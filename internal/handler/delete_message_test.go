@@ -1,0 +1,209 @@
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/PineappleBond/xyncra-server/internal/server"
+	"github.com/PineappleBond/xyncra-server/internal/store"
+	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// ---------------------------------------------------------------------------
+// Test 1: Happy path - sender deletes own message
+// ---------------------------------------------------------------------------
+
+func TestDeleteMessage_HappyPath(t *testing.T) {
+	s := setupTestSQLite(t)
+	handler := NewDeleteMessageHandler(s)
+	ctx := context.Background()
+
+	convID := "conv-del-msg-happy-1"
+	createTestConversation(t, s, convID, "alice", "bob")
+
+	msgID := uuid.New().String()
+	msg := &model.Message{
+		ID:              msgID,
+		ClientMessageID: uuid.New().String(),
+		ConversationID:  convID,
+		MessageID:       1,
+		SenderID:        "alice",
+		Content:         "Hello",
+		CreatedAt:       time.Now(),
+	}
+	require.NoError(t, s.MessageStore().Create(ctx, msg))
+
+	params := map[string]interface{}{
+		"message_id": msgID,
+	}
+
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-1", "delete_message", params)
+
+	data, err := handler.HandleRequest(ctx, client, req)
+	require.NoError(t, err)
+
+	var resp deleteMessageResponse
+	require.NoError(t, json.Unmarshal(data, &resp))
+	assert.Equal(t, "ok", resp.Status)
+}
+
+// ---------------------------------------------------------------------------
+// Test 2: Missing message_id
+// ---------------------------------------------------------------------------
+
+func TestDeleteMessage_MissingMessageID(t *testing.T) {
+	s := setupTestSQLite(t)
+	handler := NewDeleteMessageHandler(s)
+	ctx := context.Background()
+
+	params := map[string]interface{}{
+		"message_id": "",
+	}
+
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-1", "delete_message", params)
+
+	_, err := handler.HandleRequest(ctx, client, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "message_id")
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: Message not found
+// ---------------------------------------------------------------------------
+
+func TestDeleteMessage_NotFound(t *testing.T) {
+	s := setupTestSQLite(t)
+	handler := NewDeleteMessageHandler(s)
+	ctx := context.Background()
+
+	params := map[string]interface{}{
+		"message_id": uuid.New().String(),
+	}
+
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-1", "delete_message", params)
+
+	_, err := handler.HandleRequest(ctx, client, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "message not found")
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: Non-member tries to delete
+// ---------------------------------------------------------------------------
+
+func TestDeleteMessage_NotMember(t *testing.T) {
+	s := setupTestSQLite(t)
+	handler := NewDeleteMessageHandler(s)
+	ctx := context.Background()
+
+	convID := "conv-del-msg-notmember-1"
+	createTestConversation(t, s, convID, "alice", "bob")
+
+	msgID := uuid.New().String()
+	msg := &model.Message{
+		ID:              msgID,
+		ClientMessageID: uuid.New().String(),
+		ConversationID:  convID,
+		MessageID:       1,
+		SenderID:        "alice",
+		Content:         "Hello",
+		CreatedAt:       time.Now(),
+	}
+	require.NoError(t, s.MessageStore().Create(ctx, msg))
+
+	params := map[string]interface{}{
+		"message_id": msgID,
+	}
+
+	client := server.NewTestClient("charlie") // not a member
+	req := newTestRequest("req-1", "delete_message", params)
+
+	_, err := handler.HandleRequest(ctx, client, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a member")
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: Non-sender (other member) tries to delete (D-014)
+// ---------------------------------------------------------------------------
+
+func TestDeleteMessage_NotSender(t *testing.T) {
+	s := setupTestSQLite(t)
+	handler := NewDeleteMessageHandler(s)
+	ctx := context.Background()
+
+	convID := "conv-del-msg-notsender-1"
+	createTestConversation(t, s, convID, "alice", "bob")
+
+	msgID := uuid.New().String()
+	msg := &model.Message{
+		ID:              msgID,
+		ClientMessageID: uuid.New().String(),
+		ConversationID:  convID,
+		MessageID:       1,
+		SenderID:        "alice",
+		Content:         "Hello",
+		CreatedAt:       time.Now(),
+	}
+	require.NoError(t, s.MessageStore().Create(ctx, msg))
+
+	params := map[string]interface{}{
+		"message_id": msgID,
+	}
+
+	// bob is a member but not the sender
+	client := server.NewTestClient("bob")
+	req := newTestRequest("req-1", "delete_message", params)
+
+	_, err := handler.HandleRequest(ctx, client, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "only the sender")
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: After delete, message is no longer visible via Get
+// ---------------------------------------------------------------------------
+
+func TestDeleteMessage_DeletedNotVisible(t *testing.T) {
+	s := setupTestSQLite(t)
+	handler := NewDeleteMessageHandler(s)
+	ctx := context.Background()
+
+	convID := "conv-del-msg-notvisible-1"
+	createTestConversation(t, s, convID, "alice", "bob")
+
+	msgID := uuid.New().String()
+	msg := &model.Message{
+		ID:              msgID,
+		ClientMessageID: uuid.New().String(),
+		ConversationID:  convID,
+		MessageID:       1,
+		SenderID:        "alice",
+		Content:         "Hello",
+		CreatedAt:       time.Now(),
+	}
+	require.NoError(t, s.MessageStore().Create(ctx, msg))
+
+	params := map[string]interface{}{
+		"message_id": msgID,
+	}
+
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-1", "delete_message", params)
+
+	// Delete should succeed
+	_, err := handler.HandleRequest(ctx, client, req)
+	require.NoError(t, err)
+
+	// Verify message is no longer visible via Get (soft-deleted)
+	_, err = s.MessageStore().Get(ctx, msgID)
+	require.ErrorIs(t, err, store.ErrNotFound, "deleted message should not be visible via Get")
+}
