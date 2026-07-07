@@ -218,7 +218,7 @@ func (cs *ConversationStore) SearchByTitle(ctx context.Context, userID, title st
 
 	var convs []*model.Conversation
 	err := cs.db.WithContext(ctx).
-		Where("(user_id1 = ? OR user_id2 = ?) AND title LIKE ?", userID, userID, like).
+		Where("(user_id1 = ? OR user_id2 = ?) AND title LIKE ? ESCAPE '|'", userID, userID, like).
 		Order("last_message_at DESC").
 		Limit(limit).
 		Find(&convs).Error
@@ -278,11 +278,14 @@ func (cs *ConversationStore) UpdateLastRead(ctx context.Context, convID, userID 
 	return nil
 }
 
-// escapeLikePattern escapes special LIKE characters (%, _, \) in the input so
-// they are treated as literal characters in LIKE expressions.
+// escapeLikePattern escapes special LIKE characters (%, _, |) in the input so
+// they are treated as literal characters in LIKE expressions.  The pipe
+// character '|' is used as the escape character (passed via ESCAPE '|' in the
+// SQL query) because it works consistently across SQLite, PostgreSQL, and
+// MySQL — unlike backslash, whose escaping rules vary by dialect.
 func escapeLikePattern(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `%`, `\%`)
-	s = strings.ReplaceAll(s, `_`, `\_`)
+	s = strings.ReplaceAll(s, "|", "||")
+	s = strings.ReplaceAll(s, "%", "|%")
+	s = strings.ReplaceAll(s, "_", "|_")
 	return s
 }

@@ -110,7 +110,7 @@ func (ms *MessageStore) SearchByConversation(ctx context.Context, convID, conten
 	like := "%" + escapeLikePattern(content) + "%"
 
 	query := ms.db.WithContext(ctx).
-		Where("conversation_id = ? AND content LIKE ?", convID, like)
+		Where("conversation_id = ? AND content LIKE ? ESCAPE '|'", convID, like)
 
 	// Apply cursor: only messages older (lower MessageID) than the cursor.
 	if afterMessageID > 0 {

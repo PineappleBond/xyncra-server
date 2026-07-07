@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -227,9 +228,9 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 // ---------------------------------------------------------------------------
 
 // connectClient opens a WebSocket connection for the given userID and returns
-// the underlying *websocket.Conn. The connection URL is constructed as
+// a *wsConn (channel-backed wrapper). The connection URL is constructed as
 // ws://{addr}/ws?user_id={userID} (C-4).
-func connectClient(t *testing.T, addr, userID string) *websocket.Conn {
+func connectClient(t *testing.T, addr, userID string) *wsConn {
 	t.Helper()
 
 	u := url.URL{
@@ -241,12 +242,12 @@ func connectClient(t *testing.T, addr, userID string) *websocket.Conn {
 
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	require.NoError(t, err, "WebSocket dial should succeed for user %s", userID)
-	return conn
+	return wrapConn(conn)
 }
 
 // sendRequest marshals the given params into a PackageDataRequest, wraps it
 // in a Package{Type:Request}, and writes it to the connection.
-func sendRequest(t *testing.T, conn *websocket.Conn, id, method string, params map[string]interface{}) {
+func sendRequest(t *testing.T, conn *wsConn, id, method string, params map[string]interface{}) {
 	t.Helper()
 
 	paramsJSON, err := json.Marshal(params)
@@ -271,32 +272,42 @@ func sendRequest(t *testing.T, conn *websocket.Conn, id, method string, params m
 	require.NoError(t, err, "write message should succeed")
 }
 
-// readResponse reads a single message from the connection, expects it to be a
-// PackageTypeResponse, and returns the decoded PackageDataResponse.
-func readResponse(t *testing.T, conn *websocket.Conn, timeout time.Duration) *protocol.PackageDataResponse {
+// readResponse reads messages from the connection until a PackageTypeResponse
+// is received or the timeout expires. Non-Response packages (e.g. push
+// updates that arrive after drainPushUpdates returned) are silently skipped.
+//
+// This is necessary because MQ delivery is asynchronous: a push update from a
+// previous send may arrive between the current request and its response.
+func readResponse(t *testing.T, conn *wsConn, timeout time.Duration) *protocol.PackageDataResponse {
 	t.Helper()
 
-	_ = conn.SetReadDeadline(time.Now().Add(timeout))
-	_, data, err := conn.ReadMessage()
-	require.NoError(t, err, "read message should succeed within timeout")
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("readResponse: timed out after %v waiting for PackageTypeResponse", timeout)
+		}
 
-	var pkg protocol.Package
-	require.NoError(t, json.Unmarshal(data, &pkg), "unmarshal package should succeed")
-	require.Equal(t, protocol.PackageTypeResponse, pkg.Type,
-		"expected PackageTypeResponse, got %d", pkg.Type)
+		_, data, err := conn.recv(remaining)
+		require.NoError(t, err, "read message should succeed within timeout")
 
-	var resp protocol.PackageDataResponse
-	require.NoError(t, json.Unmarshal(pkg.Data, &resp), "unmarshal response should succeed")
-	return &resp
+		var pkg protocol.Package
+		require.NoError(t, json.Unmarshal(data, &pkg), "unmarshal package should succeed")
+		if pkg.Type == protocol.PackageTypeResponse {
+			var resp protocol.PackageDataResponse
+			require.NoError(t, json.Unmarshal(pkg.Data, &resp), "unmarshal response should succeed")
+			return &resp
+		}
+		// Skip non-Response packages (e.g. push updates).
+	}
 }
 
 // readPackage reads a single message from the connection and returns the
 // decoded Package without checking its type.
-func readPackage(t *testing.T, conn *websocket.Conn, timeout time.Duration) *protocol.Package {
+func readPackage(t *testing.T, conn *wsConn, timeout time.Duration) *protocol.Package {
 	t.Helper()
 
-	_ = conn.SetReadDeadline(time.Now().Add(timeout))
-	_, data, err := conn.ReadMessage()
+	_, data, err := conn.recv(timeout)
 	require.NoError(t, err, "read message should succeed within timeout")
 
 	var pkg protocol.Package
@@ -310,7 +321,7 @@ func readPackage(t *testing.T, conn *websocket.Conn, timeout time.Duration) *pro
 //
 // This is necessary because MQ delivery is asynchronous: the send_message
 // response may arrive before the push notification.
-func waitForUpdate(t *testing.T, conn *websocket.Conn, timeout time.Duration) *protocol.PackageDataUpdates {
+func waitForUpdate(t *testing.T, conn *wsConn, timeout time.Duration) *protocol.PackageDataUpdates {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
@@ -857,22 +868,126 @@ func TestSendMessageValidation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// wsConn — channel-backed WebSocket reader
+// ---------------------------------------------------------------------------
+//
+// gorilla/websocket v1.5.3 permanently poisons a connection after any
+// ReadMessage error (including timeouts): NextReader stores the error in
+// c.readErr, and every subsequent read returns the same error.  The old
+// drainPushUpdates implementation called ReadMessage in a loop until it
+// timed out, which killed the connection for the rest of the test.
+//
+// wsConn solves this by running a dedicated reader goroutine that feeds
+// messages into a buffered channel.  Drain / recv timeouts operate on the
+// channel (via select + time.After) and never touch the underlying
+// connection's read path, so the WebSocket stays healthy.
+//
+// Concurrency: gorilla/websocket allows one concurrent reader and one
+// concurrent writer.  The reader goroutine owns reads; the test goroutine
+// owns writes via the embedded *websocket.Conn — exactly one of each.
+
+// msgResult is a single message (or error) delivered by the reader goroutine.
+type msgResult struct {
+	messageType int
+	data        []byte
+	err         error
+}
+
+// wsConn wraps *websocket.Conn with a background reader goroutine.
+type wsConn struct {
+	*websocket.Conn                // promoted for WriteMessage / Close
+	msgCh           chan msgResult // buffered channel of incoming messages
+	done            chan struct{}  // closed to stop the reader goroutine
+	stopOnce        sync.Once
+}
+
+// wrapConn starts the reader goroutine and returns a *wsConn.
+func wrapConn(conn *websocket.Conn) *wsConn {
+	wc := &wsConn{
+		Conn:  conn,
+		msgCh: make(chan msgResult, 256),
+		done:  make(chan struct{}),
+	}
+	go wc.readPump()
+	return wc
+}
+
+// readPump continuously reads from the WebSocket and delivers results to
+// msgCh.  It exits when the connection is closed (ReadMessage returns an
+// error) or when done is closed.
+func (wc *wsConn) readPump() {
+	defer close(wc.msgCh)
+	for {
+		mt, data, err := wc.Conn.ReadMessage()
+		select {
+		case wc.msgCh <- msgResult{mt, data, err}:
+		case <-wc.done:
+			return
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// recv reads one message from the channel, blocking up to timeout.
+func (wc *wsConn) recv(timeout time.Duration) (int, []byte, error) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r, ok := <-wc.msgCh:
+		if !ok {
+			return 0, nil, fmt.Errorf("wsConn: reader goroutine exited")
+		}
+		return r.messageType, r.data, r.err
+	case <-timer.C:
+		return 0, nil, fmt.Errorf("wsConn: recv timeout after %v", timeout)
+	}
+}
+
+// stop terminates the reader goroutine and closes the underlying connection.
+// Safe to call multiple times.
+func (wc *wsConn) stop() {
+	wc.stopOnce.Do(func() {
+		close(wc.done)
+		_ = wc.Conn.Close()
+	})
+}
+
+// Close shadows the embedded *websocket.Conn.Close to also stop the reader
+// goroutine.  This ensures that `defer conn.Close()` in tests cleans up both
+// the WebSocket connection and the background reader goroutine.
+func (wc *wsConn) Close() error {
+	wc.stopOnce.Do(func() {
+		close(wc.done)
+	})
+	return wc.Conn.Close()
+}
+
+// ---------------------------------------------------------------------------
 // drainPushUpdates reads and discards push update packages from a connection
 // until no more are available within a short timeout. This prevents stale
 // updates from interfering with subsequent assertions.
+//
+// It operates on the wsConn channel — never on the underlying WebSocket —
+// so the connection remains healthy for subsequent reads.
 // ---------------------------------------------------------------------------
-func drainPushUpdates(t *testing.T, conn *websocket.Conn) {
+func drainPushUpdates(t *testing.T, conn *wsConn) {
 	t.Helper()
-	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	for {
-		_, _, err := conn.ReadMessage()
-		if err != nil {
-			// Timeout or error — no more messages.
-			break
+		select {
+		case r, ok := <-conn.msgCh:
+			if !ok {
+				return // reader exited
+			}
+			if r.err != nil {
+				return // read error — stop draining
+			}
+			// discard message, keep draining
+		case <-time.After(500 * time.Millisecond):
+			return // no more messages within the window
 		}
 	}
-	// Clear the deadline so subsequent reads work normally.
-	_ = conn.SetReadDeadline(time.Time{})
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,4 +1389,1420 @@ func TestNonMemberOperationsRejectedE2E(t *testing.T) {
 		"eve mark_as_read should be rejected")
 	assert.True(t, strings.Contains(strings.ToLower(markResp.Msg), "not a member"),
 		"error should mention 'not a member', got: %s", markResp.Msg)
+}
+
+// ---------------------------------------------------------------------------
+// TC-14: TestCreateConversationE2E
+// Verifies: D-011 (find-or-create idempotency)
+// Scenarios:
+//   CC-1  Happy path: Alice creates conversation with Bob (duplicate=false)
+//   CC-2  Idempotent: Alice creates again, same ID, duplicate=true
+//   CC-3  Reverse: Bob creates with Alice, same conversation (D-011 bidirectional)
+//   CC-4  Missing user_id returns error containing "user_id"
+//   CC-5  Self-conversation returns error containing "yourself"
+//   CC-6  With title: title field present in response
+//   CC-7  Concurrent creates: exactly one conversation in DB
+// ---------------------------------------------------------------------------
+
+// TestCreateConversationE2E verifies the full create_conversation flow:
+// first call creates, second call returns existing with duplicate=true.
+func TestCreateConversationE2E(t *testing.T) {
+	env := setupE2ETest(t)
+
+	// Setup: connect alice and bob.
+	aliceConn := connectClient(t, env.addr, "alice")
+	defer aliceConn.Close()
+	bobConn := connectClient(t, env.addr, "bob")
+	defer bobConn.Close()
+
+	// Drain any startup messages.
+	drainPushUpdates(t, aliceConn)
+	drainPushUpdates(t, bobConn)
+
+	// -----------------------------------------------------------------------
+	// CC-1: Happy path — Alice creates conversation with Bob.
+	// -----------------------------------------------------------------------
+	sendRequest(t, aliceConn, "create-1", "create_conversation", map[string]interface{}{
+		"user_id": "bob",
+	})
+
+	resp1 := readResponse(t, aliceConn, 5*time.Second)
+	require.Equal(t, "create-1", resp1.ID, "response ID should match (CC-1)")
+	require.Equal(t, protocol.ResponseCodeOK, resp1.Code, "first create should succeed (D-011)")
+
+	var data1 struct {
+		Conversation struct {
+			ID      string `json:"ID"`
+			UserID1 string `json:"UserID1"`
+			UserID2 string `json:"UserID2"`
+			Title   string `json:"Title"`
+			Type    string `json:"Type"`
+		} `json:"conversation"`
+		Duplicate bool `json:"duplicate"`
+	}
+	require.NoError(t, json.Unmarshal(resp1.Data, &data1), "unmarshal create response (CC-1)")
+
+	assert.NotEmpty(t, data1.Conversation.ID, "conversation ID should be non-empty (D-011)")
+	assert.Equal(t, "alice", data1.Conversation.UserID1, "user_id_1 should be alice (D-011)")
+	assert.Equal(t, "bob", data1.Conversation.UserID2, "user_id_2 should be bob (D-011)")
+	assert.Equal(t, "1-on-1", data1.Conversation.Type, "type should be 1-on-1")
+	assert.False(t, data1.Duplicate, "first create should have duplicate=false (D-011)")
+
+	firstConvID := data1.Conversation.ID
+
+	// Consume push updates from CC-1.
+	drainPushUpdates(t, aliceConn)
+	drainPushUpdates(t, bobConn)
+
+	// -----------------------------------------------------------------------
+	// CC-2: Idempotent — Alice creates again with Bob, duplicate=true, same ID.
+	// -----------------------------------------------------------------------
+	sendRequest(t, aliceConn, "create-2", "create_conversation", map[string]interface{}{
+		"user_id": "bob",
+	})
+
+	resp2 := readResponse(t, aliceConn, 5*time.Second)
+	require.Equal(t, "create-2", resp2.ID, "response ID should match (CC-2)")
+	require.Equal(t, protocol.ResponseCodeOK, resp2.Code, "duplicate create should succeed (D-011)")
+
+	var data2 struct {
+		Conversation struct {
+			ID      string `json:"ID"`
+			UserID1 string `json:"UserID1"`
+			UserID2 string `json:"UserID2"`
+		} `json:"conversation"`
+		Duplicate bool `json:"duplicate"`
+	}
+	require.NoError(t, json.Unmarshal(resp2.Data, &data2), "unmarshal duplicate response (CC-2)")
+
+	assert.Equal(t, firstConvID, data2.Conversation.ID, "same conversation ID on duplicate (D-011)")
+	assert.True(t, data2.Duplicate, "second create should have duplicate=true (D-011)")
+
+	// Consume push updates from CC-2 (if any).
+	drainPushUpdates(t, aliceConn)
+	drainPushUpdates(t, bobConn)
+
+	// -----------------------------------------------------------------------
+	// CC-3: Reverse — Bob creates with Alice, same conversation (D-011
+	// bidirectional).
+	// -----------------------------------------------------------------------
+	sendRequest(t, bobConn, "create-3", "create_conversation", map[string]interface{}{
+		"user_id": "alice",
+	})
+
+	resp3 := readResponse(t, bobConn, 5*time.Second)
+	require.Equal(t, "create-3", resp3.ID, "response ID should match (CC-3)")
+	require.Equal(t, protocol.ResponseCodeOK, resp3.Code, "reverse create should succeed (D-011)")
+
+	var data3 struct {
+		Conversation struct {
+			ID      string `json:"ID"`
+			UserID1 string `json:"UserID1"`
+			UserID2 string `json:"UserID2"`
+		} `json:"conversation"`
+		Duplicate bool `json:"duplicate"`
+	}
+	require.NoError(t, json.Unmarshal(resp3.Data, &data3), "unmarshal reverse response (CC-3)")
+
+	assert.Equal(t, firstConvID, data3.Conversation.ID,
+		"reverse create should return same conversation ID (D-011 bidirectional)")
+	assert.True(t, data3.Duplicate,
+		"reverse create should have duplicate=true (D-011 bidirectional)")
+
+	// Consume push updates from CC-3.
+	drainPushUpdates(t, bobConn)
+	drainPushUpdates(t, aliceConn)
+
+	// -----------------------------------------------------------------------
+	// CC-4: Missing user_id — error contains "user_id".
+	// -----------------------------------------------------------------------
+	sendRequest(t, aliceConn, "create-4", "create_conversation", map[string]interface{}{})
+
+	resp4 := readResponse(t, aliceConn, 5*time.Second)
+	require.Equal(t, "create-4", resp4.ID, "response ID should match (CC-4)")
+	assert.Equal(t, protocol.ResponseCodeError, resp4.Code,
+		"missing user_id should fail (CC-4)")
+	assert.True(t, strings.Contains(strings.ToLower(resp4.Msg), "user_id"),
+		"error should mention 'user_id', got: %s (CC-4)", resp4.Msg)
+
+	// -----------------------------------------------------------------------
+	// CC-5: Self-conversation — error contains "yourself".
+	// -----------------------------------------------------------------------
+	sendRequest(t, aliceConn, "create-5", "create_conversation", map[string]interface{}{
+		"user_id": "alice",
+	})
+
+	resp5 := readResponse(t, aliceConn, 5*time.Second)
+	require.Equal(t, "create-5", resp5.ID, "response ID should match (CC-5)")
+	assert.Equal(t, protocol.ResponseCodeError, resp5.Code,
+		"self-conversation should fail (CC-5)")
+	assert.True(t, strings.Contains(strings.ToLower(resp5.Msg), "yourself"),
+		"error should mention 'yourself', got: %s (CC-5)", resp5.Msg)
+
+	// -----------------------------------------------------------------------
+	// CC-6: With title — title field present in response.
+	// -----------------------------------------------------------------------
+	sendRequest(t, aliceConn, "create-6", "create_conversation", map[string]interface{}{
+		"user_id": "eve",
+		"title":   "Chat with Eve",
+	})
+
+	resp6 := readResponse(t, aliceConn, 5*time.Second)
+	require.Equal(t, "create-6", resp6.ID, "response ID should match (CC-6)")
+	require.Equal(t, protocol.ResponseCodeOK, resp6.Code,
+		"create with title should succeed (CC-6)")
+
+	var data6 struct {
+		Conversation struct {
+			ID    string `json:"ID"`
+			Title string `json:"Title"`
+		} `json:"conversation"`
+		Duplicate bool `json:"duplicate"`
+	}
+	require.NoError(t, json.Unmarshal(resp6.Data, &data6), "unmarshal title response (CC-6)")
+
+	assert.Equal(t, "Chat with Eve", data6.Conversation.Title,
+		"title should be preserved in response (CC-6)")
+	assert.False(t, data6.Duplicate, "first create with title should have duplicate=false (CC-6)")
+	assert.NotEmpty(t, data6.Conversation.ID, "conversation ID should be non-empty (CC-6)")
+
+	// Consume push updates from CC-6.
+	drainPushUpdates(t, aliceConn)
+
+	// -----------------------------------------------------------------------
+	// CC-7: Concurrent creates — only one conversation should exist in DB.
+	// -----------------------------------------------------------------------
+	// Use a fresh pair to avoid interaction with prior scenarios.
+	charlieConn := connectClient(t, env.addr, "charlie")
+	defer charlieConn.Close()
+	daveConn := connectClient(t, env.addr, "dave")
+	defer daveConn.Close()
+
+	drainPushUpdates(t, charlieConn)
+	drainPushUpdates(t, daveConn)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Goroutine 1: charlie creates with dave.
+	go func() {
+		defer wg.Done()
+		sendRequest(t, charlieConn, "create-7a", "create_conversation", map[string]interface{}{
+			"user_id": "dave",
+		})
+		resp := readResponse(t, charlieConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code,
+			"concurrent create from charlie should succeed (CC-7)")
+	}()
+
+	// Goroutine 2: dave creates with charlie (reverse direction).
+	go func() {
+		defer wg.Done()
+		sendRequest(t, daveConn, "create-7b", "create_conversation", map[string]interface{}{
+			"user_id": "charlie",
+		})
+		resp := readResponse(t, daveConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code,
+			"concurrent create from dave should succeed (CC-7)")
+	}()
+
+	wg.Wait()
+
+	// Drain any push updates.
+	drainPushUpdates(t, charlieConn)
+	drainPushUpdates(t, daveConn)
+
+	// Verify: exactly 1 conversation between charlie and dave in DB.
+	ctx := context.Background()
+	var convCount int64
+	env.db.DB().WithContext(ctx).Model(&model.Conversation{}).
+		Where("(user_id1 = ? AND user_id2 = ?) OR (user_id1 = ? AND user_id2 = ?)",
+			"charlie", "dave", "dave", "charlie").
+		Count(&convCount)
+	assert.Equal(t, int64(1), convCount,
+		"exactly 1 conversation should exist between charlie and dave after concurrent creates (D-011)")
+}
+
+// ---------------------------------------------------------------------------
+// TC-15: TestListConversationsE2E
+// Verifies: list_conversations pagination, ordering, isolation
+// ---------------------------------------------------------------------------
+
+// TestListConversationsE2E verifies the list_conversations flow:
+// pagination with offset/limit, ordering by LastMessageAt DESC, user isolation.
+func TestListConversationsE2E(t *testing.T) {
+	// -----------------------------------------------------------------------
+	// LC-1: Happy path — user with 3 conversations gets all 3 back.
+	// -----------------------------------------------------------------------
+	t.Run("LC-1_HappyPath", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		// Pre-create 3 conversations for alice with different users.
+		conv1 := createTestConversation(t, env.store, "alice", "bob")
+		conv2 := createTestConversation(t, env.store, "alice", "charlie")
+		conv3 := createTestConversation(t, env.store, "alice", "eve")
+
+		// Drain any push updates.
+		drainPushUpdates(t, aliceConn)
+
+		// Call list_conversations with default params.
+		sendRequest(t, aliceConn, "list-1", "list_conversations", map[string]interface{}{})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+
+		require.Equal(t, "list-1", resp.ID, "response ID should match (LC-1)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "list_conversations should succeed (LC-1)")
+
+		var data struct {
+			Conversations []struct {
+				ID      string `json:"ID"`
+				UserID1 string `json:"UserID1"`
+				UserID2 string `json:"UserID2"`
+			} `json:"conversations"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data), "unmarshal response data (LC-1)")
+
+		assert.Len(t, data.Conversations, 3, "should return 3 conversations (LC-1)")
+		assert.False(t, data.HasMore, "has_more should be false when all fit (LC-1)")
+
+		// Verify all conversation IDs are present.
+		convIDs := make(map[string]bool)
+		for _, c := range data.Conversations {
+			convIDs[c.ID] = true
+		}
+		assert.True(t, convIDs[conv1.ID], "should contain conv1 (LC-1)")
+		assert.True(t, convIDs[conv2.ID], "should contain conv2 (LC-1)")
+		assert.True(t, convIDs[conv3.ID], "should contain conv3 (LC-1)")
+	})
+
+	// -----------------------------------------------------------------------
+	// LC-2: Empty list — new user with no conversations.
+	// -----------------------------------------------------------------------
+	t.Run("LC-2_EmptyList", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		// "newuser" has never been part of any conversation.
+		newConn := connectClient(t, env.addr, "newuser")
+		defer newConn.Close()
+
+		drainPushUpdates(t, newConn)
+
+		sendRequest(t, newConn, "list-2", "list_conversations", map[string]interface{}{})
+		resp := readResponse(t, newConn, 5*time.Second)
+
+		require.Equal(t, "list-2", resp.ID, "response ID should match (LC-2)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "list_conversations should succeed (LC-2)")
+
+		var data struct {
+			Conversations []struct {
+				ID string `json:"ID"`
+			} `json:"conversations"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data), "unmarshal response data (LC-2)")
+
+		assert.Empty(t, data.Conversations, "new user should have 0 conversations (LC-2)")
+		assert.False(t, data.HasMore, "has_more should be false for empty list (LC-2)")
+	})
+
+	// -----------------------------------------------------------------------
+	// LC-3: Pagination — limit=2 with 5 conversations yields has_more=true.
+	// -----------------------------------------------------------------------
+	t.Run("LC-3_Pagination", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		// Pre-create 5 conversations for alice.
+		for i := 0; i < 5; i++ {
+			createTestConversation(t, env.store, "alice", fmt.Sprintf("user%d", i))
+		}
+
+		drainPushUpdates(t, aliceConn)
+
+		// Request page 1: limit=2, offset=0.
+		sendRequest(t, aliceConn, "list-3a", "list_conversations", map[string]interface{}{
+			"limit": 2,
+		})
+		resp1 := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp1.Code, "first page should succeed (LC-3)")
+
+		var page1 struct {
+			Conversations []struct {
+				ID string `json:"ID"`
+			} `json:"conversations"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp1.Data, &page1), "unmarshal page 1 (LC-3)")
+
+		assert.Len(t, page1.Conversations, 2, "page 1 should have 2 conversations (LC-3)")
+		assert.True(t, page1.HasMore, "has_more should be true when more exist (LC-3)")
+
+		// Request page 2: limit=2, offset=2.
+		sendRequest(t, aliceConn, "list-3b", "list_conversations", map[string]interface{}{
+			"offset": 2,
+			"limit":  2,
+		})
+		resp2 := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp2.Code, "second page should succeed (LC-3)")
+
+		var page2 struct {
+			Conversations []struct {
+				ID string `json:"ID"`
+			} `json:"conversations"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp2.Data, &page2), "unmarshal page 2 (LC-3)")
+
+		assert.Len(t, page2.Conversations, 2, "page 2 should have 2 conversations (LC-3)")
+		assert.True(t, page2.HasMore, "has_more should be true for page 2 of 3 (LC-3)")
+
+		// Request page 3: limit=2, offset=4.
+		sendRequest(t, aliceConn, "list-3c", "list_conversations", map[string]interface{}{
+			"offset": 4,
+			"limit":  2,
+		})
+		resp3 := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp3.Code, "third page should succeed (LC-3)")
+
+		var page3 struct {
+			Conversations []struct {
+				ID string `json:"ID"`
+			} `json:"conversations"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp3.Data, &page3), "unmarshal page 3 (LC-3)")
+
+		assert.Len(t, page3.Conversations, 1, "page 3 should have 1 conversation (LC-3)")
+		assert.False(t, page3.HasMore, "has_more should be false on last page (LC-3)")
+
+		// Verify no overlap between pages.
+		page1IDs := make(map[string]bool)
+		for _, c := range page1.Conversations {
+			page1IDs[c.ID] = true
+		}
+		for _, c := range page2.Conversations {
+			assert.False(t, page1IDs[c.ID], "page 2 should not overlap with page 1 (LC-3)")
+		}
+	})
+
+	// -----------------------------------------------------------------------
+	// LC-4: Ordering — conversations sorted by LastMessageAt DESC.
+	// -----------------------------------------------------------------------
+	t.Run("LC-4_Ordering", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		// Create 3 conversations with distinct LastMessageAt values.
+		// conv1: oldest, conv2: middle, conv3: newest.
+		now := time.Now()
+		conv1 := createTestConversation(t, env.store, "alice", "bob")
+		conv2 := createTestConversation(t, env.store, "alice", "charlie")
+		conv3 := createTestConversation(t, env.store, "alice", "eve")
+
+		// Update LastMessageAt directly via GORM to control ordering.
+		ctx := context.Background()
+		conv1.LastMessageAt = now.Add(-3 * time.Hour)
+		require.NoError(t, env.store.ConversationStore().Update(ctx, conv1),
+			"update conv1 LastMessageAt should succeed (LC-4)")
+
+		conv2.LastMessageAt = now.Add(-1 * time.Hour)
+		require.NoError(t, env.store.ConversationStore().Update(ctx, conv2),
+			"update conv2 LastMessageAt should succeed (LC-4)")
+
+		conv3.LastMessageAt = now
+		require.NoError(t, env.store.ConversationStore().Update(ctx, conv3),
+			"update conv3 LastMessageAt should succeed (LC-4)")
+
+		drainPushUpdates(t, aliceConn)
+
+		// Call list_conversations — expect ordering: conv3, conv2, conv1.
+		sendRequest(t, aliceConn, "list-4", "list_conversations", map[string]interface{}{})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "list_conversations should succeed (LC-4)")
+
+		var data struct {
+			Conversations []struct {
+				ID            string    `json:"ID"`
+				LastMessageAt time.Time `json:"LastMessageAt"`
+			} `json:"conversations"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data), "unmarshal response data (LC-4)")
+
+		require.Len(t, data.Conversations, 3, "should return 3 conversations (LC-4)")
+		assert.Equal(t, conv3.ID, data.Conversations[0].ID,
+			"newest conversation (conv3) should be first (LC-4)")
+		assert.Equal(t, conv2.ID, data.Conversations[1].ID,
+			"middle conversation (conv2) should be second (LC-4)")
+		assert.Equal(t, conv1.ID, data.Conversations[2].ID,
+			"oldest conversation (conv1) should be last (LC-4)")
+
+		// Verify LastMessageAt values are in descending order.
+		assert.True(t, data.Conversations[0].LastMessageAt.After(data.Conversations[1].LastMessageAt) ||
+			data.Conversations[0].LastMessageAt.Equal(data.Conversations[1].LastMessageAt),
+			"first LastMessageAt >= second (LC-4)")
+		assert.True(t, data.Conversations[1].LastMessageAt.After(data.Conversations[2].LastMessageAt) ||
+			data.Conversations[1].LastMessageAt.Equal(data.Conversations[2].LastMessageAt),
+			"second LastMessageAt >= third (LC-4)")
+	})
+
+	// -----------------------------------------------------------------------
+	// LC-5: User isolation — Alice cannot see Bob-Charlie conversation.
+	// -----------------------------------------------------------------------
+	t.Run("LC-5_UserIsolation", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		// Alice has a conversation with Bob.
+		aliceBob := createTestConversation(t, env.store, "alice", "bob")
+
+		// Bob has a separate conversation with Charlie (Alice is NOT a member).
+		bobCharlie := createTestConversation(t, env.store, "bob", "charlie")
+
+		drainPushUpdates(t, aliceConn)
+
+		// Alice calls list_conversations.
+		sendRequest(t, aliceConn, "list-5", "list_conversations", map[string]interface{}{})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code,
+			"list_conversations should succeed (LC-5)")
+
+		var data struct {
+			Conversations []struct {
+				ID string `json:"ID"`
+			} `json:"conversations"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data),
+			"unmarshal response data (LC-5)")
+
+		// Alice should only see her own conversation.
+		assert.Len(t, data.Conversations, 1,
+			"alice should see only her own conversations (LC-5)")
+		assert.Equal(t, aliceBob.ID, data.Conversations[0].ID,
+			"alice should see alice-bob conversation (LC-5)")
+
+		// Verify Bob-Charlie conversation is NOT visible to Alice.
+		for _, c := range data.Conversations {
+			assert.NotEqual(t, bobCharlie.ID, c.ID,
+				"alice should NOT see bob-charlie conversation (LC-5)")
+		}
+	})
+
+	// -----------------------------------------------------------------------
+	// LC-6: Soft-deleted excluded — deleted conversations not in list.
+	// -----------------------------------------------------------------------
+	t.Run("LC-6_SoftDeletedExcluded", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		// Create 3 conversations for alice.
+		conv1 := createTestConversation(t, env.store, "alice", "bob")
+		conv2 := createTestConversation(t, env.store, "alice", "charlie")
+		conv3 := createTestConversation(t, env.store, "alice", "eve")
+
+		// Soft-delete the second conversation.
+		ctx := context.Background()
+		err := env.store.ConversationStore().Delete(ctx, conv2.ID)
+		require.NoError(t, err, "soft delete should succeed (LC-6)")
+
+		drainPushUpdates(t, aliceConn)
+
+		// Call list_conversations — expect only 2 (conv1 and conv3).
+		sendRequest(t, aliceConn, "list-6", "list_conversations", map[string]interface{}{})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code,
+			"list_conversations should succeed (LC-6)")
+
+		var data struct {
+			Conversations []struct {
+				ID        string      `json:"ID"`
+				DeletedAt interface{} `json:"DeletedAt"`
+			} `json:"conversations"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data),
+			"unmarshal response data (LC-6)")
+
+		assert.Len(t, data.Conversations, 2,
+			"should return 2 conversations after soft delete (LC-6)")
+		assert.False(t, data.HasMore,
+			"has_more should be false (LC-6)")
+
+		// Verify the deleted conversation is not in the list.
+		for _, c := range data.Conversations {
+			assert.NotEqual(t, conv2.ID, c.ID,
+				"soft-deleted conversation should not appear (LC-6)")
+			assert.Nil(t, c.DeletedAt,
+				"returned conversations should not be soft-deleted (LC-6)")
+		}
+
+		// Verify conv1 and conv3 are present.
+		convIDs := make(map[string]bool)
+		for _, c := range data.Conversations {
+			convIDs[c.ID] = true
+		}
+		assert.True(t, convIDs[conv1.ID], "conv1 should be present (LC-6)")
+		assert.True(t, convIDs[conv3.ID], "conv3 should be present (LC-6)")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// TC-16: TestGetMessagesE2E
+// Verifies: D-008 (MessageID ordering), C-3 (member check)
+// ---------------------------------------------------------------------------
+
+// TestGetMessagesE2E verifies the get_messages flow:
+// pagination with after_message_id cursor, ordering by MessageID ASC, member check.
+func TestGetMessagesE2E(t *testing.T) {
+	// -----------------------------------------------------------------------
+	// GM-E1: Happy path — 5 messages, verify ASC ordering (D-008).
+	// -----------------------------------------------------------------------
+	t.Run("GM-E1_HappyPath", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+		bobConn := connectClient(t, env.addr, "bob")
+		defer bobConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		// Send 5 messages from alice.
+		var messageIDs []uint32
+		for i := 0; i < 5; i++ {
+			sendRequest(t, aliceConn, fmt.Sprintf("send-%d", i+1), "send_message", map[string]interface{}{
+				"conversation_id":   conv.ID,
+				"client_message_id": uuid.New().String(),
+				"content":           fmt.Sprintf("Message %d", i+1),
+				"type":              "text",
+			})
+			resp := readResponse(t, aliceConn, 5*time.Second)
+			require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+1)
+
+			var respData struct {
+				Message model.Message `json:"message"`
+			}
+			require.NoError(t, json.Unmarshal(resp.Data, &respData))
+			messageIDs = append(messageIDs, respData.Message.MessageID)
+		}
+
+		// Consume push updates.
+		drainPushUpdates(t, bobConn)
+		drainPushUpdates(t, aliceConn)
+
+		// Call get_messages.
+		sendRequest(t, aliceConn, "get-msgs-1", "get_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "get-msgs-1", resp.ID, "response ID should match (GM-E1)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "get_messages should succeed (GM-E1)")
+
+		var data struct {
+			Messages []struct {
+				ID        uint32      `json:"MessageID"`
+				Content   string      `json:"Content"`
+				SenderID  string      `json:"SenderID"`
+				DeletedAt interface{} `json:"DeletedAt"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data), "unmarshal response data (GM-E1)")
+
+		assert.Len(t, data.Messages, 5, "should return 5 messages (GM-E1)")
+		assert.False(t, data.HasMore, "has_more should be false when all fit (GM-E1)")
+
+		// Verify MessageID ascending order (D-008).
+		for i := 0; i < len(data.Messages)-1; i++ {
+			assert.Less(t, data.Messages[i].ID, data.Messages[i+1].ID,
+				"messages should be in ascending order (D-008)")
+		}
+
+		// Verify content matches.
+		for i, msg := range data.Messages {
+			assert.Equal(t, fmt.Sprintf("Message %d", i+1), msg.Content,
+				"message %d content should match (GM-E1)", i+1)
+			assert.Equal(t, "alice", msg.SenderID, "sender should be alice (GM-E1)")
+		}
+	})
+
+	// -----------------------------------------------------------------------
+	// GM-E2: Empty conversation — messages=[], has_more=false.
+	// -----------------------------------------------------------------------
+	t.Run("GM-E2_EmptyConversation", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		drainPushUpdates(t, aliceConn)
+
+		// Call get_messages on empty conversation.
+		sendRequest(t, aliceConn, "get-msgs-2", "get_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "get-msgs-2", resp.ID, "response ID should match (GM-E2)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "get_messages should succeed (GM-E2)")
+
+		var data struct {
+			Messages []struct {
+				ID uint32 `json:"MessageID"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data), "unmarshal response data (GM-E2)")
+
+		assert.Empty(t, data.Messages, "messages should be empty for empty conversation (GM-E2)")
+		assert.False(t, data.HasMore, "has_more should be false for empty conversation (GM-E2)")
+	})
+
+	// -----------------------------------------------------------------------
+	// GM-E3: Pagination with after_message_id cursor (D-009).
+	// -----------------------------------------------------------------------
+	t.Run("GM-E3_Pagination", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+		bobConn := connectClient(t, env.addr, "bob")
+		defer bobConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		// Send 5 messages.
+		var messageIDs []uint32
+		for i := 0; i < 5; i++ {
+			sendRequest(t, aliceConn, fmt.Sprintf("send-%d", i+1), "send_message", map[string]interface{}{
+				"conversation_id":   conv.ID,
+				"client_message_id": uuid.New().String(),
+				"content":           fmt.Sprintf("Message %d", i+1),
+				"type":              "text",
+			})
+			resp := readResponse(t, aliceConn, 5*time.Second)
+			require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+1)
+
+			var respData struct {
+				Message model.Message `json:"message"`
+			}
+			require.NoError(t, json.Unmarshal(resp.Data, &respData))
+			messageIDs = append(messageIDs, respData.Message.MessageID)
+		}
+
+		drainPushUpdates(t, bobConn)
+		drainPushUpdates(t, aliceConn)
+
+		// Request messages after message 2.
+		sendRequest(t, aliceConn, "get-msgs-3", "get_messages", map[string]interface{}{
+			"conversation_id":  conv.ID,
+			"after_message_id": messageIDs[1], // after 2nd message
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "get-msgs-3", resp.ID, "response ID should match (GM-E3)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "get_messages should succeed (GM-E3)")
+
+		var data struct {
+			Messages []struct {
+				ID      uint32 `json:"MessageID"`
+				Content string `json:"Content"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data), "unmarshal response data (GM-E3)")
+
+		assert.Len(t, data.Messages, 3, "should return 3 messages after cursor (GM-E3)")
+		assert.False(t, data.HasMore, "has_more should be false (GM-E3)")
+
+		// Verify only messages 3, 4, 5 are returned.
+		for i, msg := range data.Messages {
+			assert.Equal(t, messageIDs[i+2], msg.ID,
+				"message ID should match (GM-E3)")
+			assert.Equal(t, fmt.Sprintf("Message %d", i+3), msg.Content,
+				"message content should match (GM-E3)")
+		}
+	})
+
+	// -----------------------------------------------------------------------
+	// GM-E4: Has more detection — limit=3, 10 messages => has_more=true.
+	// -----------------------------------------------------------------------
+	t.Run("GM-E4_HasMore", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+		bobConn := connectClient(t, env.addr, "bob")
+		defer bobConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		// Send 10 messages.
+		for i := 0; i < 10; i++ {
+			sendRequest(t, aliceConn, fmt.Sprintf("send-%d", i+1), "send_message", map[string]interface{}{
+				"conversation_id":   conv.ID,
+				"client_message_id": uuid.New().String(),
+				"content":           fmt.Sprintf("Message %d", i+1),
+				"type":              "text",
+			})
+			resp := readResponse(t, aliceConn, 5*time.Second)
+			require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+1)
+		}
+
+		drainPushUpdates(t, bobConn)
+		drainPushUpdates(t, aliceConn)
+
+		// Request with limit=3.
+		sendRequest(t, aliceConn, "get-msgs-4", "get_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+			"limit":           3,
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "get-msgs-4", resp.ID, "response ID should match (GM-E4)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "get_messages should succeed (GM-E4)")
+
+		var data struct {
+			Messages []struct {
+				ID uint32 `json:"MessageID"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data), "unmarshal response data (GM-E4)")
+
+		assert.Len(t, data.Messages, 3, "should return exactly 3 messages (GM-E4)")
+		assert.True(t, data.HasMore, "has_more should be true when more exist (GM-E4)")
+
+		// Verify IDs are 1, 2, 3.
+		for i := 0; i < 3; i++ {
+			assert.Equal(t, uint32(i+1), data.Messages[i].ID,
+				"message ID should be %d (GM-E4)", i+1)
+		}
+	})
+
+	// -----------------------------------------------------------------------
+	// GM-E5: Non-member rejected — error "not a member" (C-3).
+	// -----------------------------------------------------------------------
+	t.Run("GM-E5_NonMemberRejected", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+		eveConn := connectClient(t, env.addr, "eve")
+		defer eveConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		drainPushUpdates(t, aliceConn)
+		drainPushUpdates(t, eveConn)
+
+		// Eve (non-member) calls get_messages.
+		sendRequest(t, eveConn, "get-msgs-5", "get_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+		})
+		resp := readResponse(t, eveConn, 5*time.Second)
+		require.Equal(t, "get-msgs-5", resp.ID, "response ID should match (GM-E5)")
+		assert.Equal(t, protocol.ResponseCodeError, resp.Code,
+			"non-member get_messages should be rejected (C-3)")
+		assert.True(t, strings.Contains(strings.ToLower(resp.Msg), "not a member"),
+			"error should mention 'not a member', got: %s (C-3)", resp.Msg)
+	})
+
+	// -----------------------------------------------------------------------
+	// GM-E6: Non-existent conversation — error "not found".
+	// -----------------------------------------------------------------------
+	t.Run("GM-E6_NonExistentConversation", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		drainPushUpdates(t, aliceConn)
+
+		// Call get_messages with non-existent conversation.
+		sendRequest(t, aliceConn, "get-msgs-6", "get_messages", map[string]interface{}{
+			"conversation_id": uuid.New().String(),
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "get-msgs-6", resp.ID, "response ID should match (GM-E6)")
+		assert.Equal(t, protocol.ResponseCodeError, resp.Code,
+			"get_messages for non-existent conversation should fail")
+		assert.True(t, strings.Contains(strings.ToLower(resp.Msg), "not found"),
+			"error should mention 'not found', got: %s", resp.Msg)
+	})
+
+	// -----------------------------------------------------------------------
+	// GM-E7: Soft-deleted messages excluded.
+	// -----------------------------------------------------------------------
+	t.Run("GM-E7_SoftDeletedExcluded", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+		bobConn := connectClient(t, env.addr, "bob")
+		defer bobConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		// Send 3 messages.
+		var messageIDs []string
+		for i := 0; i < 3; i++ {
+			sendRequest(t, aliceConn, fmt.Sprintf("send-%d", i+1), "send_message", map[string]interface{}{
+				"conversation_id":   conv.ID,
+				"client_message_id": uuid.New().String(),
+				"content":           fmt.Sprintf("Message %d", i+1),
+				"type":              "text",
+			})
+			resp := readResponse(t, aliceConn, 5*time.Second)
+			require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+1)
+
+			var respData struct {
+				Message model.Message `json:"message"`
+			}
+			require.NoError(t, json.Unmarshal(resp.Data, &respData))
+			messageIDs = append(messageIDs, respData.Message.ID)
+		}
+
+		drainPushUpdates(t, bobConn)
+		drainPushUpdates(t, aliceConn)
+
+		// Soft-delete the middle message.
+		ctx := context.Background()
+		err := env.store.MessageStore().Delete(ctx, messageIDs[1])
+		require.NoError(t, err, "soft delete should succeed (GM-E7)")
+
+		// Call get_messages.
+		sendRequest(t, aliceConn, "get-msgs-7", "get_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "get-msgs-7", resp.ID, "response ID should match (GM-E7)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "get_messages should succeed (GM-E7)")
+
+		var data struct {
+			Messages []struct {
+				ID        string      `json:"ID"`
+				Content   string      `json:"Content"`
+				DeletedAt interface{} `json:"DeletedAt"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data), "unmarshal response data (GM-E7)")
+
+		assert.Len(t, data.Messages, 2, "should return 2 messages after soft delete (GM-E7)")
+		assert.False(t, data.HasMore, "has_more should be false (GM-E7)")
+
+		// Verify the deleted message is not in the results.
+		for _, msg := range data.Messages {
+			assert.NotEqual(t, messageIDs[1], msg.ID,
+				"soft-deleted message should not appear (GM-E7)")
+			assert.Nil(t, msg.DeletedAt,
+				"returned messages should not be soft-deleted (GM-E7)")
+		}
+
+		// Verify messages 1 and 3 are present.
+		msgIDs := make(map[string]bool)
+		for _, msg := range data.Messages {
+			msgIDs[msg.ID] = true
+		}
+		assert.True(t, msgIDs[messageIDs[0]], "message 1 should be present (GM-E7)")
+		assert.True(t, msgIDs[messageIDs[2]], "message 3 should be present (GM-E7)")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// TC-17: TestSearchMessagesE2E
+// Verifies: search_messages with case-insensitive LIKE, DESC ordering, C-3 member check
+// ---------------------------------------------------------------------------
+
+// TestSearchMessagesE2E verifies the search_messages flow:
+// case-insensitive search, pagination with after_message_id, DESC ordering.
+func TestSearchMessagesE2E(t *testing.T) {
+	// -----------------------------------------------------------------------
+	// SM-E1: Happy path — search "hello" returns matching messages.
+	// -----------------------------------------------------------------------
+	t.Run("SM-E1_HappyPath", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+		bobConn := connectClient(t, env.addr, "bob")
+		defer bobConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		// Send 3 messages with "hello" in content.
+		for i := 0; i < 3; i++ {
+			sendRequest(t, aliceConn, fmt.Sprintf("send-%d", i+1), "send_message", map[string]interface{}{
+				"conversation_id":   conv.ID,
+				"client_message_id": uuid.New().String(),
+				"content":           fmt.Sprintf("hello world %d", i+1),
+				"type":              "text",
+			})
+			resp := readResponse(t, aliceConn, 5*time.Second)
+			require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+1)
+		}
+
+		// Send 2 messages without "hello".
+		for i := 0; i < 2; i++ {
+			sendRequest(t, aliceConn, fmt.Sprintf("send-other-%d", i+1), "send_message", map[string]interface{}{
+				"conversation_id":   conv.ID,
+				"client_message_id": uuid.New().String(),
+				"content":           fmt.Sprintf("goodbye %d", i+1),
+				"type":              "text",
+			})
+			resp := readResponse(t, aliceConn, 5*time.Second)
+			require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send other message %d should succeed", i+1)
+		}
+
+		drainPushUpdates(t, bobConn)
+		drainPushUpdates(t, aliceConn)
+
+		// Search for "hello".
+		sendRequest(t, aliceConn, "search-1", "search_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+			"query":           "hello",
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "search-1", resp.ID, "response ID should match (SM-E1)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "search_messages should succeed (SM-E1)")
+
+		var data struct {
+			Messages []struct {
+				ID              uint32 `json:"MessageID"`
+				ConversationID  string `json:"ConversationID"`
+				SenderID        string `json:"SenderID"`
+				Content         string `json:"Content"`
+				ClientMessageID string `json:"ClientMessageID"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data), "unmarshal response data (SM-E1)")
+
+		assert.Len(t, data.Messages, 3, "should return 3 messages containing 'hello' (SM-E1)")
+		assert.False(t, data.HasMore, "has_more should be false (SM-E1)")
+
+		// Verify all messages contain "hello".
+		for _, msg := range data.Messages {
+			assert.Contains(t, strings.ToLower(msg.Content), "hello",
+				"message should contain 'hello' (SM-E1)")
+			assert.Equal(t, "alice", msg.SenderID, "sender should be alice (SM-E1)")
+		}
+	})
+
+	// -----------------------------------------------------------------------
+	// SM-E2: No results — empty query returns messages=[], has_more=false.
+	// -----------------------------------------------------------------------
+	t.Run("SM-E2_NoResults", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		// Send 2 messages.
+		for i := 0; i < 2; i++ {
+			sendRequest(t, aliceConn, fmt.Sprintf("send-%d", i+1), "send_message", map[string]interface{}{
+				"conversation_id":   conv.ID,
+				"client_message_id": uuid.New().String(),
+				"content":           fmt.Sprintf("message %d", i+1),
+				"type":              "text",
+			})
+			resp := readResponse(t, aliceConn, 5*time.Second)
+			require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+1)
+		}
+
+		drainPushUpdates(t, aliceConn)
+
+		// Search for non-existent term.
+		sendRequest(t, aliceConn, "search-2", "search_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+			"query":           "nonexistent",
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "search-2", resp.ID, "response ID should match (SM-E2)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "search_messages should succeed (SM-E2)")
+
+		var data struct {
+			Messages []struct {
+				ID uint32 `json:"MessageID"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data), "unmarshal response data (SM-E2)")
+
+		assert.Empty(t, data.Messages, "should return empty messages array (SM-E2)")
+		assert.False(t, data.HasMore, "has_more should be false (SM-E2)")
+	})
+
+	// -----------------------------------------------------------------------
+	// SM-E3: Case insensitive — search "HELLO" matches "hello".
+	// -----------------------------------------------------------------------
+	t.Run("SM-E3_CaseInsensitive", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		// Send messages with mixed case.
+		sendRequest(t, aliceConn, "send-1", "send_message", map[string]interface{}{
+			"conversation_id":   conv.ID,
+			"client_message_id": uuid.New().String(),
+			"content":           "Hello World",
+			"type":              "text",
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code)
+
+		sendRequest(t, aliceConn, "send-2", "send_message", map[string]interface{}{
+			"conversation_id":   conv.ID,
+			"client_message_id": uuid.New().String(),
+			"content":           "hello again",
+			"type":              "text",
+		})
+		resp = readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code)
+
+		drainPushUpdates(t, aliceConn)
+
+		// Search for "HELLO" (uppercase).
+		sendRequest(t, aliceConn, "search-3", "search_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+			"query":           "HELLO",
+		})
+		resp = readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "search-3", resp.ID, "response ID should match (SM-E3)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "search_messages should succeed (SM-E3)")
+
+		var data struct {
+			Messages []struct {
+				Content string `json:"Content"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data), "unmarshal response data (SM-E3)")
+
+		assert.Len(t, data.Messages, 2, "should match both 'Hello' and 'hello' (SM-E3)")
+	})
+
+	// -----------------------------------------------------------------------
+	// SM-E4: Pagination with after_message_id — cursor-based pagination.
+	// -----------------------------------------------------------------------
+	t.Run("SM-E4_Pagination", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		// Send 5 messages containing "test".
+		var messageIDs []uint32
+		for i := 0; i < 5; i++ {
+			sendRequest(t, aliceConn, fmt.Sprintf("send-%d", i+1), "send_message", map[string]interface{}{
+				"conversation_id":   conv.ID,
+				"client_message_id": uuid.New().String(),
+				"content":           fmt.Sprintf("test message %d", i+1),
+				"type":              "text",
+			})
+			resp := readResponse(t, aliceConn, 5*time.Second)
+			require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+1)
+
+			var respData struct {
+				Message model.Message `json:"message"`
+			}
+			require.NoError(t, json.Unmarshal(resp.Data, &respData))
+			messageIDs = append(messageIDs, respData.Message.MessageID)
+		}
+
+		drainPushUpdates(t, aliceConn)
+
+		// First page: limit=2.
+		sendRequest(t, aliceConn, "search-4a", "search_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+			"query":           "test",
+			"limit":           2,
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "search-4a", resp.ID, "response ID should match (SM-E4)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "search_messages should succeed (SM-E4)")
+
+		var data1 struct {
+			Messages []struct {
+				ID uint32 `json:"MessageID"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data1), "unmarshal response data (SM-E4 page 1)")
+
+		assert.Len(t, data1.Messages, 2, "first page should have 2 messages (SM-E4)")
+		assert.True(t, data1.HasMore, "has_more should be true (SM-E4)")
+		// DESC order: messageIDs[4], messageIDs[3]
+		assert.Equal(t, messageIDs[4], data1.Messages[0].ID, "first message should be newest (SM-E4)")
+		assert.Equal(t, messageIDs[3], data1.Messages[1].ID, "second message should be next (SM-E4)")
+
+		// Second page: after_message_id = messageIDs[3].
+		sendRequest(t, aliceConn, "search-4b", "search_messages", map[string]interface{}{
+			"conversation_id":  conv.ID,
+			"query":            "test",
+			"limit":            2,
+			"after_message_id": messageIDs[3],
+		})
+		resp = readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "search-4b", resp.ID, "response ID should match (SM-E4)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "search_messages should succeed (SM-E4)")
+
+		var data2 struct {
+			Messages []struct {
+				ID uint32 `json:"MessageID"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data2), "unmarshal response data (SM-E4 page 2)")
+
+		assert.Len(t, data2.Messages, 2, "second page should have 2 messages (SM-E4)")
+		assert.True(t, data2.HasMore, "has_more should be true (SM-E4)")
+		// DESC order: messageIDs[2], messageIDs[1]
+		assert.Equal(t, messageIDs[2], data2.Messages[0].ID, "first message on page 2 (SM-E4)")
+		assert.Equal(t, messageIDs[1], data2.Messages[1].ID, "second message on page 2 (SM-E4)")
+
+		// Third page: after_message_id = messageIDs[1].
+		sendRequest(t, aliceConn, "search-4c", "search_messages", map[string]interface{}{
+			"conversation_id":  conv.ID,
+			"query":            "test",
+			"limit":            2,
+			"after_message_id": messageIDs[1],
+		})
+		resp = readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "search-4c", resp.ID, "response ID should match (SM-E4)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "search_messages should succeed (SM-E4)")
+
+		var data3 struct {
+			Messages []struct {
+				ID uint32 `json:"MessageID"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data3), "unmarshal response data (SM-E4 page 3)")
+
+		assert.Len(t, data3.Messages, 1, "third page should have 1 message (SM-E4)")
+		assert.False(t, data3.HasMore, "has_more should be false (SM-E4)")
+		assert.Equal(t, messageIDs[0], data3.Messages[0].ID, "last message on page 3 (SM-E4)")
+	})
+
+	// -----------------------------------------------------------------------
+	// SM-E5: Ordering DESC — newest matching message first.
+	// -----------------------------------------------------------------------
+	t.Run("SM-E5_OrderingDESC", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		// Send 5 messages with "apple".
+		var messageIDs []uint32
+		for i := 0; i < 5; i++ {
+			sendRequest(t, aliceConn, fmt.Sprintf("send-%d", i+1), "send_message", map[string]interface{}{
+				"conversation_id":   conv.ID,
+				"client_message_id": uuid.New().String(),
+				"content":           fmt.Sprintf("apple %d", i+1),
+				"type":              "text",
+			})
+			resp := readResponse(t, aliceConn, 5*time.Second)
+			require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+1)
+
+			var respData struct {
+				Message model.Message `json:"message"`
+			}
+			require.NoError(t, json.Unmarshal(resp.Data, &respData))
+			messageIDs = append(messageIDs, respData.Message.MessageID)
+		}
+
+		drainPushUpdates(t, aliceConn)
+
+		// Search for "apple".
+		sendRequest(t, aliceConn, "search-5", "search_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+			"query":           "apple",
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "search-5", resp.ID, "response ID should match (SM-E5)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "search_messages should succeed (SM-E5)")
+
+		var data struct {
+			Messages []struct {
+				ID uint32 `json:"MessageID"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data), "unmarshal response data (SM-E5)")
+
+		assert.Len(t, data.Messages, 5, "should return 5 messages (SM-E5)")
+
+		// Verify DESC ordering: IDs should decrease.
+		for i := 0; i < len(data.Messages)-1; i++ {
+			assert.Greater(t, data.Messages[i].ID, data.Messages[i+1].ID,
+				"messages should be in descending order (SM-E5)")
+		}
+
+		// First message should be the newest (messageIDs[4]).
+		assert.Equal(t, messageIDs[4], data.Messages[0].ID,
+			"first message should be newest (SM-E5)")
+		// Last message should be the oldest (messageIDs[0]).
+		assert.Equal(t, messageIDs[0], data.Messages[4].ID,
+			"last message should be oldest (SM-E5)")
+	})
+
+	// -----------------------------------------------------------------------
+	// SM-E6: Non-member rejected — error "not a member" (C-3).
+	// -----------------------------------------------------------------------
+	t.Run("SM-E6_NonMemberRejected", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+		eveConn := connectClient(t, env.addr, "eve")
+		defer eveConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		drainPushUpdates(t, aliceConn)
+		drainPushUpdates(t, eveConn)
+
+		// Eve (non-member) calls search_messages.
+		sendRequest(t, eveConn, "search-6", "search_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+			"query":           "test",
+		})
+		resp := readResponse(t, eveConn, 5*time.Second)
+		require.Equal(t, "search-6", resp.ID, "response ID should match (SM-E6)")
+		assert.Equal(t, protocol.ResponseCodeError, resp.Code,
+			"non-member search_messages should be rejected (C-3)")
+		assert.True(t, strings.Contains(strings.ToLower(resp.Msg), "not a member"),
+			"error should mention 'not a member', got: %s (C-3)", resp.Msg)
+	})
+
+	// -----------------------------------------------------------------------
+	// SM-E7: Empty query — error "query".
+	// -----------------------------------------------------------------------
+	t.Run("SM-E7_EmptyQuery", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		drainPushUpdates(t, aliceConn)
+
+		// Call search_messages with empty query.
+		sendRequest(t, aliceConn, "search-7", "search_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+			"query":           "",
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "search-7", resp.ID, "response ID should match (SM-E7)")
+		assert.Equal(t, protocol.ResponseCodeError, resp.Code,
+			"empty query should fail")
+		assert.True(t, strings.Contains(strings.ToLower(resp.Msg), "query"),
+			"error should mention 'query', got: %s", resp.Msg)
+	})
+
+	// -----------------------------------------------------------------------
+	// SM-E8: LIKE special chars — search with % and _ doesn't break.
+	// -----------------------------------------------------------------------
+	t.Run("SM-E8_LIKESpecialChars", func(t *testing.T) {
+		env := setupE2ETest(t)
+
+		aliceConn := connectClient(t, env.addr, "alice")
+		defer aliceConn.Close()
+
+		conv := createTestConversation(t, env.store, "alice", "bob")
+
+		// Send messages with LIKE special characters.
+		sendRequest(t, aliceConn, "send-1", "send_message", map[string]interface{}{
+			"conversation_id":   conv.ID,
+			"client_message_id": uuid.New().String(),
+			"content":           "100% complete",
+			"type":              "text",
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code)
+
+		sendRequest(t, aliceConn, "send-2", "send_message", map[string]interface{}{
+			"conversation_id":   conv.ID,
+			"client_message_id": uuid.New().String(),
+			"content":           "user_name",
+			"type":              "text",
+		})
+		resp = readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code)
+
+		sendRequest(t, aliceConn, "send-3", "send_message", map[string]interface{}{
+			"conversation_id":   conv.ID,
+			"client_message_id": uuid.New().String(),
+			"content":           "normal message",
+			"type":              "text",
+		})
+		resp = readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code)
+
+		drainPushUpdates(t, aliceConn)
+
+		// Search for "%".
+		sendRequest(t, aliceConn, "search-8a", "search_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+			"query":           "%",
+		})
+		resp = readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "search-8a", resp.ID, "response ID should match (SM-E8)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "search_messages with '%' should succeed (SM-E8)")
+
+		var data1 struct {
+			Messages []struct {
+				Content string `json:"Content"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data1), "unmarshal response data (SM-E8)")
+
+		assert.Len(t, data1.Messages, 1, "should match exactly 1 message with '%' (SM-E8)")
+		assert.Contains(t, data1.Messages[0].Content, "%", "content should contain '%' (SM-E8)")
+
+		// Search for "_".
+		sendRequest(t, aliceConn, "search-8b", "search_messages", map[string]interface{}{
+			"conversation_id": conv.ID,
+			"query":           "_",
+		})
+		resp = readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, "search-8b", resp.ID, "response ID should match (SM-E8)")
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "search_messages with '_' should succeed (SM-E8)")
+
+		var data2 struct {
+			Messages []struct {
+				Content string `json:"Content"`
+			} `json:"messages"`
+			HasMore bool `json:"has_more"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &data2), "unmarshal response data (SM-E8)")
+
+		assert.Len(t, data2.Messages, 1, "should match exactly 1 message with '_' (SM-E8)")
+		assert.Contains(t, data2.Messages[0].Content, "_", "content should contain '_' (SM-E8)")
+	})
 }

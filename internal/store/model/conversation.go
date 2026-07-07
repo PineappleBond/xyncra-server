@@ -8,9 +8,9 @@ import (
 
 type Conversation struct {
 	ID                     string `gorm:"primaryKey;size:36"`
-	UserID1                string `gorm:"size:64;index:idx_conversation_user1_deleted,priority:1;index:idx_conversation_users_unique,priority:1"`
-	UserID2                string `gorm:"size:64;index:idx_conversation_user2_deleted,priority:1;index:idx_conversation_users_unique,priority:2"` // only 1-on-1 not null
-	Type                   string `gorm:"size:20;index"`                                                                                          // 1-on-1 / group / channel
+	UserID1                string `gorm:"size:64;index:idx_conversation_user1_deleted,priority:1;uniqueIndex:idx_conversation_users_unique,priority:1"`
+	UserID2                string `gorm:"size:64;index:idx_conversation_user2_deleted,priority:1;uniqueIndex:idx_conversation_users_unique,priority:2"` // only 1-on-1 not null
+	Type                   string `gorm:"size:20;index"`                                                                                                // 1-on-1 / group / channel
 	Title                  string `gorm:"size:255"`
 	Pinned                 bool
 	Muted                  bool
@@ -23,5 +23,5 @@ type Conversation struct {
 	LastReadMessageID1     uint32    // UserID1's read cursor position (D-012)
 	LastReadMessageID2     uint32    // UserID2's read cursor position (D-012)
 
-	DeletedAt gorm.DeletedAt `gorm:"index:idx_conversation_user1_deleted,priority:2;index:idx_conversation_user2_deleted,priority:2;index:idx_conversation_lastmsg_deleted,priority:2;index;index:idx_conversation_users_unique,priority:3"`
+	DeletedAt gorm.DeletedAt `gorm:"index:idx_conversation_user1_deleted,priority:2;index:idx_conversation_user2_deleted,priority:2;index:idx_conversation_lastmsg_deleted,priority:2;index"`
 }

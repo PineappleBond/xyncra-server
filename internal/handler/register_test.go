@@ -218,7 +218,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	// 9. DeleteConversation handler (create a temp conv to delete)
 	deleteConvHandler := NewDeleteConversationHandler(deps.Store)
 	tempConvID := "conv-delete-reg"
-	createTestConversation(t, s, tempConvID, userID, "bob")
+	createTestConversation(t, s, tempConvID, userID, "dave")
 	deleteReq := &protocol.PackageDataRequest{
 		ID:     "req-delete-conv",
 		Method: "delete_conversation",
@@ -444,7 +444,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	// DeleteConversation uses Store.
 	deleteConvHandler := NewDeleteConversationHandler(deps.Store)
 	tempConvID := "conv-delete-dep"
-	createTestConversation(t, s, tempConvID, userID, "bob")
+	createTestConversation(t, s, tempConvID, userID, "dave")
 	deleteReq := &protocol.PackageDataRequest{
 		ID:     "req-delete-conv-dep",
 		Method: "delete_conversation",
