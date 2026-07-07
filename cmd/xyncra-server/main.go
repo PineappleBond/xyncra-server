@@ -35,6 +35,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PineappleBond/xyncra-server/internal/handler"
 	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
@@ -121,12 +122,11 @@ func main() {
 	// ---------------------------------------------------------------
 
 	msgHandler := server.NewDefaultMessageHandler()
-	msgHandler.RegisterMethod("send_message",
-		server.NewSendMessageHandler(dataStore, broker))
-	msgHandler.RegisterMethod("sync_updates",
-		server.NewSyncUpdatesHandler(dataStore))
-	msgHandler.RegisterMethod("heartbeat",
-		server.NewHeartbeatHandler(connStore))
+	handler.RegisterAll(msgHandler, handler.Dependencies{
+		ConnStore: connStore,
+		Store:     dataStore,
+		Broker:    broker,
+	})
 
 	// ---------------------------------------------------------------
 	// WebSocket Server
@@ -162,7 +162,7 @@ func main() {
 	// Tasks that are not yet handled are logged and acknowledged.
 	taskHandler := mq.NewTaskHandler()
 	taskHandler.Register(mq.TypeSendMessage,
-		server.NewSendMessageTaskHandler(srv.BroadcastUpdates, srv.Logger()))
+		handler.NewSendMessageTaskHandler(srv.BroadcastUpdates, srv.Logger()))
 	go func() {
 		if err := broker.Start(ctx, taskHandler); err != nil {
 			log.Printf("broker error: %v", err)
