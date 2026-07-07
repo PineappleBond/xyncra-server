@@ -478,7 +478,7 @@ func TestMessageSearchByConversation(t *testing.T) {
 			})
 		}
 
-		msgs, err := s.Messages.SearchByConversation(ctx, "conv-search", "hello", 10)
+		msgs, err := s.Messages.SearchByConversation(ctx, "conv-search", "hello", 0, 10)
 		if err != nil {
 			t.Fatalf("search failed: %v", err)
 		}

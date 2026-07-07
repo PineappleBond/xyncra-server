@@ -97,8 +97,10 @@ func (ms *MessageStore) GetByClientMessageID(ctx context.Context, clientMessageI
 // SearchByConversation returns messages for the given conversation that contain
 // the specified content substring (case-insensitive via LIKE), ordered by
 // MessageID descending (newest first), limited to at most limit rows.
-func (ms *MessageStore) SearchByConversation(ctx context.Context, convID, content string, limit int) ([]*model.Message, error) {
-	if limit <= 0 || limit > 200 {
+// If afterMessageID is non-zero, only messages with MessageID < afterMessageID
+// are returned, enabling cursor-based pagination through search results.
+func (ms *MessageStore) SearchByConversation(ctx context.Context, convID, content string, afterMessageID uint32, limit int) ([]*model.Message, error) {
+	if limit <= 0 || limit > 201 {
 		limit = 50
 	}
 	if content == "" {
@@ -107,9 +109,16 @@ func (ms *MessageStore) SearchByConversation(ctx context.Context, convID, conten
 
 	like := "%" + escapeLikePattern(content) + "%"
 
+	query := ms.db.WithContext(ctx).
+		Where("conversation_id = ? AND content LIKE ?", convID, like)
+
+	// Apply cursor: only messages older (lower MessageID) than the cursor.
+	if afterMessageID > 0 {
+		query = query.Where("message_id < ?", afterMessageID)
+	}
+
 	var msgs []*model.Message
-	err := ms.db.WithContext(ctx).
-		Where("conversation_id = ? AND content LIKE ?", convID, like).
+	err := query.
 		Order("message_id DESC").
 		Limit(limit).
 		Find(&msgs).Error

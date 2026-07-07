@@ -77,7 +77,9 @@ func (cs *ConversationStore) GetByUsers(ctx context.Context, user1, user2 string
 // This is acceptable in practice because a single user typically has far fewer
 // than 1000 conversations.
 func (cs *ConversationStore) GetByUser(ctx context.Context, userID string, offset, limit int) ([]*model.Conversation, error) {
-	if limit <= 0 || limit > 100 {
+	// Allow up to 101 so callers can use the limit+1 probe technique for
+	// has_more detection at the maximum page size (100).
+	if limit <= 0 || limit > 101 {
 		limit = 20
 	}
 	if offset < 0 {
@@ -204,7 +206,8 @@ func (cs *ConversationStore) UpdateLastMessage(ctx context.Context, convID strin
 // specified title substring (case-insensitive via LIKE), ordered by
 // LastMessageAt descending, limited to at most limit rows.
 func (cs *ConversationStore) SearchByTitle(ctx context.Context, userID, title string, limit int) ([]*model.Conversation, error) {
-	if limit <= 0 || limit > 100 {
+	// Allow up to 101 so callers can use the limit+1 probe technique.
+	if limit <= 0 || limit > 101 {
 		limit = 20
 	}
 	if title == "" {
