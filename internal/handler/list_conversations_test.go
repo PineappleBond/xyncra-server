@@ -285,9 +285,9 @@ func TestListConversations_Sorting_LastMessageAtDESC(t *testing.T) {
 
 	// Create 3 conversations with distinct LastMessageAt timestamps.
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	t1 := now                     // oldest
-	t2 := now.Add(1 * time.Hour)  // middle
-	t3 := now.Add(2 * time.Hour)  // newest
+	t1 := now                    // oldest
+	t2 := now.Add(1 * time.Hour) // middle
+	t3 := now.Add(2 * time.Hour) // newest
 
 	createTestConversationAtTime(t, s, uuid.New().String(), userID, "u1", "oldest", t1)
 	createTestConversationAtTime(t, s, uuid.New().String(), userID, "u2", "middle", t2)

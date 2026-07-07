@@ -369,11 +369,11 @@ func TestSearchMessages_PaginationCursor(t *testing.T) {
 	convID := uuid.New().String()
 	createTestConversation(t, s, convID, "alice", "bob")
 	seedTestMessagesWithContent(t, s, convID, "alice", []string{
-		"hello first",   // MessageID=1
-		"hello second",  // MessageID=2
-		"hello third",   // MessageID=3
-		"nomatch",       // MessageID=4
-		"hello fourth",  // MessageID=5
+		"hello first",  // MessageID=1
+		"hello second", // MessageID=2
+		"hello third",  // MessageID=3
+		"nomatch",      // MessageID=4
+		"hello fourth", // MessageID=5
 	}, 1)
 
 	// First page: get the 2 newest matches (results are DESC).
