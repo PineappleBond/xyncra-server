@@ -88,9 +88,14 @@ var luaAdd = redis.NewScript(`
 			return -1
 		end
 	else
-		-- Overwrite: if UserID changed, remove from old user's set.
+		-- Overwrite: if UserID changed, remove from old user's set and
+		-- enforce per-user limit for the new user (the connection is not
+		-- yet in the new user's set, so we check >= maxConns).
 		if oldUserID ~= newUserID then
 			redis.call('SREM', userKeyPrefix .. oldUserID, connID)
+			if maxConns > 0 and redis.call('SCARD', newUserKey) >= maxConns then
+				return -1
+			end
 		end
 	end
 

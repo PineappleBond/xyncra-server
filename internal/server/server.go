@@ -89,9 +89,8 @@ type Server interface {
 // --------------------------------------------------------------------------
 
 // ServerConfig holds the dependencies and configuration for creating a Server.
-//
-// Deprecated: Use NewBaseServerFromOptions with functional options instead.
-// ServerConfig is retained for backward compatibility.
+// It is used internally by NewBaseServerFromOptions and is also available for
+// direct use when constructing a BaseServer via NewBaseServer.
 type ServerConfig struct {
 	// Addr is the network address to listen on (e.g. ":8080").
 	Addr string
@@ -189,9 +188,6 @@ var _ Server = (*BaseServer)(nil)
 
 // NewBaseServer creates a BaseServer from the provided config. Returns an
 // error if the config is invalid.
-//
-// Deprecated: Use NewBaseServerFromOptions with functional options instead.
-// NewBaseServer is retained for backward compatibility.
 func NewBaseServer(cfg ServerConfig) (*BaseServer, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -237,7 +233,9 @@ func (s *BaseServer) Start(ctx context.Context) error {
 	}
 
 	// Recreate the done channel so that Start can be safely called again
-	// after a previous run completed. This prevents a double-close panic.
+	// after a previous run completed. The previous channel was closed when
+	// the last Start returned; without recreating it, a subsequent Start
+	// would panic on a double-close (P2-09).
 	s.done = make(chan struct{})
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.running = true

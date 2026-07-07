@@ -196,6 +196,98 @@ go tool cover -html=coverage.out -o coverage.html
 | `TestRedisConnectionStoreConfig_resolveDefaultTTL/negative_uses_package_default` | Negative -> 30m |
 | `TestRedisConnectionStoreConfig_resolveDefaultTTL/custom_value` | Custom value preserved |
 
+### WebSocketServer - Construction (3 tests)
+
+| Test | Description |
+|------|-------------|
+| `TestNewWebSocketServer_AllOptions` | Server created with all options (path, buffers, compression, timeouts) |
+| `TestNewWebSocketServer_MissingConnectionStore` | Missing ConnectionStore returns error |
+| `TestNewWebSocketServer_Defaults` | Default path "/ws" and handler applied |
+
+### WebSocketServer - Lifecycle (2 tests)
+
+| Test | Description |
+|------|-------------|
+| `TestWebSocketServer_StartStop` | Server starts and stops cleanly via context cancel |
+| `TestWebSocketServer_GracefulStop` | GracefulStop disconnects all active clients |
+
+### WebSocketServer - Paths (3 tests)
+
+| Test | Description |
+|------|-------------|
+| `TestWebSocketServer_DefaultPath` | Default "/ws" path accepts connections |
+| `TestWebSocketServer_CustomPath` | Custom path via WSWithPath works |
+| `TestWebSocketServer_WrongPath` | Non-existent path returns error |
+
+### WebSocketServer - Custom Auth & Utilities (4 tests)
+
+| Test | Description |
+|------|-------------|
+| `TestWebSocketServer_CustomAuthenticate` | Custom authenticate function used during upgrade |
+| `TestWebSocketServer_ClientCountAndClientsByUser` | Accurate client counting across users |
+| `TestWebSocketServer_MessageHandlerInstance` | Returns the configured MessageHandler |
+| `TestWebSocketMsg_BroadcastUpdates_NoClients` | Broadcasting to absent user is a no-op |
+
+### WebSocket Connection Tests (7 tests)
+
+| Test | Description |
+|------|-------------|
+| `TestWebSocketConn_MissingUserID` | Connection without user_id rejected (401) |
+| `TestWebSocketConn_EmptyUserID` | Connection with empty user_id rejected (401) |
+| `TestWebSocketConn_ClientCountIncrease` | ClientCount increases after connect |
+| `TestWebSocketConn_ClientCountDecrease` | ClientCount decreases after disconnect |
+| `TestWebSocketConn_MultipleConnectionsSameUser` | Same user can have multiple connections |
+| `TestWebSocketConn_RegisteredInConnectionStore` | Connection registered in Redis ConnectionStore |
+| `TestWebSocketConn_ConnectionRemovedFromStoreOnDisconnect` | Connection removed from store on disconnect |
+
+### Message Communication Tests (9 tests)
+
+| Test | Description |
+|------|-------------|
+| `TestWebSocketMsg_RequestResponse` | Request triggers response (unknown method error) |
+| `TestWebSocketMsg_MethodHandler` | Registered MethodHandler processes requests |
+| `TestWebSocketMsg_UnknownMethodReturnsError` | Unknown method returns error response |
+| `TestWebSocketMsg_BroadcastUpdates` | BroadcastUpdates reaches target user only |
+| `TestWebSocketMsg_BroadcastUpdates_NilUpdates` | Nil updates returns error |
+| `TestWebSocketMsg_MalformedMessageDoesNotDisconnect` | Malformed JSON does not disconnect client |
+| `TestWebSocketMsg_HandlerErrorReturnsErrorResponse` | Handler error propagated to client |
+| `TestWebSocketMsg_ConcurrentRequestResponse` | Multiple concurrent request-response flows |
+| `TestDefaultMessageHandler_NonRequestTypes` | Non-Request packages are ignored |
+
+### DefaultMessageHandler Tests (5 tests)
+
+| Test | Description |
+|------|-------------|
+| `TestDefaultMessageHandler_RegisterMethod` | Method registered and invoked via HandleMessage |
+| `TestDefaultMessageHandler_RegisterMethodFunc` | Convenience wrapper RegisterMethodFunc works |
+| `TestDefaultMessageHandler_SetFallback` | Fallback handler invoked for unknown methods |
+| `TestDefaultMessageHandler_ConcurrentRegisterAndCall` | Concurrent register and invoke are safe |
+| `TestDefaultMessageHandler_MethodOverwrite` | Re-registering overwrites previous handler |
+
+### Client Tests (6 tests)
+
+| Test | Description |
+|------|-------------|
+| `TestClient_SendAndReceive` | Messages sent via SendPackage delivered to peer |
+| `TestClient_SendBufferFullDropsMessage` | Full send buffer drops messages without blocking |
+| `TestClient_CloseIdempotent` | Multiple Close calls do not panic |
+| `TestClient_SendAfterClose` | Send after Close is a no-op |
+| `TestClient_Accessors` | UserID and ConnID return correct values |
+| `TestClient_PingPong` | Server sends periodic pings, connection stays alive |
+
+## Running Only WebSocket Tests
+
+```bash
+# All WebSocket-related tests
+go test -v -run "TestNewWebSocketServer|TestWebSocketServer_|TestWebSocketConn_|TestWebSocketMsg_|TestDefaultMessageHandler_|TestClient_" ./internal/server/...
+
+# Only connection tests
+go test -v -run "TestWebSocketConn" ./internal/server/...
+
+# Only message handler tests
+go test -v -run "TestDefaultMessageHandler" ./internal/server/...
+```
+
 ## Cleanup
 
 ### Stop the test Redis container

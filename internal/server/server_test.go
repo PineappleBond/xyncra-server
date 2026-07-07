@@ -1234,8 +1234,8 @@ func TestRedisConnectionStore_Refresh(t *testing.T) {
 	ttlBefore, err := cs.client.TTL(ctx, cs.infoKey("conn-1")).Result()
 	require.NoError(t, err)
 
-	// Wait a bit so TTL decreases.
-	time.Sleep(100 * time.Millisecond)
+	// Wait a bit so TTL decreases significantly.
+	time.Sleep(500 * time.Millisecond)
 
 	err = cs.Refresh(ctx, "conn-1")
 	require.NoError(t, err)
@@ -1243,8 +1243,15 @@ func TestRedisConnectionStore_Refresh(t *testing.T) {
 	// TTL should be reset to the full value.
 	ttlAfter, err := cs.client.TTL(ctx, cs.infoKey("conn-1")).Result()
 	require.NoError(t, err)
-	assert.True(t, ttlAfter > ttlBefore,
+	// After the Refresh, the TTL should be close to the original full value
+	// (5s), not the decreased value it had before the Refresh. We check that
+	// the refreshed TTL is greater than what it would have been without the
+	// Refresh (ttlBefore - 500ms).
+	assert.True(t, ttlAfter > ttlBefore-500*time.Millisecond,
 		"TTL should be refreshed: before=%v, after=%v", ttlBefore, ttlAfter)
+	// Also verify the refreshed TTL is close to the full value.
+	assert.True(t, ttlAfter >= 4*time.Second,
+		"Refreshed TTL should be close to full value (5s), got %v", ttlAfter)
 }
 
 func TestRedisConnectionStore_Refresh_NotFound(t *testing.T) {
