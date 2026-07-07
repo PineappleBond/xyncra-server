@@ -361,12 +361,10 @@ func (b *AsynqBroker) Start(ctx context.Context, handler Handler) error {
 	return nil
 }
 
-// Stop performs a graceful shutdown of the Asynq server by signalling the
-// internal context cancellation. The Start() method will unblock and handle
-// the actual server shutdown.
-//
-// TODO: Consider accepting a context parameter to allow callers to specify a
-// graceful shutdown timeout.
+// Stop signals the Asynq server to begin graceful shutdown by cancelling
+// the internal context. The actual shutdown is performed by Start(), which
+// calls asynq.Server.Shutdown() (which does not accept a context). For
+// timeout-based shutdown, use Close() which waits for Start() to complete.
 func (b *AsynqBroker) Stop() {
 	b.cancelMu.Lock()
 	defer b.cancelMu.Unlock()
@@ -415,28 +413,6 @@ func (b *AsynqBroker) Close() error {
 	})
 
 	return firstErr
-}
-
-// Inspector returns the underlying asynq.Inspector, which can be used to
-// query task state, queue metrics, and perform administrative operations.
-//
-// TODO: This method temporarily exposes the internal inspector to support
-// advanced operations not yet covered by the Broker interface. It should be
-// removed once the Broker interface provides first-class support for all
-// required inspection operations.
-func (b *AsynqBroker) Inspector() *asynq.Inspector {
-	return b.inspector
-}
-
-// Client returns the underlying asynq.Client, useful for advanced operations
-// not covered by the Broker interface (e.g. enqueuing native asynq tasks).
-//
-// TODO: This method temporarily exposes the internal client to support
-// advanced operations not yet covered by the Broker interface. It should be
-// removed once the Broker interface provides first-class support for all
-// required enqueue operations.
-func (b *AsynqBroker) Client() *asynq.Client {
-	return b.client
 }
 
 // --------------------------------------------------------------------------
