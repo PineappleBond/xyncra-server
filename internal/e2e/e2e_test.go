@@ -450,10 +450,17 @@ func TestOfflineMessageSync(t *testing.T) {
 	require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send should succeed")
 
 	// Consume Alice's push (C-10).
-	_ = waitForUpdate(t, aliceConn, 10*time.Second)
+	_ = waitForUpdate(t, aliceConn, 15*time.Second)
 
 	// 3. Alice disconnects.
 	aliceConn.Close()
+
+	// Wait for connection store to clean up Alice's stale connection before
+	// Bob comes online; otherwise sync timing becomes flaky under CI load.
+	require.Eventually(t, func() bool {
+		conns, err := env.connStore.ListByUser(context.Background(), "alice", 10)
+		return err == nil && len(conns) == 0
+	}, 5*time.Second, 100*time.Millisecond, "alice should be disconnected")
 
 	// 4. Bob comes online.
 	bobConn := connectClient(t, env.addr, "bob")

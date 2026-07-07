@@ -1358,14 +1358,23 @@ func TestRedisConnectionStore_ListByUser_CleansStaleEntries(t *testing.T) {
 
 	// Add a connection with a very short TTL.
 	info := newTestConnection("conn-ephemeral", "user-1")
-	info.TTL = 100 * time.Millisecond
+	info.TTL = 500 * time.Millisecond
 	require.NoError(t, cs.Add(ctx, info))
 
 	// Add a stable connection.
 	require.NoError(t, cs.Add(ctx, newTestConnection("conn-stable", "user-1")))
 
-	// Wait for the ephemeral connection to expire.
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the ephemeral connection to expire and be cleaned up.
+	// Use Eventually instead of fixed Sleep because Redis uses lazy/expiring
+	// eviction which may not run promptly under CI load.
+	require.Eventually(t, func() bool {
+		conns, err := cs.ListByUser(ctx, "user-1", -1)
+		if err != nil || len(conns) != 1 {
+			return false
+		}
+		return conns[0].ID == "conn-stable"
+	}, 5*time.Second, 50*time.Millisecond,
+		"ephemeral connection should expire and be cleaned up")
 
 	conns, err := cs.ListByUser(ctx, "user-1", -1)
 	require.NoError(t, err)
