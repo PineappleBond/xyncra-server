@@ -119,6 +119,83 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	require.NoError(t, json.Unmarshal(sendResp, &sendResult))
 	assert.NotNil(t, sendResult.Message)
 	assert.False(t, sendResult.Duplicate)
+
+	// 4. CreateConversation handler (find-or-create, D-011).
+	createHandler := NewCreateConversationHandler(deps.Store)
+	createReq := &protocol.PackageDataRequest{
+		ID:     "req-create",
+		Method: "create_conversation",
+		Params: mustMarshal(t, map[string]interface{}{
+			"user_id": "charlie",
+		}),
+	}
+	createResp, err := createHandler.HandleRequest(ctx, client, createReq)
+	require.NoError(t, err)
+	var createResult struct {
+		Conversation interface{} `json:"conversation"`
+		Duplicate    bool        `json:"duplicate"`
+	}
+	require.NoError(t, json.Unmarshal(createResp, &createResult))
+	assert.NotNil(t, createResult.Conversation)
+	assert.False(t, createResult.Duplicate)
+
+	// 5. ListConversations handler
+	listHandler := NewListConversationsHandler(deps.Store)
+	listReq := &protocol.PackageDataRequest{
+		ID:     "req-list",
+		Method: "list_conversations",
+		Params: mustMarshal(t, map[string]interface{}{
+			"offset": 0,
+			"limit":  10,
+		}),
+	}
+	listResp, err := listHandler.HandleRequest(ctx, client, listReq)
+	require.NoError(t, err)
+	var listResult struct {
+		Conversations []interface{} `json:"conversations"`
+		HasMore       bool          `json:"has_more"`
+	}
+	require.NoError(t, json.Unmarshal(listResp, &listResult))
+	assert.NotNil(t, listResult.Conversations)
+
+	// 6. GetMessages handler
+	getMsgsHandler := NewGetMessagesHandler(deps.Store)
+	getMsgsReq := &protocol.PackageDataRequest{
+		ID:     "req-get-msgs",
+		Method: "get_messages",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id": convID,
+			"limit":           10,
+		}),
+	}
+	getMsgsResp, err := getMsgsHandler.HandleRequest(ctx, client, getMsgsReq)
+	require.NoError(t, err)
+	var getMsgsResult struct {
+		Messages []interface{} `json:"messages"`
+		HasMore  bool          `json:"has_more"`
+	}
+	require.NoError(t, json.Unmarshal(getMsgsResp, &getMsgsResult))
+	assert.NotNil(t, getMsgsResult.Messages)
+
+	// 7. SearchMessages handler
+	searchHandler := NewSearchMessagesHandler(deps.Store)
+	searchReq := &protocol.PackageDataRequest{
+		ID:     "req-search",
+		Method: "search_messages",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id": convID,
+			"query":           "Test",
+			"limit":           10,
+		}),
+	}
+	searchResp, err := searchHandler.HandleRequest(ctx, client, searchReq)
+	require.NoError(t, err)
+	var searchResult struct {
+		Messages []interface{} `json:"messages"`
+		HasMore  bool          `json:"has_more"`
+	}
+	require.NoError(t, json.Unmarshal(searchResp, &searchResult))
+	assert.NotNil(t, searchResult.Messages)
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +269,57 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	}
 	_, err = sendHandler.HandleRequest(ctx, client, sendReq)
 	require.NoError(t, err, "Store and Broker dependencies should be correctly injected")
+
+	// CreateConversation uses Store.
+	createHandler := NewCreateConversationHandler(deps.Store)
+	createReq := &protocol.PackageDataRequest{
+		ID:     "req-create-dep",
+		Method: "create_conversation",
+		Params: mustMarshal(t, map[string]interface{}{
+			"user_id": "charlie",
+		}),
+	}
+	_, err = createHandler.HandleRequest(ctx, client, createReq)
+	require.NoError(t, err, "CreateConversation Store dependency should be correctly injected")
+
+	// ListConversations uses Store.
+	listHandler := NewListConversationsHandler(deps.Store)
+	listReq := &protocol.PackageDataRequest{
+		ID:     "req-list-dep",
+		Method: "list_conversations",
+		Params: mustMarshal(t, map[string]interface{}{
+			"limit": 10,
+		}),
+	}
+	_, err = listHandler.HandleRequest(ctx, client, listReq)
+	require.NoError(t, err, "ListConversations Store dependency should be correctly injected")
+
+	// GetMessages uses Store.
+	getMsgsHandler := NewGetMessagesHandler(deps.Store)
+	getMsgsReq := &protocol.PackageDataRequest{
+		ID:     "req-get-msgs-dep",
+		Method: "get_messages",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id": convID,
+			"limit":           10,
+		}),
+	}
+	_, err = getMsgsHandler.HandleRequest(ctx, client, getMsgsReq)
+	require.NoError(t, err, "GetMessages Store dependency should be correctly injected")
+
+	// SearchMessages uses Store.
+	searchHandler := NewSearchMessagesHandler(deps.Store)
+	searchReq := &protocol.PackageDataRequest{
+		ID:     "req-search-dep",
+		Method: "search_messages",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id": convID,
+			"query":           "Test",
+			"limit":           10,
+		}),
+	}
+	_, err = searchHandler.HandleRequest(ctx, client, searchReq)
+	require.NoError(t, err, "SearchMessages Store dependency should be correctly injected")
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +383,33 @@ func TestRegisterAll_HandlersInvokable(t *testing.T) {
 				"type":              "text",
 			}),
 		},
+		{
+			name: "create_conversation",
+			params: mustMarshal(t, map[string]interface{}{
+				"user_id": "charlie",
+			}),
+		},
+		{
+			name: "list_conversations",
+			params: mustMarshal(t, map[string]interface{}{
+				"limit": 10,
+			}),
+		},
+		{
+			name: "get_messages",
+			params: mustMarshal(t, map[string]interface{}{
+				"conversation_id": convID,
+				"limit":           10,
+			}),
+		},
+		{
+			name: "search_messages",
+			params: mustMarshal(t, map[string]interface{}{
+				"conversation_id": convID,
+				"query":           "Invoke",
+				"limit":           10,
+			}),
+		},
 	}
 
 	for _, tc := range methods {
@@ -273,6 +428,14 @@ func TestRegisterAll_HandlersInvokable(t *testing.T) {
 			handler = NewSyncUpdatesHandler(deps.Store)
 		case "send_message":
 			handler = NewSendMessageHandler(deps.Store, deps.Broker)
+		case "create_conversation":
+			handler = NewCreateConversationHandler(deps.Store)
+		case "list_conversations":
+			handler = NewListConversationsHandler(deps.Store)
+		case "get_messages":
+			handler = NewGetMessagesHandler(deps.Store)
+		case "search_messages":
+			handler = NewSearchMessagesHandler(deps.Store)
 		}
 
 		resp, err := handler.HandleRequest(ctx, client, req)
