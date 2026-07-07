@@ -22,6 +22,11 @@ type Dependencies struct {
 //   - "list_conversations": list conversations for the authenticated user
 //   - "get_messages": fetch messages for a conversation
 //   - "search_messages": full-text search across messages
+//   - "get_conversation": get a single conversation with unread count
+//   - "delete_conversation": cascade soft delete conversation and messages (D-013)
+//   - "restore_conversation": cascade restore conversation and messages (D-015)
+//   - "delete_message": sender-only message deletion (D-014)
+//   - "mark_as_read": update read cursor with MAX semantics (D-012)
 //
 // Note: mq_send_message is a task handler (processed by the MQ worker), not a
 // method handler (invoked by client RPC), and is therefore not registered here.
@@ -33,4 +38,9 @@ func RegisterAll(h *server.DefaultMessageHandler, deps Dependencies) {
 	h.RegisterMethod("list_conversations", NewListConversationsHandler(deps.Store))
 	h.RegisterMethod("get_messages", NewGetMessagesHandler(deps.Store))
 	h.RegisterMethod("search_messages", NewSearchMessagesHandler(deps.Store))
+	h.RegisterMethod("get_conversation", NewGetConversationHandler(deps.Store))
+	h.RegisterMethod("delete_conversation", NewDeleteConversationHandler(deps.Store))
+	h.RegisterMethod("restore_conversation", NewRestoreConversationHandler(deps.Store))
+	h.RegisterMethod("delete_message", NewDeleteMessageHandler(deps.Store))
+	h.RegisterMethod("mark_as_read", NewMarkAsReadHandler(deps.Store))
 }

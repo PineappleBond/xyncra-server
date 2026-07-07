@@ -196,6 +196,114 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(searchResp, &searchResult))
 	assert.NotNil(t, searchResult.Messages)
+
+	// 8. GetConversation handler
+	getConvHandler := NewGetConversationHandler(deps.Store)
+	getConvReq := &protocol.PackageDataRequest{
+		ID:     "req-get-conv",
+		Method: "get_conversation",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id": convID,
+		}),
+	}
+	getConvResp, err := getConvHandler.HandleRequest(ctx, client, getConvReq)
+	require.NoError(t, err)
+	var getConvResult struct {
+		Conversation interface{} `json:"conversation"`
+		UnreadCount  int64       `json:"unread_count"`
+	}
+	require.NoError(t, json.Unmarshal(getConvResp, &getConvResult))
+	assert.NotNil(t, getConvResult.Conversation)
+
+	// 9. DeleteConversation handler (create a temp conv to delete)
+	deleteConvHandler := NewDeleteConversationHandler(deps.Store)
+	tempConvID := "conv-delete-reg"
+	createTestConversation(t, s, tempConvID, userID, "bob")
+	deleteReq := &protocol.PackageDataRequest{
+		ID:     "req-delete-conv",
+		Method: "delete_conversation",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id": tempConvID,
+		}),
+	}
+	deleteResp, err := deleteConvHandler.HandleRequest(ctx, client, deleteReq)
+	require.NoError(t, err)
+	var deleteResult struct {
+		Status string `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(deleteResp, &deleteResult))
+	assert.Equal(t, "ok", deleteResult.Status)
+
+	// 10. RestoreConversation handler
+	restoreConvHandler := NewRestoreConversationHandler(deps.Store)
+	restoreReq := &protocol.PackageDataRequest{
+		ID:     "req-restore-conv",
+		Method: "restore_conversation",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id": tempConvID,
+		}),
+	}
+	restoreResp, err := restoreConvHandler.HandleRequest(ctx, client, restoreReq)
+	require.NoError(t, err)
+	var restoreResult struct {
+		Conversation interface{} `json:"conversation"`
+	}
+	require.NoError(t, json.Unmarshal(restoreResp, &restoreResult))
+	assert.NotNil(t, restoreResult.Conversation)
+
+	// 11. DeleteMessage handler -- need a message to delete
+	sendHandler2 := NewSendMessageHandler(deps.Store, deps.Broker)
+	sendReq2 := &protocol.PackageDataRequest{
+		ID:     "req-send-for-delete",
+		Method: "send_message",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id":   convID,
+			"client_message_id": "client-msg-del-reg-1",
+			"content":           "To be deleted",
+			"type":              "text",
+		}),
+	}
+	sendResp2, err := sendHandler2.HandleRequest(ctx, client, sendReq2)
+	require.NoError(t, err)
+	var sendResult2 struct {
+		Message struct {
+			ID string `json:"id"`
+		} `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(sendResp2, &sendResult2))
+	deleteMsgHandler := NewDeleteMessageHandler(deps.Store)
+	deleteMsgReq := &protocol.PackageDataRequest{
+		ID:     "req-delete-msg",
+		Method: "delete_message",
+		Params: mustMarshal(t, map[string]interface{}{
+			"message_id": sendResult2.Message.ID,
+		}),
+	}
+	deleteMsgResp, err := deleteMsgHandler.HandleRequest(ctx, client, deleteMsgReq)
+	require.NoError(t, err)
+	var deleteMsgResult struct {
+		Status string `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(deleteMsgResp, &deleteMsgResult))
+	assert.Equal(t, "ok", deleteMsgResult.Status)
+
+	// 12. MarkAsRead handler
+	markReadHandler := NewMarkAsReadHandler(deps.Store)
+	markReadReq := &protocol.PackageDataRequest{
+		ID:     "req-mark-read",
+		Method: "mark_as_read",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id": convID,
+		}),
+	}
+	markReadResp, err := markReadHandler.HandleRequest(ctx, client, markReadReq)
+	require.NoError(t, err)
+	var markReadResult struct {
+		Status      string `json:"status"`
+		UnreadCount int64  `json:"unread_count"`
+	}
+	require.NoError(t, json.Unmarshal(markReadResp, &markReadResult))
+	assert.Equal(t, "ok", markReadResult.Status)
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +428,88 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	}
 	_, err = searchHandler.HandleRequest(ctx, client, searchReq)
 	require.NoError(t, err, "SearchMessages Store dependency should be correctly injected")
+
+	// GetConversation uses Store.
+	getConvHandler := NewGetConversationHandler(deps.Store)
+	getConvReq := &protocol.PackageDataRequest{
+		ID:     "req-get-conv-dep",
+		Method: "get_conversation",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id": convID,
+		}),
+	}
+	_, err = getConvHandler.HandleRequest(ctx, client, getConvReq)
+	require.NoError(t, err, "GetConversation Store dependency should be correctly injected")
+
+	// DeleteConversation uses Store.
+	deleteConvHandler := NewDeleteConversationHandler(deps.Store)
+	tempConvID := "conv-delete-dep"
+	createTestConversation(t, s, tempConvID, userID, "bob")
+	deleteReq := &protocol.PackageDataRequest{
+		ID:     "req-delete-conv-dep",
+		Method: "delete_conversation",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id": tempConvID,
+		}),
+	}
+	_, err = deleteConvHandler.HandleRequest(ctx, client, deleteReq)
+	require.NoError(t, err, "DeleteConversation Store dependency should be correctly injected")
+
+	// RestoreConversation uses Store.
+	restoreConvHandler := NewRestoreConversationHandler(deps.Store)
+	restoreReq := &protocol.PackageDataRequest{
+		ID:     "req-restore-conv-dep",
+		Method: "restore_conversation",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id": tempConvID,
+		}),
+	}
+	_, err = restoreConvHandler.HandleRequest(ctx, client, restoreReq)
+	require.NoError(t, err, "RestoreConversation Store dependency should be correctly injected")
+
+	// DeleteMessage uses Store.
+	// First send a message to delete.
+	sendHandler2 := NewSendMessageHandler(deps.Store, deps.Broker)
+	sendReq2 := &protocol.PackageDataRequest{
+		ID:     "req-send-for-delete-dep",
+		Method: "send_message",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id":   convID,
+			"client_message_id": "client-msg-del-dep-1",
+			"content":           "To be deleted",
+			"type":              "text",
+		}),
+	}
+	sendResp2, err := sendHandler2.HandleRequest(ctx, client, sendReq2)
+	require.NoError(t, err)
+	var sendResult2 struct {
+		Message struct {
+			ID string `json:"id"`
+		} `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(sendResp2, &sendResult2))
+	deleteMsgHandler := NewDeleteMessageHandler(deps.Store)
+	deleteMsgReq := &protocol.PackageDataRequest{
+		ID:     "req-delete-msg-dep",
+		Method: "delete_message",
+		Params: mustMarshal(t, map[string]interface{}{
+			"message_id": sendResult2.Message.ID,
+		}),
+	}
+	_, err = deleteMsgHandler.HandleRequest(ctx, client, deleteMsgReq)
+	require.NoError(t, err, "DeleteMessage Store dependency should be correctly injected")
+
+	// MarkAsRead uses Store.
+	markReadHandler := NewMarkAsReadHandler(deps.Store)
+	markReadReq := &protocol.PackageDataRequest{
+		ID:     "req-mark-read-dep",
+		Method: "mark_as_read",
+		Params: mustMarshal(t, map[string]interface{}{
+			"conversation_id": convID,
+		}),
+	}
+	_, err = markReadHandler.HandleRequest(ctx, client, markReadReq)
+	require.NoError(t, err, "MarkAsRead Store dependency should be correctly injected")
 }
 
 // ---------------------------------------------------------------------------
@@ -410,6 +600,45 @@ func TestRegisterAll_HandlersInvokable(t *testing.T) {
 				"limit":           10,
 			}),
 		},
+		{
+			name: "get_conversation",
+			params: mustMarshal(t, map[string]interface{}{
+				"conversation_id": convID,
+			}),
+		},
+		{
+			name: "delete_conversation",
+			params: mustMarshal(t, map[string]interface{}{
+				"conversation_id": convID,
+			}),
+		},
+		{
+			name: "restore_conversation",
+			params: mustMarshal(t, map[string]interface{}{
+				"conversation_id": convID,
+			}),
+		},
+		{
+			name: "send_message_for_delete",
+			params: mustMarshal(t, map[string]interface{}{
+				"conversation_id":   convID,
+				"client_message_id": "client-msg-invoke-del",
+				"content":           "To be deleted for invoke test",
+				"type":              "text",
+			}),
+		},
+		{
+			name: "delete_message",
+			params: mustMarshal(t, map[string]interface{}{
+				"message_id": "placeholder", // will be overridden
+			}),
+		},
+		{
+			name: "mark_as_read",
+			params: mustMarshal(t, map[string]interface{}{
+				"conversation_id": convID,
+			}),
+		},
 	}
 
 	for _, tc := range methods {
@@ -436,6 +665,41 @@ func TestRegisterAll_HandlersInvokable(t *testing.T) {
 			handler = NewGetMessagesHandler(deps.Store)
 		case "search_messages":
 			handler = NewSearchMessagesHandler(deps.Store)
+		case "get_conversation":
+			handler = NewGetConversationHandler(deps.Store)
+		case "delete_conversation":
+			handler = NewDeleteConversationHandler(deps.Store)
+		case "restore_conversation":
+			handler = NewRestoreConversationHandler(deps.Store)
+		case "send_message_for_delete":
+			handler = NewSendMessageHandler(deps.Store, deps.Broker)
+		case "delete_message":
+			// Send a real message to get its ID, then delete it
+			tmpSendHandler := NewSendMessageHandler(deps.Store, deps.Broker)
+			tmpReq := &protocol.PackageDataRequest{
+				ID:     "req-invoke-send-del",
+				Method: "send_message",
+				Params: mustMarshal(t, map[string]interface{}{
+					"conversation_id":   convID,
+					"client_message_id": "client-msg-invoke-del-2",
+					"content":           "Temp message for delete",
+					"type":              "text",
+				}),
+			}
+			tmpResp, tmpErr := tmpSendHandler.HandleRequest(ctx, client, tmpReq)
+			require.NoError(t, tmpErr)
+			var tmpResult struct {
+				Message struct {
+					ID string `json:"id"`
+				} `json:"message"`
+			}
+			require.NoError(t, json.Unmarshal(tmpResp, &tmpResult))
+			handler = NewDeleteMessageHandler(deps.Store)
+			req.Params = mustMarshal(t, map[string]interface{}{
+				"message_id": tmpResult.Message.ID,
+			})
+		case "mark_as_read":
+			handler = NewMarkAsReadHandler(deps.Store)
 		}
 
 		resp, err := handler.HandleRequest(ctx, client, req)

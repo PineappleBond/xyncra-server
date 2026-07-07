@@ -228,6 +228,56 @@ func (cs *ConversationStore) SearchByTitle(ctx context.Context, userID, title st
 	return convs, nil
 }
 
+// GetUnscoped retrieves a conversation including soft-deleted records.
+// Returns ErrNotFound if no record exists.
+func (cs *ConversationStore) GetUnscoped(ctx context.Context, id string) (*model.Conversation, error) {
+	var conv model.Conversation
+	err := cs.db.WithContext(ctx).
+		Unscoped().
+		Where("id = ?", id).
+		First(&conv).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, classifyError(fmt.Errorf("store: get unscoped conversation: %w", err))
+	}
+	return &conv, nil
+}
+
+// UpdateLastRead updates the last-read message ID for the specified user.
+// Uses MAX semantics: only advances forward, never backward (D-012).
+func (cs *ConversationStore) UpdateLastRead(ctx context.Context, convID, userID string, messageID uint32) error {
+	// 1. Get conversation to determine which field to update.
+	conv, err := cs.Get(ctx, convID)
+	if err != nil {
+		return err
+	}
+
+	// 2. Determine which column to update.
+	var column string
+	switch {
+	case conv.UserID1 == userID:
+		column = "last_read_message_id1"
+	case conv.UserID2 == userID:
+		column = "last_read_message_id2"
+	default:
+		return ErrNotFound // not a member
+	}
+
+	// 3. Use MAX semantics: only advance forward, never backward (D-012).
+	// Use CASE WHEN which is standard SQL and works across SQLite, PostgreSQL,
+	// and MySQL (unlike MAX(a,b) scalar which is SQLite-only).
+	result := cs.db.WithContext(ctx).
+		Model(&model.Conversation{}).
+		Where("id = ?", convID).
+		Update(column, gorm.Expr("CASE WHEN ? > ? THEN ? ELSE ? END", gorm.Expr(column), messageID, gorm.Expr(column), messageID))
+	if result.Error != nil {
+		return classifyError(fmt.Errorf("store: update last read: %w", result.Error))
+	}
+	return nil
+}
+
 // escapeLikePattern escapes special LIKE characters (%, _, \) in the input so
 // they are treated as literal characters in LIKE expressions.
 func escapeLikePattern(s string) string {

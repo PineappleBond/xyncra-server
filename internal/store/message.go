@@ -197,3 +197,17 @@ func (ms *MessageStore) CountUnread(ctx context.Context, convID string, afterMes
 	}
 	return count, nil
 }
+
+// RestoreByConversation restores all soft-deleted messages belonging to the
+// given conversation. Returns the number of restored rows.
+func (ms *MessageStore) RestoreByConversation(ctx context.Context, convID string) (int64, error) {
+	result := ms.db.WithContext(ctx).
+		Unscoped().
+		Model(&model.Message{}).
+		Where("conversation_id = ? AND deleted_at IS NOT NULL", convID).
+		Update("deleted_at", nil)
+	if result.Error != nil {
+		return 0, classifyError(fmt.Errorf("store: restore messages by conversation: %w", result.Error))
+	}
+	return result.RowsAffected, nil
+}

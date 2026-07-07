@@ -855,3 +855,423 @@ func TestSendMessageValidation(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// drainPushUpdates reads and discards push update packages from a connection
+// until no more are available within a short timeout. This prevents stale
+// updates from interfering with subsequent assertions.
+// ---------------------------------------------------------------------------
+func drainPushUpdates(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	for {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			// Timeout or error — no more messages.
+			break
+		}
+	}
+	// Clear the deadline so subsequent reads work normally.
+	_ = conn.SetReadDeadline(time.Time{})
+}
+
+// ---------------------------------------------------------------------------
+// TC-9: TestGetConversationE2E
+// Verifies: get_conversation returns conversation with unread_count (D-012)
+// ---------------------------------------------------------------------------
+
+// TestGetConversationE2E verifies the full get_conversation flow: create
+// conversation, send messages, and verify the response includes unread_count.
+func TestGetConversationE2E(t *testing.T) {
+	env := setupE2ETest(t)
+
+	// 1. Connect alice and bob.
+	aliceConn := connectClient(t, env.addr, "alice")
+	defer aliceConn.Close()
+	bobConn := connectClient(t, env.addr, "bob")
+	defer bobConn.Close()
+
+	// 2. Create conversation in DB.
+	conv := createTestConversation(t, env.store, "alice", "bob")
+
+	// 3. Alice sends 2 messages.
+	var messageIDs []string
+	for i := 0; i < 2; i++ {
+		clientMsgID := uuid.New().String()
+		sendRequest(t, aliceConn, fmt.Sprintf("send-%d", i+1), "send_message", map[string]interface{}{
+			"conversation_id":   conv.ID,
+			"client_message_id": clientMsgID,
+			"content":           fmt.Sprintf("Message %d", i+1),
+			"type":              "text",
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+1)
+
+		var respData struct {
+			Message model.Message `json:"message"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &respData))
+		messageIDs = append(messageIDs, respData.Message.ID)
+	}
+
+	// 4. Consume push updates for both connections.
+	// Each send_message generates a push to bob and a push to alice (C-10).
+	// We need to drain these so they don't interfere with later reads.
+	drainPushUpdates(t, bobConn)
+	drainPushUpdates(t, aliceConn)
+
+	// 5. Alice calls get_conversation — verify conversation returned with unread_count.
+	sendRequest(t, aliceConn, "get-conv-1", "get_conversation", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	aliceResp := readResponse(t, aliceConn, 5*time.Second)
+	require.Equal(t, protocol.ResponseCodeOK, aliceResp.Code, "alice get_conversation should succeed")
+
+	var aliceData struct {
+		Conversation model.Conversation `json:"conversation"`
+		UnreadCount  int64              `json:"unread_count"`
+	}
+	require.NoError(t, json.Unmarshal(aliceResp.Data, &aliceData))
+	assert.Equal(t, conv.ID, aliceData.Conversation.ID, "conversation ID should match")
+	// Alice sent the messages, so her read cursor is at 0 (no mark_as_read called).
+	// She has 2 unread messages (she hasn't marked them as read).
+	assert.Equal(t, int64(2), aliceData.UnreadCount, "alice should have 2 unread messages")
+
+	// 6. Bob calls get_conversation — verify conversation returned with unread_count.
+	sendRequest(t, bobConn, "get-conv-2", "get_conversation", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	bobResp := readResponse(t, bobConn, 5*time.Second)
+	require.Equal(t, protocol.ResponseCodeOK, bobResp.Code, "bob get_conversation should succeed")
+
+	var bobData struct {
+		Conversation model.Conversation `json:"conversation"`
+		UnreadCount  int64              `json:"unread_count"`
+	}
+	require.NoError(t, json.Unmarshal(bobResp.Data, &bobData))
+	assert.Equal(t, conv.ID, bobData.Conversation.ID, "conversation ID should match")
+	assert.Equal(t, int64(2), bobData.UnreadCount, "bob should have 2 unread messages")
+}
+
+// ---------------------------------------------------------------------------
+// TC-10: TestMarkAsReadAndGetConversationE2E
+// Verifies: mark_as_read decreases unread_count, get_conversation reflects it (D-012)
+// ---------------------------------------------------------------------------
+
+// TestMarkAsReadAndGetConversationE2E verifies the full mark_as_read +
+// get_conversation flow: unread_count decreases after mark_as_read, and
+// subsequent messages increase it again.
+func TestMarkAsReadAndGetConversationE2E(t *testing.T) {
+	env := setupE2ETest(t)
+
+	// 1. Connect alice and bob.
+	aliceConn := connectClient(t, env.addr, "alice")
+	defer aliceConn.Close()
+	bobConn := connectClient(t, env.addr, "bob")
+	defer bobConn.Close()
+
+	// 2. Create conversation, alice sends 3 messages.
+	conv := createTestConversation(t, env.store, "alice", "bob")
+	var lastMessageID uint32
+	for i := 0; i < 3; i++ {
+		clientMsgID := uuid.New().String()
+		sendRequest(t, aliceConn, fmt.Sprintf("send-%d", i+1), "send_message", map[string]interface{}{
+			"conversation_id":   conv.ID,
+			"client_message_id": clientMsgID,
+			"content":           fmt.Sprintf("Message %d", i+1),
+			"type":              "text",
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+1)
+
+		var respData struct {
+			Message model.Message `json:"message"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &respData))
+		lastMessageID = respData.Message.MessageID
+	}
+
+	// Consume push updates.
+	drainPushUpdates(t, bobConn)
+	drainPushUpdates(t, aliceConn)
+
+	// 3. Bob calls mark_as_read — verify status "ok", unread_count == 0.
+	sendRequest(t, bobConn, "mark-1", "mark_as_read", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	markResp := readResponse(t, bobConn, 5*time.Second)
+	require.Equal(t, protocol.ResponseCodeOK, markResp.Code, "mark_as_read should succeed")
+
+	var markData struct {
+		Status            string `json:"status"`
+		UnreadCount       int64  `json:"unread_count"`
+		LastReadMessageID uint32 `json:"last_read_message_id"`
+	}
+	require.NoError(t, json.Unmarshal(markResp.Data, &markData))
+	assert.Equal(t, "ok", markData.Status, "mark_as_read status should be 'ok'")
+	assert.Equal(t, int64(0), markData.UnreadCount, "bob unread_count should be 0 after mark_as_read")
+	assert.Equal(t, lastMessageID, markData.LastReadMessageID, "last_read_message_id should be 3")
+
+	// 4. Bob calls get_conversation — verify unread_count == 0.
+	sendRequest(t, bobConn, "get-conv-1", "get_conversation", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	bobResp := readResponse(t, bobConn, 5*time.Second)
+	require.Equal(t, protocol.ResponseCodeOK, bobResp.Code, "bob get_conversation should succeed")
+
+	var bobData struct {
+		Conversation model.Conversation `json:"conversation"`
+		UnreadCount  int64              `json:"unread_count"`
+	}
+	require.NoError(t, json.Unmarshal(bobResp.Data, &bobData))
+	assert.Equal(t, int64(0), bobData.UnreadCount, "bob unread_count should be 0 in get_conversation")
+
+	// 5. Alice sends 2 more messages.
+	for i := 0; i < 2; i++ {
+		clientMsgID := uuid.New().String()
+		sendRequest(t, aliceConn, fmt.Sprintf("send-more-%d", i+1), "send_message", map[string]interface{}{
+			"conversation_id":   conv.ID,
+			"client_message_id": clientMsgID,
+			"content":           fmt.Sprintf("Message %d", i+4),
+			"type":              "text",
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+4)
+	}
+
+	// Consume push updates.
+	drainPushUpdates(t, bobConn)
+	drainPushUpdates(t, aliceConn)
+
+	// 6. Bob calls get_conversation — verify unread_count == 2.
+	sendRequest(t, bobConn, "get-conv-2", "get_conversation", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	bobResp2 := readResponse(t, bobConn, 5*time.Second)
+	require.Equal(t, protocol.ResponseCodeOK, bobResp2.Code, "bob get_conversation should succeed")
+
+	var bobData2 struct {
+		Conversation model.Conversation `json:"conversation"`
+		UnreadCount  int64              `json:"unread_count"`
+	}
+	require.NoError(t, json.Unmarshal(bobResp2.Data, &bobData2))
+	assert.Equal(t, int64(2), bobData2.UnreadCount, "bob unread_count should be 2 after 2 new messages")
+}
+
+// ---------------------------------------------------------------------------
+// TC-11: TestDeleteAndRestoreConversationE2E
+// Verifies: delete_conversation cascade soft delete (D-013),
+//           restore_conversation cascade restore (D-015)
+// ---------------------------------------------------------------------------
+
+// TestDeleteAndRestoreConversationE2E verifies the full delete/restore flow:
+// delete cascade soft-deletes conversation + messages, restore cascade restores
+// them, and get_messages works after restore.
+func TestDeleteAndRestoreConversationE2E(t *testing.T) {
+	env := setupE2ETest(t)
+
+	// 1. Connect alice and bob.
+	aliceConn := connectClient(t, env.addr, "alice")
+	defer aliceConn.Close()
+	bobConn := connectClient(t, env.addr, "bob")
+	defer bobConn.Close()
+
+	// 2. Create conversation, alice sends 2 messages.
+	conv := createTestConversation(t, env.store, "alice", "bob")
+	for i := 0; i < 2; i++ {
+		clientMsgID := uuid.New().String()
+		sendRequest(t, aliceConn, fmt.Sprintf("send-%d", i+1), "send_message", map[string]interface{}{
+			"conversation_id":   conv.ID,
+			"client_message_id": clientMsgID,
+			"content":           fmt.Sprintf("Message %d", i+1),
+			"type":              "text",
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+1)
+	}
+
+	// 3. Consume responses and push updates.
+	drainPushUpdates(t, bobConn)
+	drainPushUpdates(t, aliceConn)
+
+	// 4. Alice calls delete_conversation — verify status "ok", deleted_message_count == 2.
+	sendRequest(t, aliceConn, "del-conv-1", "delete_conversation", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	delResp := readResponse(t, aliceConn, 5*time.Second)
+	require.Equal(t, protocol.ResponseCodeOK, delResp.Code, "delete_conversation should succeed")
+
+	var delData struct {
+		Status              string `json:"status"`
+		DeletedMessageCount int64  `json:"deleted_message_count"`
+	}
+	require.NoError(t, json.Unmarshal(delResp.Data, &delData))
+	assert.Equal(t, "ok", delData.Status, "delete_conversation status should be 'ok'")
+	assert.Equal(t, int64(2), delData.DeletedMessageCount, "should have deleted 2 messages (D-013)")
+
+	// 5. Alice calls get_messages — error "conversation not found" (deleted).
+	sendRequest(t, aliceConn, "get-msgs-1", "get_messages", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	errResp := readResponse(t, aliceConn, 5*time.Second)
+	assert.Equal(t, protocol.ResponseCodeError, errResp.Code, "get_messages should fail after delete")
+	assert.True(t, strings.Contains(strings.ToLower(errResp.Msg), "not found"),
+		"error should mention 'not found', got: %s", errResp.Msg)
+
+	// 6. Alice calls restore_conversation — verify conversation returned,
+	//    restored_message_count == 2.
+	sendRequest(t, aliceConn, "restore-1", "restore_conversation", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	restoreResp := readResponse(t, aliceConn, 5*time.Second)
+	require.Equal(t, protocol.ResponseCodeOK, restoreResp.Code, "restore_conversation should succeed")
+
+	var restoreData struct {
+		Conversation         model.Conversation `json:"conversation"`
+		RestoredMessageCount int64              `json:"restored_message_count"`
+	}
+	require.NoError(t, json.Unmarshal(restoreResp.Data, &restoreData))
+	assert.Equal(t, conv.ID, restoreData.Conversation.ID, "restored conversation ID should match")
+	assert.Equal(t, int64(2), restoreData.RestoredMessageCount, "should have restored 2 messages (D-015)")
+
+	// 7. Alice calls get_messages — verify 2 messages returned.
+	sendRequest(t, aliceConn, "get-msgs-2", "get_messages", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	msgsResp := readResponse(t, aliceConn, 5*time.Second)
+	require.Equal(t, protocol.ResponseCodeOK, msgsResp.Code, "get_messages after restore should succeed")
+
+	var msgsData struct {
+		Messages []*model.Message `json:"messages"`
+		HasMore  bool             `json:"has_more"`
+	}
+	require.NoError(t, json.Unmarshal(msgsResp.Data, &msgsData))
+	assert.Len(t, msgsData.Messages, 2, "should have 2 messages after restore")
+	assert.False(t, msgsData.HasMore, "has_more should be false")
+}
+
+// ---------------------------------------------------------------------------
+// TC-12: TestDeleteMessageE2E
+// Verifies: delete_message soft deletes a single message (D-014)
+// ---------------------------------------------------------------------------
+
+// TestDeleteMessageE2E verifies the full delete_message flow: send messages,
+// delete one, and verify only the remaining message is returned by get_messages.
+func TestDeleteMessageE2E(t *testing.T) {
+	env := setupE2ETest(t)
+
+	// 1. Connect alice and bob.
+	aliceConn := connectClient(t, env.addr, "alice")
+	defer aliceConn.Close()
+	bobConn := connectClient(t, env.addr, "bob")
+	defer bobConn.Close()
+
+	// 2. Create conversation, alice sends 2 messages.
+	conv := createTestConversation(t, env.store, "alice", "bob")
+	var firstMsgID string
+	for i := 0; i < 2; i++ {
+		clientMsgID := uuid.New().String()
+		sendRequest(t, aliceConn, fmt.Sprintf("send-%d", i+1), "send_message", map[string]interface{}{
+			"conversation_id":   conv.ID,
+			"client_message_id": clientMsgID,
+			"content":           fmt.Sprintf("Message %d", i+1),
+			"type":              "text",
+		})
+		resp := readResponse(t, aliceConn, 5*time.Second)
+		require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send message %d should succeed", i+1)
+
+		var respData struct {
+			Message model.Message `json:"message"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data, &respData))
+		if i == 0 {
+			firstMsgID = respData.Message.ID
+		}
+	}
+
+	// 3. Consume responses and push updates.
+	drainPushUpdates(t, bobConn)
+	drainPushUpdates(t, aliceConn)
+
+	// 4. Alice calls delete_message on first message — verify status "ok".
+	sendRequest(t, aliceConn, "del-msg-1", "delete_message", map[string]interface{}{
+		"message_id": firstMsgID,
+	})
+	delResp := readResponse(t, aliceConn, 5*time.Second)
+	require.Equal(t, protocol.ResponseCodeOK, delResp.Code, "delete_message should succeed")
+
+	var delData struct {
+		Status string `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(delResp.Data, &delData))
+	assert.Equal(t, "ok", delData.Status, "delete_message status should be 'ok'")
+
+	// 5. Alice calls get_messages — verify only 1 message returned (second one).
+	sendRequest(t, aliceConn, "get-msgs-1", "get_messages", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	msgsResp := readResponse(t, aliceConn, 5*time.Second)
+	require.Equal(t, protocol.ResponseCodeOK, msgsResp.Code, "get_messages should succeed")
+
+	var msgsData struct {
+		Messages []*model.Message `json:"messages"`
+		HasMore  bool             `json:"has_more"`
+	}
+	require.NoError(t, json.Unmarshal(msgsResp.Data, &msgsData))
+	assert.Len(t, msgsData.Messages, 1, "should have only 1 message after deleting first (D-014)")
+	assert.Equal(t, "Message 2", msgsData.Messages[0].Content, "remaining message should be the second one")
+}
+
+// ---------------------------------------------------------------------------
+// TC-13: TestNonMemberOperationsRejectedE2E
+// Verifies: non-member operations are rejected for get_conversation,
+//           delete_conversation, and mark_as_read (C-3)
+// ---------------------------------------------------------------------------
+
+// TestNonMemberOperationsRejectedE2E verifies that a user who is not a member
+// of a conversation cannot call get_conversation, delete_conversation, or
+// mark_as_read on it.
+func TestNonMemberOperationsRejectedE2E(t *testing.T) {
+	env := setupE2ETest(t)
+
+	// 1. Connect alice, bob, and eve (non-member).
+	aliceConn := connectClient(t, env.addr, "alice")
+	defer aliceConn.Close()
+	bobConn := connectClient(t, env.addr, "bob")
+	defer bobConn.Close()
+	eveConn := connectClient(t, env.addr, "eve")
+	defer eveConn.Close()
+
+	// 2. Create conversation between alice and bob.
+	conv := createTestConversation(t, env.store, "alice", "bob")
+
+	// 3. Eve calls get_conversation — error "not a member".
+	sendRequest(t, eveConn, "eve-get-1", "get_conversation", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	getResp := readResponse(t, eveConn, 5*time.Second)
+	assert.Equal(t, protocol.ResponseCodeError, getResp.Code,
+		"eve get_conversation should be rejected")
+	assert.True(t, strings.Contains(strings.ToLower(getResp.Msg), "not a member"),
+		"error should mention 'not a member', got: %s", getResp.Msg)
+
+	// 4. Eve calls delete_conversation — error "not a member".
+	sendRequest(t, eveConn, "eve-del-1", "delete_conversation", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	delResp := readResponse(t, eveConn, 5*time.Second)
+	assert.Equal(t, protocol.ResponseCodeError, delResp.Code,
+		"eve delete_conversation should be rejected")
+	assert.True(t, strings.Contains(strings.ToLower(delResp.Msg), "not a member"),
+		"error should mention 'not a member', got: %s", delResp.Msg)
+
+	// 5. Eve calls mark_as_read — error "not a member".
+	sendRequest(t, eveConn, "eve-mark-1", "mark_as_read", map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+	markResp := readResponse(t, eveConn, 5*time.Second)
+	assert.Equal(t, protocol.ResponseCodeError, markResp.Code,
+		"eve mark_as_read should be rejected")
+	assert.True(t, strings.Contains(strings.ToLower(markResp.Msg), "not a member"),
+		"error should mention 'not a member', got: %s", markResp.Msg)
+}

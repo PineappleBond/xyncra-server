@@ -20,6 +20,8 @@ type Conversation struct {
 	CreatedAt              time.Time `gorm:"index"`
 	UpdatedAt              time.Time
 	LastMessageAt          time.Time `gorm:"index:idx_conversation_lastmsg_deleted,priority:1"`
+	LastReadMessageID1     uint32    // UserID1's read cursor position (D-012)
+	LastReadMessageID2     uint32    // UserID2's read cursor position (D-012)
 
 	DeletedAt gorm.DeletedAt `gorm:"index:idx_conversation_user1_deleted,priority:2;index:idx_conversation_user2_deleted,priority:2;index:idx_conversation_lastmsg_deleted,priority:2;index;index:idx_conversation_users_unique,priority:3"`
 }

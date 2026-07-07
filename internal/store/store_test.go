@@ -931,3 +931,202 @@ func TestMessageNewFields(t *testing.T) {
 		}
 	})
 }
+
+// --- D-012 to D-015 Store method tests ---
+
+// TestConversationGetUnscoped verifies that GetUnscoped finds conversations
+// including soft-deleted ones, and returns ErrNotFound for non-existent IDs.
+func TestConversationGetUnscoped(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		// Create a conversation, verify GetUnscoped finds it
+		conv := newTestConv("conv-unscoped-1", "alice", "bob", "1-on-1", "Test")
+		if err := s.Conversations.Create(ctx, conv); err != nil {
+			t.Fatalf("create failed: %v", err)
+		}
+		got, err := s.Conversations.GetUnscoped(ctx, "conv-unscoped-1")
+		if err != nil {
+			t.Fatalf("GetUnscoped failed: %v", err)
+		}
+		if got.ID != "conv-unscoped-1" {
+			t.Fatalf("expected conv-unscoped-1, got %s", got.ID)
+		}
+
+		// Soft-delete it
+		if err := s.Conversations.Delete(ctx, "conv-unscoped-1"); err != nil {
+			t.Fatalf("delete failed: %v", err)
+		}
+
+		// Get returns ErrNotFound but GetUnscoped still finds it
+		_, err = s.Conversations.Get(ctx, "conv-unscoped-1")
+		if err != ErrNotFound {
+			t.Fatalf("expected ErrNotFound from Get after delete, got %v", err)
+		}
+		got2, err := s.Conversations.GetUnscoped(ctx, "conv-unscoped-1")
+		if err != nil {
+			t.Fatalf("GetUnscoped after delete failed: %v", err)
+		}
+		if got2.ID != "conv-unscoped-1" {
+			t.Fatalf("expected conv-unscoped-1 from GetUnscoped, got %s", got2.ID)
+		}
+
+		// Non-existent ID returns ErrNotFound from GetUnscoped
+		_, err = s.Conversations.GetUnscoped(ctx, "nonexistent-id")
+		if err != ErrNotFound {
+			t.Fatalf("expected ErrNotFound for non-existent ID, got %v", err)
+		}
+	})
+}
+
+// TestConversationUpdateLastRead verifies the MAX-semantics update of read
+// cursors (D-012): only advances forward, never backward.
+func TestConversationUpdateLastRead(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		conv := newTestConv("conv-lr-1", "alice", "bob", "1-on-1", "Read Test")
+		if err := s.Conversations.Create(ctx, conv); err != nil {
+			t.Fatalf("create failed: %v", err)
+		}
+
+		// UpdateLastRead for alice with messageID=5
+		if err := s.Conversations.UpdateLastRead(ctx, "conv-lr-1", "alice", 5); err != nil {
+			t.Fatalf("UpdateLastRead alice=5 failed: %v", err)
+		}
+		got, _ := s.Conversations.Get(ctx, "conv-lr-1")
+		if got.LastReadMessageID1 != 5 {
+			t.Fatalf("expected LastReadMessageID1=5, got %d", got.LastReadMessageID1)
+		}
+
+		// UpdateLastRead for bob with messageID=3
+		if err := s.Conversations.UpdateLastRead(ctx, "conv-lr-1", "bob", 3); err != nil {
+			t.Fatalf("UpdateLastRead bob=3 failed: %v", err)
+		}
+		got, _ = s.Conversations.Get(ctx, "conv-lr-1")
+		if got.LastReadMessageID2 != 3 {
+			t.Fatalf("expected LastReadMessageID2=3, got %d", got.LastReadMessageID2)
+		}
+
+		// UpdateLastRead for alice with messageID=2 (smaller) — should stay at 5 (MAX semantics, D-012)
+		if err := s.Conversations.UpdateLastRead(ctx, "conv-lr-1", "alice", 2); err != nil {
+			t.Fatalf("UpdateLastRead alice=2 failed: %v", err)
+		}
+		got, _ = s.Conversations.Get(ctx, "conv-lr-1")
+		if got.LastReadMessageID1 != 5 {
+			t.Fatalf("expected LastReadMessageID1 still 5 (MAX semantics), got %d", got.LastReadMessageID1)
+		}
+
+		// UpdateLastRead for alice with messageID=10 (larger) — should advance to 10
+		if err := s.Conversations.UpdateLastRead(ctx, "conv-lr-1", "alice", 10); err != nil {
+			t.Fatalf("UpdateLastRead alice=10 failed: %v", err)
+		}
+		got, _ = s.Conversations.Get(ctx, "conv-lr-1")
+		if got.LastReadMessageID1 != 10 {
+			t.Fatalf("expected LastReadMessageID1=10, got %d", got.LastReadMessageID1)
+		}
+
+		// UpdateLastRead for non-member should return ErrNotFound
+		err := s.Conversations.UpdateLastRead(ctx, "conv-lr-1", "charlie", 1)
+		if err != ErrNotFound {
+			t.Fatalf("expected ErrNotFound for non-member, got %v", err)
+		}
+	})
+}
+
+// TestMessageRestoreByConversation verifies cascade restore of messages (D-015):
+// deleting and restoring messages by conversation.
+func TestMessageRestoreByConversation(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		// Create a conversation with 3 messages
+		s.Conversations.Create(ctx, newTestConv("conv-restore-1", "alice", "bob", "1-on-1", "Restore Test"))
+		for i := uint32(1); i <= 3; i++ {
+			s.Messages.Create(ctx, &model.Message{
+				ID: fmt.Sprintf("restore-msg-%d", i), ClientMessageID: fmt.Sprintf("restore-client-%d", i),
+				ConversationID: "conv-restore-1", MessageID: i, SenderID: "alice",
+				Content: fmt.Sprintf("msg %d", i), CreatedAt: testNow,
+			})
+		}
+
+		// Delete all messages via DeleteByConversation
+		if err := s.Messages.DeleteByConversation(ctx, "conv-restore-1"); err != nil {
+			t.Fatalf("DeleteByConversation failed: %v", err)
+		}
+
+		// Verify messages are gone
+		msgs, _ := s.Messages.ListByConversation(ctx, "conv-restore-1", 0, 100)
+		if len(msgs) != 0 {
+			t.Fatalf("expected 0 messages after delete, got %d", len(msgs))
+		}
+
+		// RestoreByConversation should return 3 rows affected
+		restored, err := s.Messages.RestoreByConversation(ctx, "conv-restore-1")
+		if err != nil {
+			t.Fatalf("RestoreByConversation failed: %v", err)
+		}
+		if restored != 3 {
+			t.Fatalf("expected 3 restored rows, got %d", restored)
+		}
+
+		// Verify all 3 messages are visible again
+		msgs, err = s.Messages.ListByConversation(ctx, "conv-restore-1", 0, 100)
+		if err != nil {
+			t.Fatalf("ListByConversation after restore failed: %v", err)
+		}
+		if len(msgs) != 3 {
+			t.Fatalf("expected 3 messages after restore, got %d", len(msgs))
+		}
+
+		// Test with empty conversation: RestoreByConversation returns 0
+		s.Conversations.Create(ctx, newTestConv("conv-restore-empty", "alice", "bob", "1-on-1", "Empty"))
+		restored2, err := s.Messages.RestoreByConversation(ctx, "conv-restore-empty")
+		if err != nil {
+			t.Fatalf("RestoreByConversation on empty conv failed: %v", err)
+		}
+		if restored2 != 0 {
+			t.Fatalf("expected 0 restored rows for empty conv, got %d", restored2)
+		}
+
+		// Test isolation: only affects target conversation
+		s.Conversations.Create(ctx, newTestConv("conv-restore-2", "charlie", "dave", "1-on-1", "Isolation"))
+		for i := uint32(1); i <= 2; i++ {
+			s.Messages.Create(ctx, &model.Message{
+				ID: fmt.Sprintf("iso-msg-%d", i), ClientMessageID: fmt.Sprintf("iso-client-%d", i),
+				ConversationID: "conv-restore-2", MessageID: i, SenderID: "charlie",
+				Content: fmt.Sprintf("iso msg %d", i), CreatedAt: testNow,
+			})
+		}
+		// Delete conv2 messages
+		if err := s.Messages.DeleteByConversation(ctx, "conv-restore-2"); err != nil {
+			t.Fatalf("DeleteByConversation conv2 failed: %v", err)
+		}
+		// Restore conv1 messages (already restored above, but messages are not deleted now)
+		// Actually conv1 messages are already restored. Let's delete conv1 again and restore only conv1.
+		if err := s.Messages.DeleteByConversation(ctx, "conv-restore-1"); err != nil {
+			t.Fatalf("DeleteByConversation conv1 failed: %v", err)
+		}
+		// Now restore only conv1
+		restored3, err := s.Messages.RestoreByConversation(ctx, "conv-restore-1")
+		if err != nil {
+			t.Fatalf("RestoreByConversation conv1 isolation failed: %v", err)
+		}
+		if restored3 != 3 {
+			t.Fatalf("expected 3 restored rows for conv1, got %d", restored3)
+		}
+		// conv2 messages should still be deleted
+		msgs2, _ := s.Messages.ListByConversation(ctx, "conv-restore-2", 0, 100)
+		if len(msgs2) != 0 {
+			t.Fatalf("expected 0 messages in conv2 (should stay deleted), got %d", len(msgs2))
+		}
+		// conv1 messages should be restored
+		msgs1, _ := s.Messages.ListByConversation(ctx, "conv-restore-1", 0, 100)
+		if len(msgs1) != 3 {
+			t.Fatalf("expected 3 messages in conv1 after restore, got %d", len(msgs1))
+		}
+	})
+}
