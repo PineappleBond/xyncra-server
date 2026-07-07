@@ -80,9 +80,9 @@ func TestWithQueue(t *testing.T) {
 
 func TestWithMaxRetry(t *testing.T) {
 	tests := []struct {
-		name  string
-		n     int
-		want  int
+		name    string
+		n       int
+		want    int
 		changed bool
 	}{
 		{"positive value", 5, 5, true},

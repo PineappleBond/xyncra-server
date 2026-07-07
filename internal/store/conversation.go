@@ -46,6 +46,23 @@ func (cs *ConversationStore) Get(ctx context.Context, id string) (*model.Convers
 	return &conv, nil
 }
 
+// GetByUsers returns the 1-on-1 conversation between user1 and user2.
+// It checks both (user1, user2) and (user2, user1) orderings.
+// Returns ErrNotFound if no matching conversation exists.
+func (cs *ConversationStore) GetByUsers(ctx context.Context, user1, user2 string) (*model.Conversation, error) {
+	var conv model.Conversation
+	err := cs.db.WithContext(ctx).
+		Where("(user_id1 = ? AND user_id2 = ?) OR (user_id1 = ? AND user_id2 = ?)", user1, user2, user2, user1).
+		First(&conv).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, classifyError(fmt.Errorf("store: get conversation by users: %w", err))
+	}
+	return &conv, nil
+}
+
 // GetByUser returns conversations where the given user is either UserID1 or
 // UserID2, ordered by LastMessageAt descending, with offset/limit pagination.
 // Soft-deleted records are excluded automatically by GORM's soft-delete plugin.

@@ -380,16 +380,16 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 		logger:                 logger,
 		connectionInfoEnricher: o.connectionInfoEnricher,
 		wsConfig: WebSocketServerConfig{
-			Path:            o.path,
-			Authenticate:    authenticate,
-			ReadBufferSize:  o.readBufSize,
-			WriteBufferSize: o.writeBufSize,
+			Path:              o.path,
+			Authenticate:      authenticate,
+			ReadBufferSize:    o.readBufSize,
+			WriteBufferSize:   o.writeBufSize,
 			EnableCompression: o.compression,
-			WriteWait:       o.writeWait,
-			PongWait:        o.pongWait,
-			PingPeriod:      o.pingPeriod,
-			MaxMessageSize:  o.maxMessageSize,
-			MessageHandler:  handler,
+			WriteWait:         o.writeWait,
+			PongWait:          o.pongWait,
+			PingPeriod:        o.pingPeriod,
+			MaxMessageSize:    o.maxMessageSize,
+			MessageHandler:    handler,
 		},
 	}
 
@@ -508,11 +508,11 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 	// Register in the ConnectionStore.
 	ip := extractIP(r)
 	connInfo := &ConnectionInfo{
-		ID:       connID,
-		UserID:   userID,
-		Protocol: "websocket",
+		ID:        connID,
+		UserID:    userID,
+		Protocol:  "websocket",
 		IPAddress: ip,
-		Status:   "active",
+		Status:    "active",
 	}
 	// Call the enricher to populate additional fields from the HTTP request.
 	if s.connectionInfoEnricher != nil {

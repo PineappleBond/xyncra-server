@@ -287,6 +287,94 @@ func TestConversationRestore(t *testing.T) {
 	})
 }
 
+// TestConversationGetByUsers_HappyPath verifies that GetByUsers returns the
+// correct 1-on-1 conversation between two users.
+func TestConversationGetByUsers_HappyPath(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		conv := newTestConv("gbu-happy-1", "alice", "bob", "1-on-1", "Alice & Bob")
+		if err := s.Conversations.Create(ctx, conv); err != nil {
+			t.Fatalf("create failed: %v", err)
+		}
+
+		got, err := s.Conversations.GetByUsers(ctx, "alice", "bob")
+		if err != nil {
+			t.Fatalf("GetByUsers failed: %v", err)
+		}
+		if got.ID != "gbu-happy-1" {
+			t.Fatalf("expected conv gbu-happy-1, got %s", got.ID)
+		}
+		if got.Title != "Alice & Bob" {
+			t.Fatalf("expected title 'Alice & Bob', got %q", got.Title)
+		}
+	})
+}
+
+// TestConversationGetByUsers_UserOrderIndependent verifies that GetByUsers
+// returns the same conversation regardless of the order of the user arguments.
+func TestConversationGetByUsers_UserOrderIndependent(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		conv := newTestConv("gbu-order-1", "alice", "bob", "1-on-1", "Chat")
+		if err := s.Conversations.Create(ctx, conv); err != nil {
+			t.Fatalf("create failed: %v", err)
+		}
+
+		got1, err := s.Conversations.GetByUsers(ctx, "alice", "bob")
+		if err != nil {
+			t.Fatalf("GetByUsers(alice,bob) failed: %v", err)
+		}
+		got2, err := s.Conversations.GetByUsers(ctx, "bob", "alice")
+		if err != nil {
+			t.Fatalf("GetByUsers(bob,alice) failed: %v", err)
+		}
+		if got1.ID != got2.ID {
+			t.Fatalf("expected same conv for both orderings, got %s and %s", got1.ID, got2.ID)
+		}
+	})
+}
+
+// TestConversationGetByUsers_NotFound verifies that GetByUsers returns
+// ErrNotFound when no matching conversation exists.
+func TestConversationGetByUsers_NotFound(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		_, err := s.Conversations.GetByUsers(ctx, "alice", "bob")
+		if err != ErrNotFound {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+}
+
+// TestConversationGetByUsers_SoftDeletedExcluded verifies that a soft-deleted
+// conversation is not returned by GetByUsers.
+func TestConversationGetByUsers_SoftDeletedExcluded(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		conv := newTestConv("gbu-del-1", "alice", "bob", "1-on-1", "Chat")
+		if err := s.Conversations.Create(ctx, conv); err != nil {
+			t.Fatalf("create failed: %v", err)
+		}
+
+		if err := s.Conversations.Delete(ctx, "gbu-del-1"); err != nil {
+			t.Fatalf("delete failed: %v", err)
+		}
+
+		_, err := s.Conversations.GetByUsers(ctx, "alice", "bob")
+		if err != ErrNotFound {
+			t.Fatalf("expected ErrNotFound for soft-deleted conv, got %v", err)
+		}
+	})
+}
+
 // --- Message tests ---
 
 func TestMessageCRUD(t *testing.T) {

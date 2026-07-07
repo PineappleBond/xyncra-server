@@ -58,8 +58,9 @@ const (
 //
 // KEYS[1] = infoKey, KEYS[2] = newUserKey
 // ARGV[1] = data, ARGV[2] = ttl (ms), ARGV[3] = connID,
-//   ARGV[4] = maxConns (0 = unlimited), ARGV[5] = newUserID,
-//   ARGV[6] = userKeyPrefix (e.g. "xyncra:conn:user:")
+//
+//	ARGV[4] = maxConns (0 = unlimited), ARGV[5] = newUserID,
+//	ARGV[6] = userKeyPrefix (e.g. "xyncra:conn:user:")
 //
 // Returns 1 on success, -1 if max connections exceeded.
 var luaAdd = redis.NewScript(`
@@ -233,11 +234,11 @@ func (c RedisConnectionStoreConfig) toRedisOptions() *redis.Options {
 // The zero value is not usable; use NewRedisConnectionStore to create an
 // instance.
 type RedisConnectionStore struct {
-	client                *redis.Client
-	defaultTTL            time.Duration
-	keyPrefix             string
-	ownsClient            bool // true when we created the client and should close it
-	maxConnsPerUser       int  // 0 means no limit
+	client          *redis.Client
+	defaultTTL      time.Duration
+	keyPrefix       string
+	ownsClient      bool // true when we created the client and should close it
+	maxConnsPerUser int  // 0 means no limit
 }
 
 // Ensure RedisConnectionStore implements ConnectionStore at compile time.

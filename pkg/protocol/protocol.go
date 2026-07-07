@@ -28,9 +28,9 @@ type Package struct {
 // PackageDataRequest is a client-initiated request to invoke a method.
 type PackageDataRequest struct {
 	// ID is a unique identifier for correlating requests with responses.
-	ID     string          `json:"id"`
+	ID string `json:"id"`
 	// Method is the name of the method to invoke on the server.
-	Method string          `json:"method"`
+	Method string `json:"method"`
 	// Params contains the method parameters as JSON.
 	Params json.RawMessage `json:"params"`
 }
@@ -49,11 +49,11 @@ const (
 // PackageDataResponse is the server's reply to a PackageDataRequest.
 type PackageDataResponse struct {
 	// ID correlates this response with the originating request.
-	ID   string          `json:"id"`
+	ID string `json:"id"`
 	// Code indicates success (0) or an error (negative value).
-	Code ResponseCode    `json:"code"`
+	Code ResponseCode `json:"code"`
 	// Msg provides a human-readable status message.
-	Msg  string          `json:"msg"`
+	Msg string `json:"msg"`
 	// Data contains the response payload as JSON.
 	Data json.RawMessage `json:"data"`
 }
@@ -66,9 +66,9 @@ type PackageDataUpdates struct {
 // PackageDataUpdate represents a single incremental data change.
 type PackageDataUpdate struct {
 	// Seq is a monotonically increasing sequence number for ordering.
-	Seq       uint32          `json:"seq"`
+	Seq uint32 `json:"seq"`
 	// Payload contains the update data as JSON.
-	Payload   json.RawMessage `json:"payload"`
+	Payload json.RawMessage `json:"payload"`
 	// CreatedAt is the timestamp when this update was generated.
-	CreatedAt time.Time       `json:"created_at,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
 }

@@ -807,8 +807,8 @@ func TestNewRedisConnectionStore_PoolConfig(t *testing.T) {
 // A-010: MaxConnectionsPerUser config.
 func TestNewRedisConnectionStore_MaxConnectionsPerUser(t *testing.T) {
 	cs, err := NewRedisConnectionStore(RedisConnectionStoreConfig{
-		Addr:                testRedisAddr,
-		DB:                  testRedisDB,
+		Addr:                  testRedisAddr,
+		DB:                    testRedisDB,
 		MaxConnectionsPerUser: 3,
 	})
 	if err != nil {
@@ -829,7 +829,7 @@ func TestNewRedisConnectionStoreFromClient(t *testing.T) {
 	defer client.Close()
 
 	cs := NewRedisConnectionStoreFromClient(RedisConnectionStoreFromClientConfig{
-		Client:    client,
+		Client:     client,
 		DefaultTTL: 2 * time.Minute,
 	})
 	require.NotNil(t, cs)
@@ -856,9 +856,9 @@ func TestNewRedisConnectionStoreFromClient_WithKeyPrefix(t *testing.T) {
 	defer client.Close()
 
 	cs := NewRedisConnectionStoreFromClient(RedisConnectionStoreFromClientConfig{
-		Client:    client,
+		Client:     client,
 		DefaultTTL: 5 * time.Minute,
-		KeyPrefix: "tenant1:",
+		KeyPrefix:  "tenant1:",
 	})
 	require.NotNil(t, cs)
 	assert.Equal(t, "tenant1:", cs.keyPrefix)
@@ -1597,15 +1597,15 @@ func TestRedisConnectionStore_KeyPrefix(t *testing.T) {
 	_ = client.FlushDB(ctx).Err()
 
 	cs1 := NewRedisConnectionStoreFromClient(RedisConnectionStoreFromClientConfig{
-		Client:    client,
+		Client:     client,
 		DefaultTTL: 5 * time.Second,
-		KeyPrefix: "tenant1:",
+		KeyPrefix:  "tenant1:",
 	})
 
 	cs2 := NewRedisConnectionStoreFromClient(RedisConnectionStoreFromClientConfig{
-		Client:    client,
+		Client:     client,
 		DefaultTTL: 5 * time.Second,
-		KeyPrefix: "tenant2:",
+		KeyPrefix:  "tenant2:",
 	})
 
 	defer func() {

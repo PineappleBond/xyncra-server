@@ -7,15 +7,15 @@ import (
 )
 
 type Conversation struct {
-	ID                     string    `gorm:"primaryKey;size:36"`
-	UserID1                string    `gorm:"size:64;index:idx_conversation_user1_deleted,priority:1"`
-	UserID2                string    `gorm:"size:64;index:idx_conversation_user2_deleted,priority:1"` // only 1-on-1 not null
-	Type                   string    `gorm:"size:20;index"`                                          // 1-on-1 / group / channel
-	Title                  string    `gorm:"size:255"`
+	ID                     string `gorm:"primaryKey;size:36"`
+	UserID1                string `gorm:"size:64;index:idx_conversation_user1_deleted,priority:1"`
+	UserID2                string `gorm:"size:64;index:idx_conversation_user2_deleted,priority:1"` // only 1-on-1 not null
+	Type                   string `gorm:"size:20;index"`                                           // 1-on-1 / group / channel
+	Title                  string `gorm:"size:255"`
 	Pinned                 bool
 	Muted                  bool
-	AvatarURL              string    `gorm:"size:512"`
-	Description            string    `gorm:"type:text"`
+	AvatarURL              string `gorm:"size:512"`
+	Description            string `gorm:"type:text"`
 	LastProcessedMessageID uint32
 	CreatedAt              time.Time `gorm:"index"`
 	UpdatedAt              time.Time

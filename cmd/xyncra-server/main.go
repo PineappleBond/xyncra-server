@@ -92,9 +92,9 @@ func main() {
 	// ---------------------------------------------------------------
 
 	connStore, err := server.NewRedisConnectionStore(server.RedisConnectionStoreConfig{
-		Addr:                *redisAddr,
-		Password:            *redisPassword,
-		DB:                  *redisDB,
+		Addr:                  *redisAddr,
+		Password:              *redisPassword,
+		DB:                    *redisDB,
 		MaxConnectionsPerUser: *maxConns,
 	})
 	if err != nil {
@@ -117,6 +117,18 @@ func main() {
 	defer broker.Close()
 
 	// ---------------------------------------------------------------
+	// Message Handlers
+	// ---------------------------------------------------------------
+
+	msgHandler := server.NewDefaultMessageHandler()
+	msgHandler.RegisterMethod("send_message",
+		server.NewSendMessageHandler(dataStore, broker))
+	msgHandler.RegisterMethod("sync_updates",
+		server.NewSyncUpdatesHandler(dataStore))
+	msgHandler.RegisterMethod("heartbeat",
+		server.NewHeartbeatHandler(connStore))
+
+	// ---------------------------------------------------------------
 	// WebSocket Server
 	// ---------------------------------------------------------------
 
@@ -125,6 +137,7 @@ func main() {
 		server.WSWithConnectionStore(connStore),
 		server.WSWithStore(dataStore),
 		server.WSWithBroker(broker),
+		server.WSWithMessageHandler(msgHandler),
 	)
 	if err != nil {
 		log.Fatalf("failed to create websocket server: %v", err)
@@ -148,6 +161,8 @@ func main() {
 	// Start the broker worker pool in a background goroutine.
 	// Tasks that are not yet handled are logged and acknowledged.
 	taskHandler := mq.NewTaskHandler()
+	taskHandler.Register(mq.TypeSendMessage,
+		server.NewSendMessageTaskHandler(srv.BroadcastUpdates, srv.Logger()))
 	go func() {
 		if err := broker.Start(ctx, taskHandler); err != nil {
 			log.Printf("broker error: %v", err)

@@ -136,16 +136,16 @@ func NewClient(conn *websocket.Conn, userID, connID string, opts ...ClientOption
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &Client{
-		conn:       conn,
-		userID:     userID,
-		connID:     connID,
-		send:       make(chan []byte, defaultSendBufSize),
-		ctx:        ctx,
-		cancel:     cancel,
-		done:       make(chan struct{}),
-		writeWait:  defaultWriteWait,
-		pongWait:   defaultPongWait,
-		pingPeriod: defaultPingPeriod,
+		conn:           conn,
+		userID:         userID,
+		connID:         connID,
+		send:           make(chan []byte, defaultSendBufSize),
+		ctx:            ctx,
+		cancel:         cancel,
+		done:           make(chan struct{}),
+		writeWait:      defaultWriteWait,
+		pongWait:       defaultPongWait,
+		pingPeriod:     defaultPingPeriod,
 		maxMessageSize: defaultMaxMessageSize,
 	}
 

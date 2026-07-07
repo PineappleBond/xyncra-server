@@ -36,7 +36,7 @@ func (us *UserUpdateStore) Create(ctx context.Context, updates []model.UserUpdat
 // afterSeq, ordered by Seq ascending, limited to at most limit rows. This
 // supports incremental / long-polling sync of a user's event stream.
 func (us *UserUpdateStore) ListByUser(ctx context.Context, userID string, afterSeq uint32, limit int) ([]*model.UserUpdate, error) {
-	if limit <= 0 || limit > 500 {
+	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
 

@@ -15,10 +15,10 @@ import (
 // MemoryConnectionStore is NOT suitable for production: data is lost when the
 // process exits, and there is no cross-instance synchronization.
 type MemoryConnectionStore struct {
-	mu                  sync.RWMutex
-	infoByKey           map[string]*ConnectionInfo // connID -> info
-	userSet             map[string]map[string]bool // userID -> set of connIDs
-	maxConnsPerUser     int
+	mu              sync.RWMutex
+	infoByKey       map[string]*ConnectionInfo // connID -> info
+	userSet         map[string]map[string]bool // userID -> set of connIDs
+	maxConnsPerUser int
 }
 
 // Ensure MemoryConnectionStore implements ConnectionStore at compile time.
