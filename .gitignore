@@ -1,0 +1,55 @@
+# === Go ===
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+*.trace
+coverage.out
+coverage.html
+go.work
+go.work.sum
+
+# Go 编译二进制（项目名）
+/xyncra-server
+/xyncra-server.*
+
+# === 本地开发数据库 ===
+*.db
+*.sqlite
+*.sqlite3
+
+# === IDE ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# === 环境 / 密钥 ===
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# === 构建产物 ===
+/dist/
+/build/
+/bin/
+
+# === 临时文件 ===
+*.tmp
+*.bak
+*.log
+
+# === Claude Code / 工具 ===
+.claude/
+.codegraph/
+.superpowers/
+logs/
