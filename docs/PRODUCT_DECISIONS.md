@@ -371,10 +371,95 @@ Connection TTL 续期采用被动模式——仅由 heartbeat RPC 触发 `Connec
 
 ---
 
+## D-012: mark_as_read 的已读位置模型
+
+### 决策
+
+`mark_as_read` 使用 Conversation 模型上的 `LastReadMessageID1` 和 `LastReadMessageID2` 字段（分别对应 UserID1 和 UserID2 的已读位置）。每个用户的已读游标独立维护，互不影响。
+
+更新语义为 `MAX(current_value, new_value)`，即只向前推进、不后退。当客户端传入的 `message_id` 小于当前已读位置时，服务器静默忽略（不报错），返回当前已读位置。
+
+### 原因
+
+1. **简单高效**：1-on-1 会话只有两个成员，两个字段足够，无需单独的 `read_state` 表
+2. **并发安全**：`MAX` 语义防止多设备并发导致已读位置回退
+3. **与 D-008 配合**：已读位置可以用 uint32 表示，与 MessageID 单调递增模型一致
+4. **查询高效**：未读计数只需 `CountUnread(convID, lastReadMessageID)`，无 JOIN
+
+### 约束
+
+- 当前 1-on-1 模型下两个字段足够。如果未来支持 group/channel，需要迁移到 per-user read state 表
+- 已读位置不对对方主动暴露（不实现已读回执）。如需"对方已读"功能，需在后续迭代中扩展
+
+---
+
+## D-013: delete_conversation 级联软删除行为
+
+### 决策
+
+`delete_conversation` 执行级联软删除：先软删除会话，再软删除该会话下的所有消息（调用 `MessageStore.DeleteByConversation`）。两个操作在同一数据库事务中执行。
+
+当前模型下，Conversation 是双方共享记录。一方删除会话，另一方的会话也会消失（GORM soft-delete 对双方生效）。这是当前阶段的有意识简化。
+
+软删除的消息仍然占据 `client_message_id` 的 unique index 命名空间（GORM 软删除不修改 unique index 行为）。因此，如果会话被恢复，原有的 `client_message_id` 仍然有效；如果会话不被恢复，这些 `client_message_id` 将永久不可重用。
+
+### 原因
+
+1. **数据一致性**：级联删除保证不会出现孤立的无主消息
+2. **可恢复性**：软删除保留数据，可通过 `restore_conversation` 恢复
+3. **实现简单**：当前阶段不需要 per-user 的会话可见性管理
+4. **client_message_id 安全**：建议使用 UUID v4，命名空间占用不构成实际问题
+
+### 未来演进
+
+如果未来需要"一方删除不影响另一方"的体验（类似微信），需要引入 `ConversationMember` 表记录 per-user 的 `deleted_at`，替代当前的共享软删除模型。
+
+---
+
+## D-014: delete_message 的权限模型
+
+### 决策
+
+`delete_message` 仅允许消息的发送者（`SenderID == client.UserID()`）删除该消息。非发送者调用返回权限错误。
+
+此权限检查使用反向代理注入的 `user_id`（D-002 模型），服务器不验证身份本身，只执行业务规则。
+
+### 原因
+
+1. **与 D-002 一致**：服务器不做认证，但可以做业务规则检查
+2. **最小权限原则**：仅发送者可删是即时通讯的标准行为
+3. **简单可靠**：无需引入角色系统或管理员权限
+
+### 未来演进
+
+可通过系统级参数（如 `force=true`）支持管理员删除，但当前版本不需要。
+
+---
+
+## D-015: restore_conversation 级联恢复语义
+
+### 决策
+
+`restore_conversation` 恢复会话记录的同时，级联恢复该会话下所有被软删除的消息。两个操作在同一事务中执行。
+
+恢复后，会话的 `LastProcessedMessageID` 重新计算为所有恢复消息中最大的 `MessageID`。`LastMessageAt` 也相应更新。
+
+对未删除的会话调用 `restore_conversation` 是幂等的——返回当前会话，不报错。
+
+### 原因
+
+1. **避免孤立数据**：恢复消息而不恢复会话会导致孤立消息
+2. **避免空会话**：恢复会话而不恢复消息会让用户看到空会话
+3. **直觉一致**：级联恢复是最直观的用户体验
+4. **幂等友好**：重复恢复不报错，客户端可安全重试
+
+---
+
 ## 版本历史
 
 | 日期       | 版本 | 变更                                                                                |
 | ---------- | ---- | ----------------------------------------------------------------------------------- |
+| 2026-07-07 | v1.4 | 新增 D-012（已读位置模型）、D-013（级联软删除）、D-014（消息删除权限）、D-015（级联恢复） |
 | 2026-07-07 | v1.3 | 新增 D-011（create_conversation 幂等模型）                                          |
 | 2026-07-07 | v1.2 | 新增 D-009（sync_updates 分页模型）、D-010（被动续期策略）                          |
 | 2026-07-07 | v1.1 | 新增 D-006（幂等性模型）、D-007（MQ fire-and-forget）、D-008（MessageID 分配策略） |
