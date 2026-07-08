@@ -77,7 +77,7 @@ xyncra-server/
 │   ├── clientdb.go                  # ClientDB 主接口（SQLite）
 │   ├── conversation_store.go        # 会话存储（包含已读位置）
 │   ├── message_store.go             # 消息存储
-│   ├── sync_state_store.go          # 同步状态存储（last_seq, last_message_id）
+│   ├── sync_state_store.go          # 同步状态存储（local_max_seq, latest_seq）
 │   ├── draft_store.go               # 草稿存储
 │   ├── queue_store.go               # 持久化重试队列
 │   ├── rpc_log_store.go             # RPC 日志存储（查询、聚合、导出）
@@ -1270,7 +1270,7 @@ go tool cover -html=coverage.out -o coverage.html
 ```markdown
 # Xyncra Client Usage Skill
 
-本 SKILL 教你如何如何使用 xyncra-client CLI 工具。
+本 SKILL 教你如何使用 xyncra-client CLI 工具。
 
 ## 快速开始
 
