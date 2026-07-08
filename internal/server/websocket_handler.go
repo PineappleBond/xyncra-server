@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -144,7 +145,13 @@ func (h *DefaultMessageHandler) handleRequest(ctx context.Context, client *Clien
 	if err != nil {
 		log.Printf("websocket: handler error [connID=%s, method=%s]: %v",
 			client.ConnID(), req.Method, err)
-		_ = sendErrorResponse(client, req.ID, protocol.ResponseCodeError, err.Error())
+		var handlerErr *protocol.HandlerError
+		if errors.As(err, &handlerErr) {
+			_ = sendErrorResponse(client, req.ID, handlerErr.Code, handlerErr.Message)
+		} else {
+			// Unmigrated handler or unexpected error: use generic error code.
+			_ = sendErrorResponse(client, req.ID, protocol.ResponseCodeError, err.Error())
+		}
 		return
 	}
 

@@ -21,6 +21,7 @@
   - [restore_conversation](#restore_conversation)
   - [delete_message](#delete_message)
   - [mark_as_read](#mark_as_read)
+- [错误码](#错误码)
 - [数据模型](#数据模型)
   - [Conversation](#conversation)
   - [Message](#message)
@@ -91,7 +92,7 @@ ws://host:port/ws?user_id={user_id}
 | 字段 | 类型            | 说明                                       |
 |------|-----------------|--------------------------------------------|
 | id   | string          | 对应请求的 ID                              |
-| code | int32           | 状态码：0=成功 (OK)，-1=错误 (Error)       |
+| code | int32           | 状态码：0=成功，负数=错误（详见[错误码](#错误码)） |
 | msg  | string          | 错误消息（成功时为空字符串）               |
 | data | json.RawMessage | 响应数据（JSON 编码，结构取决于方法）      |
 
@@ -177,10 +178,10 @@ ws://host:port/ws?user_id={user_id}
 
 **错误**：
 
-| 错误信息                          | 说明                                 |
-|-----------------------------------|--------------------------------------|
-| connection expired                | 连接已过期或被驱逐，需要重新连接     |
-| failed to refresh connection: ... | 刷新连接 TTL 失败                    |
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -101 | connection expired | 连接已过期或被驱逐，需要重新连接 |
+| -300 | refresh connection: ... | 刷新连接 TTL 失败 |
 
 **客户端建议**：定期发送 heartbeat，建议间隔 30-60 秒。如果停止发送，连接会在 TTL（默认 30 分钟）后自动过期。
 
@@ -250,16 +251,16 @@ ws://host:port/ws?user_id={user_id}
 
 **错误**：
 
-| 错误信息                                          | 说明                         |
-|---------------------------------------------------|------------------------------|
-| invalid params: ...                               | 参数 JSON 解析失败           |
-| missing required field: conversation_id           | 缺少必填字段 conversation_id |
-| missing required field: client_message_id         | 缺少必填字段 client_message_id |
-| missing required field: content                   | 缺少必填字段 content         |
-| conversation not found                            | 会话不存在                   |
-| user is not a member of the conversation          | 调用者不是会话成员           |
-| failed to check idempotency: ...                  | 幂等性检查失败               |
-| failed to send message: ...                       | 消息持久化失败               |
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -100 | missing required field: conversation_id | 缺少必填字段 |
+| -100 | missing required field: client_message_id | 缺少必填字段 |
+| -100 | missing required field: content | 缺少必填字段 |
+| -101 | conversation not found | 会话不存在 |
+| -200 | user is not a member of the conversation | 调用者不是会话成员 |
+| -300 | check idempotency: ... | 幂等性检查失败 |
+| -300 | send message: ... | 消息持久化失败 |
 
 ---
 
@@ -312,11 +313,11 @@ ws://host:port/ws?user_id={user_id}
 
 **错误**：
 
-| 错误信息                        | 说明                 |
-|---------------------------------|----------------------|
-| invalid params: ...             | 参数 JSON 解析失败   |
-| failed to list updates: ...     | 查询更新列表失败     |
-| failed to get latest seq: ...   | 获取最新序号失败     |
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -300 | list updates: ... | 查询更新列表失败 |
+| -300 | get latest seq: ... | 获取最新序号失败 |
 
 ---
 
@@ -383,13 +384,13 @@ ws://host:port/ws?user_id={user_id}
 
 **错误**：
 
-| 错误信息                                        | 说明                                 |
-|-------------------------------------------------|--------------------------------------|
-| invalid params: ...                             | 参数 JSON 解析失败                   |
-| missing required field: user_id                 | 缺少必填字段 user_id                 |
-| cannot create conversation with yourself        | 不能和自己创建会话                   |
-| check existing conversation: ...                | 查询已有会话失败                     |
-| create conversation: ...                        | 创建会话失败                         |
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -100 | missing required field: user_id | 缺少必填字段 |
+| -100 | cannot create conversation with yourself | 不能和自己创建会话 |
+| -300 | check existing conversation: ... | 查询已有会话失败 |
+| -300 | create conversation: ... | 创建会话失败 |
 
 **注意**：服务端会规范化用户对顺序（字典序小的为 UserID1，大的为 UserID2），确保无论从哪方发起，会话唯一性一致。
 
@@ -449,10 +450,10 @@ ws://host:port/ws?user_id={user_id}
 
 **错误**：
 
-| 错误信息                           | 说明                 |
-|------------------------------------|----------------------|
-| invalid params: ...                | 参数 JSON 解析失败   |
-| list conversations: ...            | 查询会话列表失败     |
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -300 | list conversations: ... | 查询会话列表失败 |
 
 **注意**：`conversations` 始终返回数组，不会为 null（空列表时为 `[]`）。
 
@@ -509,13 +510,13 @@ ws://host:port/ws?user_id={user_id}
 
 **错误**：
 
-| 错误信息                                          | 说明                         |
-|---------------------------------------------------|------------------------------|
-| invalid params: ...                               | 参数 JSON 解析失败           |
-| missing required field: conversation_id           | 缺少必填字段 conversation_id |
-| conversation not found                            | 会话不存在                   |
-| user is not a member of the conversation          | 调用者不是会话成员           |
-| failed to list messages: ...                      | 查询消息列表失败             |
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -100 | missing required field: conversation_id | 缺少必填字段 |
+| -101 | conversation not found | 会话不存在 |
+| -200 | user is not a member of the conversation | 调用者不是会话成员 |
+| -300 | list messages: ... | 查询消息列表失败 |
 
 **注意**：`messages` 始终返回数组，不会为 null（空列表时为 `[]`）。
 
@@ -574,14 +575,14 @@ ws://host:port/ws?user_id={user_id}
 
 **错误**：
 
-| 错误信息                                          | 说明                         |
-|---------------------------------------------------|------------------------------|
-| invalid params: ...                               | 参数 JSON 解析失败           |
-| missing required field: conversation_id           | 缺少必填字段 conversation_id |
-| missing required field: query                     | 缺少必填字段 query           |
-| conversation not found                            | 会话不存在                   |
-| user is not a member of the conversation          | 调用者不是会话成员           |
-| failed to search messages: ...                    | 搜索消息失败                 |
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -100 | missing required field: conversation_id | 缺少必填字段 |
+| -100 | missing required field: query | 缺少必填字段 |
+| -101 | conversation not found | 会话不存在 |
+| -200 | user is not a member of the conversation | 调用者不是会话成员 |
+| -300 | search messages: ... | 搜索消息失败 |
 
 **注意**：`messages` 始终返回数组，不会为 null。与 `get_messages` 不同，搜索结果按 MessageID **降序**排列（最新消息在前）。
 
@@ -637,13 +638,13 @@ ws://host:port/ws?user_id={user_id}
 
 **错误**：
 
-| 错误信息                                          | 说明                         |
-|---------------------------------------------------|------------------------------|
-| invalid params: ...                               | 参数 JSON 解析失败           |
-| missing required field: conversation_id           | 缺少必填字段 conversation_id |
-| conversation not found                            | 会话不存在                   |
-| user is not a member of the conversation          | 调用者不是会话成员           |
-| failed to get conversation: ...                   | 获取会话失败                 |
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -100 | missing required field: conversation_id | 缺少必填字段 |
+| -101 | conversation not found | 会话不存在 |
+| -200 | user is not a member of the conversation | 调用者不是会话成员 |
+| -300 | get conversation: ... | 获取会话失败 |
 
 **注意**：未读计数基于当前用户的已读游标 (D-012)。如果计算未读计数时发生错误，默认返回 0 而非报错。
 
@@ -684,13 +685,13 @@ ws://host:port/ws?user_id={user_id}
 
 **错误**：
 
-| 错误信息                                          | 说明                         |
-|---------------------------------------------------|------------------------------|
-| invalid params: ...                               | 参数 JSON 解析失败           |
-| missing required field: conversation_id           | 缺少必填字段 conversation_id |
-| conversation not found                            | 会话不存在                   |
-| user is not a member of the conversation          | 调用者不是会话成员           |
-| failed to delete conversation: ...                | 删除会话失败                 |
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -100 | missing required field: conversation_id | 缺少必填字段 |
+| -101 | conversation not found | 会话不存在 |
+| -200 | user is not a member of the conversation | 调用者不是会话成员 |
+| -300 | delete conversation: ... | 删除会话失败 |
 
 **注意**：软删除的消息仍然占据 `client_message_id` 的 unique index 命名空间。被删除的会话可通过 `restore_conversation` 恢复。
 
@@ -757,13 +758,13 @@ ws://host:port/ws?user_id={user_id}
 
 **错误**：
 
-| 错误信息                                          | 说明                         |
-|---------------------------------------------------|------------------------------|
-| invalid params: ...                               | 参数 JSON 解析失败           |
-| missing required field: conversation_id           | 缺少必填字段 conversation_id |
-| conversation not found                            | 会话不存在（包括已永久删除） |
-| user is not a member of the conversation          | 调用者不是会话成员           |
-| failed to restore conversation: ...               | 恢复会话失败                 |
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -100 | missing required field: conversation_id | 缺少必填字段 |
+| -101 | conversation not found | 会话不存在（包括已永久删除） |
+| -200 | user is not a member of the conversation | 调用者不是会话成员 |
+| -300 | restore conversation: ... | 恢复会话失败 |
 
 ---
 
@@ -801,15 +802,15 @@ ws://host:port/ws?user_id={user_id}
 
 **错误**：
 
-| 错误信息                                          | 说明                                 |
-|---------------------------------------------------|--------------------------------------|
-| invalid params: ...                               | 参数 JSON 解析失败                   |
-| missing required field: message_id                | 缺少必填字段 message_id              |
-| message not found                                 | 消息不存在                           |
-| conversation not found                            | 消息所属会话不存在                   |
-| user is not a member of the conversation          | 调用者不是会话成员                   |
-| only the sender can delete this message           | 非消息发送者无权删除（D-014）        |
-| failed to delete message: ...                     | 删除消息失败                         |
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -100 | missing required field: message_id | 缺少必填字段 |
+| -101 | message not found | 消息不存在 |
+| -101 | conversation not found | 消息所属会话不存在 |
+| -200 | user is not a member of the conversation | 调用者不是会话成员 |
+| -200 | only the sender can delete this message | 非消息发送者无权删除 (D-014) |
+| -300 | delete message: ... | 删除消息失败 |
 
 ---
 
@@ -863,16 +864,53 @@ ws://host:port/ws?user_id={user_id}
 
 **错误**：
 
-| 错误信息                                          | 说明                         |
-|---------------------------------------------------|------------------------------|
-| invalid params: ...                               | 参数 JSON 解析失败           |
-| missing required field: conversation_id           | 缺少必填字段 conversation_id |
-| conversation not found                            | 会话不存在                   |
-| user is not a member of the conversation          | 调用者不是会话成员           |
-| update last read: ...                             | 更新已读游标失败             |
-| count unread: ...                                 | 计算未读计数失败             |
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -100 | missing required field: conversation_id | 缺少必填字段 |
+| -101 | conversation not found | 会话不存在 |
+| -200 | user is not a member of the conversation | 调用者不是会话成员 |
+| -300 | update last read: ... | 更新已读游标失败 |
+| -300 | count unread: ... | 计算未读计数失败 |
 
 **注意**：如果传入的 `message_id` 大于会话的 `LastProcessedMessageID`，会被自动截断为 `LastProcessedMessageID`。如果传入的 `message_id` 小于当前已读位置，服务器静默忽略（不报错），返回当前已读位置 (D-012)。
+
+---
+
+## 错误码
+
+所有错误响应的 `code` 字段使用结构化错误码 (D-017)。负数表示错误，分段分配：
+
+| Code | 名称 | 说明 |
+|------|------|------|
+| 0 | OK | 成功 |
+| -1 | Error | 通用错误（未分类，向后兼容） |
+| **-100** | **ValidationError** | **参数验证失败（缺少必填字段、类型错误、JSON 解析失败等）** |
+| **-101** | **NotFound** | **资源不存在（会话、消息、连接等）** |
+| -102 | Duplicate | 资源重复（幂等命中时返回成功，不会返回此错误码） |
+| **-200** | **PermissionDenied** | **权限不足（如非发送者尝试删除消息、非会话成员）** |
+| -201 | Forbidden | 禁止访问 |
+| **-300** | **InternalError** | **服务器内部错误** |
+| -301 | Unavailable | 服务不可用 |
+
+**向后兼容**：旧客户端检查 `code < 0` 判断错误仍然有效。
+
+### 各方法的错误码
+
+| 方法 | 可能的错误码 |
+|------|-------------|
+| heartbeat | -101 (connection expired), -300 (internal) |
+| send_message | -100 (validation), -101 (not found), -200 (not a member), -300 (internal) |
+| sync_updates | -100 (validation), -300 (internal) |
+| create_conversation | -100 (validation), -300 (internal) |
+| list_conversations | -100 (validation), -300 (internal) |
+| get_messages | -100 (validation), -101 (not found), -200 (not a member), -300 (internal) |
+| search_messages | -100 (validation), -101 (not found), -200 (not a member), -300 (internal) |
+| get_conversation | -100 (validation), -101 (not found), -200 (not a member), -300 (internal) |
+| delete_conversation | -100 (validation), -101 (not found), -200 (not a member), -300 (internal) |
+| restore_conversation | -100 (validation), -101 (not found), -200 (not a member), -300 (internal) |
+| delete_message | -100 (validation), -101 (not found), -200 (permission denied / not a member), -300 (internal) |
+| mark_as_read | -100 (validation), -101 (not found), -200 (not a member), -300 (internal) |
 
 ---
 
