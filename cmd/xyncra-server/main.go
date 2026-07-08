@@ -35,6 +35,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PineappleBond/xyncra-server/internal/cleanup"
 	"github.com/PineappleBond/xyncra-server/internal/handler"
 	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
@@ -168,6 +169,14 @@ func main() {
 			log.Printf("broker error: %v", err)
 		}
 	}()
+
+	// Start the UserUpdate cleanup goroutine.
+	// Periodically removes expired UserUpdate records (older than 30 days).
+	// Uses default 1-hour interval per D-001 zero-config philosophy.
+	cleaner := cleanup.NewUserUpdateCleaner(cleanup.Config{
+		Store: dataStore.UserUpdateStore(),
+	})
+	go cleaner.Run(ctx)
 
 	// ---------------------------------------------------------------
 	// Run
