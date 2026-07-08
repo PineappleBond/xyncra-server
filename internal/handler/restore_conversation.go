@@ -55,12 +55,12 @@ func (h *restoreConversationHandler) HandleRequest(ctx context.Context, client *
 	// 1. Parse parameters.
 	var params restoreConversationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
+		return nil, protocol.NewValidationError("invalid params")
 	}
 
 	// 2. Validate required fields.
 	if params.ConversationID == "" {
-		return nil, fmt.Errorf("missing required field: conversation_id")
+		return nil, protocol.NewValidationError("missing required field: conversation_id")
 	}
 
 	convID := params.ConversationID
@@ -69,16 +69,16 @@ func (h *restoreConversationHandler) HandleRequest(ctx context.Context, client *
 	conv, err := h.store.ConversationStore().GetUnscoped(ctx, convID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("conversation not found")
+			return nil, protocol.NewNotFoundError("conversation not found")
 		}
-		return nil, fmt.Errorf("failed to get conversation: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("get conversation: %w", err))
 	}
 
 	// 4. Verify membership (C-3).
 	userID := client.UserID()
 	members := conversationMembers(conv)
 	if !containsUser(members, userID) {
-		return nil, fmt.Errorf("user is not a member of the conversation")
+		return nil, protocol.NewPermissionDeniedError("user is not a member of the conversation")
 	}
 
 	// 5. Idempotent: if conversation is NOT soft-deleted, return current state (D-015).
@@ -86,7 +86,7 @@ func (h *restoreConversationHandler) HandleRequest(ctx context.Context, client *
 		// Already active — return as-is with zero restored count.
 		restoredConv, getErr := h.store.ConversationStore().Get(ctx, convID)
 		if getErr != nil {
-			return nil, fmt.Errorf("failed to get conversation: %w", getErr)
+			return nil, protocol.NewInternalError(fmt.Errorf("get conversation: %w", getErr))
 		}
 		return marshalResponse(restoreConversationResponse{
 			Conversation:         restoredConv,
@@ -142,15 +142,15 @@ func (h *restoreConversationHandler) HandleRequest(ctx context.Context, client *
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("conversation not found")
+			return nil, protocol.NewNotFoundError("conversation not found")
 		}
-		return nil, fmt.Errorf("failed to restore conversation: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("restore conversation: %w", err))
 	}
 
 	// 7. Fetch the restored conversation and return.
 	restoredConv, err := h.store.ConversationStore().Get(ctx, convID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get restored conversation: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("get restored conversation: %w", err))
 	}
 
 	return marshalResponse(restoreConversationResponse{

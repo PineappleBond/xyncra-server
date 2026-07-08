@@ -3,11 +3,13 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -238,9 +240,17 @@ func TestSearchMessages_MissingConversationID(t *testing.T) {
 	s := setupTestSQLite(t)
 	handler := NewSearchMessagesHandler(s)
 
-	callSearchMessagesExpectError(t, handler, "alice", map[string]interface{}{
+	ctx := context.Background()
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-search-msgs", "search_messages", map[string]interface{}{
 		"query": "hello",
-	}, "conversation_id")
+	})
+	_, err := handler.HandleRequest(ctx, client, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conversation_id")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodeValidationError, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +279,15 @@ func TestSearchMessages_MissingQuery(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			callSearchMessagesExpectError(t, handler, "alice", tt.params, "query")
+			ctx := context.Background()
+			client := server.NewTestClient("alice")
+			req := newTestRequest("req-search-msgs", "search_messages", tt.params)
+			_, err := handler.HandleRequest(ctx, client, req)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "query")
+			var handlerErr *protocol.HandlerError
+			require.True(t, errors.As(err, &handlerErr))
+			assert.Equal(t, protocol.ResponseCodeValidationError, handlerErr.Code)
 		})
 	}
 }
@@ -282,10 +300,18 @@ func TestSearchMessages_ConversationNotFound(t *testing.T) {
 	s := setupTestSQLite(t)
 	handler := NewSearchMessagesHandler(s)
 
-	callSearchMessagesExpectError(t, handler, "alice", map[string]interface{}{
+	ctx := context.Background()
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-search-msgs", "search_messages", map[string]interface{}{
 		"conversation_id": "nonexistent-conv-id",
 		"query":           "hello",
-	}, "not found")
+	})
+	_, err := handler.HandleRequest(ctx, client, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodeNotFound, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -299,10 +325,18 @@ func TestSearchMessages_NotAMember(t *testing.T) {
 	convID := uuid.New().String()
 	createTestConversation(t, s, convID, "alice", "bob")
 
-	callSearchMessagesExpectError(t, handler, "charlie", map[string]interface{}{
+	ctx := context.Background()
+	client := server.NewTestClient("charlie")
+	req := newTestRequest("req-search-msgs", "search_messages", map[string]interface{}{
 		"conversation_id": convID,
 		"query":           "hello",
-	}, "not a member of the conversation")
+	})
+	_, err := handler.HandleRequest(ctx, client, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a member of the conversation")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodePermissionDenied, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------

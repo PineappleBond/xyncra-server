@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -346,6 +347,9 @@ func TestSyncUpdates_InvalidParams(t *testing.T) {
 	require.Error(t, err, "should return error for invalid JSON")
 	assert.Contains(t, err.Error(), "invalid params",
 		"error should contain 'invalid params'")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodeValidationError, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------

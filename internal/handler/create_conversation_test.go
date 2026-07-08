@@ -3,10 +3,12 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -197,6 +199,9 @@ func TestCreateConversation_MissingUserID(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "user_id",
 				"error should mention 'user_id' (D-011)")
+			var handlerErr *protocol.HandlerError
+			require.True(t, errors.As(err, &handlerErr))
+			assert.Equal(t, protocol.ResponseCodeValidationError, handlerErr.Code)
 		})
 	}
 }
@@ -220,6 +225,9 @@ func TestCreateConversation_CannotCreateWithSelf(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "yourself",
 		"error should mention 'yourself' (D-011)")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodeValidationError, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------

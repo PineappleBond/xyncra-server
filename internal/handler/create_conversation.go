@@ -72,18 +72,18 @@ func (h *createConversationHandler) HandleRequest(ctx context.Context, client *s
 	// 1. Parse parameters.
 	var params createConversationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
+		return nil, protocol.NewValidationError("invalid params")
 	}
 
 	// 2. Validate required fields.
 	if params.UserID == "" {
-		return nil, fmt.Errorf("missing required field: user_id")
+		return nil, protocol.NewValidationError("missing required field: user_id")
 	}
 
 	// 3. Validate not creating a conversation with oneself.
 	callerID := client.UserID()
 	if params.UserID == callerID {
-		return nil, fmt.Errorf("cannot create conversation with yourself")
+		return nil, protocol.NewValidationError("cannot create conversation with yourself")
 	}
 
 	// 4. Find-or-create idempotency check (D-011).
@@ -97,7 +97,7 @@ func (h *createConversationHandler) HandleRequest(ctx context.Context, client *s
 		return marshalResponse(resp)
 	}
 	if !errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("check existing conversation: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("check existing conversation: %w", err))
 	}
 
 	// 5. Create a new conversation.
@@ -134,7 +134,7 @@ func (h *createConversationHandler) HandleRequest(ctx context.Context, client *s
 				return marshalResponse(resp)
 			}
 		}
-		return nil, fmt.Errorf("create conversation: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("create conversation: %w", err))
 	}
 
 	// 6. Return success.

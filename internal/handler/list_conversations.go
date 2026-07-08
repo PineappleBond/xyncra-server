@@ -61,7 +61,7 @@ func (h *listConversationsHandler) HandleRequest(ctx context.Context, client *se
 	// 1. Parse parameters.
 	var params listConversationsParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
+		return nil, protocol.NewValidationError("invalid params")
 	}
 
 	// 2. Normalise limit: default 20, cap 100.
@@ -84,7 +84,7 @@ func (h *listConversationsHandler) HandleRequest(ctx context.Context, client *se
 	storeLimit := limit + 1
 	convs, err := h.store.ConversationStore().GetByUser(ctx, userID, offset, storeLimit)
 	if err != nil {
-		return nil, fmt.Errorf("list conversations: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("list conversations: %w", err))
 	}
 
 	// 5. Determine has_more and truncate to the requested limit.

@@ -78,18 +78,18 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 	// 1. Parse parameters.
 	var params sendMessageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
+		return nil, protocol.NewValidationError("invalid params")
 	}
 
 	// Validate required fields.
 	if params.ConversationID == "" {
-		return nil, fmt.Errorf("missing required field: conversation_id")
+		return nil, protocol.NewValidationError("missing required field: conversation_id")
 	}
 	if params.ClientMessageID == "" {
-		return nil, fmt.Errorf("missing required field: client_message_id")
+		return nil, protocol.NewValidationError("missing required field: client_message_id")
 	}
 	if params.Content == "" {
-		return nil, fmt.Errorf("missing required field: content")
+		return nil, protocol.NewValidationError("missing required field: content")
 	}
 
 	// Apply default message type.
@@ -106,22 +106,22 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 		}
 		return marshalResponse(resp)
 	} else if !errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("failed to check idempotency: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("check idempotency: %w", err))
 	}
 
 	// 3. Fetch conversation and verify membership.
 	conv, err := h.store.ConversationStore().Get(ctx, params.ConversationID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("conversation not found")
+			return nil, protocol.NewNotFoundError("conversation not found")
 		}
-		return nil, fmt.Errorf("failed to get conversation: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("get conversation: %w", err))
 	}
 
 	senderID := client.UserID()
 	members := conversationMembers(conv)
 	if !containsUser(members, senderID) {
-		return nil, fmt.Errorf("user is not a member of the conversation")
+		return nil, protocol.NewPermissionDeniedError("user is not a member of the conversation")
 	}
 
 	// 4. Allocate MessageID (D-008).
@@ -145,7 +145,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 	// 6. Build per-member UserUpdate records.
 	msgPayload, err := json.Marshal(msg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal message: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("marshal message: %w", err))
 	}
 
 	updates := make([]model.UserUpdate, 0, len(members))
@@ -154,7 +154,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 	for _, memberID := range members {
 		latestSeq, err := h.store.UserUpdateStore().GetLatestSeq(ctx, memberID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get latest seq for user %s: %w", memberID, err)
+			return nil, protocol.NewInternalError(fmt.Errorf("get latest seq for user %s: %w", memberID, err))
 		}
 		newSeq := latestSeq + 1
 
@@ -181,7 +181,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 
 	// 7. Atomic persist (message + updates + conversation metadata).
 	if err := h.store.SendMessage(ctx, msg, updates, conv.ID, msg.CreatedAt, messageID); err != nil {
-		return nil, fmt.Errorf("failed to send message: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("send message: %w", err))
 	}
 
 	// 8-9. Build MQ task and enqueue asynchronously (fire-and-forget, D-007).

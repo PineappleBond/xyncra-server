@@ -53,12 +53,12 @@ func (h *deleteMessageHandler) HandleRequest(ctx context.Context, client *server
 	// 1. Parse parameters.
 	var params deleteMessageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
+		return nil, protocol.NewValidationError("invalid params")
 	}
 
 	// 2. Validate required fields.
 	if params.MessageID == "" {
-		return nil, fmt.Errorf("missing required field: message_id")
+		return nil, protocol.NewValidationError("missing required field: message_id")
 	}
 
 	msgID := params.MessageID
@@ -67,35 +67,35 @@ func (h *deleteMessageHandler) HandleRequest(ctx context.Context, client *server
 	msg, err := h.store.MessageStore().Get(ctx, msgID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("message not found")
+			return nil, protocol.NewNotFoundError("message not found")
 		}
-		return nil, fmt.Errorf("failed to get message: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("get message: %w", err))
 	}
 
 	// 4. Fetch conversation and verify existence.
 	conv, err := h.store.ConversationStore().Get(ctx, msg.ConversationID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("conversation not found")
+			return nil, protocol.NewNotFoundError("conversation not found")
 		}
-		return nil, fmt.Errorf("failed to get conversation: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("get conversation: %w", err))
 	}
 
 	// 5. Verify membership (C-3).
 	userID := client.UserID()
 	members := conversationMembers(conv)
 	if !containsUser(members, userID) {
-		return nil, fmt.Errorf("user is not a member of the conversation")
+		return nil, protocol.NewPermissionDeniedError("user is not a member of the conversation")
 	}
 
 	// 6. Verify caller is the message sender (D-014).
 	if msg.SenderID != userID {
-		return nil, fmt.Errorf("only the sender can delete this message")
+		return nil, protocol.NewPermissionDeniedError("only the sender can delete this message")
 	}
 
 	// 7. Soft-delete the message.
 	if err := h.store.MessageStore().Delete(ctx, msgID); err != nil {
-		return nil, fmt.Errorf("failed to delete message: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("delete message: %w", err))
 	}
 
 	// 8. Return response.

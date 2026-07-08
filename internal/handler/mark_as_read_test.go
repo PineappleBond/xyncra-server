@@ -3,12 +3,14 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -179,6 +181,9 @@ func TestMarkAsRead_MissingConversationID(t *testing.T) {
 	_, err := h.HandleRequest(ctx, client, req)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "conversation_id")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodeValidationError, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +205,9 @@ func TestMarkAsRead_NotFound(t *testing.T) {
 	_, err := h.HandleRequest(ctx, client, req)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodeNotFound, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +233,9 @@ func TestMarkAsRead_NotMember(t *testing.T) {
 	_, err := h.HandleRequest(ctx, client, req)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a member")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodePermissionDenied, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------

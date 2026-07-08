@@ -80,9 +80,9 @@ func (h *heartbeatHandler) HandleRequest(ctx context.Context, client *server.Cli
 	// 3. Refresh the connection TTL (D-010 passive renewal).
 	if err := h.connStore.Refresh(ctx, client.ConnID()); err != nil {
 		if errors.Is(err, server.ErrConnectionNotFound) {
-			return nil, fmt.Errorf("connection expired: %w", server.ErrConnectionNotFound)
+			return nil, protocol.NewNotFoundError("connection expired")
 		}
-		return nil, fmt.Errorf("failed to refresh connection: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("refresh connection: %w", err))
 	}
 
 	// 4. Return success.

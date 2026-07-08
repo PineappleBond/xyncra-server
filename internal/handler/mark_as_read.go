@@ -63,28 +63,28 @@ func (h *markAsReadHandler) HandleRequest(ctx context.Context, client *server.Cl
 	// 1. Parse parameters.
 	var params markAsReadParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
+		return nil, protocol.NewValidationError("invalid params")
 	}
 
 	// Validate required fields.
 	if params.ConversationID == "" {
-		return nil, fmt.Errorf("missing required field: conversation_id")
+		return nil, protocol.NewValidationError("missing required field: conversation_id")
 	}
 
 	// 2. Fetch conversation and verify it exists.
 	conv, err := h.store.ConversationStore().Get(ctx, params.ConversationID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("conversation not found")
+			return nil, protocol.NewNotFoundError("conversation not found")
 		}
-		return nil, fmt.Errorf("failed to get conversation: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("get conversation: %w", err))
 	}
 
 	// 3. Verify membership.
 	userID := client.UserID()
 	members := conversationMembers(conv)
 	if !containsUser(members, userID) {
-		return nil, fmt.Errorf("user is not a member of the conversation")
+		return nil, protocol.NewPermissionDeniedError("user is not a member of the conversation")
 	}
 
 	// 4. Determine target messageID.
@@ -102,13 +102,13 @@ func (h *markAsReadHandler) HandleRequest(ctx context.Context, client *server.Cl
 
 	// 6. Update read cursor (MAX semantics enforced by store, D-012).
 	if err := h.store.ConversationStore().UpdateLastRead(ctx, params.ConversationID, userID, messageID); err != nil {
-		return nil, fmt.Errorf("update last read: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("update last read: %w", err))
 	}
 
 	// 7. Calculate unread count.
 	unreadCount, err := h.store.MessageStore().CountUnread(ctx, params.ConversationID, messageID)
 	if err != nil {
-		return nil, fmt.Errorf("count unread: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("count unread: %w", err))
 	}
 
 	// 8. Return success.

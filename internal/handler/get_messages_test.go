@@ -3,11 +3,13 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -172,9 +174,17 @@ func TestGetMessages_MissingConversationID(t *testing.T) {
 	s := setupTestSQLite(t)
 	handler := NewGetMessagesHandler(s)
 
-	callGetMessagesExpectError(t, handler, "alice", map[string]interface{}{
+	ctx := context.Background()
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-get-msgs", "get_messages", map[string]interface{}{
 		"limit": 10,
-	}, "conversation_id")
+	})
+	_, err := handler.HandleRequest(ctx, client, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conversation_id")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodeValidationError, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -185,9 +195,17 @@ func TestGetMessages_ConversationNotFound(t *testing.T) {
 	s := setupTestSQLite(t)
 	handler := NewGetMessagesHandler(s)
 
-	callGetMessagesExpectError(t, handler, "alice", map[string]interface{}{
+	ctx := context.Background()
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-get-msgs", "get_messages", map[string]interface{}{
 		"conversation_id": "nonexistent-conv-id",
-	}, "not found")
+	})
+	_, err := handler.HandleRequest(ctx, client, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodeNotFound, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -201,9 +219,17 @@ func TestGetMessages_NotAMember(t *testing.T) {
 	convID := uuid.New().String()
 	createTestConversation(t, s, convID, "alice", "bob")
 
-	callGetMessagesExpectError(t, handler, "charlie", map[string]interface{}{
+	ctx := context.Background()
+	client := server.NewTestClient("charlie")
+	req := newTestRequest("req-get-msgs", "get_messages", map[string]interface{}{
 		"conversation_id": convID,
-	}, "not a member of the conversation")
+	})
+	_, err := handler.HandleRequest(ctx, client, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a member of the conversation")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodePermissionDenied, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------

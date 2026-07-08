@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -125,6 +126,9 @@ func TestHeartbeat_ConnectionExpired(t *testing.T) {
 	_, err := handler.HandleRequest(ctx, client, req)
 	require.Error(t, err, "heartbeat should fail for expired/missing connection")
 	assert.Contains(t, err.Error(), "connection expired")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodeNotFound, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -146,8 +150,11 @@ func TestHeartbeat_RefreshFailed(t *testing.T) {
 
 	_, err := handler.HandleRequest(ctx, client, req)
 	require.Error(t, err, "heartbeat should fail when Refresh returns an error")
-	assert.Contains(t, err.Error(), "failed to refresh connection")
+	assert.Contains(t, err.Error(), "refresh connection")
 	assert.Contains(t, err.Error(), "simulated redis timeout")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodeInternalError, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------

@@ -3,12 +3,14 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -72,6 +74,9 @@ func TestDeleteMessage_MissingMessageID(t *testing.T) {
 	_, err := handler.HandleRequest(ctx, client, req)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "message_id")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodeValidationError, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +98,9 @@ func TestDeleteMessage_NotFound(t *testing.T) {
 	_, err := handler.HandleRequest(ctx, client, req)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "message not found")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodeNotFound, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +137,9 @@ func TestDeleteMessage_NotMember(t *testing.T) {
 	_, err := handler.HandleRequest(ctx, client, req)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a member")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodePermissionDenied, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +177,9 @@ func TestDeleteMessage_NotSender(t *testing.T) {
 	_, err := handler.HandleRequest(ctx, client, req)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "only the sender")
+	var handlerErr *protocol.HandlerError
+	require.True(t, errors.As(err, &handlerErr))
+	assert.Equal(t, protocol.ResponseCodePermissionDenied, handlerErr.Code)
 }
 
 // ---------------------------------------------------------------------------

@@ -55,12 +55,12 @@ func (h *deleteConversationHandler) HandleRequest(ctx context.Context, client *s
 	// 1. Parse parameters.
 	var params deleteConversationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
+		return nil, protocol.NewValidationError("invalid params")
 	}
 
 	// 2. Validate required fields.
 	if params.ConversationID == "" {
-		return nil, fmt.Errorf("missing required field: conversation_id")
+		return nil, protocol.NewValidationError("missing required field: conversation_id")
 	}
 
 	convID := params.ConversationID
@@ -69,16 +69,16 @@ func (h *deleteConversationHandler) HandleRequest(ctx context.Context, client *s
 	conv, err := h.store.ConversationStore().Get(ctx, convID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("conversation not found")
+			return nil, protocol.NewNotFoundError("conversation not found")
 		}
-		return nil, fmt.Errorf("failed to get conversation: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("get conversation: %w", err))
 	}
 
 	// 4. Verify membership (C-3).
 	userID := client.UserID()
 	members := conversationMembers(conv)
 	if !containsUser(members, userID) {
-		return nil, fmt.Errorf("user is not a member of the conversation")
+		return nil, protocol.NewPermissionDeniedError("user is not a member of the conversation")
 	}
 
 	// 5. Cascade soft delete in a transaction (D-013).
@@ -107,9 +107,9 @@ func (h *deleteConversationHandler) HandleRequest(ctx context.Context, client *s
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("conversation not found")
+			return nil, protocol.NewNotFoundError("conversation not found")
 		}
-		return nil, fmt.Errorf("failed to delete conversation: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("delete conversation: %w", err))
 	}
 
 	// 6. Return response.

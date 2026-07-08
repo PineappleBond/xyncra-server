@@ -61,28 +61,28 @@ func (h *getMessagesHandler) HandleRequest(ctx context.Context, client *server.C
 	// 1. Parse parameters.
 	var params getMessagesParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
+		return nil, protocol.NewValidationError("invalid params")
 	}
 
 	// 2. Validate required fields.
 	if params.ConversationID == "" {
-		return nil, fmt.Errorf("missing required field: conversation_id")
+		return nil, protocol.NewValidationError("missing required field: conversation_id")
 	}
 
 	// 3. Fetch conversation and verify existence.
 	conv, err := h.store.ConversationStore().Get(ctx, params.ConversationID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("conversation not found")
+			return nil, protocol.NewNotFoundError("conversation not found")
 		}
-		return nil, fmt.Errorf("failed to get conversation: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("get conversation: %w", err))
 	}
 
 	// 4. Verify membership (C-3).
 	userID := client.UserID()
 	members := conversationMembers(conv)
 	if !containsUser(members, userID) {
-		return nil, fmt.Errorf("user is not a member of the conversation")
+		return nil, protocol.NewPermissionDeniedError("user is not a member of the conversation")
 	}
 
 	// 5. Normalise limit: default 50, cap 200.
@@ -94,7 +94,7 @@ func (h *getMessagesHandler) HandleRequest(ctx context.Context, client *server.C
 	// 6. Fetch messages using the limit+1 probe to detect has_more.
 	msgs, err := h.store.MessageStore().ListByConversation(ctx, conv.ID, params.AfterMessageID, limit+1)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list messages: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("list messages: %w", err))
 	}
 
 	// 7. Determine has_more and truncate to the requested limit.

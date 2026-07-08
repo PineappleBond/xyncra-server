@@ -58,7 +58,7 @@ func (h *syncUpdatesHandler) HandleRequest(ctx context.Context, client *server.C
 	// 1. Parse params.
 	var params syncUpdatesParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
+		return nil, protocol.NewValidationError("invalid params")
 	}
 
 	// 2. Normalise limit: default 100, cap 500.
@@ -75,7 +75,7 @@ func (h *syncUpdatesHandler) HandleRequest(ctx context.Context, client *server.C
 	// 3. Fetch updates (limit+1 probe to detect has_more).
 	updates, err := h.store.UserUpdateStore().ListByUser(ctx, userID, params.AfterSeq, limit+1)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list updates: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("list updates: %w", err))
 	}
 
 	// 4. Determine has_more and truncate to the requested limit.
@@ -97,7 +97,7 @@ func (h *syncUpdatesHandler) HandleRequest(ctx context.Context, client *server.C
 	// 6. Fetch the latest seq for the user.
 	latestSeq, err := h.store.UserUpdateStore().GetLatestSeq(ctx, userID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get latest seq: %w", err)
+		return nil, protocol.NewInternalError(fmt.Errorf("get latest seq: %w", err))
 	}
 
 	// 7. Return response.
