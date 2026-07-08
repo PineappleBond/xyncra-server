@@ -52,6 +52,24 @@ func (us *UserUpdateStore) ListByUser(ctx context.Context, userID string, afterS
 	return updates, nil
 }
 
+// ListByUserRange returns user updates for the given userID with Seq in the
+// range (afterSeq, maxSeq] (exclusive start, inclusive end), ordered by Seq
+// ascending. This supports gap-filling in the handler layer.
+func (us *UserUpdateStore) ListByUserRange(ctx context.Context, userID string, afterSeq, maxSeq uint32) ([]*model.UserUpdate, error) {
+	if maxSeq <= afterSeq {
+		return nil, nil
+	}
+	var updates []*model.UserUpdate
+	err := us.db.WithContext(ctx).
+		Where("user_id = ? AND seq > ? AND seq <= ?", userID, afterSeq, maxSeq).
+		Order("seq ASC").
+		Find(&updates).Error
+	if err != nil {
+		return nil, classifyError(fmt.Errorf("store: list user updates by range: %w", err))
+	}
+	return updates, nil
+}
+
 // GetLatestSeq returns the highest Seq value for the given user. Returns 0 and
 // nil if the user has no update records.
 func (us *UserUpdateStore) GetLatestSeq(ctx context.Context, userID string) (uint32, error) {

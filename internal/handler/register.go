@@ -39,8 +39,8 @@ func RegisterAll(h *server.DefaultMessageHandler, deps Dependencies) {
 	h.RegisterMethod("get_messages", NewGetMessagesHandler(deps.Store))
 	h.RegisterMethod("search_messages", NewSearchMessagesHandler(deps.Store))
 	h.RegisterMethod("get_conversation", NewGetConversationHandler(deps.Store))
-	h.RegisterMethod("delete_conversation", NewDeleteConversationHandler(deps.Store))
-	h.RegisterMethod("restore_conversation", NewRestoreConversationHandler(deps.Store))
-	h.RegisterMethod("delete_message", NewDeleteMessageHandler(deps.Store))
-	h.RegisterMethod("mark_as_read", NewMarkAsReadHandler(deps.Store))
+	h.RegisterMethod("delete_conversation", NewDeleteConversationHandler(deps.Store, deps.Broker))
+	h.RegisterMethod("restore_conversation", NewRestoreConversationHandler(deps.Store, deps.Broker))
+	h.RegisterMethod("delete_message", NewDeleteMessageHandler(deps.Store, deps.Broker))
+	h.RegisterMethod("mark_as_read", NewMarkAsReadHandler(deps.Store, deps.Broker))
 }

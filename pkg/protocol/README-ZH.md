@@ -90,6 +90,7 @@ classDiagram
     
     class PackageDataUpdate {
         +uint32 Seq
+        +string Type
         +json.RawMessage Payload
         +time.Time CreatedAt
     }
@@ -212,6 +213,7 @@ classDiagram
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | Seq | uint32 | 序列号（**关键字段**，用于增量同步和排序，对应 `UserUpdate.Seq`） |
+| Type | string | 更新类型：message / delete_message / mark_read / conversation |
 | Payload | json.RawMessage | 事件数据（JSON 格式，对应 `UserUpdate.Payload`） |
 | CreatedAt | time.Time | 创建时间 |
 
@@ -230,8 +232,8 @@ classDiagram
   "updates": [
     {
       "seq": 101,
+      "type": "message",
       "payload": {
-        "type": "new_message",
         "conversation_id": "conv-abc",
         "message_id": 43,
         "sender_id": "user-alice",
@@ -250,8 +252,8 @@ classDiagram
   "updates": [
     {
       "seq": 205,
+      "type": "mark_read",
       "payload": {
-        "type": "conversation.read",
         "conversation_id": "conv-abc",
         "device_id": "phone-001"
       },
@@ -475,8 +477,8 @@ sequenceDiagram
     "updates": [
       {
         "seq": 101,
+        "type": "message",
         "payload": {
-          "type": "new_message",
           "conversation_id": "conv-abc123",
           "message_id": 43,
           "sender_id": "user-alice",
@@ -502,8 +504,8 @@ sequenceDiagram
     "updates": [
       {
         "seq": 205,
+        "type": "mark_read",
         "payload": {
-          "type": "conversation.read",
           "conversation_id": "conv-abc123",
           "device_id": "phone-001",
           "read_up_to_message_id": 43
@@ -545,11 +547,11 @@ sequenceDiagram
     "msg": "",
     "data": {
       "updates": [
-        {"seq": 101, "payload": {"type": "new_message", ...}},
-        {"seq": 102, "payload": {"type": "conversation.read", ...}},
-        {"seq": 103, "payload": {"type": "new_message", ...}},
-        {"seq": 104, "payload": {"type": "user.profile_update", ...}},
-        {"seq": 105, "payload": {"type": "new_message", ...}}
+        {"seq": 101, "type": "message", "payload": {...}},
+        {"seq": 102, "type": "mark_read", "payload": {...}},
+        {"seq": 103, "type": "message", "payload": {...}},
+        {"seq": 104, "type": "conversation", "payload": {...}},
+        {"seq": 105, "type": "message", "payload": {...}}
       ],
       "has_more": false
     }

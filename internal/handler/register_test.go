@@ -216,7 +216,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	assert.NotNil(t, getConvResult.Conversation)
 
 	// 9. DeleteConversation handler (create a temp conv to delete)
-	deleteConvHandler := NewDeleteConversationHandler(deps.Store)
+	deleteConvHandler := NewDeleteConversationHandler(deps.Store, deps.Broker)
 	tempConvID := "conv-delete-reg"
 	createTestConversation(t, s, tempConvID, userID, "dave")
 	deleteReq := &protocol.PackageDataRequest{
@@ -235,7 +235,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	assert.Equal(t, "ok", deleteResult.Status)
 
 	// 10. RestoreConversation handler
-	restoreConvHandler := NewRestoreConversationHandler(deps.Store)
+	restoreConvHandler := NewRestoreConversationHandler(deps.Store, deps.Broker)
 	restoreReq := &protocol.PackageDataRequest{
 		ID:     "req-restore-conv",
 		Method: "restore_conversation",
@@ -271,7 +271,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 		} `json:"message"`
 	}
 	require.NoError(t, json.Unmarshal(sendResp2, &sendResult2))
-	deleteMsgHandler := NewDeleteMessageHandler(deps.Store)
+	deleteMsgHandler := NewDeleteMessageHandler(deps.Store, deps.Broker)
 	deleteMsgReq := &protocol.PackageDataRequest{
 		ID:     "req-delete-msg",
 		Method: "delete_message",
@@ -288,7 +288,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	assert.Equal(t, "ok", deleteMsgResult.Status)
 
 	// 12. MarkAsRead handler
-	markReadHandler := NewMarkAsReadHandler(deps.Store)
+	markReadHandler := NewMarkAsReadHandler(deps.Store, deps.Broker)
 	markReadReq := &protocol.PackageDataRequest{
 		ID:     "req-mark-read",
 		Method: "mark_as_read",
@@ -442,7 +442,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	require.NoError(t, err, "GetConversation Store dependency should be correctly injected")
 
 	// DeleteConversation uses Store.
-	deleteConvHandler := NewDeleteConversationHandler(deps.Store)
+	deleteConvHandler := NewDeleteConversationHandler(deps.Store, deps.Broker)
 	tempConvID := "conv-delete-dep"
 	createTestConversation(t, s, tempConvID, userID, "dave")
 	deleteReq := &protocol.PackageDataRequest{
@@ -456,7 +456,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	require.NoError(t, err, "DeleteConversation Store dependency should be correctly injected")
 
 	// RestoreConversation uses Store.
-	restoreConvHandler := NewRestoreConversationHandler(deps.Store)
+	restoreConvHandler := NewRestoreConversationHandler(deps.Store, deps.Broker)
 	restoreReq := &protocol.PackageDataRequest{
 		ID:     "req-restore-conv-dep",
 		Method: "restore_conversation",
@@ -488,7 +488,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 		} `json:"message"`
 	}
 	require.NoError(t, json.Unmarshal(sendResp2, &sendResult2))
-	deleteMsgHandler := NewDeleteMessageHandler(deps.Store)
+	deleteMsgHandler := NewDeleteMessageHandler(deps.Store, deps.Broker)
 	deleteMsgReq := &protocol.PackageDataRequest{
 		ID:     "req-delete-msg-dep",
 		Method: "delete_message",
@@ -500,7 +500,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	require.NoError(t, err, "DeleteMessage Store dependency should be correctly injected")
 
 	// MarkAsRead uses Store.
-	markReadHandler := NewMarkAsReadHandler(deps.Store)
+	markReadHandler := NewMarkAsReadHandler(deps.Store, deps.Broker)
 	markReadReq := &protocol.PackageDataRequest{
 		ID:     "req-mark-read-dep",
 		Method: "mark_as_read",
@@ -668,9 +668,9 @@ func TestRegisterAll_HandlersInvokable(t *testing.T) {
 		case "get_conversation":
 			handler = NewGetConversationHandler(deps.Store)
 		case "delete_conversation":
-			handler = NewDeleteConversationHandler(deps.Store)
+			handler = NewDeleteConversationHandler(deps.Store, deps.Broker)
 		case "restore_conversation":
-			handler = NewRestoreConversationHandler(deps.Store)
+			handler = NewRestoreConversationHandler(deps.Store, deps.Broker)
 		case "send_message_for_delete":
 			handler = NewSendMessageHandler(deps.Store, deps.Broker)
 		case "delete_message":
@@ -694,12 +694,12 @@ func TestRegisterAll_HandlersInvokable(t *testing.T) {
 				} `json:"message"`
 			}
 			require.NoError(t, json.Unmarshal(tmpResp, &tmpResult))
-			handler = NewDeleteMessageHandler(deps.Store)
+			handler = NewDeleteMessageHandler(deps.Store, deps.Broker)
 			req.Params = mustMarshal(t, map[string]interface{}{
 				"message_id": tmpResult.Message.ID,
 			})
 		case "mark_as_read":
-			handler = NewMarkAsReadHandler(deps.Store)
+			handler = NewMarkAsReadHandler(deps.Store, deps.Broker)
 		}
 
 		resp, err := handler.HandleRequest(ctx, client, req)

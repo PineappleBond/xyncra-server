@@ -119,10 +119,12 @@ func TestSendMessage_HappyPath(t *testing.T) {
 	aliceUpdates, err := s.UserUpdateStore().ListByUser(ctx, "alice", 0, 10)
 	require.NoError(t, err)
 	assert.Len(t, aliceUpdates, 1)
+	assert.Equal(t, protocol.UpdateTypeMessage, aliceUpdates[0].Type, "UserUpdate Type should be 'message'")
 
 	bobUpdates, err := s.UserUpdateStore().ListByUser(ctx, "bob", 0, 10)
 	require.NoError(t, err)
 	assert.Len(t, bobUpdates, 1)
+	assert.Equal(t, protocol.UpdateTypeMessage, bobUpdates[0].Type, "UserUpdate Type should be 'message'")
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +177,17 @@ func TestSendMessage_IdempotentDuplicate(t *testing.T) {
 	msgs, err := s.MessageStore().ListByConversation(ctx, convID, 0, 100)
 	require.NoError(t, err)
 	assert.Len(t, msgs, 1, "should only have one message in database")
+
+	// Verify idempotent hit did NOT create additional UserUpdates (QA-High-3).
+	// After the first send, alice and bob each had exactly 1 UserUpdate.
+	// The duplicate send must not create any more.
+	aliceUpdates, err := s.UserUpdateStore().ListByUser(ctx, "alice", 0, 10)
+	require.NoError(t, err)
+	assert.Len(t, aliceUpdates, 1, "idempotent hit should not create additional UserUpdates for alice")
+
+	bobUpdates, err := s.UserUpdateStore().ListByUser(ctx, "bob", 0, 10)
+	require.NoError(t, err)
+	assert.Len(t, bobUpdates, 1, "idempotent hit should not create additional UserUpdates for bob")
 }
 
 // ---------------------------------------------------------------------------
@@ -363,11 +376,13 @@ func TestSendMessage_UserUpdateSeqIncrement(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, aliceUpdates1, 1)
 	assert.Equal(t, uint32(1), aliceUpdates1[0].Seq)
+	assert.Equal(t, protocol.UpdateTypeMessage, aliceUpdates1[0].Type, "UserUpdate Type should be 'message'")
 
 	bobUpdates1, err := s.UserUpdateStore().ListByUser(ctx, "bob", 0, 10)
 	require.NoError(t, err)
 	assert.Len(t, bobUpdates1, 1)
 	assert.Equal(t, uint32(1), bobUpdates1[0].Seq)
+	assert.Equal(t, protocol.UpdateTypeMessage, bobUpdates1[0].Type, "UserUpdate Type should be 'message'")
 
 	// Send second message
 	params2 := map[string]interface{}{
@@ -385,12 +400,16 @@ func TestSendMessage_UserUpdateSeqIncrement(t *testing.T) {
 	assert.Len(t, aliceUpdates2, 2)
 	assert.Equal(t, uint32(1), aliceUpdates2[0].Seq)
 	assert.Equal(t, uint32(2), aliceUpdates2[1].Seq)
+	assert.Equal(t, protocol.UpdateTypeMessage, aliceUpdates2[0].Type)
+	assert.Equal(t, protocol.UpdateTypeMessage, aliceUpdates2[1].Type)
 
 	bobUpdates2, err := s.UserUpdateStore().ListByUser(ctx, "bob", 0, 10)
 	require.NoError(t, err)
 	assert.Len(t, bobUpdates2, 2)
 	assert.Equal(t, uint32(1), bobUpdates2[0].Seq)
 	assert.Equal(t, uint32(2), bobUpdates2[1].Seq)
+	assert.Equal(t, protocol.UpdateTypeMessage, bobUpdates2[0].Type)
+	assert.Equal(t, protocol.UpdateTypeMessage, bobUpdates2[1].Type)
 }
 
 // ---------------------------------------------------------------------------
@@ -531,8 +550,10 @@ func TestSendMessage_MultipleMessages(t *testing.T) {
 	// Verify seq increments correctly
 	for i, update := range aliceUpdates {
 		assert.Equal(t, uint32(i+1), update.Seq)
+		assert.Equal(t, protocol.UpdateTypeMessage, update.Type, "UserUpdate Type should be 'message'")
 	}
 	for i, update := range bobUpdates {
 		assert.Equal(t, uint32(i+1), update.Seq)
+		assert.Equal(t, protocol.UpdateTypeMessage, update.Type, "UserUpdate Type should be 'message'")
 	}
 }

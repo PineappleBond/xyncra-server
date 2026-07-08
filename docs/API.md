@@ -131,11 +131,12 @@ ws://host:port/ws?user_id={user_id}
 
 单条增量更新记录。
 
-| 字段       | 类型            | 说明                       |
-|------------|-----------------|----------------------------|
-| seq        | uint32          | 单调递增序号               |
-| payload    | json.RawMessage | 更新内容（JSON 编码）      |
-| created_at | time.Time       | 更新生成时间               |
+| 字段       | 类型            | 说明                                               |
+|------------|-----------------|----------------------------------------------------|
+| seq        | uint32          | 单调递增序号                                       |
+| type       | string          | 更新类型（message / delete_message / mark_read / conversation） |
+| payload    | json.RawMessage | 更新内容（JSON 编码）                              |
+| created_at | time.Time       | 更新生成时间                                       |
 
 ---
 
@@ -297,11 +298,13 @@ ws://host:port/ws?user_id={user_id}
   "updates": [
     {
       "seq": 1,
+      "type": "message",
       "payload": { ... },
       "created_at": "2026-07-08T12:00:00Z"
     },
     {
       "seq": 2,
+      "type": "mark_read",
       "payload": { ... },
       "created_at": "2026-07-08T12:01:00Z"
     }
@@ -318,6 +321,27 @@ ws://host:port/ws?user_id={user_id}
 | -100 | invalid params | 参数 JSON 解析失败 |
 | -300 | list updates: ... | 查询更新列表失败 |
 | -300 | get latest seq: ... | 获取最新序号失败 |
+
+### Update 类型
+
+`sync_updates` 和实时推送中的每个 Update 包含 `type` 字段，标识更新类型：
+
+| Type | 说明 | Payload 结构 |
+| ---- | ---- | ------------ |
+| `message` | 新消息 | 完整的 Message 对象 |
+| `delete_message` | 消息被删除 | `{message_id, conversation_id, message_id_seq}` |
+| `mark_read` | 已读位置更新 | `{conversation_id, last_read_message_id}` |
+| `conversation` | 会话状态变更 | `{conversation_id, action}` — action 为 `"delete"` 或 `"restore"` |
+| `gap` | 补空占位 | `null` — 客户端应跳过，仅更新 local_max_seq |
+
+**处理策略**：
+
+- `message`：保存到本地数据库，显示在会话中
+- `delete_message`：从本地数据库删除对应消息
+- `mark_read`：更新本地已读位置（仅操作用户的其他设备收到）
+- `conversation`：更新本地会话状态（软删除或恢复）
+- `gap`：仅递增 `local_max_seq`，不做其他处理
+- 未知类型：跳过（向前兼容，未来可能新增更多类型）
 
 ---
 
@@ -955,10 +979,11 @@ ws://host:port/ws?user_id={user_id}
 
 ### UserUpdate
 
-| 字段      | 类型      | 说明                                     |
-|-----------|-----------|------------------------------------------|
-| ID        | string    | 更新记录唯一 ID（UUID，主键）            |
-| UserID    | string    | 所属用户 ID                              |
-| Seq       | uint32    | 单调递增序号，用于增量同步排序 (D-009)   |
-| Payload   | []byte    | 更新内容（JSON 编码的字节数组）          |
-| CreatedAt | time.Time | 创建时间                                 |
+| 字段      | 类型      | 说明                                                  |
+|-----------|-----------|-------------------------------------------------------|
+| ID        | string    | 更新记录唯一 ID（UUID，主键）                         |
+| UserID    | string    | 所属用户 ID                                           |
+| Seq       | uint32    | 单调递增序号，用于增量同步排序 (D-009)                |
+| Type      | string    | 更新类型（message / delete_message / mark_read / conversation） |
+| Payload   | []byte    | 更新内容（JSON 编码的字节数组）                       |
+| CreatedAt | time.Time | 创建时间                                              |

@@ -17,6 +17,15 @@ const (
 	PackageTypeUpdates
 )
 
+// Update type constants for UserUpdate.Type and PackageDataUpdate.Type.
+const (
+	UpdateTypeMessage       = "message"        // New message notification
+	UpdateTypeDeleteMessage = "delete_message" // Message deletion
+	UpdateTypeMarkRead      = "mark_read"      // Read cursor update
+	UpdateTypeConversation  = "conversation"   // Conversation state change (delete/restore)
+	UpdateTypeGap           = "gap"            // Synthetic gap filler (runtime only, never persisted)
+)
+
 // Package is the top-level message envelope for the WebSocket protocol.
 type Package struct {
 	// Version is the protocol version. Defaults to 1 when zero-valued.
@@ -67,6 +76,8 @@ type PackageDataUpdates struct {
 type PackageDataUpdate struct {
 	// Seq is a monotonically increasing sequence number for ordering.
 	Seq uint32 `json:"seq"`
+	// Type identifies the kind of update (e.g. "message", "delete_message").
+	Type string `json:"type"`
 	// Payload contains the update data as JSON.
 	Payload json.RawMessage `json:"payload"`
 	// CreatedAt is the timestamp when this update was generated.

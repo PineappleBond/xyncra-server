@@ -399,3 +399,111 @@ func TestUserUpdateStore_CleanupExpired_NoExpiredRecords(t *testing.T) {
 		assert.Len(t, got, 2, "all records should still exist")
 	})
 }
+
+// ---------------------------------------------------------------------------
+// ListByUserRange
+// ---------------------------------------------------------------------------
+
+// TestUserUpdateStore_ListByUserRange_HappyPath verifies that ListByUserRange
+// returns updates with Seq in the range (afterSeq, maxSeq] ordered by Seq ASC.
+func TestUserUpdateStore_ListByUserRange_HappyPath(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		// Insert updates with seqs 1..10 for alice.
+		createUserUpdates(t, s, ctx, "alice", "uu-range", 10)
+
+		// Query range (3, 7] — should return seqs 4, 5, 6, 7.
+		got, err := s.UserUpdates.ListByUserRange(ctx, "alice", 3, 7)
+		require.NoError(t, err, "ListByUserRange should succeed")
+		require.Len(t, got, 4, "should return 4 updates (seqs 4,5,6,7)")
+		assert.Equal(t, uint32(4), got[0].Seq, "first update should have Seq=4")
+		assert.Equal(t, uint32(7), got[3].Seq, "last update should have Seq=7")
+
+		// Verify ASC ordering.
+		for i := 1; i < len(got); i++ {
+			assert.Greater(t, got[i].Seq, got[i-1].Seq, "results should be in ascending seq order")
+		}
+	})
+}
+
+// TestUserUpdateStore_ListByUserRange_EmptyRange verifies that afterSeq >= maxSeq
+// returns nil without an error.
+func TestUserUpdateStore_ListByUserRange_EmptyRange(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		createUserUpdates(t, s, ctx, "alice", "uu-range-empty", 10)
+
+		// afterSeq >= maxSeq should return nil.
+		got, err := s.UserUpdates.ListByUserRange(ctx, "alice", 5, 5)
+		require.NoError(t, err, "ListByUserRange with afterSeq==maxSeq should not error")
+		assert.Nil(t, got, "afterSeq==maxSeq should return nil")
+
+		got2, err := s.UserUpdates.ListByUserRange(ctx, "alice", 7, 3)
+		require.NoError(t, err, "ListByUserRange with afterSeq>maxSeq should not error")
+		assert.Nil(t, got2, "afterSeq>maxSeq should return nil")
+	})
+}
+
+// TestUserUpdateStore_ListByUserRange_NonExistentUser verifies that
+// ListByUserRange returns an empty slice (not an error) for a user that has
+// no updates.
+func TestUserUpdateStore_ListByUserRange_NonExistentUser(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		got, err := s.UserUpdates.ListByUserRange(ctx, "nonexistent-user", 0, 100)
+		require.NoError(t, err, "ListByUserRange for non-existent user should not error")
+		assert.Empty(t, got, "non-existent user should have no updates in range")
+	})
+}
+
+// TestUserUpdateStore_ListByUserRange_BeyondLatestSeq verifies that querying
+// a range beyond the actual latest seq returns only the available updates.
+func TestUserUpdateStore_ListByUserRange_BeyondLatestSeq(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		// Insert 3 updates (seqs 1, 2, 3).
+		createUserUpdates(t, s, ctx, "alice", "uu-range-beyond", 3)
+
+		// Query range (0, 100] — only seqs 1, 2, 3 exist.
+		got, err := s.UserUpdates.ListByUserRange(ctx, "alice", 0, 100)
+		require.NoError(t, err, "ListByUserRange should succeed")
+		assert.Len(t, got, 3, "should return only the 3 existing updates")
+		assert.Equal(t, uint32(3), got[2].Seq, "last update should have Seq=3")
+	})
+}
+
+// TestUserUpdateStore_ListByUserRange_WithGaps verifies that ListByUserRange
+// correctly returns only existing updates when there are gaps in the seq
+// sequence. The gap-filling is done in the handler, not the store.
+func TestUserUpdateStore_ListByUserRange_WithGaps(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		// Insert updates with seqs 1, 3, 5, 7 (gaps at 2, 4, 6).
+		updates := []model.UserUpdate{
+			{ID: "uu-range-gap-1", UserID: "alice", Seq: 1, Payload: []byte(`{}`), CreatedAt: testNow},
+			{ID: "uu-range-gap-3", UserID: "alice", Seq: 3, Payload: []byte(`{}`), CreatedAt: testNow},
+			{ID: "uu-range-gap-5", UserID: "alice", Seq: 5, Payload: []byte(`{}`), CreatedAt: testNow},
+			{ID: "uu-range-gap-7", UserID: "alice", Seq: 7, Payload: []byte(`{}`), CreatedAt: testNow},
+		}
+		require.NoError(t, s.UserUpdates.Create(ctx, updates), "creating updates should succeed")
+
+		// Query range (0, 7] — should return only seqs 1, 3, 5, 7.
+		got, err := s.UserUpdates.ListByUserRange(ctx, "alice", 0, 7)
+		require.NoError(t, err, "ListByUserRange should succeed")
+		require.Len(t, got, 4, "should return 4 existing updates (gaps not filled at store level)")
+		assert.Equal(t, uint32(1), got[0].Seq)
+		assert.Equal(t, uint32(3), got[1].Seq)
+		assert.Equal(t, uint32(5), got[2].Seq)
+		assert.Equal(t, uint32(7), got[3].Seq)
+	})
+}

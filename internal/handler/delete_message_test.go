@@ -22,7 +22,7 @@ import (
 
 func TestDeleteMessage_HappyPath(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteMessageHandler(s)
+	handler := NewDeleteMessageHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-del-msg-happy-1"
@@ -53,6 +53,24 @@ func TestDeleteMessage_HappyPath(t *testing.T) {
 	var resp deleteMessageResponse
 	require.NoError(t, json.Unmarshal(data, &resp))
 	assert.Equal(t, "ok", resp.Status)
+
+	// Verify UserUpdates created for ALL conversation members.
+	aliceUpdates, err := s.UserUpdateStore().ListByUser(ctx, "alice", 0, 10)
+	require.NoError(t, err)
+	assert.Len(t, aliceUpdates, 1, "alice should have 1 UserUpdate")
+	assert.Equal(t, protocol.UpdateTypeDeleteMessage, aliceUpdates[0].Type, "Type should be 'delete_message'")
+
+	// Verify payload contains message_id, conversation_id, and message_id_seq.
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(aliceUpdates[0].Payload, &payload))
+	assert.Equal(t, msgID, payload["message_id"])
+	assert.Equal(t, convID, payload["conversation_id"])
+	assert.Equal(t, float64(1), payload["message_id_seq"])
+
+	bobUpdates, err := s.UserUpdateStore().ListByUser(ctx, "bob", 0, 10)
+	require.NoError(t, err)
+	assert.Len(t, bobUpdates, 1, "bob should also have 1 UserUpdate (all members)")
+	assert.Equal(t, protocol.UpdateTypeDeleteMessage, bobUpdates[0].Type, "Type should be 'delete_message'")
 }
 
 // ---------------------------------------------------------------------------
@@ -61,7 +79,7 @@ func TestDeleteMessage_HappyPath(t *testing.T) {
 
 func TestDeleteMessage_MissingMessageID(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteMessageHandler(s)
+	handler := NewDeleteMessageHandler(s, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -85,7 +103,7 @@ func TestDeleteMessage_MissingMessageID(t *testing.T) {
 
 func TestDeleteMessage_NotFound(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteMessageHandler(s)
+	handler := NewDeleteMessageHandler(s, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -109,7 +127,7 @@ func TestDeleteMessage_NotFound(t *testing.T) {
 
 func TestDeleteMessage_NotMember(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteMessageHandler(s)
+	handler := NewDeleteMessageHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-del-msg-notmember-1"
@@ -148,7 +166,7 @@ func TestDeleteMessage_NotMember(t *testing.T) {
 
 func TestDeleteMessage_NotSender(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteMessageHandler(s)
+	handler := NewDeleteMessageHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-del-msg-notsender-1"
@@ -188,7 +206,7 @@ func TestDeleteMessage_NotSender(t *testing.T) {
 
 func TestDeleteMessage_DeletedNotVisible(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteMessageHandler(s)
+	handler := NewDeleteMessageHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-del-msg-notvisible-1"

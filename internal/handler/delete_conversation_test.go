@@ -18,7 +18,7 @@ import (
 
 func TestDeleteConversation_HappyPath(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteConversationHandler(s)
+	handler := NewDeleteConversationHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-delete-happy-1"
@@ -39,6 +39,23 @@ func TestDeleteConversation_HappyPath(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &resp))
 	assert.Equal(t, "ok", resp.Status)
 	assert.Equal(t, int64(3), resp.DeletedMessageCount, "should have deleted 3 messages")
+
+	// Verify UserUpdates created for ALL conversation members.
+	aliceUpdates, err := s.UserUpdateStore().ListByUser(ctx, "alice", 0, 10)
+	require.NoError(t, err)
+	assert.Len(t, aliceUpdates, 1, "alice should have 1 UserUpdate")
+	assert.Equal(t, protocol.UpdateTypeConversation, aliceUpdates[0].Type, "Type should be 'conversation'")
+
+	// Verify payload contains conversation_id and action "delete".
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(aliceUpdates[0].Payload, &payload))
+	assert.Equal(t, convID, payload["conversation_id"])
+	assert.Equal(t, "delete", payload["action"])
+
+	bobUpdates, err := s.UserUpdateStore().ListByUser(ctx, "bob", 0, 10)
+	require.NoError(t, err)
+	assert.Len(t, bobUpdates, 1, "bob should also have 1 UserUpdate (all members)")
+	assert.Equal(t, protocol.UpdateTypeConversation, bobUpdates[0].Type, "Type should be 'conversation'")
 }
 
 // ---------------------------------------------------------------------------
@@ -47,7 +64,7 @@ func TestDeleteConversation_HappyPath(t *testing.T) {
 
 func TestDeleteConversation_MissingConversationID(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteConversationHandler(s)
+	handler := NewDeleteConversationHandler(s, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -71,7 +88,7 @@ func TestDeleteConversation_MissingConversationID(t *testing.T) {
 
 func TestDeleteConversation_NotFound(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteConversationHandler(s)
+	handler := NewDeleteConversationHandler(s, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -95,7 +112,7 @@ func TestDeleteConversation_NotFound(t *testing.T) {
 
 func TestDeleteConversation_NotMember(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteConversationHandler(s)
+	handler := NewDeleteConversationHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-delete-notmember-1"
@@ -122,7 +139,7 @@ func TestDeleteConversation_NotMember(t *testing.T) {
 
 func TestDeleteConversation_CascadeDelete(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteConversationHandler(s)
+	handler := NewDeleteConversationHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-delete-cascade-1"
@@ -155,7 +172,7 @@ func TestDeleteConversation_CascadeDelete(t *testing.T) {
 
 func TestDeleteConversation_DoubleDelete(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteConversationHandler(s)
+	handler := NewDeleteConversationHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-delete-double-1"

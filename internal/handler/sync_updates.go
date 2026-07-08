@@ -7,6 +7,7 @@ import (
 
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
+	"github.com/PineappleBond/xyncra-server/internal/store/model"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
 
@@ -51,9 +52,10 @@ func NewSyncUpdatesHandler(store store.StoreAPI) *syncUpdatesHandler {
 }
 
 // HandleRequest implements MethodHandler. It processes a "sync_updates" RPC
-// call: parses parameters, normalises the limit, fetches incremental updates
-// via the limit+1 probe technique, converts model records to protocol
-// updates, and returns the paginated response.
+// call: parses parameters, normalises the limit, fetches the latest seq,
+// computes the expected seq range, queries actual updates within that range,
+// and fills any missing seq positions with synthetic "gap" updates so the
+// client receives a contiguous sequence (see D-029).
 func (h *syncUpdatesHandler) HandleRequest(ctx context.Context, client *server.Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
 	// 1. Parse params.
 	var params syncUpdatesParams
@@ -72,37 +74,64 @@ func (h *syncUpdatesHandler) HandleRequest(ctx context.Context, client *server.C
 
 	userID := client.UserID()
 
-	// 3. Fetch updates (limit+1 probe to detect has_more).
-	updates, err := h.store.UserUpdateStore().ListByUser(ctx, userID, params.AfterSeq, limit+1)
-	if err != nil {
-		return nil, protocol.NewInternalError(fmt.Errorf("list updates: %w", err))
-	}
-
-	// 4. Determine has_more and truncate to the requested limit.
-	hasMore := len(updates) > limit
-	if hasMore {
-		updates = updates[:limit]
-	}
-
-	// 5. Convert []*model.UserUpdate -> []protocol.PackageDataUpdate.
-	pkgUpdates := make([]protocol.PackageDataUpdate, len(updates))
-	for i, u := range updates {
-		pkgUpdates[i] = protocol.PackageDataUpdate{
-			Seq:       u.Seq,
-			Payload:   json.RawMessage(u.Payload),
-			CreatedAt: u.CreatedAt,
-		}
-	}
-
-	// 6. Fetch the latest seq for the user.
+	// 3. Fetch the latest seq for the user first (moved earlier for gap-filling).
 	latestSeq, err := h.store.UserUpdateStore().GetLatestSeq(ctx, userID)
 	if err != nil {
 		return nil, protocol.NewInternalError(fmt.Errorf("get latest seq: %w", err))
 	}
 
-	// 7. Return response.
+	// 4. Early exit: no new updates.
+	if latestSeq <= params.AfterSeq {
+		return marshalResponse(syncUpdatesResponse{
+			Updates:   []protocol.PackageDataUpdate{},
+			HasMore:   false,
+			LatestSeq: latestSeq,
+		})
+	}
+
+	// 5. Compute expected end of the range.
+	expectedEnd := params.AfterSeq + uint32(limit)
+	if expectedEnd > latestSeq {
+		expectedEnd = latestSeq
+	}
+
+	// 6. Query actual updates within the expected range (afterSeq, expectedEnd].
+	actualUpdates, err := h.store.UserUpdateStore().ListByUserRange(ctx, userID, params.AfterSeq, expectedEnd)
+	if err != nil {
+		return nil, protocol.NewInternalError(fmt.Errorf("list updates: %w", err))
+	}
+
+	// 7. Build seq -> update lookup map.
+	actualMap := make(map[uint32]*model.UserUpdate, len(actualUpdates))
+	for _, u := range actualUpdates {
+		actualMap[u.Seq] = u
+	}
+
+	// 8. Build result, filling gaps for any missing seq positions.
+	result := make([]protocol.PackageDataUpdate, 0, int(expectedEnd-params.AfterSeq))
+	for seq := params.AfterSeq + 1; seq <= expectedEnd; seq++ {
+		if u, ok := actualMap[seq]; ok {
+			result = append(result, protocol.PackageDataUpdate{
+				Seq:       u.Seq,
+				Type:      u.Type,
+				Payload:   json.RawMessage(u.Payload),
+				CreatedAt: u.CreatedAt,
+			})
+		} else {
+			result = append(result, protocol.PackageDataUpdate{
+				Seq:     seq,
+				Type:    protocol.UpdateTypeGap,
+				Payload: nil,
+			})
+		}
+	}
+
+	// 9. has_more: true when the requested window extends beyond what we returned.
+	hasMore := params.AfterSeq+uint32(limit) < latestSeq
+
+	// 10. Return response.
 	return marshalResponse(syncUpdatesResponse{
-		Updates:   pkgUpdates,
+		Updates:   result,
 		HasMore:   hasMore,
 		LatestSeq: latestSeq,
 	})

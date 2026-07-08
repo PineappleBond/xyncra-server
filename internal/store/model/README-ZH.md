@@ -49,6 +49,7 @@ erDiagram
         string ID PK
         string UserID
         uint32 Seq
+        string Type
         bytes Payload
         datetime CreatedAt
     }
@@ -108,6 +109,7 @@ erDiagram
 | ID | string(36) | 主键，UUID格式，更新记录唯一标识 |
 | UserID | string(64) | 用户ID |
 | Seq | uint32 | 序列号（用于排序和同步） |
+| Type | string(20) | 更新类型：message / delete_message / mark_read / conversation |
 | Payload | bytea/bytes | 更新内容（通常是 JSON 或 Protobuf 编码） |
 | CreatedAt | datetime | 创建时间 |
 

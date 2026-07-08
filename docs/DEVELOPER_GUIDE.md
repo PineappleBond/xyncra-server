@@ -517,6 +517,64 @@ taskHandler.Register(mq.TypeMyNewTask,
 
 ---
 
+## 如何添加新的 Update 类型
+
+当需要新增一种 Update 类型（如 `reaction`、`typing` 等）时，按以下步骤操作：
+
+### 1. 定义常量
+
+在 `pkg/protocol/protocol.go` 中添加常量：
+
+```go
+const UpdateTypeReaction = "reaction"
+```
+
+### 2. 定义 Payload 结构
+
+在对应的 handler 文件中定义 payload 结构体：
+
+```go
+type reactionUpdatePayload struct {
+    ConversationID string `json:"conversation_id"`
+    MessageID      uint32 `json:"message_id"`
+    Emoji          string `json:"emoji"`
+}
+```
+
+### 3. 在 Handler 中创建 UserUpdate
+
+在 handler 的 `HandleRequest` 方法中（操作成功后）：
+
+1. 确定影响范围：只为操作用户创建，还是为所有会话成员创建？
+   - 仅影响自己的操作（如 `mark_read`）→ 只为操作用户创建
+   - 影响所有人的操作（如 `delete`）→ 为所有成员创建
+2. 为每个受影响的用户分配 seq：`GetLatestSeq(userID) + 1`
+3. 构建 `model.UserUpdate`，设置 `Type: protocol.UpdateTypeReaction`
+4. 调用 `UserUpdateStore().Create(ctx, updates)`
+
+### 4. MQ 广播
+
+构建 `sendMessageRecipient` 列表，通过 `Broker.Enqueue` 入队（fire-and-forget）。
+复用现有的 `TypeSendMessage` 任务类型。
+
+### 5. 更新测试
+
+- handler 测试：验证 UserUpdate 被创建，Type 正确，Payload 正确
+- sync_updates 测试：验证新类型的 Update 能通过 sync_updates 返回
+- E2E 测试：验证端到端流程
+
+### 6. 更新 API 文档
+
+在 `docs/API.md` 的 sync_updates 章节补充新类型的 payload 结构。
+
+### 设计原则
+
+- 所有操作共享用户级 seq 空间（D-028）
+- MQ 广播失败不影响数据完整性（D-007）
+- gap 由服务器运行时填充（D-029）
+
+---
+
 ## 测试规范
 
 ### Handler 单元测试

@@ -5,7 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
@@ -29,6 +34,14 @@ type deleteConversationResponse struct {
 	DeletedMessageCount int64  `json:"deleted_message_count"` // cascade-deleted message count
 }
 
+// deleteConversationUpdatePayload is the payload stored inside the
+// delete_conversation UserUpdate. It carries the conversation ID and the
+// action performed so that clients can update local state.
+type deleteConversationUpdatePayload struct {
+	ConversationID string `json:"conversation_id"`
+	Action         string `json:"action"` // "delete"
+}
+
 // --------------------------------------------------------------------------
 // Handler
 // --------------------------------------------------------------------------
@@ -36,15 +49,18 @@ type deleteConversationResponse struct {
 // deleteConversationHandler implements MethodHandler for the "delete_conversation" method.
 // It performs a cascade soft delete on the conversation and all its messages (D-013).
 //
-// The handler is stateless (only holds an immutable dependency reference) and
+// The handler is stateless (only holds immutable dependency references) and
 // therefore safe for concurrent use.
 type deleteConversationHandler struct {
-	store store.StoreAPI
+	store  store.StoreAPI
+	broker mq.Broker
 }
 
-// NewDeleteConversationHandler creates a deleteConversationHandler backed by the given Store.
-func NewDeleteConversationHandler(store store.StoreAPI) *deleteConversationHandler {
-	return &deleteConversationHandler{store: store}
+// NewDeleteConversationHandler creates a deleteConversationHandler backed by the given Store
+// and Broker. The broker is used to enqueue a fire-and-forget MQ task that
+// pushes the delete_conversation update to all conversation members' online devices.
+func NewDeleteConversationHandler(store store.StoreAPI, broker mq.Broker) *deleteConversationHandler {
+	return &deleteConversationHandler{store: store, broker: broker}
 }
 
 // HandleRequest implements MethodHandler. It processes a "delete_conversation" RPC
@@ -112,9 +128,89 @@ func (h *deleteConversationHandler) HandleRequest(ctx context.Context, client *s
 		return nil, protocol.NewInternalError(fmt.Errorf("delete conversation: %w", err))
 	}
 
-	// 6. Return response.
+	// 6. Create UserUpdates for ALL conversation members (D-013: cascade
+	// delete affects all members' devices) and broadcast via MQ.
+	updatePayload, _ := json.Marshal(deleteConversationUpdatePayload{
+		ConversationID: convID,
+		Action:         "delete",
+	})
+
+	now := time.Now()
+	updates := make([]model.UserUpdate, 0, len(members))
+	recipients := make([]sendMessageRecipient, 0, len(members))
+
+	for _, memberID := range members {
+		latestSeq, err := h.store.UserUpdateStore().GetLatestSeq(ctx, memberID)
+		if err != nil {
+			log.Printf("delete_conversation: failed to get latest seq for user %s (skipping UserUpdate): %v", memberID, err)
+			continue
+		}
+		newSeq := latestSeq + 1
+
+		updates = append(updates, model.UserUpdate{
+			ID:        uuid.New().String(),
+			UserID:    memberID,
+			Seq:       newSeq,
+			Type:      protocol.UpdateTypeConversation,
+			Payload:   updatePayload,
+			CreatedAt: now,
+		})
+
+		recipients = append(recipients, sendMessageRecipient{
+			UserID: memberID,
+			Updates: []protocol.PackageDataUpdate{
+				{
+					Seq:       newSeq,
+					Type:      protocol.UpdateTypeConversation,
+					Payload:   updatePayload,
+					CreatedAt: now,
+				},
+			},
+		})
+	}
+
+	if err := h.store.UserUpdateStore().Create(ctx, updates); err != nil {
+		// UserUpdate creation failure does not affect the main flow (D-007
+		// fire-and-forget spirit). The conversation was already soft-deleted.
+		log.Printf("delete_conversation: failed to create UserUpdates: %v", err)
+	}
+
+	// 7. MQ broadcast to all members' online devices (fire-and-forget, D-007).
+	broadcastDeleteConversationUpdates(h.broker, recipients)
+
+	// 8. Return response.
 	return marshalResponse(deleteConversationResponse{
 		Status:              "ok",
 		DeletedMessageCount: deletedMessageCount,
 	})
+}
+
+// broadcastDeleteConversationUpdates enqueues a fire-and-forget MQ task to push
+// the delete_conversation update to all conversation members' online devices. It
+// reuses the sendMessageRecipient / sendMessageTaskPayload structures and the
+// TypeSendMessage task type because they are sufficiently generic.
+//
+// Errors are logged but never returned (D-007: MQ failures do not affect data
+// integrity — the update was already persisted and will be delivered via
+// sync_updates on the next pull).
+func broadcastDeleteConversationUpdates(broker mq.Broker, recipients []sendMessageRecipient) {
+	if broker == nil {
+		return
+	}
+
+	taskPayload := sendMessageTaskPayload{Recipients: recipients}
+
+	payloadBytes, err := json.Marshal(taskPayload)
+	if err != nil {
+		log.Printf("delete_conversation: failed to marshal MQ payload: %v", err)
+		return
+	}
+
+	task := &mq.Task{
+		Type:    mq.TypeSendMessage,
+		Payload: payloadBytes,
+	}
+	if _, err := broker.Enqueue(context.Background(), task); err != nil {
+		log.Printf("delete_conversation: MQ enqueue failed (fire-and-forget): %v", err)
+	}
 }

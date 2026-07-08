@@ -407,6 +407,7 @@ func TestBasicMessageDelivery(t *testing.T) {
 	bobUpdates := waitForUpdate(t, bobConn, 10*time.Second)
 	require.Len(t, bobUpdates.Updates, 1, "bob should receive exactly 1 update")
 	assert.Equal(t, uint32(1), bobUpdates.Updates[0].Seq, "bob's seq should be 1 (D-008)")
+	assert.Equal(t, protocol.UpdateTypeMessage, bobUpdates.Updates[0].Type, "update Type should be 'message' (D-028)")
 
 	var bobPayload model.Message
 	require.NoError(t, json.Unmarshal(bobUpdates.Updates[0].Payload, &bobPayload),
@@ -416,6 +417,7 @@ func TestBasicMessageDelivery(t *testing.T) {
 	// 6. Alice also receives the push (C-10: fan-out includes sender).
 	aliceUpdates := waitForUpdate(t, aliceConn, 10*time.Second)
 	require.Len(t, aliceUpdates.Updates, 1, "alice should also receive 1 update (C-10)")
+	assert.Equal(t, protocol.UpdateTypeMessage, aliceUpdates.Updates[0].Type, "alice update Type should be 'message' (D-028)")
 
 	// 7. DB verification.
 	ctx := context.Background()
@@ -426,6 +428,11 @@ func TestBasicMessageDelivery(t *testing.T) {
 	var updateCount int64
 	env.db.DB().WithContext(ctx).Model(&model.UserUpdate{}).Where("user_id IN ?", []string{"alice", "bob"}).Count(&updateCount)
 	assert.Equal(t, int64(2), updateCount, "should have 2 user_updates (one per member) (D-007)")
+
+	// Verify UserUpdate Type field.
+	var typedUpdateCount int64
+	env.db.DB().WithContext(ctx).Model(&model.UserUpdate{}).Where("user_id IN ? AND type = ?", []string{"alice", "bob"}, protocol.UpdateTypeMessage).Count(&typedUpdateCount)
+	assert.Equal(t, int64(2), typedUpdateCount, "both user_updates should have Type='message' (D-028)")
 
 	var updatedConv model.Conversation
 	require.NoError(t, env.db.DB().WithContext(ctx).Where("id = ?", conv.ID).First(&updatedConv).Error)
@@ -500,6 +507,7 @@ func TestOfflineMessageSync(t *testing.T) {
 
 	if len(syncData.Updates) > 0 {
 		assert.Equal(t, uint32(1), syncData.Updates[0].Seq, "update seq should be 1")
+		assert.Equal(t, protocol.UpdateTypeMessage, syncData.Updates[0].Type, "update Type should be 'message' (D-028)")
 		var payload model.Message
 		require.NoError(t, json.Unmarshal(syncData.Updates[0].Payload, &payload))
 		assert.Equal(t, "Are you there?", payload.Content, "payload content should match")
@@ -671,6 +679,12 @@ func TestMessageIdempotency(t *testing.T) {
 	env.db.DB().WithContext(ctx).Model(&model.UserUpdate{}).
 		Where("user_id IN ?", []string{"alice", "bob"}).Count(&updateCount)
 	assert.Equal(t, int64(2), updateCount, "should have exactly 2 user_updates (D-006)")
+
+	// Verify UserUpdate Type field.
+	var typedUpdateCount int64
+	env.db.DB().WithContext(ctx).Model(&model.UserUpdate{}).
+		Where("user_id IN ? AND type = ?", []string{"alice", "bob"}, protocol.UpdateTypeMessage).Count(&typedUpdateCount)
+	assert.Equal(t, int64(2), typedUpdateCount, "both user_updates should have Type='message' (D-028)")
 }
 
 // ---------------------------------------------------------------------------
@@ -778,7 +792,7 @@ func TestNonMemberSendRejected(t *testing.T) {
 	})
 
 	resp := readResponse(t, eveConn, 5*time.Second)
-	assert.Equal(t, protocol.ResponseCodeError, resp.Code,
+	assert.Equal(t, protocol.ResponseCodePermissionDenied, resp.Code,
 		"non-member send should be rejected")
 	assert.True(t, strings.Contains(strings.ToLower(resp.Msg), "not a member"),
 		"error message should mention 'not a member', got: %s", resp.Msg)
@@ -805,7 +819,7 @@ func TestSendToNonexistentConversation(t *testing.T) {
 	})
 
 	resp := readResponse(t, aliceConn, 5*time.Second)
-	assert.Equal(t, protocol.ResponseCodeError, resp.Code,
+	assert.Equal(t, protocol.ResponseCodeNotFound, resp.Code,
 		"send to nonexistent conversation should fail")
 	assert.True(t, strings.Contains(strings.ToLower(resp.Msg), "not found"),
 		"error message should mention 'not found', got: %s", resp.Msg)
@@ -859,7 +873,7 @@ func TestSendMessageValidation(t *testing.T) {
 			sendRequest(t, aliceConn, "req-1", "send_message", tc.params)
 
 			resp := readResponse(t, aliceConn, 5*time.Second)
-			assert.Equal(t, protocol.ResponseCodeError, resp.Code,
+			assert.Equal(t, protocol.ResponseCodeValidationError, resp.Code,
 				"validation should fail for %s", tc.name)
 			assert.True(t, strings.Contains(strings.ToLower(resp.Msg), tc.expect),
 				"error message should mention %q, got: %s", tc.expect, resp.Msg)
@@ -1229,7 +1243,7 @@ func TestDeleteAndRestoreConversationE2E(t *testing.T) {
 		"conversation_id": conv.ID,
 	})
 	errResp := readResponse(t, aliceConn, 5*time.Second)
-	assert.Equal(t, protocol.ResponseCodeError, errResp.Code, "get_messages should fail after delete")
+	assert.Equal(t, protocol.ResponseCodeNotFound, errResp.Code, "get_messages should fail after delete")
 	assert.True(t, strings.Contains(strings.ToLower(errResp.Msg), "not found"),
 		"error should mention 'not found', got: %s", errResp.Msg)
 
@@ -1365,7 +1379,7 @@ func TestNonMemberOperationsRejectedE2E(t *testing.T) {
 		"conversation_id": conv.ID,
 	})
 	getResp := readResponse(t, eveConn, 5*time.Second)
-	assert.Equal(t, protocol.ResponseCodeError, getResp.Code,
+	assert.Equal(t, protocol.ResponseCodePermissionDenied, getResp.Code,
 		"eve get_conversation should be rejected")
 	assert.True(t, strings.Contains(strings.ToLower(getResp.Msg), "not a member"),
 		"error should mention 'not a member', got: %s", getResp.Msg)
@@ -1375,7 +1389,7 @@ func TestNonMemberOperationsRejectedE2E(t *testing.T) {
 		"conversation_id": conv.ID,
 	})
 	delResp := readResponse(t, eveConn, 5*time.Second)
-	assert.Equal(t, protocol.ResponseCodeError, delResp.Code,
+	assert.Equal(t, protocol.ResponseCodePermissionDenied, delResp.Code,
 		"eve delete_conversation should be rejected")
 	assert.True(t, strings.Contains(strings.ToLower(delResp.Msg), "not a member"),
 		"error should mention 'not a member', got: %s", delResp.Msg)
@@ -1385,7 +1399,7 @@ func TestNonMemberOperationsRejectedE2E(t *testing.T) {
 		"conversation_id": conv.ID,
 	})
 	markResp := readResponse(t, eveConn, 5*time.Second)
-	assert.Equal(t, protocol.ResponseCodeError, markResp.Code,
+	assert.Equal(t, protocol.ResponseCodePermissionDenied, markResp.Code,
 		"eve mark_as_read should be rejected")
 	assert.True(t, strings.Contains(strings.ToLower(markResp.Msg), "not a member"),
 		"error should mention 'not a member', got: %s", markResp.Msg)
@@ -1520,7 +1534,7 @@ func TestCreateConversationE2E(t *testing.T) {
 
 	resp4 := readResponse(t, aliceConn, 5*time.Second)
 	require.Equal(t, "create-4", resp4.ID, "response ID should match (CC-4)")
-	assert.Equal(t, protocol.ResponseCodeError, resp4.Code,
+	assert.Equal(t, protocol.ResponseCodeValidationError, resp4.Code,
 		"missing user_id should fail (CC-4)")
 	assert.True(t, strings.Contains(strings.ToLower(resp4.Msg), "user_id"),
 		"error should mention 'user_id', got: %s (CC-4)", resp4.Msg)
@@ -1534,7 +1548,7 @@ func TestCreateConversationE2E(t *testing.T) {
 
 	resp5 := readResponse(t, aliceConn, 5*time.Second)
 	require.Equal(t, "create-5", resp5.ID, "response ID should match (CC-5)")
-	assert.Equal(t, protocol.ResponseCodeError, resp5.Code,
+	assert.Equal(t, protocol.ResponseCodeValidationError, resp5.Code,
 		"self-conversation should fail (CC-5)")
 	assert.True(t, strings.Contains(strings.ToLower(resp5.Msg), "yourself"),
 		"error should mention 'yourself', got: %s (CC-5)", resp5.Msg)
@@ -2213,7 +2227,7 @@ func TestGetMessagesE2E(t *testing.T) {
 		})
 		resp := readResponse(t, eveConn, 5*time.Second)
 		require.Equal(t, "get-msgs-5", resp.ID, "response ID should match (GM-E5)")
-		assert.Equal(t, protocol.ResponseCodeError, resp.Code,
+		assert.Equal(t, protocol.ResponseCodePermissionDenied, resp.Code,
 			"non-member get_messages should be rejected (C-3)")
 		assert.True(t, strings.Contains(strings.ToLower(resp.Msg), "not a member"),
 			"error should mention 'not a member', got: %s (C-3)", resp.Msg)
@@ -2236,7 +2250,7 @@ func TestGetMessagesE2E(t *testing.T) {
 		})
 		resp := readResponse(t, aliceConn, 5*time.Second)
 		require.Equal(t, "get-msgs-6", resp.ID, "response ID should match (GM-E6)")
-		assert.Equal(t, protocol.ResponseCodeError, resp.Code,
+		assert.Equal(t, protocol.ResponseCodeNotFound, resp.Code,
 			"get_messages for non-existent conversation should fail")
 		assert.True(t, strings.Contains(strings.ToLower(resp.Msg), "not found"),
 			"error should mention 'not found', got: %s", resp.Msg)
@@ -2692,7 +2706,7 @@ func TestSearchMessagesE2E(t *testing.T) {
 		})
 		resp := readResponse(t, eveConn, 5*time.Second)
 		require.Equal(t, "search-6", resp.ID, "response ID should match (SM-E6)")
-		assert.Equal(t, protocol.ResponseCodeError, resp.Code,
+		assert.Equal(t, protocol.ResponseCodePermissionDenied, resp.Code,
 			"non-member search_messages should be rejected (C-3)")
 		assert.True(t, strings.Contains(strings.ToLower(resp.Msg), "not a member"),
 			"error should mention 'not a member', got: %s (C-3)", resp.Msg)
@@ -2718,7 +2732,7 @@ func TestSearchMessagesE2E(t *testing.T) {
 		})
 		resp := readResponse(t, aliceConn, 5*time.Second)
 		require.Equal(t, "search-7", resp.ID, "response ID should match (SM-E7)")
-		assert.Equal(t, protocol.ResponseCodeError, resp.Code,
+		assert.Equal(t, protocol.ResponseCodeValidationError, resp.Code,
 			"empty query should fail")
 		assert.True(t, strings.Contains(strings.ToLower(resp.Msg), "query"),
 			"error should mention 'query', got: %s", resp.Msg)

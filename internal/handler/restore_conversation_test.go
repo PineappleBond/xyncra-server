@@ -18,7 +18,7 @@ import (
 
 func TestRestoreConversation_HappyPath(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewRestoreConversationHandler(s)
+	handler := NewRestoreConversationHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-restore-happy-1"
@@ -50,6 +50,23 @@ func TestRestoreConversation_HappyPath(t *testing.T) {
 	assert.NotNil(t, resp.Conversation)
 	assert.Equal(t, convID, resp.Conversation.ID)
 	assert.Equal(t, int64(3), resp.RestoredMessageCount, "should have restored 3 messages")
+
+	// Verify UserUpdates created for ALL conversation members.
+	aliceUpdates, err := s.UserUpdateStore().ListByUser(ctx, "alice", 0, 10)
+	require.NoError(t, err)
+	assert.Len(t, aliceUpdates, 1, "alice should have 1 UserUpdate")
+	assert.Equal(t, protocol.UpdateTypeConversation, aliceUpdates[0].Type, "Type should be 'conversation'")
+
+	// Verify payload contains conversation_id and action "restore".
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(aliceUpdates[0].Payload, &payload))
+	assert.Equal(t, convID, payload["conversation_id"])
+	assert.Equal(t, "restore", payload["action"])
+
+	bobUpdates, err := s.UserUpdateStore().ListByUser(ctx, "bob", 0, 10)
+	require.NoError(t, err)
+	assert.Len(t, bobUpdates, 1, "bob should also have 1 UserUpdate (all members)")
+	assert.Equal(t, protocol.UpdateTypeConversation, bobUpdates[0].Type, "Type should be 'conversation'")
 }
 
 // ---------------------------------------------------------------------------
@@ -58,7 +75,7 @@ func TestRestoreConversation_HappyPath(t *testing.T) {
 
 func TestRestoreConversation_Idempotent(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewRestoreConversationHandler(s)
+	handler := NewRestoreConversationHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-restore-idempotent-1"
@@ -79,6 +96,15 @@ func TestRestoreConversation_Idempotent(t *testing.T) {
 	assert.NotNil(t, resp.Conversation)
 	assert.Equal(t, convID, resp.Conversation.ID)
 	assert.Equal(t, int64(0), resp.RestoredMessageCount, "non-deleted conv should have 0 restored messages")
+
+	// Verify NO UserUpdate is created for idempotent case (conversation not deleted).
+	aliceUpdates, err := s.UserUpdateStore().ListByUser(ctx, "alice", 0, 10)
+	require.NoError(t, err)
+	assert.Empty(t, aliceUpdates, "idempotent restore should NOT create UserUpdate")
+
+	bobUpdates, err := s.UserUpdateStore().ListByUser(ctx, "bob", 0, 10)
+	require.NoError(t, err)
+	assert.Empty(t, bobUpdates, "idempotent restore should NOT create UserUpdate for bob either")
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +113,7 @@ func TestRestoreConversation_Idempotent(t *testing.T) {
 
 func TestRestoreConversation_MissingConversationID(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewRestoreConversationHandler(s)
+	handler := NewRestoreConversationHandler(s, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -110,7 +136,7 @@ func TestRestoreConversation_MissingConversationID(t *testing.T) {
 
 func TestRestoreConversation_NotFound(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewRestoreConversationHandler(s)
+	handler := NewRestoreConversationHandler(s, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -133,7 +159,7 @@ func TestRestoreConversation_NotFound(t *testing.T) {
 
 func TestRestoreConversation_NotMember(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewRestoreConversationHandler(s)
+	handler := NewRestoreConversationHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-restore-notmember-1"
@@ -178,7 +204,7 @@ func TestRestoreConversation_MessagesVisibleAfterRestore(t *testing.T) {
 	assert.Empty(t, msgs, "messages should be hidden after delete")
 
 	// Restore via handler.
-	handler := NewRestoreConversationHandler(s)
+	handler := NewRestoreConversationHandler(s, nil)
 	params := map[string]interface{}{
 		"conversation_id": convID,
 	}

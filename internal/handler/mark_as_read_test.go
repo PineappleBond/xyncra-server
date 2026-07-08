@@ -51,7 +51,7 @@ func seedMessages(t *testing.T, s *testSQLiteStore, convID string, count int) {
 
 func TestMarkAsRead_HappyPath(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s)
+	h := NewMarkAsReadHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-happy"
@@ -78,6 +78,23 @@ func TestMarkAsRead_HappyPath(t *testing.T) {
 	conv, err := s.ConversationStore().Get(ctx, convID)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(3), conv.LastReadMessageID1, "alice is UserID1, should have LastReadMessageID1=3")
+
+	// Verify UserUpdate was created for alice (the operating user) only.
+	aliceUpdates, err := s.UserUpdateStore().ListByUser(ctx, "alice", 0, 10)
+	require.NoError(t, err)
+	assert.Len(t, aliceUpdates, 1, "alice should have 1 UserUpdate after mark_as_read")
+	assert.Equal(t, protocol.UpdateTypeMarkRead, aliceUpdates[0].Type, "UserUpdate Type should be 'mark_read'")
+
+	// Verify payload contains conversation_id and last_read_message_id.
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(aliceUpdates[0].Payload, &payload))
+	assert.Equal(t, convID, payload["conversation_id"], "payload should contain conversation_id")
+	assert.Equal(t, float64(3), payload["last_read_message_id"], "payload should contain last_read_message_id")
+
+	// Verify NO UserUpdate was created for bob (D-012: mark_read not exposed to other party).
+	bobUpdates, err := s.UserUpdateStore().ListByUser(ctx, "bob", 0, 10)
+	require.NoError(t, err)
+	assert.Empty(t, bobUpdates, "bob should NOT have any UserUpdate from mark_as_read (D-012)")
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +103,7 @@ func TestMarkAsRead_HappyPath(t *testing.T) {
 
 func TestMarkAsRead_OmitMessageID(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s)
+	h := NewMarkAsReadHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-omit"
@@ -120,7 +137,7 @@ func TestMarkAsRead_OmitMessageID(t *testing.T) {
 
 func TestMarkAsRead_MAXSemantics(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s)
+	h := NewMarkAsReadHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-max"
@@ -169,7 +186,7 @@ func TestMarkAsRead_MAXSemantics(t *testing.T) {
 
 func TestMarkAsRead_MissingConversationID(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s)
+	h := NewMarkAsReadHandler(s, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -192,7 +209,7 @@ func TestMarkAsRead_MissingConversationID(t *testing.T) {
 
 func TestMarkAsRead_NotFound(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s)
+	h := NewMarkAsReadHandler(s, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -216,7 +233,7 @@ func TestMarkAsRead_NotFound(t *testing.T) {
 
 func TestMarkAsRead_NotMember(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s)
+	h := NewMarkAsReadHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-notmember"
@@ -244,7 +261,7 @@ func TestMarkAsRead_NotMember(t *testing.T) {
 
 func TestMarkAsRead_UserID1AndUserID2Separate(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s)
+	h := NewMarkAsReadHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-separate"
@@ -284,7 +301,7 @@ func TestMarkAsRead_UserID1AndUserID2Separate(t *testing.T) {
 
 func TestMarkAsRead_UnreadCountCorrect(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s)
+	h := NewMarkAsReadHandler(s, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-unread"
@@ -318,4 +335,66 @@ func TestMarkAsRead_UnreadCountCorrect(t *testing.T) {
 			assert.Equal(t, tt.expectedCount, unreadCount)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: UserUpdate creation - Type, Payload, and only for operating user
+// ---------------------------------------------------------------------------
+
+func TestMarkAsRead_UserUpdateCreation(t *testing.T) {
+	s := setupTestSQLite(t)
+	h := NewMarkAsReadHandler(s, nil)
+	ctx := context.Background()
+
+	convID := "conv-mark-uu-create"
+	createTestConversation(t, s, convID, "alice", "bob")
+	seedMessages(t, s, convID, 5)
+
+	// Alice marks message 3 as read.
+	params := map[string]interface{}{
+		"conversation_id": convID,
+		"message_id":      3,
+	}
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-1", "mark_as_read", params)
+	_, err := h.HandleRequest(ctx, client, req)
+	require.NoError(t, err)
+
+	// Verify UserUpdate created for alice with correct Type.
+	aliceUpdates, err := s.UserUpdateStore().ListByUser(ctx, "alice", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, aliceUpdates, 1, "alice should have exactly 1 UserUpdate")
+	assert.Equal(t, protocol.UpdateTypeMarkRead, aliceUpdates[0].Type, "Type should be 'mark_read'")
+	assert.Equal(t, uint32(1), aliceUpdates[0].Seq, "Seq should be 1 (first update)")
+
+	// Verify Payload contains conversation_id and last_read_message_id.
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(aliceUpdates[0].Payload, &payload))
+	assert.Equal(t, convID, payload["conversation_id"])
+	assert.Equal(t, float64(3), payload["last_read_message_id"])
+
+	// Verify NO UserUpdate for bob (D-012).
+	bobUpdates, err := s.UserUpdateStore().ListByUser(ctx, "bob", 0, 10)
+	require.NoError(t, err)
+	assert.Empty(t, bobUpdates, "bob should have 0 UserUpdates (D-012)")
+
+	// Alice marks message 5 as read - should create a second UserUpdate.
+	params2 := map[string]interface{}{
+		"conversation_id": convID,
+		"message_id":      5,
+	}
+	req2 := newTestRequest("req-2", "mark_as_read", params2)
+	_, err = h.HandleRequest(ctx, client, req2)
+	require.NoError(t, err)
+
+	aliceUpdates2, err := s.UserUpdateStore().ListByUser(ctx, "alice", 0, 10)
+	require.NoError(t, err)
+	assert.Len(t, aliceUpdates2, 2, "alice should have 2 UserUpdates after second mark_as_read")
+	assert.Equal(t, uint32(2), aliceUpdates2[1].Seq, "second update should have Seq=2")
+	assert.Equal(t, protocol.UpdateTypeMarkRead, aliceUpdates2[1].Type)
+
+	// Bob still has 0 UserUpdates.
+	bobUpdates2, err := s.UserUpdateStore().ListByUser(ctx, "bob", 0, 10)
+	require.NoError(t, err)
+	assert.Empty(t, bobUpdates2, "bob should still have 0 UserUpdates")
 }

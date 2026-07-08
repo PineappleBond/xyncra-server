@@ -42,6 +42,7 @@ func setupTestSQLite(t *testing.T) *testSQLiteStore {
 
 // seedUserUpdates inserts count UserUpdate records for the given userID,
 // starting at startSeq. Payloads are simple JSON objects for verification.
+// Each update gets Type "message" by default.
 func seedUserUpdates(t *testing.T, s *testSQLiteStore, userID string, count int, startSeq uint32) {
 	t.Helper()
 	ctx := context.Background()
@@ -54,6 +55,7 @@ func seedUserUpdates(t *testing.T, s *testSQLiteStore, userID string, count int,
 			ID:        uuid.New().String(),
 			UserID:    userID,
 			Seq:       seq,
+			Type:      "message",
 			Payload:   []byte(fmt.Sprintf(`{"msg":"update-%d"}`, seq)),
 			CreatedAt: now.Add(time.Duration(i) * time.Millisecond),
 		}
@@ -128,6 +130,7 @@ func TestSyncUpdates_HappyPath_WithUpdates(t *testing.T) {
 		expectedSeq := uint32(i + 1)
 		assert.Equal(t, expectedSeq, u.Seq, "update %d should have seq %d", i, expectedSeq)
 		assert.NotEmpty(t, u.Payload, "payload should not be empty")
+		assert.Equal(t, "message", u.Type, "Type should be 'message' for seeded updates")
 	}
 }
 
@@ -454,4 +457,234 @@ func TestSyncUpdates_NegativeLimitUsesDefault(t *testing.T) {
 
 	assert.Len(t, result.Updates, 100, "negative limit should default to 100")
 	assert.True(t, result.HasMore, "has_more should be true since 150 > 100")
+}
+
+// ---------------------------------------------------------------------------
+// Gap-filling helpers and tests (D-029)
+// ---------------------------------------------------------------------------
+
+// isNilOrJSONNull reports whether a json.RawMessage is nil or contains the
+// JSON literal "null".
+func isNilOrJSONNull(raw json.RawMessage) bool {
+	return len(raw) == 0 || string(raw) == "null"
+}
+
+// seedUserUpdatesWithSeqs inserts UserUpdate records for the given userID with
+// specific seq values. This is used to create scenarios with gaps.
+func seedUserUpdatesWithSeqs(t *testing.T, s *testSQLiteStore, userID string, seqs []uint32) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now()
+
+	updates := make([]model.UserUpdate, len(seqs))
+	for i, seq := range seqs {
+		updates[i] = model.UserUpdate{
+			ID:        uuid.New().String(),
+			UserID:    userID,
+			Seq:       seq,
+			Type:      "message",
+			Payload:   []byte(fmt.Sprintf(`{"msg":"update-%d"}`, seq)),
+			CreatedAt: now.Add(time.Duration(i) * time.Millisecond),
+		}
+	}
+	require.NoError(t, s.UserUpdateStore().Create(ctx, updates))
+}
+
+// ---------------------------------------------------------------------------
+// D-029-1: Consecutive seq, no gap
+// ---------------------------------------------------------------------------
+
+func TestSyncUpdates_GapFilling_NoGap(t *testing.T) {
+	s := setupTestSQLite(t)
+	handler := NewSyncUpdatesHandler(s)
+	const userID = "alice-gap-no"
+
+	// Seed 5 updates with consecutive seqs: 1, 2, 3, 4, 5
+	seedUserUpdatesWithSeqs(t, s, userID, []uint32{1, 2, 3, 4, 5})
+
+	result := callSyncUpdates(t, handler, userID, map[string]interface{}{
+		"after_seq": 0,
+		"limit":     10,
+	})
+
+	assert.Len(t, result.Updates, 5, "should return all 5 updates with no gaps")
+	assert.Equal(t, uint32(5), result.LatestSeq)
+	assert.False(t, result.HasMore)
+
+	// Verify no gap entries
+	for i, u := range result.Updates {
+		assert.NotEqual(t, protocol.UpdateTypeGap, u.Type, "update[%d] should not be a gap", i)
+		assert.Equal(t, uint32(i+1), u.Seq)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// D-029-2: Middle gap (seq 1, 3, 5 — missing 2, 4)
+// ---------------------------------------------------------------------------
+
+func TestSyncUpdates_GapFilling_MiddleGap(t *testing.T) {
+	s := setupTestSQLite(t)
+	handler := NewSyncUpdatesHandler(s)
+	const userID = "alice-gap-mid"
+
+	// Seed updates with seqs 1, 3, 5 — gaps at 2 and 4
+	seedUserUpdatesWithSeqs(t, s, userID, []uint32{1, 3, 5})
+
+	result := callSyncUpdates(t, handler, userID, map[string]interface{}{
+		"after_seq": 0,
+		"limit":     10,
+	})
+
+	// latestSeq=5, expectedEnd=min(0+10,5)=5, so query (0,5]
+	// Actual: seqs 1, 3, 5. Gaps at 2, 4.
+	require.Len(t, result.Updates, 5, "should return 5 updates (3 real + 2 gap fillers)")
+	assert.Equal(t, uint32(5), result.LatestSeq)
+
+	// Verify the result is contiguous with gaps filled
+	assert.Equal(t, uint32(1), result.Updates[0].Seq)
+	assert.Equal(t, "message", result.Updates[0].Type)
+
+	assert.Equal(t, uint32(2), result.Updates[1].Seq)
+	assert.Equal(t, protocol.UpdateTypeGap, result.Updates[1].Type, "seq 2 should be a gap filler")
+	assert.True(t, isNilOrJSONNull(result.Updates[1].Payload), "gap filler should have nil/null payload")
+
+	assert.Equal(t, uint32(3), result.Updates[2].Seq)
+	assert.Equal(t, "message", result.Updates[2].Type)
+
+	assert.Equal(t, uint32(4), result.Updates[3].Seq)
+	assert.Equal(t, protocol.UpdateTypeGap, result.Updates[3].Type, "seq 4 should be a gap filler")
+	assert.True(t, isNilOrJSONNull(result.Updates[3].Payload), "gap filler should have nil/null payload")
+
+	assert.Equal(t, uint32(5), result.Updates[4].Seq)
+	assert.Equal(t, "message", result.Updates[4].Type)
+}
+
+// ---------------------------------------------------------------------------
+// D-029-3: Start gap (seq 3, 4, 5 — missing 1, 2)
+// ---------------------------------------------------------------------------
+
+func TestSyncUpdates_GapFilling_StartGap(t *testing.T) {
+	s := setupTestSQLite(t)
+	handler := NewSyncUpdatesHandler(s)
+	const userID = "alice-gap-start"
+
+	// Seed updates with seqs 3, 4, 5 — gaps at 1, 2
+	seedUserUpdatesWithSeqs(t, s, userID, []uint32{3, 4, 5})
+
+	result := callSyncUpdates(t, handler, userID, map[string]interface{}{
+		"after_seq": 0,
+		"limit":     10,
+	})
+
+	require.Len(t, result.Updates, 5, "should return 5 updates (3 real + 2 gap fillers)")
+	assert.Equal(t, uint32(5), result.LatestSeq)
+
+	// Verify gaps at start
+	assert.Equal(t, uint32(1), result.Updates[0].Seq)
+	assert.Equal(t, protocol.UpdateTypeGap, result.Updates[0].Type, "seq 1 should be a gap filler")
+
+	assert.Equal(t, uint32(2), result.Updates[1].Seq)
+	assert.Equal(t, protocol.UpdateTypeGap, result.Updates[1].Type, "seq 2 should be a gap filler")
+
+	assert.Equal(t, uint32(3), result.Updates[2].Seq)
+	assert.Equal(t, "message", result.Updates[2].Type)
+}
+
+// ---------------------------------------------------------------------------
+// D-029-4: End gap (seq 1, 2, 3 — missing 4, 5)
+// ---------------------------------------------------------------------------
+
+func TestSyncUpdates_GapFilling_EndGap(t *testing.T) {
+	s := setupTestSQLite(t)
+	handler := NewSyncUpdatesHandler(s)
+	const userID = "alice-gap-end"
+
+	// Seed updates with seqs 1, 2, 3 — but we want to verify the gap-filling
+	// doesn't go beyond latestSeq. In this case latestSeq=3, so no end gap
+	// should be filled. Test: verify latestSeq bounds behavior.
+	seedUserUpdatesWithSeqs(t, s, userID, []uint32{1, 2, 3})
+
+	result := callSyncUpdates(t, handler, userID, map[string]interface{}{
+		"after_seq": 0,
+		"limit":     10,
+	})
+
+	// latestSeq=3, expectedEnd=min(0+10,3)=3, so query (0,3]
+	assert.Len(t, result.Updates, 3, "should return exactly 3 updates")
+	assert.Equal(t, uint32(3), result.LatestSeq)
+	assert.False(t, result.HasMore)
+
+	for _, u := range result.Updates {
+		assert.NotEqual(t, protocol.UpdateTypeGap, u.Type, "no gap fillers expected")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// D-029-5: All gaps (empty DB but after_seq=0 and latest_seq inferred)
+// This tests the scenario where after_seq > 0 but no updates exist beyond it.
+// ---------------------------------------------------------------------------
+
+func TestSyncUpdates_GapFilling_AllGaps(t *testing.T) {
+	s := setupTestSQLite(t)
+	handler := NewSyncUpdatesHandler(s)
+	const userID = "alice-gap-all"
+
+	// Seed updates with only seq 5 — gaps at 1, 2, 3, 4
+	seedUserUpdatesWithSeqs(t, s, userID, []uint32{5})
+
+	result := callSyncUpdates(t, handler, userID, map[string]interface{}{
+		"after_seq": 0,
+		"limit":     10,
+	})
+
+	// latestSeq=5, expectedEnd=min(0+10,5)=5, query (0,5]
+	// Only seq 5 exists; seqs 1-4 are gaps.
+	require.Len(t, result.Updates, 5, "should return 5 updates (1 real + 4 gap fillers)")
+	assert.Equal(t, uint32(5), result.LatestSeq)
+
+	for i := 0; i < 4; i++ {
+		assert.Equal(t, uint32(i+1), result.Updates[i].Seq)
+		assert.Equal(t, protocol.UpdateTypeGap, result.Updates[i].Type, "seq %d should be a gap filler", i+1)
+		assert.True(t, isNilOrJSONNull(result.Updates[i].Payload), "gap filler should have nil/null payload")
+	}
+	assert.Equal(t, uint32(5), result.Updates[4].Seq)
+	assert.Equal(t, "message", result.Updates[4].Type)
+}
+
+// ---------------------------------------------------------------------------
+// D-029-6: Gap-filling is not persisted — verifying by re-fetching
+// ---------------------------------------------------------------------------
+
+func TestSyncUpdates_GapFilling_NotPersisted(t *testing.T) {
+	s := setupTestSQLite(t)
+	handler := NewSyncUpdatesHandler(s)
+	const userID = "alice-gap-nopersist"
+
+	// Seed updates with gaps (seq 1, 3)
+	seedUserUpdatesWithSeqs(t, s, userID, []uint32{1, 3})
+
+	// First sync — should fill gap at seq 2
+	result1 := callSyncUpdates(t, handler, userID, map[string]interface{}{
+		"after_seq": 0,
+		"limit":     10,
+	})
+	require.Len(t, result1.Updates, 3, "should return 3 updates (2 real + 1 gap filler)")
+
+	// Verify the gap filler is in the response
+	assert.Equal(t, protocol.UpdateTypeGap, result1.Updates[1].Type, "seq 2 should be a gap filler")
+
+	// Second sync with same params — should return the same result (gap filler
+	// is NOT persisted, so it's regenerated each time)
+	result2 := callSyncUpdates(t, handler, userID, map[string]interface{}{
+		"after_seq": 0,
+		"limit":     10,
+	})
+	require.Len(t, result2.Updates, 3, "should still return 3 updates (gap filler regenerated)")
+	assert.Equal(t, protocol.UpdateTypeGap, result2.Updates[1].Type, "seq 2 should still be a gap filler")
+
+	// Verify only 2 records in DB (not 3 — gap filler is not persisted)
+	ctx := context.Background()
+	dbUpdates, err := s.UserUpdateStore().ListByUser(ctx, userID, 0, 100)
+	require.NoError(t, err)
+	assert.Len(t, dbUpdates, 2, "only 2 real records in DB (gap filler not persisted)")
 }

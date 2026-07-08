@@ -162,6 +162,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 			ID:        uuid.New().String(),
 			UserID:    memberID,
 			Seq:       newSeq,
+			Type:      protocol.UpdateTypeMessage,
 			Payload:   msgPayload,
 			CreatedAt: now,
 		}
@@ -172,6 +173,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 			Updates: []protocol.PackageDataUpdate{
 				{
 					Seq:       newSeq,
+					Type:      protocol.UpdateTypeMessage,
 					Payload:   msgPayload,
 					CreatedAt: now,
 				},
