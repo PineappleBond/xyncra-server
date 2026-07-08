@@ -24,8 +24,8 @@ func (l *fakeLogger) Info(msg string, args ...any)  {}
 func (l *fakeLogger) Error(msg string, args ...any) { l.errors = append(l.errors, msg) }
 func (l *fakeLogger) Debug(msg string, args ...any) { l.debugs = append(l.debugs, msg) }
 
-// makeTask builds an mq.Task with an mqSendMessageTaskPayload JSON-encoded.
-func makeTask(t *testing.T, payload mqSendMessageTaskPayload) *mq.Task {
+// makeTask builds an mq.Task with an sendMessageTaskPayload JSON-encoded.
+func makeTask(t *testing.T, payload sendMessageTaskPayload) *mq.Task {
 	t.Helper()
 	data, err := json.Marshal(payload)
 	require.NoError(t, err)
@@ -50,8 +50,8 @@ func TestSendMessageTaskHandler_HappyPath(t *testing.T) {
 		return nil
 	}
 
-	payload := mqSendMessageTaskPayload{
-		Recipients: []mqSendMessageRecipient{
+	payload := sendMessageTaskPayload{
+		Recipients: []sendMessageRecipient{
 			{
 				UserID: "alice",
 				Updates: []protocol.PackageDataUpdate{
@@ -113,8 +113,8 @@ func TestSendMessageTaskHandler_BroadcastError(t *testing.T) {
 	}
 
 	logger := &fakeLogger{}
-	payload := mqSendMessageTaskPayload{
-		Recipients: []mqSendMessageRecipient{
+	payload := sendMessageTaskPayload{
+		Recipients: []sendMessageRecipient{
 			{UserID: "alice", Updates: []protocol.PackageDataUpdate{{Seq: 1}}},
 			{UserID: "bob", Updates: []protocol.PackageDataUpdate{{Seq: 2}}},
 			{UserID: "carol", Updates: []protocol.PackageDataUpdate{{Seq: 3}}},
@@ -143,7 +143,7 @@ func TestSendMessageTaskHandler_NoRecipients(t *testing.T) {
 	}
 
 	handler := NewSendMessageTaskHandler(broadcastFn, nil)
-	payload := mqSendMessageTaskPayload{Recipients: []mqSendMessageRecipient{}}
+	payload := sendMessageTaskPayload{Recipients: []sendMessageRecipient{}}
 	err := handler(context.Background(), makeTask(t, payload))
 	assert.NoError(t, err)
 }

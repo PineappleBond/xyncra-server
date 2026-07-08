@@ -11,23 +11,6 @@ import (
 )
 
 // --------------------------------------------------------------------------
-// MQ task payload types for send_message
-// --------------------------------------------------------------------------
-
-// mqSendMessageRecipient describes the push data for a single conversation
-// member inside the MQ task payload.
-type mqSendMessageRecipient struct {
-	UserID  string                       `json:"user_id"`
-	Updates []protocol.PackageDataUpdate `json:"updates"`
-}
-
-// mqSendMessageTaskPayload is the MQ task payload used to fan out the message
-// to each conversation member for real-time delivery.
-type mqSendMessageTaskPayload struct {
-	Recipients []mqSendMessageRecipient `json:"recipients"`
-}
-
-// --------------------------------------------------------------------------
 // Task handler factory
 // --------------------------------------------------------------------------
 
@@ -46,7 +29,7 @@ func NewSendMessageTaskHandler(
 			return fmt.Errorf("send_message task: nil task")
 		}
 
-		var payload mqSendMessageTaskPayload
+		var payload sendMessageTaskPayload
 		if err := json.Unmarshal(task.Payload, &payload); err != nil {
 			if logger != nil {
 				logger.Error("send_message task: unmarshal payload: %v", err)
