@@ -75,11 +75,10 @@ xyncra-server/
 │
 ├── pkg/store/
 │   ├── clientdb.go                  # ClientDB 主接口（SQLite）
-│   ├── conversation_store.go        # 会话存储
+│   ├── conversation_store.go        # 会话存储（包含已读位置）
 │   ├── message_store.go             # 消息存储
 │   ├── sync_state_store.go          # 同步状态存储（last_seq, last_message_id）
 │   ├── draft_store.go               # 草稿存储
-│   ├── read_position_store.go       # 已读位置存储
 │   ├── queue_store.go               # 持久化重试队列
 │   ├── rpc_log_store.go             # RPC 日志存储（查询、聚合、导出）
 │   ├── notification_log_store.go    # 通知日志存储
@@ -186,12 +185,16 @@ xyncra-server/
 
 ### 3.3 服务器侧 Updates 补空设计（需新增）
 
+**重要说明**：服务器补空是**未来的优化计划**，客户端防抖拉取是**当前的兼容方案**。两者互补而非矛盾：
+- **当前阶段**：服务器不补空，客户端通过防抖拉取处理 seq 间隙
+- **未来阶段**：服务器实现补空逻辑，客户端的防抖拉取仍然保留作为兜底机制
+
 #### 3.3.1 拉取参数
 
 - 客户端传入 `after_seq`（排他性下界）和 `limit`（期望数量）
 - 服务器返回 `[after_seq+1, after_seq+limit]` 范围内的所有 updates
 
-#### 3.3.2 服务器处理流程
+#### 3.3.2 服务器处理流程（未来实现）
 
 1. 计算预期 seq 列表：`[after_seq+1, after_seq+2, ..., after_seq+limit]`
 2. 查询数据库中实际的 updates
@@ -205,6 +208,33 @@ xyncra-server/
 - `type`: `"gap"`
 - `payload`: `null` 或空对象
 - `created_at`: 当前时间戳
+
+#### 3.3.4 客户端处理策略
+
+**当前阶段（服务器未补空）**：
+1. 客户端拉取 updates（after_seq=100, limit=100）
+2. 服务器返回 [101, 102, 105, 106]（缺失 103, 104）
+3. 客户端逐个处理：
+   - ApplyUpdate(101) ✓
+   - ApplyUpdate(102) ✓
+   - ApplyUpdate(105) ✗（seq != 102+1）→ 丢弃，触发防抖拉取
+   - 停止处理剩余的 106
+4. 防抖拉取：after_seq=102, limit=100
+5. 服务器返回 [103, 104, 105, 106, ...]
+6. 客户端继续处理
+
+**未来阶段（服务器补空后）**：
+1. 客户端拉取 updates（after_seq=100, limit=100）
+2. 服务器返回 [101, 102, gap, gap, 105, 106, ...]（已补空）
+3. 客户端逐个处理：
+   - ApplyUpdate(101) ✓
+   - ApplyUpdate(102) ✓
+   - ApplyUpdate(gap) → 更新 local_max_seq=104，跳过
+   - ApplyUpdate(105) ✓
+   - ApplyUpdate(106) ✓
+4. 无需防抖拉取，性能更好
+
+**兜底机制**：即使服务器补空逻辑有 bug，客户端的防抖拉取仍然可以处理 seq 间隙，保证数据完整性
 
 ### 3.4 流程图
 
@@ -438,24 +468,20 @@ gorm.Config{
    - 保存、读取、删除草稿
    - 按会话 ID 关联
 
-5. **ReadPositionStore** - 已读位置存储
-   - 存储每个会话的已读游标位置
-   - 与 Conversation 的 LastReadMessageID1/2 同步
-
-6. **QueueStore** - 持久化重试队列
+5. **QueueStore** - 持久化重试队列
    - 保存失败的重试任务
    - 按 NextRetry 时间排序查询
    - 更新重试状态（Attempt、NextRetry）
    - 标记永久失败的任务
 
-7. **RPCLogStore** - RPC 日志存储
+6. **RPCLogStore** - RPC 日志存储
    - 保存 RPC 请求和响应日志
    - 支持按时间、方法、请求 ID、会话 ID 查询
    - 支持聚合统计（成功率、延迟、错误分布）
    - 支持导出为 CSV/JSON 格式
    - 支持日志清理（按保留天数）
 
-8. **NotificationLogStore** - 通知日志存储
+7. **NotificationLogStore** - 通知日志存储
    - 保存 Update 通知日志
    - 支持按时间、seq 查询
    - 支持导出和清理
@@ -467,14 +493,80 @@ gorm.Config{
 1. **Conversation**
    - 字段：ID, UserID1, UserID2, Type, Title, Pinned, Muted, AvatarURL, Description, LastProcessedMessageID, CreatedAt, UpdatedAt, LastMessageAt, LastReadMessageID1, LastReadMessageID2, DeletedAt
    - 本地字段：`synced_at`（最后同步时间）
+   - **已读位置查询**：
+     ```go
+     // 根据当前用户判断已读位置
+     if conversation.UserID1 == currentUserID {
+         myReadPosition = conversation.LastReadMessageID1
+         otherReadPosition = conversation.LastReadMessageID2
+     } else {
+         myReadPosition = conversation.LastReadMessageID2
+         otherReadPosition = conversation.LastReadMessageID1
+     }
+     ```
 
 2. **Message**
    - 字段：ID, ClientMessageID, ConversationID, MessageID, SenderID, Content, Type, ReplyTo, Status, CreatedAt, DeletedAt
    - 本地字段：`applied`（是否已应用到 UI）
 
 3. **UserUpdate**
-   - 字段：ID, UserID, Seq, Payload, CreatedAt
-   - 本地字段：`type`（update 类型，用于快速过滤）
+   - 字段：ID, UserID, Seq, **Type**, Payload, CreatedAt
+   - 本地字段：无
+   - **Type 字段**：标识 Update 类型，用于快速过滤和处理
+   - **支持的类型**：
+     - `message` - 新消息通知（当前唯一类型）
+     - `delete_message` - 消息删除（未来扩展）
+     - `mark_read` - 已读位置更新（未来扩展）
+     - `conversation` - 会话更新（创建、删除、恢复，未来扩展）
+     - `gap` - 空类型（服务器补空用，未来扩展）
+
+   **服务器端改动计划**：
+   ```go
+   // 当前实现（send_message.go）
+   msgPayload, err := json.Marshal(msg)
+   update := model.UserUpdate{
+       ID:        uuid.New().String(),
+       UserID:    memberID,
+       Seq:       newSeq,
+       Payload:   msgPayload,
+       CreatedAt: now,
+   }
+   
+   // 未来实现（添加 Type 字段）
+   msgPayload, err := json.Marshal(msg)
+   update := model.UserUpdate{
+       ID:        uuid.New().String(),
+       UserID:    memberID,
+       Seq:       newSeq,
+       Type:      "message",  // 新增
+       Payload:   msgPayload,
+       CreatedAt: now,
+   }
+   ```
+
+   **客户端处理逻辑**：
+   ```go
+   // 根据 Type 字段处理不同类型的 Update
+   switch update.Type {
+   case "message":
+       // 解析 Payload 为 Message 对象
+       // 保存到本地数据库
+   case "gap":
+       // 跳过，仅更新 local_max_seq
+   case "delete_message":
+       // 解析 Payload，删除本地消息
+   case "mark_read":
+       // 解析 Payload，更新已读位置
+   case "conversation":
+       // 解析 Payload，更新会话信息
+   }
+   ```
+
+   **迁移策略**：
+   - 在 UserUpdate 模型中添加 `Type` 字段
+   - GORM AutoMigrate 会自动添加列
+   - 现有数据默认设置为 `type: "message"`（通过数据库迁移脚本）
+   - 修改 send_message 逻辑，设置 `Type: "message"`
 
 4. **SyncState**
    - 字段：Key, Value
@@ -483,17 +575,14 @@ gorm.Config{
 5. **Draft**
    - 字段：ID, ConversationID, Content, CreatedAt, UpdatedAt
 
-6. **ReadPosition**
-   - 字段：ConversationID, UserID, LastReadMessageID, UpdatedAt
-
-7. **RetryTask**
+6. **RetryTask**
    - 字段：ID, Method, Params, Attempt, MaxAttempts, NextRetry, CreatedAt, Status
 
-8. **RPCLog**（RPC 请求/响应日志）
+7. **RPCLog**（RPC 请求/响应日志）
    - 字段：ID, Timestamp, Type, RequestID, Method, Code, ConversationID, Duration, Params, Data, ErrorMsg
    - 索引：timestamp, method, request_id, conversation_id, code
 
-9. **NotificationLog**（Update 通知日志）
+8. **NotificationLog**（Update 通知日志）
    - 字段：ID, Timestamp, Type, Seq, Payload
    - 索引：timestamp, seq
 
@@ -801,18 +890,73 @@ gorm.Config{
 
 1. **Unix Socket**
    - 路径：`~/.xyncra/{user_id}/{device_id}/xyncra.sock`
-   - 协议：JSON-RPC over Unix Socket
+   - 协议：**JSON-RPC 2.0 over Unix Socket**
    - 用途：其他命令通过 Socket 向 listen 发送 RPC 请求
 
-2. **通信流程**
-   ```
-   CLI 命令 → Unix Socket → listen 进程 → WebSocket → 服务器
-   服务器响应 → WebSocket → listen 进程 → Unix Socket → CLI 命令
+2. **JSON-RPC 消息格式**
+
+   **请求格式**：
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "id": "req-001",
+     "method": "send_message",
+     "params": {
+       "conversation_id": "conv-123",
+       "content": "Hello"
+     }
+   }
    ```
 
-3. **fallback 方案**
-   - 如果 listen 未运行，其他命令直接建立 WebSocket 连接
+   **响应格式**：
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "id": "req-001",
+     "result": {
+       "message": { ... },
+       "duplicate": false
+     }
+   }
+   ```
+
+   **错误响应**：
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "id": "req-001",
+     "error": {
+       "code": -100,
+       "message": "conversation not found",
+       "data": null
+     }
+   }
+   ```
+
+3. **通信流程**
+   ```
+   CLI 命令 → Unix Socket (JSON-RPC) → listen 进程 → WebSocket → 服务器
+   服务器响应 → WebSocket → listen 进程 → Unix Socket (JSON-RPC) → CLI 命令
+   ```
+
+4. **fallback 方案**
+   - 如果 listen 未运行（Unix Socket 连接失败），其他命令直接建立 WebSocket 连接
    - 执行完操作后关闭连接（短连接模式）
+   - 这种模式称为"独立模式"，性能较差但可用
+
+5. **两种运行模式**
+
+   **守护进程模式（推荐）**：
+   - listen 命令正在运行
+   - 其他命令通过 Unix Socket 复用 listen 的连接
+   - 优势：单连接、高效、可接收实时推送
+
+   **独立模式（fallback）**：
+   - listen 未运行
+   - 其他命令直接建立 WebSocket 连接
+   - 劣势：短连接、无法接收实时推送、性能较差
+
+   **模式切换**：自动检测，无需用户干预
 
 ### 5.4 日志存储和查询
 
@@ -871,9 +1015,11 @@ gorm.Config{
 - 使用事务保证一致性
 
 **日志轮转**：
-- 按日期分表：`rpc_logs_2026_07_08`
-- 保留策略：默认 7 天，可通过 `logs cleanup` 命令管理
-- 自动清理：listen 命令每小时检查一次，删除过期日志
+- **单表模式**：所有日志存储在 `rpc_logs` 和 `notifications` 表中（不使用日期分表）
+- **定期清理**：通过 `logs cleanup` 命令删除过期日志
+- **保留策略**：默认保留 7 天，可通过 `--retain` 参数配置
+- **自动清理**：listen 命令每小时检查一次，自动删除过期日志
+- **GORM 兼容**：单表模式与 GORM AutoMigrate 完全兼容，无需额外的迁移逻辑
 
 **控制台输出**：
 - 人类友好的格式化文本
@@ -1441,6 +1587,23 @@ flowchart TD
      - 避免 Claude Code 上下文被大文件撑爆
      - 与现有架构一致（GORM 自动迁移）
    - 权衡：写入时有额外开销，但查询性能显著提升
+
+6. **D-025：UserUpdate 类型字段**
+   - 决策：在 UserUpdate 模型中添加 `Type` 字段（数据库层面）
+   - 原因：
+     - 支持多种 Update 类型（message, delete_message, mark_read, conversation, gap）
+     - 便于查询和过滤（WHERE type = 'message'）
+     - 符合数据库设计最佳实践（类型信息在元数据层）
+   - 迁移策略：GORM AutoMigrate 自动添加列，现有数据默认 type='message'
+
+7. **D-026：已读位置存储策略**
+   - 决策：直接使用 Conversation 表的 LastReadMessageID1/2 字段，不创建单独的 ReadPosition 表
+   - 原因：
+     - 避免双写导致的数据不一致
+     - 查询简单（直接读取 Conversation）
+     - 与服务器设计一致
+     - 减少数据冗余
+   - 查询逻辑：根据当前 user_id 判断是 UserID1 还是 UserID2，读取对应的已读字段
 
 ### B. 性能指标
 
