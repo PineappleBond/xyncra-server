@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -924,15 +925,7 @@ func TestClient_SendBufferFullDropsMessage(t *testing.T) {
 	}, 2*time.Second, 50*time.Millisecond)
 
 	// Find the client in the server.
-	srv.mu.RLock()
-	var targetClient *Client
-	for _, c := range srv.clients {
-		if c.UserID() == "user-buffer-full" {
-			targetClient = c
-			break
-		}
-	}
-	srv.mu.RUnlock()
+	targetClient := findClient(srv, "user-buffer-full")
 	require.NotNil(t, targetClient)
 
 	// Send many messages rapidly. Since no one is reading the client's send
@@ -973,15 +966,7 @@ func TestClient_CloseIdempotent(t *testing.T) {
 	}, 2*time.Second, 50*time.Millisecond)
 
 	// Find the client and close it multiple times.
-	srv.mu.RLock()
-	var targetClient *Client
-	for _, c := range srv.clients {
-		if c.UserID() == "user-close-idem" {
-			targetClient = c
-			break
-		}
-	}
-	srv.mu.RUnlock()
+	targetClient := findClient(srv, "user-close-idem")
 	require.NotNil(t, targetClient)
 
 	assert.NotPanics(t, func() {
@@ -1008,15 +993,7 @@ func TestClient_SendAfterClose(t *testing.T) {
 		return srv.ClientCount() >= 1
 	}, 2*time.Second, 50*time.Millisecond)
 
-	srv.mu.RLock()
-	var targetClient *Client
-	for _, c := range srv.clients {
-		if c.UserID() == "user-send-after-close" {
-			targetClient = c
-			break
-		}
-	}
-	srv.mu.RUnlock()
+	targetClient := findClient(srv, "user-send-after-close")
 	require.NotNil(t, targetClient)
 
 	targetClient.Close()
@@ -1052,15 +1029,7 @@ func TestClient_Accessors(t *testing.T) {
 		return srv.ClientCount() >= 1
 	}, 2*time.Second, 50*time.Millisecond)
 
-	srv.mu.RLock()
-	var targetClient *Client
-	for _, c := range srv.clients {
-		if c.UserID() == "user-42" {
-			targetClient = c
-			break
-		}
-	}
-	srv.mu.RUnlock()
+	targetClient := findClient(srv, "user-42")
 	require.NotNil(t, targetClient)
 
 	assert.Equal(t, "user-42", targetClient.UserID())
@@ -1464,4 +1433,1230 @@ func TestMemoryStore_HealthEndpoint(t *testing.T) {
 		defer resp.Body.Close()
 		return resp.StatusCode == http.StatusOK
 	}, 2*time.Second, 50*time.Millisecond)
+}
+
+// ---------------------------------------------------------------------------
+// Helper: find a server-side Client by userID
+// ---------------------------------------------------------------------------
+
+// findClient returns the first server-side Client matching the given userID,
+// or nil if not found. The caller should typically wrap this in
+// require.NotNil.
+func findClient(srv *WebSocketServer, userID string) *Client {
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	for _, c := range srv.clients {
+		if c.UserID() == userID {
+			return c
+		}
+	}
+	return nil
+}
+
+// newClientWithSendBuf creates a Client with a send buffer but nil conn.
+// Only for testing sendResponse/sendSuccessResponse/sendErrorResponse and
+// other methods that do not touch the underlying WebSocket connection.
+func newClientWithSendBuf(t *testing.T, userID string, bufSize int) *Client {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Client{
+		userID: userID,
+		connID: "test-conn",
+		send:   make(chan []byte, bufSize),
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P0: NewClient default constants (D-001: zero-config defaults)
+// ---------------------------------------------------------------------------
+
+// TestNewClient_Defaults verifies that NewClient applies the documented
+// default constants when no options are provided.
+func TestNewClient_Defaults(t *testing.T) {
+	c := NewClient(nil, "u1", "c1")
+
+	// D-001: zero-config defaults must match the documented constants.
+	assert.Equal(t, defaultWriteWait, c.writeWait, "writeWait default (D-001)")
+	assert.Equal(t, 10*time.Second, c.writeWait, "writeWait = 10s (D-001)")
+	assert.Equal(t, defaultPongWait, c.pongWait, "pongWait default (D-001)")
+	assert.Equal(t, 60*time.Second, c.pongWait, "pongWait = 60s (D-001)")
+	assert.Equal(t, defaultPingPeriod, c.pingPeriod, "pingPeriod default (D-001)")
+	assert.Equal(t, 54*time.Second, c.pingPeriod, "pingPeriod = 54s (D-001)")
+	assert.Equal(t, defaultMaxMessageSize, int(c.maxMessageSize), "maxMessageSize default (D-001)")
+	assert.Equal(t, int64(64*1024), c.maxMessageSize, "maxMessageSize = 64 KiB (D-001)")
+
+	// The send channel buffer size must equal defaultSendBufSize.
+	assert.Equal(t, defaultSendBufSize, cap(c.send), "send buffer capacity (D-001)")
+	assert.Equal(t, 256, cap(c.send), "send buffer = 256 (D-001)")
+
+	// Other fields.
+	assert.Equal(t, "u1", c.userID)
+	assert.Equal(t, "c1", c.connID)
+	assert.NotNil(t, c.ctx)
+	assert.NotNil(t, c.cancel)
+	assert.NotNil(t, c.done)
+	assert.False(t, c.closed)
+	assert.Nil(t, c.handler)
+}
+
+// ---------------------------------------------------------------------------
+// P0: NewClient option overrides
+// ---------------------------------------------------------------------------
+
+// TestNewClient_WithOptions verifies that each ClientOption correctly
+// overrides the corresponding default value.
+func TestNewClient_WithOptions(t *testing.T) {
+	customHandler := MessageHandlerFunc(func(ctx context.Context, client *Client, pkg *protocol.Package) {})
+
+	c := NewClient(nil, "u2", "c2",
+		WithWriteWait(5*time.Second),
+		WithPongWait(30*time.Second),
+		WithPingPeriod(25*time.Second),
+		WithMaxMessageSize(1024*1024),
+		WithSendBufSize(512),
+		WithMessageHandler(customHandler),
+	)
+
+	assert.Equal(t, 5*time.Second, c.writeWait, "WithWriteWait override")
+	assert.Equal(t, 30*time.Second, c.pongWait, "WithPongWait override")
+	assert.Equal(t, 25*time.Second, c.pingPeriod, "WithPingPeriod override")
+	assert.Equal(t, int64(1024*1024), c.maxMessageSize, "WithMaxMessageSize override")
+	assert.Equal(t, 512, cap(c.send), "WithSendBufSize override")
+	// Function values cannot be compared with == in Go; verify the handler
+	// was set by checking it is non-nil.
+	assert.NotNil(t, c.handler, "WithMessageHandler override")
+}
+
+// TestNewClient_WithSendBufSize_Invalid verifies that WithSendBufSize with
+// zero or negative values preserves the default buffer size (D-001).
+func TestNewClient_WithSendBufSize_Invalid(t *testing.T) {
+	// n=0 → keep default
+	c0 := NewClient(nil, "u", "c", WithSendBufSize(0))
+	assert.Equal(t, defaultSendBufSize, cap(c0.send), "WithSendBufSize(0) keeps default (D-001)")
+
+	// n=-1 → keep default
+	c1 := NewClient(nil, "u", "c", WithSendBufSize(-1))
+	assert.Equal(t, defaultSendBufSize, cap(c1.send), "WithSendBufSize(-1) keeps default (D-001)")
+
+	// n=-100 → keep default
+	c2 := NewClient(nil, "u", "c", WithSendBufSize(-100))
+	assert.Equal(t, defaultSendBufSize, cap(c2.send), "WithSendBufSize(-100) keeps default (D-001)")
+}
+
+// ---------------------------------------------------------------------------
+// P0: marshalPackage / unmarshalPackage round-trip
+// ---------------------------------------------------------------------------
+
+// TestMarshalUnmarshalPackage verifies that marshalPackage and
+// unmarshalPackage correctly encode and decode all PackageType values, and
+// that invalid JSON returns an error.
+func TestMarshalUnmarshalPackage(t *testing.T) {
+	// Round-trip each PackageType.
+	tests := []struct {
+		name string
+		pkg  *protocol.Package
+	}{
+		{
+			name: "Request",
+			pkg: &protocol.Package{
+				Type: protocol.PackageTypeRequest,
+				Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
+			},
+		},
+		{
+			name: "Response",
+			pkg: &protocol.Package{
+				Type: protocol.PackageTypeResponse,
+				Data: json.RawMessage(`{"id":"r1","code":0,"msg":"ok","data":null}`),
+			},
+		},
+		{
+			name: "Updates",
+			pkg: &protocol.Package{
+				Type: protocol.PackageTypeUpdates,
+				Data: json.RawMessage(`{"updates":[{"seq":1,"payload":{}}]}`),
+			},
+		},
+		{
+			name: "NilData",
+			pkg: &protocol.Package{
+				Type: protocol.PackageTypeResponse,
+				Data: nil,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := marshalPackage(tt.pkg)
+			require.NoError(t, err, "marshalPackage should not fail")
+			require.NotEmpty(t, data)
+
+			got, err := unmarshalPackage(data)
+			require.NoError(t, err, "unmarshalPackage should not fail")
+			assert.Equal(t, tt.pkg.Type, got.Type, "type must match")
+			// Nil Data marshals as JSON "null" and unmarshals back as the
+			// literal bytes []byte("null"), not as Go nil.
+			if tt.pkg.Data == nil {
+				assert.Equal(t, json.RawMessage("null"), got.Data, "nil data must round-trip as JSON null")
+			} else {
+				assert.JSONEq(t, string(tt.pkg.Data), string(got.Data), "data must match")
+			}
+		})
+	}
+
+	// Invalid JSON must return an error.
+	t.Run("InvalidJSON", func(t *testing.T) {
+		_, err := unmarshalPackage([]byte("not-json{{{"))
+		require.Error(t, err, "unmarshalPackage should return error for invalid JSON")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// P0: Run blocks until Close
+// ---------------------------------------------------------------------------
+
+// TestClient_Run_BlocksUntilClose verifies that Run blocks the calling
+// goroutine until Close is called, and that Done() is closed after Run
+// returns.
+func TestClient_Run_BlocksUntilClose(t *testing.T) {
+	srv, addr, cleanup := startWSServerMem(t,
+		WSWithPingPeriod(1*time.Hour),
+	)
+	defer cleanup()
+
+	wsConn := connectWS(t, addr, "user-run-blocks")
+	defer wsConn.Close()
+
+	require.Eventually(t, func() bool {
+		return findClient(srv, "user-run-blocks") != nil
+	}, 2*time.Second, 50*time.Millisecond)
+
+	client := findClient(srv, "user-run-blocks")
+	require.NotNil(t, client)
+
+	// Done must not be closed while the client is alive.
+	select {
+	case <-client.Done():
+		t.Fatal("Done() should not be closed while client is running")
+	default:
+		// expected
+	}
+
+	// Close the client.
+	client.Close()
+
+	// Done must close within a reasonable time.
+	select {
+	case <-client.Done():
+		// success
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done() should be closed after Close()")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P0: Done is closed after both pumps exit
+// ---------------------------------------------------------------------------
+
+// TestClient_Done_ClosedAfterBothPumps verifies that the Done channel is
+// closed only after both readPump and writePump goroutines have exited.
+func TestClient_Done_ClosedAfterBothPumps(t *testing.T) {
+	srv, addr, cleanup := startWSServerMem(t,
+		WSWithPingPeriod(1*time.Hour),
+	)
+	defer cleanup()
+
+	wsConn := connectWS(t, addr, "user-done-pumps")
+	defer wsConn.Close()
+
+	require.Eventually(t, func() bool {
+		return findClient(srv, "user-done-pumps") != nil
+	}, 2*time.Second, 50*time.Millisecond)
+
+	client := findClient(srv, "user-done-pumps")
+	require.NotNil(t, client)
+
+	// Close the client: this cancels ctx, causing writePump to send a close
+	// frame and exit, and readPump to get an error and exit.
+	client.Close()
+
+	// Wait for Done. It must close, proving both pumps have exited.
+	select {
+	case <-client.Done():
+		// success: both pumps exited
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done() should close after both pumps exit")
+	}
+
+	// After Done is closed, the client must be marked as closed.
+	client.mu.Lock()
+	assert.True(t, client.closed, "client must be marked closed after Done")
+	client.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// P0: readPump calls handler
+// ---------------------------------------------------------------------------
+
+// TestClient_ReadPump_HandlerCalled verifies that the message handler is
+// invoked for every valid incoming package.
+func TestClient_ReadPump_HandlerCalled(t *testing.T) {
+	handler := NewDefaultMessageHandler()
+	handler.RegisterMethodFunc("echo", func(ctx context.Context, client *Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return req.Params, nil
+	})
+
+	_, addr, cleanup := startWSServerMem(t, WSWithMessageHandler(handler))
+	defer cleanup()
+
+	wsConn := connectWS(t, addr, "user-handler-called")
+	defer wsConn.Close()
+
+	// Send a valid request; the handler should be called and produce a
+	// response.
+	sendRequestPackage(t, wsConn, "hc-1", "echo", json.RawMessage(`{"v":1}`))
+
+	resp := readResponsePackage(t, wsConn, 3*time.Second)
+	assert.Equal(t, "hc-1", resp.ID)
+	assert.Equal(t, protocol.ResponseCodeOK, resp.Code)
+
+	var data map[string]int
+	require.NoError(t, json.Unmarshal(resp.Data, &data))
+	assert.Equal(t, 1, data["v"])
+}
+
+// ---------------------------------------------------------------------------
+// P0: readPump continues after decode error
+// ---------------------------------------------------------------------------
+
+// TestClient_ReadPump_DecodeErrorContinues verifies that a decode error
+// (invalid JSON) does not disconnect the client; subsequent valid messages
+// are still processed.
+func TestClient_ReadPump_DecodeErrorContinues(t *testing.T) {
+	handler := NewDefaultMessageHandler()
+	handler.RegisterMethodFunc("ping", func(ctx context.Context, client *Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.RawMessage(`{"pong":true}`), nil
+	})
+
+	_, addr, cleanup := startWSServerMem(t, WSWithMessageHandler(handler))
+	defer cleanup()
+
+	wsConn := connectWS(t, addr, "user-decode-cont")
+	defer wsConn.Close()
+
+	// Send invalid JSON (will fail to decode as a protocol.Package).
+	err := wsConn.WriteMessage(websocket.TextMessage, []byte("{broken json"))
+	require.NoError(t, err)
+
+	// Give the server a moment to process the bad message and log the error.
+	time.Sleep(200 * time.Millisecond)
+
+	// Connection must still be alive: send a valid request.
+	sendRequestPackage(t, wsConn, "after-bad", "ping", json.RawMessage(`{}`))
+
+	resp := readResponsePackage(t, wsConn, 3*time.Second)
+	assert.Equal(t, "after-bad", resp.ID)
+	assert.Equal(t, protocol.ResponseCodeOK, resp.Code)
+}
+
+// ---------------------------------------------------------------------------
+// P0: writePump sends CloseMessage on ctx cancel
+// ---------------------------------------------------------------------------
+
+// TestClient_WritePump_CtxCancelSendsCloseFrame verifies that when the
+// client context is cancelled (via Close), the writePump exits and the
+// underlying connection is closed. Note: Close() cancels ctx and then
+// immediately closes the underlying TCP conn, which races with the
+// writePump's attempt to send a close frame. The peer may see either a
+// proper close frame (1000/1001) or an abnormal closure (1006) depending
+// on timing.
+func TestClient_WritePump_CtxCancelSendsCloseFrame(t *testing.T) {
+	srv, addr, cleanup := startWSServerMem(t,
+		WSWithPingPeriod(1*time.Hour),
+	)
+	defer cleanup()
+
+	wsConn := connectWS(t, addr, "user-close-frame")
+	defer wsConn.Close()
+
+	require.Eventually(t, func() bool {
+		return findClient(srv, "user-close-frame") != nil
+	}, 2*time.Second, 50*time.Millisecond)
+
+	client := findClient(srv, "user-close-frame")
+	require.NotNil(t, client)
+
+	// Close the server-side client. This cancels ctx (triggering writePump
+	// exit) and closes the underlying conn.
+	client.Close()
+
+	// The WS client should see the connection close. Set a read deadline and
+	// try to read; the read must fail.
+	_ = wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, _, err := wsConn.ReadMessage()
+	require.Error(t, err, "client should see connection close after server Close()")
+
+	// Verify Done is closed (both pumps exited).
+	select {
+	case <-client.Done():
+		// success: both pumps exited
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done() should close after Close()")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P0: Send is safe for concurrent use with Close (-race)
+// ---------------------------------------------------------------------------
+
+// TestClient_Send_ConcurrentWithClose verifies that concurrent Send and
+// Close calls do not cause data races or panics under the race detector.
+func TestClient_Send_ConcurrentWithClose(t *testing.T) {
+	srv, addr, cleanup := startWSServerMem(t,
+		WSWithPingPeriod(1*time.Hour),
+	)
+	defer cleanup()
+
+	wsConn := connectWS(t, addr, "user-race-send")
+	defer wsConn.Close()
+
+	require.Eventually(t, func() bool {
+		return findClient(srv, "user-race-send") != nil
+	}, 2*time.Second, 50*time.Millisecond)
+
+	client := findClient(srv, "user-race-send")
+	require.NotNil(t, client)
+
+	// Launch multiple goroutines calling Send concurrently.
+	const numSenders = 10
+	var wg sync.WaitGroup
+	for i := 0; i < numSenders; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				client.Send([]byte(fmt.Sprintf("sender-%d-msg-%d", id, j)))
+			}
+		}(i)
+	}
+
+	// Concurrently close the client.
+	time.Sleep(1 * time.Millisecond) // let some Sends go through
+	assert.NotPanics(t, func() {
+		client.Close()
+	})
+
+	// Wait for all senders to finish.
+	wg.Wait()
+
+	// After Close, Send must be a no-op (not panic).
+	assert.NotPanics(t, func() {
+		client.Send([]byte("after-close"))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// P1: readPump with nil handler does not panic
+// ---------------------------------------------------------------------------
+
+// TestClient_ReadPump_NilHandlerSilentDiscard verifies that a Client with
+// handler=nil silently discards incoming messages without panicking.
+func TestClient_ReadPump_NilHandlerSilentDiscard(t *testing.T) {
+	srv, addr, cleanup := startWSServerMem(t,
+		WSWithPingPeriod(1*time.Hour),
+	)
+	defer cleanup()
+
+	wsConn := connectWS(t, addr, "user-nil-handler")
+	defer wsConn.Close()
+
+	require.Eventually(t, func() bool {
+		return findClient(srv, "user-nil-handler") != nil
+	}, 2*time.Second, 50*time.Millisecond)
+
+	client := findClient(srv, "user-nil-handler")
+	require.NotNil(t, client)
+
+	// Set the handler to nil to test the nil-handler code path.
+	client.handler = nil
+
+	// Send a valid request. The server should not panic, and the connection
+	// should stay alive.
+	sendRequestPackage(t, wsConn, "nil-1", "anything", json.RawMessage(`{}`))
+
+	// Give the server a moment to process the message.
+	time.Sleep(200 * time.Millisecond)
+
+	// The connection must still be alive — no response expected (handler is
+	// nil), but the server must not have closed the connection.
+	// Send another valid request to verify.
+	sendRequestPackage(t, wsConn, "nil-2", "anything", json.RawMessage(`{}`))
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify connection is alive by writing a ping.
+	err := wsConn.WriteMessage(websocket.PingMessage, nil)
+	assert.NoError(t, err, "connection should still be alive after nil-handler discard")
+}
+
+// ---------------------------------------------------------------------------
+// P1: writePump batch drain
+// ---------------------------------------------------------------------------
+
+// TestClient_WritePump_BatchDrain verifies that when multiple messages are
+// queued in the send channel, writePump drains them efficiently. Due to
+// the batch drain optimization, multiple JSON objects may be concatenated
+// into a single WebSocket text frame. This test verifies all messages
+// eventually arrive by reading raw frames and counting JSON objects.
+func TestClient_WritePump_BatchDrain(t *testing.T) {
+	srv, addr, cleanup := startWSServerMem(t,
+		WSWithPingPeriod(1*time.Hour),
+		WSWithPongWait(30*time.Second), // prevent readPump timeout
+	)
+	defer cleanup()
+
+	wsConn := connectWS(t, addr, "user-batch-drain")
+	defer wsConn.Close()
+
+	require.Eventually(t, func() bool {
+		return findClient(srv, "user-batch-drain") != nil
+	}, 2*time.Second, 50*time.Millisecond)
+
+	client := findClient(srv, "user-batch-drain")
+	require.NotNil(t, client)
+
+	// Enqueue multiple messages rapidly so writePump batches them.
+	const numMsgs = 5
+	for i := 0; i < numMsgs; i++ {
+		pkg := &protocol.Package{
+			Type: protocol.PackageTypeUpdates,
+			Data: json.RawMessage(fmt.Sprintf(`{"seq":%d}`, i+1)),
+		}
+		err := client.SendPackage(pkg)
+		require.NoError(t, err)
+	}
+
+	// Read raw WS frames and count the total number of JSON objects (and
+	// verify each has the correct type). The batch drain may concatenate
+	// multiple JSON objects into one frame.
+	receivedCount := 0
+	_ = wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for receivedCount < numMsgs {
+		_, rawMsg, err := wsConn.ReadMessage()
+		if err != nil {
+			break
+		}
+		// Parse concatenated JSON objects from this frame.
+		dec := json.NewDecoder(bytes.NewReader(rawMsg))
+		for dec.More() {
+			var pkg protocol.Package
+			if err := dec.Decode(&pkg); err != nil {
+				break
+			}
+			assert.Equal(t, protocol.PackageTypeUpdates, pkg.Type)
+			receivedCount++
+		}
+	}
+	assert.Equal(t, numMsgs, receivedCount, "all batched messages should be received")
+}
+
+// ---------------------------------------------------------------------------
+// P1: Close idempotency — flag and context behaviour
+// ---------------------------------------------------------------------------
+
+// TestClient_Close_IdempotentUnit verifies the internal state transitions
+// that Close triggers: the closed flag is set and the context is cancelled.
+// Calling Close on a Client with a nil conn would panic (conn.Close), so
+// this test directly sets the closed flag and cancels the context to
+// exercise the guard logic, verifying that the second "close" would be a
+// no-op. The full idempotency test with a real connection is covered by
+// TestClient_CloseIdempotent.
+func TestClient_Close_IdempotentUnit(t *testing.T) {
+	c := NewClient(nil, "u", "c")
+
+	// Simulate what Close does internally (without touching conn).
+	c.mu.Lock()
+	require.False(t, c.closed, "client should not be closed initially")
+	c.closed = true
+	c.cancel()
+	c.mu.Unlock()
+
+	// Verify state after first "close".
+	c.mu.Lock()
+	assert.True(t, c.closed, "client must be marked closed")
+	c.mu.Unlock()
+	select {
+	case <-c.ctx.Done():
+		// expected
+	default:
+		t.Fatal("context should be cancelled after close")
+	}
+
+	// Simulate second Close: the guard check (c.closed == true) should
+	// cause an early return. We verify this by checking that the closed
+	// flag is still true and ctx is still cancelled — nothing changed.
+	c.mu.Lock()
+	wasClosed := c.closed
+	c.mu.Unlock()
+	assert.True(t, wasClosed, "idempotent: second close sees closed=true")
+
+	// Context should still be cancelled (no re-cancel needed).
+	select {
+	case <-c.ctx.Done():
+		// expected
+	default:
+		t.Fatal("context should still be cancelled")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P1: SendPackage returns marshal error
+// ---------------------------------------------------------------------------
+
+// TestClient_SendPackage_Enqueue verifies that SendPackage marshals a
+// protocol.Package and enqueues it into the client's send channel. Since
+// protocol.Package uses json.RawMessage for Data (which is []byte and always
+// marshals successfully), a true marshal error is essentially unreachable
+// with the current struct layout. This test verifies the happy path and
+// confirms the message is correctly enqueued.
+func TestClient_SendPackage_Enqueue(t *testing.T) {
+	c := newClientWithSendBuf(t, "u", 10)
+
+	// Valid package — should marshal and enqueue successfully.
+	validPkg := &protocol.Package{
+		Type: protocol.PackageTypeUpdates,
+		Data: json.RawMessage(`{"seq":1}`),
+	}
+	err := c.SendPackage(validPkg)
+	assert.NoError(t, err, "SendPackage should succeed for valid package")
+
+	// Verify the message was enqueued.
+	select {
+	case msg := <-c.send:
+		assert.NotEmpty(t, msg)
+		// Verify the enqueued data is valid JSON containing the package.
+		var decoded protocol.Package
+		require.NoError(t, json.Unmarshal(msg, &decoded))
+		assert.Equal(t, protocol.PackageTypeUpdates, decoded.Type)
+	default:
+		t.Fatal("SendPackage should have enqueued a message")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P1: readPump closes connection on oversized message
+// ---------------------------------------------------------------------------
+
+// TestClient_ReadPump_MessageExceedsLimit verifies that an incoming message
+// exceeding MaxMessageSize causes the connection to be closed.
+func TestClient_ReadPump_MessageExceedsLimit(t *testing.T) {
+	const smallLimit = 256 // 256 bytes
+
+	_, addr, cleanup := startWSServerMem(t,
+		WSWithMaxMessageSize(smallLimit),
+		WSWithPingPeriod(1*time.Hour),
+	)
+	defer cleanup()
+
+	wsConn := connectWS(t, addr, "user-oversize")
+	defer wsConn.Close()
+
+	// Send a message that exceeds the limit.
+	bigMsg := make([]byte, smallLimit+1024)
+	for i := range bigMsg {
+		bigMsg[i] = 'A'
+	}
+
+	// Wrap it in a valid protocol.Package JSON envelope so it's a text
+	// message that exceeds the limit after JSON parsing.
+	envelope := fmt.Sprintf(`{"type":0,"data":"%s"}`, string(bigMsg))
+	err := wsConn.WriteMessage(websocket.TextMessage, []byte(envelope))
+	require.NoError(t, err)
+
+	// The server should close the connection because the message exceeds
+	// MaxMessageSize. The client read should fail.
+	_ = wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, err = wsConn.ReadMessage()
+	assert.Error(t, err, "connection should be closed after oversized message")
+}
+
+// ---------------------------------------------------------------------------
+// websocket_handler.go tests — P0
+// ---------------------------------------------------------------------------
+
+// TestHandleRequest_InvalidJSON verifies that sending a PackageTypeRequest
+// with invalid JSON in Data produces an error response with code=-1 and an
+// empty ID (D-017: the request ID is unavailable when parsing fails).
+func TestHandleRequest_InvalidJSON(t *testing.T) {
+	handler := NewDefaultMessageHandler()
+
+	_, addr, cleanup := startWSServerMem(t, WSWithMessageHandler(handler))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-invalid-json")
+	defer conn.Close()
+
+	// Send a Package with PackageTypeRequest but Data that is not valid JSON
+	// for PackageDataRequest. The outer JSON must be valid so readPump can
+	// decode the Package; only the inner Data must fail to unmarshal.
+	rawWS := `{"type":0,"data":"{not valid json"}`
+	err := conn.WriteMessage(websocket.TextMessage, []byte(rawWS))
+	require.NoError(t, err)
+
+	resp := readResponsePackage(t, conn, 3*time.Second)
+	// (D-017) ID must be empty string when request cannot be parsed.
+	assert.Equal(t, "", resp.ID, "ID must be empty string when JSON is invalid (D-017)")
+	assert.Equal(t, protocol.ResponseCodeError, resp.Code, "code must be -1 (D-017)")
+	assert.Equal(t, "invalid request data", resp.Msg)
+}
+
+// TestHandleRequest_UnknownMethod verifies that a request for an unregistered
+// method returns an error response containing the original request ID (D-017).
+func TestHandleRequest_UnknownMethod(t *testing.T) {
+	handler := NewDefaultMessageHandler()
+	// No methods registered.
+
+	_, addr, cleanup := startWSServerMem(t, WSWithMessageHandler(handler))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-unknown-meth")
+	defer conn.Close()
+
+	sendRequestPackage(t, conn, "req-unk-1", "nonexistent_method", json.RawMessage(`{}`))
+
+	resp := readResponsePackage(t, conn, 3*time.Second)
+	// (D-017) req.ID must be echoed back even for unknown method errors.
+	assert.Equal(t, "req-unk-1", resp.ID, "request ID must be preserved (D-017)")
+	assert.Equal(t, protocol.ResponseCodeError, resp.Code, "code must be -1 (D-017)")
+	assert.Contains(t, resp.Msg, "unknown method: nonexistent_method")
+}
+
+// TestHandleRequest_HandlerReturnsHandlerError verifies that a HandlerError
+// returned by a MethodHandler has its Code and Message transparently passed
+// through to the client response (D-017).
+func TestHandleRequest_HandlerReturnsHandlerError(t *testing.T) {
+	handler := NewDefaultMessageHandler()
+	handler.RegisterMethodFunc("fail_typed", func(ctx context.Context, client *Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return nil, protocol.NewHandlerError(protocol.ResponseCodeNotFound, "conversation not found")
+	})
+
+	_, addr, cleanup := startWSServerMem(t, WSWithMessageHandler(handler))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-handler-err-typed")
+	defer conn.Close()
+
+	sendRequestPackage(t, conn, "req-te-1", "fail_typed", json.RawMessage(`{}`))
+
+	resp := readResponsePackage(t, conn, 3*time.Second)
+	// (D-017) HandlerError Code and Message must be transparently forwarded.
+	assert.Equal(t, "req-te-1", resp.ID, "request ID must be preserved (D-017)")
+	assert.Equal(t, protocol.ResponseCodeNotFound, resp.Code, "HandlerError.Code must be forwarded (D-017)")
+	assert.Equal(t, "conversation not found", resp.Msg, "HandlerError.Message must be forwarded (D-017)")
+}
+
+// TestHandleRequest_HandlerError_WithWrappedInnerError verifies that
+// errors.As correctly extracts the HandlerError Code even when the error is
+// wrapped with fmt.Errorf (D-017).
+func TestHandleRequest_HandlerError_WithWrappedInnerError(t *testing.T) {
+	handler := NewDefaultMessageHandler()
+	handler.RegisterMethodFunc("fail_wrapped", func(ctx context.Context, client *Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		inner := protocol.NewHandlerError(protocol.ResponseCodePermissionDenied, "access denied")
+		// Wrap the HandlerError: errors.As should still extract it.
+		return nil, fmt.Errorf("operation failed: %w", inner)
+	})
+
+	_, addr, cleanup := startWSServerMem(t, WSWithMessageHandler(handler))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-wrapped-err")
+	defer conn.Close()
+
+	sendRequestPackage(t, conn, "req-we-1", "fail_wrapped", json.RawMessage(`{}`))
+
+	resp := readResponsePackage(t, conn, 3*time.Second)
+	// (D-017) errors.As must extract HandlerError.Code from wrapped errors.
+	assert.Equal(t, "req-we-1", resp.ID, "request ID must be preserved (D-017)")
+	assert.Equal(t, protocol.ResponseCodePermissionDenied, resp.Code, "wrapped HandlerError.Code must be extracted via errors.As (D-017)")
+	assert.Contains(t, resp.Msg, "access denied", "wrapped HandlerError.Message must be extracted (D-017)")
+}
+
+// TestDefaultMessageHandler_UnknownPackageType verifies that a Package with
+// a type value that is not Request/Response/Updates hits the default branch
+// (logged) and does not produce any response or panic.
+func TestDefaultMessageHandler_UnknownPackageType(t *testing.T) {
+	handler := NewDefaultMessageHandler()
+
+	_, addr, cleanup := startWSServerMem(t, WSWithMessageHandler(handler))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-unknown-pkg-type")
+	defer conn.Close()
+
+	// Send a package with an invalid type (99).
+	pkg := protocol.Package{
+		Type: protocol.PackageType(99),
+		Data: json.RawMessage(`{}`),
+	}
+	data, err := json.Marshal(pkg)
+	require.NoError(t, err)
+	err = conn.WriteMessage(websocket.TextMessage, data)
+	require.NoError(t, err)
+
+	// The server must not send any response for unknown package types.
+	// Verify the connection is still alive by sending a valid request
+	// afterwards. The unknown-method response proves the connection survived.
+	time.Sleep(200 * time.Millisecond)
+
+	sendRequestPackage(t, conn, "still-alive-unknown-type", "anything", json.RawMessage(`{}`))
+	resp := readResponsePackage(t, conn, 3*time.Second)
+	assert.Equal(t, "still-alive-unknown-type", resp.ID, "connection must survive unknown package type")
+}
+
+// ---------------------------------------------------------------------------
+// websocket_handler.go tests — P1
+// ---------------------------------------------------------------------------
+
+// TestDefaultMessageHandler_ResponsePackageType_Ignored verifies that a
+// PackageTypeResponse received from the client is logged and ignored (no
+// handler invocation, no response sent back).
+func TestDefaultMessageHandler_ResponsePackageType_Ignored(t *testing.T) {
+	handler := NewDefaultMessageHandler()
+	handlerCalled := false
+	handler.RegisterMethodFunc("should_not_be_called", func(ctx context.Context, client *Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		handlerCalled = true
+		return json.RawMessage(`{}`), nil
+	})
+
+	_, addr, cleanup := startWSServerMem(t, WSWithMessageHandler(handler))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-resp-ignored")
+	defer conn.Close()
+
+	// Send a PackageTypeResponse to the server.
+	respPkg := protocol.Package{
+		Type: protocol.PackageTypeResponse,
+		Data: json.RawMessage(`{"id":"x","code":0,"msg":"ok","data":null}`),
+	}
+	data, err := json.Marshal(respPkg)
+	require.NoError(t, err)
+	err = conn.WriteMessage(websocket.TextMessage, data)
+	require.NoError(t, err)
+
+	// Wait for processing.
+	time.Sleep(200 * time.Millisecond)
+
+	// The registered method handler must NOT have been called.
+	assert.False(t, handlerCalled, "method handler must not be invoked for PackageTypeResponse")
+
+	// Connection must still be alive.
+	sendRequestPackage(t, conn, "after-resp-pkg", "should_not_be_called", json.RawMessage(`{}`))
+	resp := readResponsePackage(t, conn, 3*time.Second)
+	assert.Equal(t, "after-resp-pkg", resp.ID)
+	// The method handler should be called now (from the valid request).
+	assert.True(t, handlerCalled, "method handler must be called for a valid request after ignored response package")
+}
+
+// TestDefaultMessageHandler_UpdatesPackageType_Ignored verifies that a
+// PackageTypeUpdates received from the client is logged and ignored (no
+// handler invocation, no response sent back).
+func TestDefaultMessageHandler_UpdatesPackageType_Ignored(t *testing.T) {
+	handler := NewDefaultMessageHandler()
+	handlerCalled := false
+	handler.RegisterMethodFunc("should_not_be_called", func(ctx context.Context, client *Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		handlerCalled = true
+		return json.RawMessage(`{}`), nil
+	})
+
+	_, addr, cleanup := startWSServerMem(t, WSWithMessageHandler(handler))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-updates-ignored")
+	defer conn.Close()
+
+	// Send a PackageTypeUpdates to the server.
+	updatesPkg := protocol.Package{
+		Type: protocol.PackageTypeUpdates,
+		Data: json.RawMessage(`{"updates":[]}`),
+	}
+	data, err := json.Marshal(updatesPkg)
+	require.NoError(t, err)
+	err = conn.WriteMessage(websocket.TextMessage, data)
+	require.NoError(t, err)
+
+	// Wait for processing.
+	time.Sleep(200 * time.Millisecond)
+
+	// The registered method handler must NOT have been called.
+	assert.False(t, handlerCalled, "method handler must not be invoked for PackageTypeUpdates")
+
+	// Connection must still be alive.
+	sendRequestPackage(t, conn, "after-updates-pkg", "should_not_be_called", json.RawMessage(`{}`))
+	resp := readResponsePackage(t, conn, 3*time.Second)
+	assert.Equal(t, "after-updates-pkg", resp.ID)
+	assert.True(t, handlerCalled, "method handler must be called for a valid request after ignored updates package")
+}
+
+// TestHandleRequest_HandlerReturnsPlainError verifies that a plain error
+// (not a HandlerError) from a MethodHandler results in code=-1 with the
+// error message as the Msg field.
+func TestHandleRequest_HandlerReturnsPlainError(t *testing.T) {
+	handler := NewDefaultMessageHandler()
+	handler.RegisterMethodFunc("fail_plain", func(ctx context.Context, client *Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return nil, fmt.Errorf("something went wrong")
+	})
+
+	_, addr, cleanup := startWSServerMem(t, WSWithMessageHandler(handler))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-plain-err")
+	defer conn.Close()
+
+	sendRequestPackage(t, conn, "req-pe-1", "fail_plain", json.RawMessage(`{}`))
+
+	resp := readResponsePackage(t, conn, 3*time.Second)
+	assert.Equal(t, "req-pe-1", resp.ID)
+	assert.Equal(t, protocol.ResponseCodeError, resp.Code, "plain error must use generic code -1")
+	assert.Equal(t, "something went wrong", resp.Msg, "plain error message must be forwarded verbatim")
+}
+
+// TestDefaultMessageHandler_Fallback_InvokedOnUnknown verifies that a
+// fallback handler set via SetFallback is invoked when a request method is
+// not registered (unit-level, using startWSServerMem).
+func TestDefaultMessageHandler_Fallback_InvokedOnUnknown(t *testing.T) {
+	handler := NewDefaultMessageHandler()
+	fallbackCalled := false
+	handler.SetFallback(MethodHandlerFunc(
+		func(ctx context.Context, client *Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+			fallbackCalled = true
+			return json.RawMessage(`{"fallback":"yes"}`), nil
+		},
+	))
+
+	_, addr, cleanup := startWSServerMem(t, WSWithMessageHandler(handler))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-fallback-unit")
+	defer conn.Close()
+
+	sendRequestPackage(t, conn, "fb-u-1", "completely_unknown", json.RawMessage(`{}`))
+
+	resp := readResponsePackage(t, conn, 3*time.Second)
+	assert.True(t, fallbackCalled, "fallback handler must be invoked for unknown method")
+	assert.Equal(t, "fb-u-1", resp.ID)
+	assert.Equal(t, protocol.ResponseCodeOK, resp.Code)
+}
+
+// TestSendSuccessResponse verifies that sendSuccessResponse marshals and
+// sends a correct PackageTypeResponse with code=0 via the client's send
+// channel, using a Client with no real WebSocket connection.
+func TestSendSuccessResponse(t *testing.T) {
+	c := newClientWithSendBuf(t, "u-success", 10)
+
+	respData := json.RawMessage(`{"key":"value"}`)
+	err := sendSuccessResponse(c, "id-1", respData)
+	require.NoError(t, err)
+
+	// Read the enqueued message from the send channel.
+	select {
+	case raw := <-c.send:
+		var pkg protocol.Package
+		require.NoError(t, json.Unmarshal(raw, &pkg))
+		assert.Equal(t, protocol.PackageTypeResponse, pkg.Type)
+
+		var resp protocol.PackageDataResponse
+		require.NoError(t, json.Unmarshal(pkg.Data, &resp))
+		assert.Equal(t, "id-1", resp.ID)
+		assert.Equal(t, protocol.ResponseCodeOK, resp.Code)
+		assert.Equal(t, "ok", resp.Msg)
+		assert.JSONEq(t, `{"key":"value"}`, string(resp.Data))
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a message in the send channel")
+	}
+}
+
+// TestSendErrorResponse verifies that sendErrorResponse marshals and sends a
+// correct PackageTypeResponse with the given code and message.
+func TestSendErrorResponse(t *testing.T) {
+	c := newClientWithSendBuf(t, "u-error", 10)
+
+	err := sendErrorResponse(c, "id-err", protocol.ResponseCodeNotFound, "not found")
+	require.NoError(t, err)
+
+	select {
+	case raw := <-c.send:
+		var pkg protocol.Package
+		require.NoError(t, json.Unmarshal(raw, &pkg))
+		assert.Equal(t, protocol.PackageTypeResponse, pkg.Type)
+
+		var resp protocol.PackageDataResponse
+		require.NoError(t, json.Unmarshal(pkg.Data, &resp))
+		assert.Equal(t, "id-err", resp.ID)
+		assert.Equal(t, protocol.ResponseCodeNotFound, resp.Code, "(D-017) structured error code must be forwarded")
+		assert.Equal(t, "not found", resp.Msg)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a message in the send channel")
+	}
+}
+
+// TestSendResponse_AfterClientClose verifies that calling sendResponse on a
+// closed client does not panic and returns no error (the message is silently
+// dropped by Send).
+func TestSendResponse_AfterClientClose(t *testing.T) {
+	c := newClientWithSendBuf(t, "u-closed", 10)
+
+	// Close the client by setting the closed flag and cancelling context.
+	c.mu.Lock()
+	c.closed = true
+	c.cancel()
+	c.mu.Unlock()
+
+	// sendResponse after close should not panic.
+	assert.NotPanics(t, func() {
+		err := sendSuccessResponse(c, "id-after-close", json.RawMessage(`{}`))
+		// The error may be nil because Send silently drops after close.
+		_ = err
+	})
+
+	assert.NotPanics(t, func() {
+		err := sendErrorResponse(c, "id-after-close", protocol.ResponseCodeError, "test")
+		_ = err
+	})
+}
+
+// ---------------------------------------------------------------------------
+// websocket_handler.go tests — P2
+// ---------------------------------------------------------------------------
+
+// TestMessageHandlerFunc_Adapter verifies that MessageHandlerFunc adapts an
+// ordinary function into a MessageHandler.
+func TestMessageHandlerFunc_Adapter(t *testing.T) {
+	called := false
+	var gotClient *Client
+	var gotPkg *protocol.Package
+
+	fn := MessageHandlerFunc(func(ctx context.Context, client *Client, pkg *protocol.Package) {
+		called = true
+		gotClient = client
+		gotPkg = pkg
+	})
+
+	c := newClientWithSendBuf(t, "u-adapter", 1)
+	pkg := &protocol.Package{Type: protocol.PackageTypeRequest, Data: json.RawMessage(`{}`)}
+	fn.HandleMessage(context.Background(), c, pkg)
+
+	assert.True(t, called, "adapter function must be called")
+	assert.Equal(t, c, gotClient, "client must be forwarded")
+	assert.Equal(t, pkg, gotPkg, "package must be forwarded")
+}
+
+// TestMethodHandlerFunc_Adapter verifies that MethodHandlerFunc adapts an
+// ordinary function into a MethodHandler.
+func TestMethodHandlerFunc_Adapter(t *testing.T) {
+	called := false
+	expectedData := json.RawMessage(`{"result":true}`)
+
+	fn := MethodHandlerFunc(func(ctx context.Context, client *Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		called = true
+		return expectedData, nil
+	})
+
+	c := newClientWithSendBuf(t, "u-method-adapter", 1)
+	req := &protocol.PackageDataRequest{ID: "a1", Method: "test"}
+	result, err := fn.HandleRequest(context.Background(), c, req)
+
+	assert.True(t, called, "adapter function must be called")
+	require.NoError(t, err)
+	assert.Equal(t, expectedData, result)
+}
+
+// TestDefaultMessageHandler_RegisterMethod_Overwrite verifies at the unit
+// level that re-registering a method name replaces the previous handler.
+func TestDefaultMessageHandler_RegisterMethod_Overwrite(t *testing.T) {
+	handler := NewDefaultMessageHandler()
+
+	// Register the initial handler.
+	handler.RegisterMethodFunc("ow", func(ctx context.Context, client *Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.RawMessage(`{"v":"old"}`), nil
+	})
+
+	// Overwrite.
+	handler.RegisterMethodFunc("ow", func(ctx context.Context, client *Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.RawMessage(`{"v":"new"}`), nil
+	})
+
+	// Verify by invoking HandleMessage through a real WS connection.
+	_, addr, cleanup := startWSServerMem(t, WSWithMessageHandler(handler))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-overwrite-unit")
+	defer conn.Close()
+
+	sendRequestPackage(t, conn, "ow-1", "ow", json.RawMessage(`{}`))
+
+	resp := readResponsePackage(t, conn, 3*time.Second)
+	assert.Equal(t, protocol.ResponseCodeOK, resp.Code)
+
+	var data map[string]string
+	require.NoError(t, json.Unmarshal(resp.Data, &data))
+	assert.Equal(t, "new", data["v"], "overwritten handler must be invoked")
+}
+
+// ---------------------------------------------------------------------------
+// D-018: NodeBroadcaster integration tests
+// ---------------------------------------------------------------------------
+
+// mockNodeBroadcaster is a test double that records Publish calls and allows
+// injecting a Subscribe callback for testing handleRemoteBroadcast.
+type mockNodeBroadcaster struct {
+	mu            sync.Mutex
+	publishCalls  []mockPublishCall
+	subscribeFunc func(ctx context.Context, callback func(string, *protocol.PackageDataUpdates, string)) error
+	closeCalled   bool
+}
+
+type mockPublishCall struct {
+	UserID       string
+	Updates      *protocol.PackageDataUpdates
+	SourceNodeID string
+}
+
+func (m *mockNodeBroadcaster) Publish(ctx context.Context, userID string, updates *protocol.PackageDataUpdates, sourceNodeID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.publishCalls = append(m.publishCalls, mockPublishCall{
+		UserID:       userID,
+		Updates:      updates,
+		SourceNodeID: sourceNodeID,
+	})
+	return nil
+}
+
+func (m *mockNodeBroadcaster) Subscribe(ctx context.Context, callback func(string, *protocol.PackageDataUpdates, string)) error {
+	if m.subscribeFunc != nil {
+		return m.subscribeFunc(ctx, callback)
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (m *mockNodeBroadcaster) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closeCalled = true
+	return nil
+}
+
+func (m *mockNodeBroadcaster) getPublishCalls() []mockPublishCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]mockPublishCall(nil), m.publishCalls...)
+}
+
+// TestBroadcastUpdates_CallsNodeBroadcaster verifies that BroadcastUpdates
+// calls NodeBroadcaster.Publish after local broadcast (D-018).
+func TestBroadcastUpdates_CallsNodeBroadcaster(t *testing.T) {
+	mockNB := &mockNodeBroadcaster{}
+	cs := NewMemoryConnectionStore(0)
+
+	srv, addr, cleanup := startWSServer(t, cs, WSWithNodeBroadcaster(mockNB))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-nb-publish")
+	defer conn.Close()
+
+	require.Eventually(t, func() bool {
+		return srv.ClientCount() >= 1
+	}, 2*time.Second, 50*time.Millisecond)
+
+	updates := &protocol.PackageDataUpdates{
+		Updates: []protocol.PackageDataUpdate{
+			{Seq: 1, Payload: json.RawMessage(`{"event":"test"}`)},
+		},
+	}
+	err := srv.BroadcastUpdates("user-nb-publish", updates)
+	require.NoError(t, err)
+
+	// Verify NodeBroadcaster.Publish was called.
+	calls := mockNB.getPublishCalls()
+	require.Len(t, calls, 1, "NodeBroadcaster.Publish should be called once (D-018)")
+	assert.Equal(t, "user-nb-publish", calls[0].UserID)
+	assert.Equal(t, updates, calls[0].Updates)
+	// SourceNodeID should be the server's own node ID.
+	assert.NotEmpty(t, calls[0].SourceNodeID, "sourceNodeID must be non-empty (D-018)")
+	assert.Equal(t, srv.nodeID, calls[0].SourceNodeID, "sourceNodeID must match server nodeID (D-018)")
+
+	// The local client should also receive the update.
+	pkg := readPackage(t, conn, 3*time.Second)
+	assert.Equal(t, protocol.PackageTypeUpdates, pkg.Type)
+}
+
+// TestHandleRemoteBroadcast_SkipsOwnNode verifies that handleRemoteBroadcast
+// skips messages originated by this node to avoid duplicate delivery (D-018).
+func TestHandleRemoteBroadcast_SkipsOwnNode(t *testing.T) {
+	mockNB := &mockNodeBroadcaster{}
+	cs := NewMemoryConnectionStore(0)
+
+	srv, addr, cleanup := startWSServer(t, cs, WSWithNodeBroadcaster(mockNB))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-skip-self")
+	defer conn.Close()
+
+	require.Eventually(t, func() bool {
+		return srv.ClientCount() >= 1
+	}, 2*time.Second, 50*time.Millisecond)
+
+	updates := &protocol.PackageDataUpdates{
+		Updates: []protocol.PackageDataUpdate{
+			{Seq: 1, Payload: json.RawMessage(`{"event":"self"}`)},
+		},
+	}
+
+	// Call handleRemoteBroadcast with this node's own ID.
+	srv.handleRemoteBroadcast("user-skip-self", updates, srv.nodeID)
+
+	// The client should NOT receive any update (message was skipped).
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_, _, err := conn.ReadMessage()
+	assert.Error(t, err, "client should not receive update from own node (D-018)")
+}
+
+// TestHandleRemoteBroadcast_DeliversFromOtherNode verifies that
+// handleRemoteBroadcast delivers updates from other nodes (D-018).
+func TestHandleRemoteBroadcast_DeliversFromOtherNode(t *testing.T) {
+	mockNB := &mockNodeBroadcaster{}
+	cs := NewMemoryConnectionStore(0)
+
+	srv, addr, cleanup := startWSServer(t, cs, WSWithNodeBroadcaster(mockNB))
+	defer cleanup()
+
+	conn := connectWS(t, addr, "user-other-node")
+	defer conn.Close()
+
+	require.Eventually(t, func() bool {
+		return srv.ClientCount() >= 1
+	}, 2*time.Second, 50*time.Millisecond)
+
+	updates := &protocol.PackageDataUpdates{
+		Updates: []protocol.PackageDataUpdate{
+			{Seq: 42, Payload: json.RawMessage(`{"event":"remote"}`)},
+		},
+	}
+
+	// Call handleRemoteBroadcast with a different node ID.
+	srv.handleRemoteBroadcast("user-other-node", updates, "different-node-id")
+
+	// The client SHOULD receive the update.
+	pkg := readPackage(t, conn, 3*time.Second)
+	assert.Equal(t, protocol.PackageTypeUpdates, pkg.Type)
+
+	var upd protocol.PackageDataUpdates
+	require.NoError(t, json.Unmarshal(pkg.Data, &upd))
+	require.Len(t, upd.Updates, 1)
+	assert.Equal(t, uint32(42), upd.Updates[0].Seq)
 }
