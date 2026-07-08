@@ -100,4 +100,20 @@
 //	        // Handle Redis timeout.
 //	    }
 //	}
+//
+// # Cross-Node Message Routing
+//
+// The NodeBroadcaster interface handles cross-node message routing using
+// Redis Pub/Sub (D-018). In single-node deployments, the default
+// NoopBroadcaster is used (no overhead). In multi-node deployments,
+// RedisNodeBroadcaster fans out updates across all nodes.
+//
+//	srv, _ := server.NewWebSocketServer(
+//	    server.WSWithAddr(":8080"),
+//	    server.WSWithConnectionStore(connStore),
+//	    server.WSWithNodeBroadcaster(nodeBroadcaster),
+//	)
+//
+// The WebSocketServer automatically subscribes to Pub/Sub on Start and
+// publishes updates via BroadcastUpdates.
 package server

@@ -40,6 +40,7 @@ import (
 	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -119,6 +120,20 @@ func main() {
 	defer broker.Close()
 
 	// ---------------------------------------------------------------
+	// Node Broadcaster (cross-node message routing via Redis Pub/Sub)
+	// ---------------------------------------------------------------
+
+	// Uses a dedicated redis.Client for Pub/Sub since Pub/Sub requires
+	// an exclusive connection that cannot be shared with regular commands.
+	nodeBroadcasterClient := redis.NewClient(&redis.Options{
+		Addr:     *redisAddr,
+		Password: *redisPassword,
+		DB:       *redisDB,
+	})
+	nodeBroadcaster := server.NewRedisNodeBroadcaster(nodeBroadcasterClient, "xyncra")
+	defer nodeBroadcasterClient.Close()
+
+	// ---------------------------------------------------------------
 	// Message Handlers
 	// ---------------------------------------------------------------
 
@@ -139,6 +154,7 @@ func main() {
 		server.WSWithStore(dataStore),
 		server.WSWithBroker(broker),
 		server.WSWithMessageHandler(msgHandler),
+		server.WSWithNodeBroadcaster(nodeBroadcaster),
 	)
 	if err != nil {
 		log.Fatalf("failed to create websocket server: %v", err)

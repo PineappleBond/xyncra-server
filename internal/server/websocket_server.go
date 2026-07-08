@@ -129,6 +129,7 @@ type webSocketServerOptions struct {
 	messageHandler         MessageHandler
 	logger                 Logger
 	connectionInfoEnricher func(*ConnectionInfo, *http.Request)
+	nodeBroadcaster        NodeBroadcaster
 }
 
 // WSWithAddr sets the listen address.
@@ -235,6 +236,16 @@ func WSWithConnectionInfoEnricher(fn func(*ConnectionInfo, *http.Request)) WebSo
 	return func(o *webSocketServerOptions) { o.connectionInfoEnricher = fn }
 }
 
+// WSWithNodeBroadcaster sets the NodeBroadcaster for cross-node message routing.
+// Default: NoopBroadcaster (single-node deployment).
+func WSWithNodeBroadcaster(nb NodeBroadcaster) WebSocketServerOption {
+	return func(o *webSocketServerOptions) {
+		if nb != nil {
+			o.nodeBroadcaster = nb
+		}
+	}
+}
+
 // --------------------------------------------------------------------------
 // WebSocketServer
 // --------------------------------------------------------------------------
@@ -291,6 +302,13 @@ type WebSocketServer struct {
 	// connectionInfoEnricher is called during upgrade to populate extra
 	// ConnectionInfo fields from the HTTP request.
 	connectionInfoEnricher func(*ConnectionInfo, *http.Request)
+
+	// nodeBroadcaster handles cross-node message routing via Pub/Sub.
+	nodeBroadcaster NodeBroadcaster
+
+	// nodeID is a unique identifier for this node, used to skip
+	// self-originated messages in Pub/Sub (D-018).
+	nodeID string
 }
 
 // Ensure WebSocketServer implements Server at compile time.
@@ -368,6 +386,11 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 		logger = stdLogger{}
 	}
 
+	nodeBroadcaster := o.nodeBroadcaster
+	if nodeBroadcaster == nil {
+		nodeBroadcaster = &NoopBroadcaster{}
+	}
+
 	s := &WebSocketServer{
 		BaseServer:             base,
 		upgrader:               upgrader,
@@ -379,6 +402,8 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 		clientOptions:          clientOpts,
 		logger:                 logger,
 		connectionInfoEnricher: o.connectionInfoEnricher,
+		nodeBroadcaster:        nodeBroadcaster,
+		nodeID:                 uuid.New().String(),
 		wsConfig: WebSocketServerConfig{
 			Path:              o.path,
 			Authenticate:      authenticate,
@@ -423,6 +448,13 @@ func (s *WebSocketServer) Start(ctx context.Context) error {
 		close(errCh)
 	}()
 
+	// Start the Pub/Sub subscription for cross-node message routing (D-018).
+	go func() {
+		if err := s.nodeBroadcaster.Subscribe(s.Context(), s.handleRemoteBroadcast); err != nil && s.Context().Err() == nil {
+			s.logger.Error("node broadcaster subscribe error", "error", err)
+		}
+	}()
+
 	// Run the BaseServer lifecycle (blocks until context is cancelled).
 	err = s.BaseServer.Start(ctx)
 
@@ -448,6 +480,12 @@ func (s *WebSocketServer) Start(ctx context.Context) error {
 // connections, waits for all active clients to disconnect (or the context to
 // expire), and then returns.
 func (s *WebSocketServer) GracefulStop(ctx context.Context) error {
+	// Close the node broadcaster to release Pub/Sub resources.
+	if s.nodeBroadcaster != nil {
+		if err := s.nodeBroadcaster.Close(); err != nil {
+			s.logger.Error("node broadcaster close error", "error", err)
+		}
+	}
 	return s.BaseServer.GracefulStop(ctx)
 }
 
@@ -592,19 +630,38 @@ func (s *WebSocketServer) closeAllClients() {
 	}
 }
 
-// BroadcastUpdates sends a PackageDataUpdates package to all local connections
-// of the given user. It uses the per-user index for O(k) lookup where k is
-// the number of connections for that user, instead of scanning all clients.
-// It is intended for single-instance deployments. For multi-instance
-// deployments, use the message queue (Broker) to fan out (P1-03, P1-3).
+// BroadcastUpdates sends a PackageDataUpdates package to all connections
+// of the given user, both local and remote (across nodes). It performs
+// a local broadcast first, then publishes to Redis Pub/Sub for other
+// nodes to pick up (D-018).
+//
+// Pub/Sub failures are logged but do not cause BroadcastUpdates to return
+// an error, consistent with the fire-and-forget strategy (D-007).
 func (s *WebSocketServer) BroadcastUpdates(userID string, updates *protocol.PackageDataUpdates) error {
 	if updates == nil {
 		return fmt.Errorf("websocket: updates is nil")
 	}
 
+	// 1. Local broadcast (existing logic).
+	s.broadcastLocal(userID, updates)
+
+	// 2. Cross-node publish via Pub/Sub.
+	if err := s.nodeBroadcaster.Publish(s.Context(), userID, updates, s.nodeID); err != nil {
+		s.logger.Error("cross-node broadcast failed", "userID", userID, "error", err)
+		// Fire-and-forget: data is persisted, delivery via sync_updates (D-007).
+	}
+
+	return nil
+}
+
+// broadcastLocal sends a PackageDataUpdates package to all local connections
+// of the given user. It uses the per-user index for O(k) lookup where k is
+// the number of connections for that user.
+func (s *WebSocketServer) broadcastLocal(userID string, updates *protocol.PackageDataUpdates) {
 	data, err := jsonMarshal(updates)
 	if err != nil {
-		return fmt.Errorf("websocket: marshal updates: %w", err)
+		s.logger.Error("websocket: marshal updates for local broadcast: %v", err)
+		return
 	}
 	pkg := &protocol.Package{
 		Type: protocol.PackageTypeUpdates,
@@ -624,8 +681,17 @@ func (s *WebSocketServer) BroadcastUpdates(userID string, updates *protocol.Pack
 			s.logger.Error("websocket: broadcast to [connID=%s]: %v", client.ConnID(), sendErr)
 		}
 	}
+}
 
-	return nil
+// handleRemoteBroadcast is called when a Pub/Sub message is received from
+// another node. It skips messages originated by this node (avoiding
+// duplicate delivery) and performs a local broadcast.
+func (s *WebSocketServer) handleRemoteBroadcast(userID string, updates *protocol.PackageDataUpdates, sourceNodeID string) {
+	// Skip messages from this node (already delivered locally).
+	if sourceNodeID == s.nodeID {
+		return
+	}
+	s.broadcastLocal(userID, updates)
 }
 
 // ClientCount returns the number of active client connections.
