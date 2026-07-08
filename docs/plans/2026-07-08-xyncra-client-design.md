@@ -29,6 +29,7 @@
 - 本地 SQLite 数据库（无 CGO）
 - 持久化重试队列
 - 命令行界面（支持所有 RPC 方法）
+- **日志查询和聚合命令**（支持过滤、统计、导出）
 - SKILL 文档（教会 LLM 如何使用）
 - Claude Code 子代理驱动的测试框架
 
@@ -51,7 +52,8 @@
 - **ORM**：GORM（自动迁移）
 - **WebSocket**：gorilla/websocket
 - **文件锁**：github.com/gofrs/flock
-- **日志**：标准库 log + JSONL 文件
+- **日志存储**：SQLite（直接写入数据库，支持高效查询）
+- **日志导出**：CSV/JSON 格式
 
 ---
 
@@ -79,6 +81,7 @@ xyncra-server/
 │   ├── draft_store.go               # 草稿存储
 │   ├── read_position_store.go       # 已读位置存储
 │   ├── queue_store.go               # 持久化重试队列
+│   ├── rpc_log_store.go             # RPC 日志存储（查询、聚合、导出）
 │   └── models.go                    # 数据模型定义
 │
 ├── internal/cli/
@@ -88,9 +91,10 @@ xyncra-server/
 │   ├── conversations.go             # 会话相关命令
 │   ├── messages.go                  # 消息相关命令
 │   ├── sync.go                      # sync-updates 命令
+│   ├── logs.go                      # logs 命令（查询、聚合、导出）
 │   └── output/
 │       ├── console.go               # 控制台输出格式化
-│       └── jsonl.go                 # JSONL 文件输出
+│       └── csv.go                   # CSV 导出
 │
 └── pkg/protocol/                    # 已有：复用现有协议定义
 ```
@@ -443,6 +447,18 @@ gorm.Config{
    - 更新重试状态（Attempt、NextRetry）
    - 标记永久失败的任务
 
+7. **RPCLogStore** - RPC 日志存储
+   - 保存 RPC 请求和响应日志
+   - 支持按时间、方法、请求 ID、会话 ID 查询
+   - 支持聚合统计（成功率、延迟、错误分布）
+   - 支持导出为 CSV/JSON 格式
+   - 支持日志清理（按保留天数）
+
+8. **NotificationLogStore** - 通知日志存储
+   - 保存 Update 通知日志
+   - 支持按时间、seq 查询
+   - 支持导出和清理
+
 ### 4.5 数据模型
 
 **本地数据模型**（与服务器协议对应，但增加本地字段）：
@@ -471,6 +487,14 @@ gorm.Config{
 
 7. **RetryTask**
    - 字段：ID, Method, Params, Attempt, MaxAttempts, NextRetry, CreatedAt, Status
+
+8. **RPCLog**（RPC 请求/响应日志）
+   - 字段：ID, Timestamp, Type, RequestID, Method, Code, ConversationID, Duration, Params, Data, ErrorMsg
+   - 索引：timestamp, method, request_id, conversation_id, code
+
+9. **NotificationLog**（Update 通知日志）
+   - 字段：ID, Timestamp, Type, Seq, Payload
+   - 索引：timestamp, seq
 
 ### 4.6 SQLite 配置和业务读写需求
 
@@ -707,6 +731,69 @@ gorm.Config{
     - draft delete --conversation-id -c
     ```
 
+14. **logs** - 日志查询、聚合、导出
+    ```
+    子命令：
+    
+    14.1 logs tail - 查看最近 N 条日志
+    参数：
+    --type                 日志类型：rpc | notifications（默认：rpc）
+    --limit                返回条数（默认：50）
+    --since                时间范围：30s, 5m, 1h, 24h
+    
+    行为：
+    - 从 SQLite 数据库查询最近的日志
+    - 分页输出（每行一条 JSON）
+    - 支持按时间范围过滤
+    
+    14.2 logs search - 搜索特定条件的日志
+    参数：
+    --method               方法名过滤
+    --error                只显示错误（code != 0）
+    --from, --to           时间范围（ISO 8601 格式）
+    --conversation-id      会话 ID 过滤
+    --request-id           请求 ID 过滤（请求 + 响应）
+    --limit                返回条数（默认：50）
+    
+    行为：
+    - 支持多条件组合过滤
+    - 按时间倒序输出（最新在前）
+    - 支持分页
+    
+    14.3 logs stats - 统计聚合信息
+    参数：
+    --since                时间范围（默认：24h）
+    --interval             聚合间隔：1m, 5m, 10m, 1h（默认：1h）
+    
+    行为：
+    - 统计总请求数、成功数、失败数、成功率
+    - 按方法分组统计
+    - 计算平均延迟、P95、P99 延迟
+    - 错误分布统计
+    - 支持按时间间隔分组输出
+    
+    14.4 logs export - 导出为 CSV/JSON
+    参数：
+    --format               导出格式：csv | json（默认：csv）
+    --output               输出文件路径
+    --method               方法名过滤
+    --from, --to           时间范围
+    
+    行为：
+    - 导出日志为 CSV 或 JSON 格式
+    - 支持过滤条件
+    - 供其他工具（Excel、数据分析工具）使用
+    
+    14.5 logs cleanup - 清理旧日志
+    参数：
+    --retain               保留天数（默认：7d）
+    --dry-run              模拟运行，不实际删除
+    
+    行为：
+    - 删除指定天数之前的日志
+    - 支持模拟运行（查看将删除多少条）
+    ```
+
 ### 5.3 进程间通信（IPC）
 
 **listen 命令**作为守护进程，其他命令需要与之通信：
@@ -726,29 +813,70 @@ gorm.Config{
    - 如果 listen 未运行，其他命令直接建立 WebSocket 连接
    - 执行完操作后关闭连接（短连接模式）
 
-### 5.4 输出格式
+### 5.4 日志存储和查询
+
+**日志存储策略**：直接写入 SQLite 数据库（而非 JSONL 文件）
+
+**优势**：
+- 支持高效查询（索引优化）
+- 支持聚合统计
+- 支持复杂过滤条件
+- 与现有架构一致（GORM 自动迁移）
+
+**数据表设计**：
+
+1. **rpc_logs 表**（RPC 请求/响应日志）
+   ```go
+   type RPCLog struct {
+       ID             int64     `gorm:"primaryKey"`
+       Timestamp      time.Time `gorm:"index"`
+       Type           string    `gorm:"index"` // "request" or "response"
+       RequestID      string    `gorm:"index"`
+       Method         string    `gorm:"index"`
+       Code           int32     `gorm:"index"` // 0=success, negative=error
+       ConversationID string    `gorm:"index"`
+       Duration       int64     // 响应时间（毫秒）
+       Params         string    // JSON 格式
+       Data           string    // JSON 格式
+       ErrorMsg       string
+   }
+   
+   // 索引
+   // idx_rpc_logs_timestamp
+   // idx_rpc_logs_method
+   // idx_rpc_logs_request_id
+   // idx_rpc_logs_conversation_id
+   // idx_rpc_logs_code
+   ```
+
+2. **notifications 表**（Update 通知日志）
+   ```go
+   type NotificationLog struct {
+       ID        int64     `gorm:"primaryKey"`
+       Timestamp time.Time `gorm:"index"`
+       Type      string    `gorm:"index"` // "update" or "request"
+       Seq       uint32    `gorm:"index"`
+       Payload   string    // JSON 格式
+   }
+   
+   // 索引
+   // idx_notifications_timestamp
+   // idx_notifications_seq
+   ```
+
+**写入策略**：
+- ApplyUpdate 时同步写入 `notifications` 表
+- RPC 请求/响应时同步写入 `rpc_logs` 表
+- 使用事务保证一致性
+
+**日志轮转**：
+- 按日期分表：`rpc_logs_2026_07_08`
+- 保留策略：默认 7 天，可通过 `logs cleanup` 命令管理
+- 自动清理：listen 命令每小时检查一次，删除过期日志
 
 **控制台输出**：
 - 人类友好的格式化文本
 - 支持颜色（可选，通过 `--no-color` 禁用）
-
-**JSONL 文件输出**：
-
-1. **notifications.jsonl** - Update 通知
-   ```json
-   {"timestamp":"2026-07-08T12:00:00Z","type":"update","seq":123,"payload":{...}}
-   ```
-
-2. **rpc.log.jsonl** - RPC 请求/响应日志
-   ```json
-   {"timestamp":"2026-07-08T12:00:00Z","type":"request","id":"req-001","method":"send_message","params":{...}}
-   {"timestamp":"2026-07-08T12:00:01Z","type":"response","id":"req-001","code":0,"data":{...}}
-   ```
-
-3. **日志轮转**
-   - 按日期轮转：`notifications-2026-07-08.jsonl`
-   - 保留最近 7 天
-   - 可配置（默认 7 天）
 
 ### 5.5 进程锁管理
 
@@ -957,7 +1085,8 @@ go tool cover -html=coverage.out -o coverage.html
     │   ├── conversations.md          # 会话管理命令
     │   ├── messages.md               # 消息操作命令
     │   ├── sync.md                   # 同步命令
-    │   └── draft.md                  # 草稿管理命令
+    │   ├── draft.md                  # 草稿管理命令
+    │   └── logs.md                   # 日志查询、聚合、导出命令
     ├── architecture/
     │   ├── overview.md               # 架构概述
     │   ├── database.md               # 本地数据库说明
@@ -993,6 +1122,7 @@ go tool cover -html=coverage.out -o coverage.html
 - [messages.md](references/commands/messages.md) - 消息操作
 - [sync.md](references/commands/sync.md) - 增量同步
 - [draft.md](references/commands/draft.md) - 草稿管理
+- [logs.md](references/commands/logs.md) - 日志查询、聚合、导出
 
 ## 架构说明
 
@@ -1103,6 +1233,19 @@ flowchart TD
    - [ ] 批量同步吞吐量
    - [ ] 数据库查询性能
    - [ ] 内存占用
+
+8. **日志查询测试**
+   - [ ] `logs tail` 查看最近 N 条日志
+   - [ ] `logs search` 按方法过滤
+   - [ ] `logs search` 按错误码过滤
+   - [ ] `logs search` 按时间范围过滤
+   - [ ] `logs search` 按请求 ID 过滤
+   - [ ] `logs stats` 统计聚合（成功率、延迟）
+   - [ ] `logs stats` 按时间间隔分组
+   - [ ] `logs export` 导出为 CSV
+   - [ ] `logs export` 导出为 JSON
+   - [ ] `logs cleanup` 清理旧日志
+   - [ ] `logs cleanup --dry-run` 模拟运行
 
 ### 9.3 测试用例文档格式
 
@@ -1288,6 +1431,16 @@ flowchart TD
 4. **D-023：GORM 自动迁移**
    - 决策：每次运行命令时自动执行 AutoMigrate
    - 原因：零配置，首次运行自动创建数据库
+
+5. **D-024：日志存储策略**
+   - 决策：日志直接写入 SQLite 数据库（而非 JSONL 文件）
+   - 原因：
+     - 支持高效查询（索引优化）
+     - 支持聚合统计（成功率、延迟、错误分布）
+     - 支持复杂过滤条件
+     - 避免 Claude Code 上下文被大文件撑爆
+     - 与现有架构一致（GORM 自动迁移）
+   - 权衡：写入时有额外开销，但查询性能显著提升
 
 ### B. 性能指标
 
