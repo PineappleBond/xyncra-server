@@ -380,3 +380,366 @@ func TestRPCLogStore_Save_DuplicateKey(t *testing.T) {
 	err := db.RPCLogs.Save(ctx, l2)
 	require.ErrorIs(t, err, ErrDuplicateKey)
 }
+
+// ---------------------------------------------------------------------------
+// AggregateByInterval tests
+// ---------------------------------------------------------------------------
+
+func TestRPCLogStore_AggregateByInterval_1m(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	base := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+
+	logs := []*model.RPCLog{
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 10 * time.Millisecond, CreatedAt: base},
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 20 * time.Millisecond, CreatedAt: base.Add(10 * time.Second)},
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 30 * time.Millisecond, CreatedAt: base.Add(1 * time.Minute)},
+	}
+	for _, l := range logs {
+		require.NoError(t, db.RPCLogs.Save(ctx, l))
+	}
+
+	start := base.Add(-1 * time.Hour)
+	end := base.Add(10 * time.Minute)
+
+	rows, err := db.RPCLogs.AggregateByInterval(ctx, start, end, "1m")
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+
+	assert.Equal(t, "2024-01-15 10:30:00", rows[0].Interval)
+	assert.Equal(t, "M1", rows[0].Method)
+	assert.Equal(t, int64(2), rows[0].Count)
+	assert.Equal(t, int64(2), rows[0].Success)
+	assert.Equal(t, int64(0), rows[0].ErrorCount)
+	assert.InDelta(t, 15.0, rows[0].AvgMs, 0.5)
+
+	assert.Equal(t, "2024-01-15 10:31:00", rows[1].Interval)
+	assert.Equal(t, "M1", rows[1].Method)
+	assert.Equal(t, int64(1), rows[1].Count)
+	assert.InDelta(t, 30.0, rows[1].AvgMs, 0.5)
+}
+
+func TestRPCLogStore_AggregateByInterval_5m(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	base := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	logs := []*model.RPCLog{
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 10 * time.Millisecond, CreatedAt: base},                       // 10:00 bucket
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 20 * time.Millisecond, CreatedAt: base.Add(2 * time.Minute)},  // 10:00 bucket
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 40 * time.Millisecond, CreatedAt: base.Add(5 * time.Minute)},  // 10:05 bucket
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 50 * time.Millisecond, CreatedAt: base.Add(10 * time.Minute)}, // 10:10 bucket
+	}
+	for _, l := range logs {
+		require.NoError(t, db.RPCLogs.Save(ctx, l))
+	}
+
+	start := base.Add(-1 * time.Hour)
+	end := base.Add(20 * time.Minute)
+
+	rows, err := db.RPCLogs.AggregateByInterval(ctx, start, end, "5m")
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+
+	// First 5m bucket: 10:00
+	assert.Equal(t, "2024-01-15 10:00:00", rows[0].Interval)
+	assert.Equal(t, int64(2), rows[0].Count)
+	assert.InDelta(t, 15.0, rows[0].AvgMs, 0.5)
+
+	// Second 5m bucket: 10:05
+	assert.Equal(t, "2024-01-15 10:05:00", rows[1].Interval)
+	assert.Equal(t, int64(1), rows[1].Count)
+	assert.InDelta(t, 40.0, rows[1].AvgMs, 0.5)
+
+	// Third 5m bucket: 10:10
+	assert.Equal(t, "2024-01-15 10:10:00", rows[2].Interval)
+	assert.Equal(t, int64(1), rows[2].Count)
+	assert.InDelta(t, 50.0, rows[2].AvgMs, 0.5)
+}
+
+func TestRPCLogStore_AggregateByInterval_15m(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	base := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	logs := []*model.RPCLog{
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 10 * time.Millisecond, CreatedAt: base},                       // 10:00 bucket
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 20 * time.Millisecond, CreatedAt: base.Add(5 * time.Minute)},  // 10:00 bucket
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 30 * time.Millisecond, CreatedAt: base.Add(10 * time.Minute)}, // 10:00 bucket
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 40 * time.Millisecond, CreatedAt: base.Add(15 * time.Minute)}, // 10:15 bucket
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 50 * time.Millisecond, CreatedAt: base.Add(30 * time.Minute)}, // 10:30 bucket
+	}
+	for _, l := range logs {
+		require.NoError(t, db.RPCLogs.Save(ctx, l))
+	}
+
+	start := base.Add(-1 * time.Hour)
+	end := base.Add(45 * time.Minute)
+
+	rows, err := db.RPCLogs.AggregateByInterval(ctx, start, end, "15m")
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+
+	// First 15m bucket: 10:00
+	assert.Equal(t, "2024-01-15 10:00:00", rows[0].Interval)
+	assert.Equal(t, int64(3), rows[0].Count)
+	assert.InDelta(t, 20.0, rows[0].AvgMs, 0.5)
+
+	// Second 15m bucket: 10:15
+	assert.Equal(t, "2024-01-15 10:15:00", rows[1].Interval)
+	assert.Equal(t, int64(1), rows[1].Count)
+	assert.InDelta(t, 40.0, rows[1].AvgMs, 0.5)
+
+	// Third 15m bucket: 10:30
+	assert.Equal(t, "2024-01-15 10:30:00", rows[2].Interval)
+	assert.Equal(t, int64(1), rows[2].Count)
+	assert.InDelta(t, 50.0, rows[2].AvgMs, 0.5)
+}
+
+func TestRPCLogStore_AggregateByInterval_1h(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	base := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	logs := []*model.RPCLog{
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 10 * time.Millisecond, CreatedAt: base},
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 20 * time.Millisecond, CreatedAt: base.Add(30 * time.Minute)},
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 30 * time.Millisecond, CreatedAt: base.Add(1 * time.Hour)},
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 40 * time.Millisecond, CreatedAt: base.Add(2 * time.Hour)},
+	}
+	for _, l := range logs {
+		require.NoError(t, db.RPCLogs.Save(ctx, l))
+	}
+
+	start := base.Add(-1 * time.Hour)
+	end := base.Add(4 * time.Hour)
+
+	rows, err := db.RPCLogs.AggregateByInterval(ctx, start, end, "1h")
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+
+	assert.Equal(t, "2024-01-15 10:00:00", rows[0].Interval)
+	assert.Equal(t, int64(2), rows[0].Count)
+	assert.InDelta(t, 15.0, rows[0].AvgMs, 0.5)
+
+	assert.Equal(t, "2024-01-15 11:00:00", rows[1].Interval)
+	assert.Equal(t, int64(1), rows[1].Count)
+	assert.InDelta(t, 30.0, rows[1].AvgMs, 0.5)
+
+	assert.Equal(t, "2024-01-15 12:00:00", rows[2].Interval)
+	assert.Equal(t, int64(1), rows[2].Count)
+	assert.InDelta(t, 40.0, rows[2].AvgMs, 0.5)
+}
+
+func TestRPCLogStore_AggregateByInterval_1d(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	day1 := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+	day2 := time.Date(2024, 1, 16, 8, 0, 0, 0, time.UTC)
+
+	logs := []*model.RPCLog{
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 10 * time.Millisecond, CreatedAt: day1},
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 20 * time.Millisecond, CreatedAt: day1.Add(3 * time.Hour)},
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 50 * time.Millisecond, CreatedAt: day2},
+	}
+	for _, l := range logs {
+		require.NoError(t, db.RPCLogs.Save(ctx, l))
+	}
+
+	start := day1.Add(-24 * time.Hour)
+	end := day2.Add(24 * time.Hour)
+
+	rows, err := db.RPCLogs.AggregateByInterval(ctx, start, end, "1d")
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+
+	assert.Equal(t, "2024-01-15", rows[0].Interval)
+	assert.Equal(t, int64(2), rows[0].Count)
+	assert.InDelta(t, 15.0, rows[0].AvgMs, 0.5)
+
+	assert.Equal(t, "2024-01-16", rows[1].Interval)
+	assert.Equal(t, int64(1), rows[1].Count)
+	assert.InDelta(t, 50.0, rows[1].AvgMs, 0.5)
+}
+
+func TestRPCLogStore_AggregateByInterval_MultipleMethods(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	base := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	logs := []*model.RPCLog{
+		{ID: uid(), RequestID: uid(), Method: "SendMessage", StatusCode: 0, Duration: 10 * time.Millisecond, CreatedAt: base},
+		{ID: uid(), RequestID: uid(), Method: "GetMessages", StatusCode: 0, Duration: 20 * time.Millisecond, CreatedAt: base.Add(10 * time.Second)},
+		{ID: uid(), RequestID: uid(), Method: "SendMessage", StatusCode: 0, Duration: 30 * time.Millisecond, CreatedAt: base.Add(20 * time.Second)},
+		{ID: uid(), RequestID: uid(), Method: "DeleteMessage", StatusCode: 0, Duration: 5 * time.Millisecond, CreatedAt: base.Add(30 * time.Second)},
+	}
+	for _, l := range logs {
+		require.NoError(t, db.RPCLogs.Save(ctx, l))
+	}
+
+	start := base.Add(-1 * time.Hour)
+	end := base.Add(1 * time.Hour)
+
+	rows, err := db.RPCLogs.AggregateByInterval(ctx, start, end, "1h")
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+
+	// Should be sorted by interval ASC, method ASC — all in same hour bucket.
+	assert.Equal(t, "DeleteMessage", rows[0].Method)
+	assert.Equal(t, int64(1), rows[0].Count)
+	assert.InDelta(t, 5.0, rows[0].AvgMs, 0.5)
+
+	assert.Equal(t, "GetMessages", rows[1].Method)
+	assert.Equal(t, int64(1), rows[1].Count)
+	assert.InDelta(t, 20.0, rows[1].AvgMs, 0.5)
+
+	assert.Equal(t, "SendMessage", rows[2].Method)
+	assert.Equal(t, int64(2), rows[2].Count)
+	assert.InDelta(t, 20.0, rows[2].AvgMs, 0.5) // (10+30)/2
+}
+
+func TestRPCLogStore_AggregateByInterval_ErrorClassification(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	base := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	logs := []*model.RPCLog{
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 10 * time.Millisecond, CreatedAt: base},
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 20 * time.Millisecond, CreatedAt: base.Add(10 * time.Second)},
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: -1, Duration: 5 * time.Millisecond, CreatedAt: base.Add(20 * time.Second)},
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: -2, Duration: 3 * time.Millisecond, CreatedAt: base.Add(30 * time.Second)},
+		{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 200, Duration: 15 * time.Millisecond, CreatedAt: base.Add(40 * time.Second)},
+	}
+	for _, l := range logs {
+		require.NoError(t, db.RPCLogs.Save(ctx, l))
+	}
+
+	start := base.Add(-1 * time.Hour)
+	end := base.Add(1 * time.Hour)
+
+	rows, err := db.RPCLogs.AggregateByInterval(ctx, start, end, "1h")
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+
+	assert.Equal(t, int64(5), rows[0].Count)
+	assert.Equal(t, int64(3), rows[0].Success)    // StatusCode 0, 0, 200 (>= 0)
+	assert.Equal(t, int64(2), rows[0].ErrorCount) // StatusCode -1, -2 (< 0)
+	assert.InDelta(t, 10.6, rows[0].AvgMs, 1.0)   // (10+20+5+3+15)/5 = 10.6
+}
+
+func TestRPCLogStore_AggregateByInterval_EmptyRange(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	// Insert data far in the past.
+	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	log := &model.RPCLog{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, Duration: 10 * time.Millisecond, CreatedAt: past}
+	require.NoError(t, db.RPCLogs.Save(ctx, log))
+
+	// Query a range that contains no data.
+	start := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2024, 6, 2, 0, 0, 0, 0, time.UTC)
+
+	rows, err := db.RPCLogs.AggregateByInterval(ctx, start, end, "1h")
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+}
+
+func TestRPCLogStore_AggregateByInterval_InvalidInterval(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	start := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+	end := start.Add(1 * time.Hour)
+
+	_, err := db.RPCLogs.AggregateByInterval(ctx, start, end, "10m")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid interval")
+}
+
+// ---------------------------------------------------------------------------
+// CountBefore tests
+// ---------------------------------------------------------------------------
+
+func TestRPCLogStore_CountBefore_Basic(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	base := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
+
+	logs := []*model.RPCLog{
+		{ID: uid(), RequestID: uid(), Method: "M1", CreatedAt: base.Add(-3 * time.Hour)},
+		{ID: uid(), RequestID: uid(), Method: "M2", CreatedAt: base.Add(-1 * time.Hour)},
+		{ID: uid(), RequestID: uid(), Method: "M3", CreatedAt: base},
+		{ID: uid(), RequestID: uid(), Method: "M4", CreatedAt: base.Add(1 * time.Hour)},
+	}
+	for _, l := range logs {
+		require.NoError(t, db.RPCLogs.Save(ctx, l))
+	}
+
+	count, err := db.RPCLogs.CountBefore(ctx, base)
+	require.NoError(t, err)
+	// Strictly before base: l1 (-3h) and l2 (-1h) → 2
+	assert.Equal(t, int64(2), count)
+
+	// Count everything before a future time.
+	future := base.Add(24 * time.Hour)
+	count, err = db.RPCLogs.CountBefore(ctx, future)
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), count)
+}
+
+func TestRPCLogStore_CountBefore_Empty(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	count, err := db.RPCLogs.CountBefore(ctx, time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count)
+}
+
+func TestNotificationLogStore_CountBefore_Basic(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	base := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
+
+	logs := []*model.NotificationLog{
+		{ID: uid(), Seq: 1, Type: "message", Payload: []byte(`{}`), CreatedAt: base.Add(-2 * time.Hour)},
+		{ID: uid(), Seq: 2, Type: "message", Payload: []byte(`{}`), CreatedAt: base.Add(-30 * time.Minute)},
+		{ID: uid(), Seq: 3, Type: "message", Payload: []byte(`{}`), CreatedAt: base.Add(1 * time.Hour)},
+	}
+	for _, l := range logs {
+		require.NoError(t, db.NotificationLogs.Save(ctx, l))
+	}
+
+	count, err := db.NotificationLogs.CountBefore(ctx, base)
+	require.NoError(t, err)
+	// Strictly before base: seq 1 (-2h) and seq 2 (-30m) → 2
+	assert.Equal(t, int64(2), count)
+
+	// Count all before a future time.
+	future := base.Add(24 * time.Hour)
+	count, err = db.NotificationLogs.CountBefore(ctx, future)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), count)
+}

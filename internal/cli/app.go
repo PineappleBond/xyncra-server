@@ -88,6 +88,8 @@ func NewRootCommand() *cobra.Command {
 	cmd.AddCommand(newSearchMessagesCommand())
 	cmd.AddCommand(newDraftCommand())
 	cmd.AddCommand(newSyncUpdatesCommand())
+	cmd.AddCommand(newLogsCommand())
+	cmd.AddCommand(newKillCommand())
 
 	return cmd
 }

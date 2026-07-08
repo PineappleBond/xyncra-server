@@ -228,6 +228,8 @@ func TestNewRootCommand(t *testing.T) {
 		"search-messages",
 		"draft",
 		"sync-updates",
+		"logs",
+		"kill",
 	}
 	for _, name := range expectedCmds {
 		if !names[name] {
@@ -238,11 +240,12 @@ func TestNewRootCommand(t *testing.T) {
 
 func TestNewRootCommand_TotalSubcommandCount(t *testing.T) {
 	cmd := NewRootCommand()
-	// 13 subcommands: listen, send, create-conversation, delete-conversation,
+	// 15 subcommands: listen, send, create-conversation, delete-conversation,
 	// restore-conversation, list-conversations, get-conversation, delete-message,
-	// mark-as-read, get-messages, search-messages, draft, sync-updates.
-	if got := len(cmd.Commands()); got != 13 {
-		t.Errorf("expected 13 subcommands, got %d", got)
+	// mark-as-read, get-messages, search-messages, draft, sync-updates,
+	// logs, kill.
+	if got := len(cmd.Commands()); got != 15 {
+		t.Errorf("expected 15 subcommands, got %d", got)
 	}
 }
 
@@ -253,4 +256,24 @@ func TestNewRootCommand_HelpTexts(t *testing.T) {
 			t.Errorf("subcommand %q has empty Short help text", sub.Use)
 		}
 	}
+}
+
+func TestNewRootCommand_HasLogsCommand(t *testing.T) {
+	cmd := NewRootCommand()
+	for _, sub := range cmd.Commands() {
+		if sub.Name() == "logs" {
+			return
+		}
+	}
+	t.Error("expected logs subcommand")
+}
+
+func TestNewRootCommand_HasKillCommand(t *testing.T) {
+	cmd := NewRootCommand()
+	for _, sub := range cmd.Commands() {
+		if sub.Name() == "kill" {
+			return
+		}
+	}
+	t.Error("expected kill subcommand")
 }

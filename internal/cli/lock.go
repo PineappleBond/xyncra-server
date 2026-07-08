@@ -109,6 +109,12 @@ func readLockInfo(lockPath string) (*LockInfo, error) {
 	return &info, nil
 }
 
+// cleanupDaemonFiles removes the lock file and IPC socket file for the daemon.
+func cleanupDaemonFiles(cliCtx *CLIContext) {
+	_ = os.Remove(cliCtx.LockPath())
+	_ = os.Remove(cliCtx.SocketPath())
+}
+
 // isProcessAlive checks if a process with the given PID exists.
 func isProcessAlive(pid int) bool {
 	if pid <= 0 {

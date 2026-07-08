@@ -117,13 +117,64 @@ func (rs *RPCLogStore) Aggregate(ctx context.Context, startTime, endTime time.Ti
 			SUM(CASE WHEN status_code >= 0 THEN 1 ELSE 0 END) as success,
 			SUM(CASE WHEN status_code < 0 THEN 1 ELSE 0 END) as error_count,
 			AVG(CAST(duration AS FLOAT) / 1000000.0) as avg_ms`).
-		Where("created_at >= ? AND created_at <= ?", startTime, endTime).
+		Where("created_at >= ? AND created_at < ?", startTime, endTime).
 		Group("method").
 		Scan(&rows).Error
 	if err != nil {
 		return nil, classifyError(fmt.Errorf("store: aggregate rpc logs: %w", err))
 	}
 	return rows, nil
+}
+
+// RPCIntervalRow represents aggregated RPC log statistics for a time interval.
+type RPCIntervalRow struct {
+	Interval   string  `json:"interval"` // e.g. "2026-07-09 10:00"
+	Method     string  `json:"method"`
+	Count      int64   `json:"count"`
+	Success    int64   `json:"success"`
+	ErrorCount int64   `json:"error_count"`
+	AvgMs      float64 `json:"avg_ms"`
+}
+
+// AggregateByInterval returns per-interval, per-method RPC statistics for the
+// given time range [startTime, endTime). Supported intervals: "1m", "5m",
+// "15m", "1h", "1d". Results are ordered by interval ASC, method ASC.
+func (rs *RPCLogStore) AggregateByInterval(ctx context.Context, startTime, endTime time.Time, interval string) ([]RPCIntervalRow, error) {
+	var bucketExpr string
+	switch interval {
+	case "1m":
+		bucketExpr = "strftime('%Y-%m-%d %H:%M:00', created_at)"
+	case "5m":
+		bucketExpr = "datetime((strftime('%s', created_at) / 300) * 300, 'unixepoch')"
+	case "15m":
+		bucketExpr = "datetime((strftime('%s', created_at) / 900) * 900, 'unixepoch')"
+	case "1h":
+		bucketExpr = "strftime('%Y-%m-%d %H:00:00', created_at)"
+	case "1d":
+		bucketExpr = "date(created_at)"
+	default:
+		return nil, fmt.Errorf("store: invalid interval %q: must be one of 1m, 5m, 15m, 1h, 1d", interval)
+	}
+
+	var results []RPCIntervalRow
+	err := rs.db.WithContext(ctx).
+		Table("rpc_logs").
+		Select(bucketExpr+` as interval,
+			method,
+			COUNT(*) as count,
+			SUM(CASE WHEN status_code >= 0 THEN 1 ELSE 0 END) as success,
+			SUM(CASE WHEN status_code < 0 THEN 1 ELSE 0 END) as error_count,
+			AVG(CAST(duration AS FLOAT) / 1000000.0) as avg_ms`).
+		Where("created_at >= ? AND created_at < ?", startTime, endTime).
+		Group("interval").
+		Group("method").
+		Order("interval ASC").
+		Order("method ASC").
+		Find(&results).Error
+	if err != nil {
+		return nil, classifyError(fmt.Errorf("store: aggregate rpc logs by interval: %w", err))
+	}
+	return results, nil
 }
 
 // ExportCSV writes RPC logs matching the filter as CSV to the given writer.
@@ -148,7 +199,7 @@ func (rs *RPCLogStore) ExportCSV(ctx context.Context, w io.Writer, filter RPCLog
 			l.Method,
 			fmt.Sprintf("%d", l.StatusCode),
 			l.ConversationID,
-			fmt.Sprintf("%.3f", float64(l.Duration.Milliseconds())),
+			fmt.Sprintf("%.3f", float64(l.Duration.Microseconds())/1000.0),
 			l.ErrorMsg,
 			l.CreatedAt.Format(time.RFC3339),
 		}
@@ -190,4 +241,18 @@ func (rs *RPCLogStore) CleanupBefore(ctx context.Context, before time.Time) (int
 // CleanupOlderThan hard-deletes RPC logs older than the given duration.
 func (rs *RPCLogStore) CleanupOlderThan(ctx context.Context, retention time.Duration) (int64, error) {
 	return rs.CleanupBefore(ctx, time.Now().Add(-retention))
+}
+
+// CountBefore returns the number of RPC logs with CreatedAt strictly before the
+// given time without deleting them.
+func (rs *RPCLogStore) CountBefore(ctx context.Context, before time.Time) (int64, error) {
+	var count int64
+	err := rs.db.WithContext(ctx).
+		Model(&model.RPCLog{}).
+		Where("created_at < ?", before).
+		Count(&count).Error
+	if err != nil {
+		return 0, classifyError(fmt.Errorf("store: count rpc logs before: %w", err))
+	}
+	return count, nil
 }

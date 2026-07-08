@@ -136,6 +136,20 @@ func (ns *NotificationLogStore) CleanupBefore(ctx context.Context, before time.T
 	return result.RowsAffected, nil
 }
 
+// CountBefore returns the number of notification logs with CreatedAt strictly
+// before the given time without deleting them.
+func (ns *NotificationLogStore) CountBefore(ctx context.Context, before time.Time) (int64, error) {
+	var count int64
+	err := ns.db.WithContext(ctx).
+		Model(&model.NotificationLog{}).
+		Where("created_at < ?", before).
+		Count(&count).Error
+	if err != nil {
+		return 0, classifyError(fmt.Errorf("store: count notification logs before: %w", err))
+	}
+	return count, nil
+}
+
 // GetLatestSeq returns the highest Seq value in the notification log.
 // Returns 0 if the log is empty.
 func (ns *NotificationLogStore) GetLatestSeq(ctx context.Context) (uint32, error) {
