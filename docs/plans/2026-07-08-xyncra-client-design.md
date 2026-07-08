@@ -161,7 +161,7 @@ xyncra-server/
 - **ApplyUpdates**（复数）：批量拉取 Updates 的入口，内部逐个调用 ApplyUpdate
 
 **处理流程**：
-1. 批量拉取 Updates（`seq_start` 到 `seq_start + limit`）
+1. 批量拉取 Updates（`after_seq` 到 `after_seq + limit`）
 2. 收到 Updates 列表后，**逐个处理**每个 Update
 3. 每个 Update 调用 `ApplyUpdate`：
    - 检查 `seq == local_max_seq + 1`
@@ -180,7 +180,7 @@ xyncra-server/
 #### 3.2.6 增量同步
 
 - **自动触发**：连接建立后自动拉取离线期间的 Updates
-- **分页拉取**：使用 `seq_start` + `limit` 作为参数
+- **分页拉取**：使用 `after_seq` + `limit` 作为参数
 - **状态持久化**：同步进度（local_max_seq）写入本地数据库
 
 ### 3.3 服务器侧 Updates 补空设计（需新增）
@@ -395,8 +395,9 @@ gorm.Config{
    - UserUpdate
    - SyncState
    - Draft
-   - ReadPosition
    - RetryTask
+   - RPCLog
+   - NotificationLog
 
 2. **索引迁移**（通过 GORM 标签定义）
    ```
@@ -412,9 +413,6 @@ gorm.Config{
    RetryTask 表索引：
    - next_retry（单列索引，加速重试轮询）
    - status（单列索引，加速状态过滤）
-   
-   ReadPosition 表索引：
-   - conversation_id + user_id（复合唯一索引）
    ```
 
 3. **GORM 标签示例**
@@ -521,6 +519,22 @@ gorm.Config{
      - `gap` - 空类型（服务器补空用，未来扩展）
 
    **服务器端改动计划**：
+
+   **⚠️ 重要说明**：D-025 的完整实现需要**先在服务器侧完成前置改动**。当前服务器的 `model.UserUpdate` 没有 Type 字段，`send_message.go` 也没有设置 Type。客户端必须先等服务器添加 Type 字段后，才能按 Type 过滤和处理不同类型的 Update。
+
+   **服务器侧改动清单**（需要在客户端实现前完成）：
+   1. `internal/store/model/user_update.go` - 添加 Type 字段
+   2. `internal/handler/send_message.go` - 设置 Type: "message"
+   3. `internal/handler/mark_as_read.go` - 创建 mark_read 类型的 Update
+   4. `internal/handler/delete_message.go` - 创建 delete_message 类型的 Update
+   5. `internal/handler/delete_conversation.go` - 创建 conversation 类型的 Update
+   6. `pkg/protocol/protocol.go` - 添加 Update 类型常量
+
+   **客户端过渡方案**（服务器未添加 Type 字段前）：
+   - 所有 Update 都视为 `type: "message"`（兼容当前服务器）
+   - 客户端解析 Payload 时，根据内容判断类型（临时方案）
+
+   **服务器代码示例**：
    ```go
    // 当前实现（send_message.go）
    msgPayload, err := json.Marshal(msg)
@@ -633,7 +647,7 @@ gorm.Config{
 
 4. **已读位置更新（中频写入）**
    - 触发频率：用户查看消息时
-   - 写入内容：ReadPosition 表、Conversation 表
+   - 写入内容：Conversation 表（LastReadMessageID1/2）
 
 5. **批量同步（低频写入）**
    - 触发频率：连接建立时、手动触发时
@@ -721,6 +735,7 @@ gorm.Config{
    - 自动同步（拉取离线 Updates）
    - 启动心跳（每 30 秒）
    - 启动重试队列轮询（每 1 秒）
+   - 启动日志自动清理（每 1 小时）
    - 接收消息并处理
    - 输出到控制台 + 写入 SQLite 日志表
    - Ctrl+C 优雅退出
@@ -1435,7 +1450,7 @@ flowchart TD
 **预期结果**：
 - 控制台输出消息发送成功
 - 本地数据库中消息已保存
-- JSONL 日志文件包含 RPC 记录
+- SQLite rpc_logs 表包含 RPC 记录
 
 **实际结果**：
 - [待填写]
