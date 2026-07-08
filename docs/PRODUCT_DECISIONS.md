@@ -482,10 +482,32 @@ UserUpdate 记录保留 30 天（`DefaultCleanupRetention`），超过 30 天的
 
 ---
 
+## D-019: 容器化部署模型
+
+### 决策
+
+提供 multi-stage Dockerfile 和 docker-compose 作为推荐的部署方式。Dockerfile 使用 golang:alpine 构建 + alpine 运行（~15-20MB 镜像）。docker-compose 编排 xyncra-server 和 Redis 7。
+
+### 原因
+
+1. **开箱即用**：Docker 是最简单的部署方式，符合 D-001 零配置哲学
+2. **环境一致性**：容器化避免环境差异导致的问题
+3. **运维友好**：docker-compose 一键启动所有依赖
+4. **HEALTHCHECK**：使用现有 `/health` 端点
+
+### 约束
+
+- 推荐但非强制——开发者仍可直接 `go run` 或 `go build` 运行
+- 需要 Docker 和 docker-compose 环境
+- 默认使用 SQLite（容器内持久化通过 volume 挂载）
+
+---
+
 ## 版本历史
 
 | 日期       | 版本 | 变更                                                                                |
 | ---------- | ---- | ----------------------------------------------------------------------------------- |
+| 2026-07-08 | v1.6 | 新增 D-019（容器化部署模型）                                                      |
 | 2026-07-08 | v1.5 | 新增 D-016（UserUpdate 数据生命周期管理）                                           |
 | 2026-07-07 | v1.4 | 新增 D-012（已读位置模型）、D-013（级联软删除）、D-014（消息删除权限）、D-015（级联恢复） |
 | 2026-07-07 | v1.3 | 新增 D-011（create_conversation 幂等模型）                                          |

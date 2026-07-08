@@ -1,0 +1,14 @@
+.git
+.github
+.claude
+docs
+*.md
+!README.md
+*.db
+*.test
+*.out
+coverage.*
+.idea
+.vscode
+xyncra-server
+tmp/
