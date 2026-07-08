@@ -82,6 +82,7 @@ xyncra-server/
 │   ├── read_position_store.go       # 已读位置存储
 │   ├── queue_store.go               # 持久化重试队列
 │   ├── rpc_log_store.go             # RPC 日志存储（查询、聚合、导出）
+│   ├── notification_log_store.go    # 通知日志存储
 │   └── models.go                    # 数据模型定义
 │
 ├── internal/cli/
@@ -116,7 +117,7 @@ xyncra-server/
 3. **internal/cli** - 命令层
    - CLI 命令定义和参数解析
    - 调用 pkg/client 执行操作
-   - 格式化输出（控制台 + JSONL 文件）
+   - 格式化输出（控制台 + SQLite 日志查询）
    - 进程锁管理
 
 ---
@@ -187,12 +188,12 @@ xyncra-server/
 
 #### 3.3.1 拉取参数
 
-- 客户端传入 `seq_start`（排他性下界）和 `limit`（期望数量）
-- 服务器返回 `[seq_start+1, seq_start+limit]` 范围内的所有 updates
+- 客户端传入 `after_seq`（排他性下界）和 `limit`（期望数量）
+- 服务器返回 `[after_seq+1, after_seq+limit]` 范围内的所有 updates
 
 #### 3.3.2 服务器处理流程
 
-1. 计算预期 seq 列表：`[seq_start+1, seq_start+2, ..., seq_start+limit]`
+1. 计算预期 seq 列表：`[after_seq+1, after_seq+2, ..., after_seq+limit]`
 2. 查询数据库中实际的 updates
 3. 对比预期列表和实际结果
 4. 如果有缺失的 seq，用空类型 Update 补充
@@ -215,7 +216,7 @@ flowchart TD
     B -->|是| C[处理 Update]
     C --> D[更新 local_max_seq]
     D --> E[写入本地数据库]
-    E --> F[写入 JSONL 通知文件]
+    E --> F[写入通知日志表]
     F --> G[打印到控制台]
     G --> H[返回成功]
     
@@ -250,7 +251,7 @@ flowchart TD
     B -->|是| D[忽略本次触发<br/>等待计时器到期]
     
     C --> E[500ms 计时器到期]
-    E --> F[调用 sync_updates<br/>seq_start=local_max_seq<br/>limit=100]
+    E --> F[调用 sync_updates<br/>after_seq=local_max_seq<br/>limit=100]
     F --> G[收到 Updates 列表]
     G --> H[调用 ApplyUpdates 处理]
 ```
@@ -259,9 +260,9 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[收到 sync_updates 请求] --> B[解析参数<br/>seq_start, limit]
-    B --> C[计算预期 seq 列表<br/>seq_start+1 到 seq_start+limit]
-    C --> D[查询数据库<br/>seq > seq_start<br/>最多 limit 条]
+    A[收到 sync_updates 请求] --> B[解析参数<br/>after_seq, limit]
+    B --> C[计算预期 seq 列表<br/>after_seq+1 到 after_seq+limit]
+    C --> D[查询数据库<br/>seq > after_seq<br/>最多 limit 条]
     D --> E[对比预期列表<br/>和实际结果]
     E --> F{有缺失的 seq?}
     
@@ -285,7 +286,7 @@ sequenceDiagram
     participant Server as 服务器
     
     Note over Client: 连接建立，自动同步
-    Client->>Server: sync_updates(seq_start=0, limit=100)
+    Client->>Server: sync_updates(after_seq=0, limit=100)
     Note over Server: 预期 seq: [1,2,3,...,100]<br/>实际查询: [1,2,3,5,6,8...]
     Note over Server: 检测到缺失: 4,7...
     Note over Server: 补空: [1,2,3,gap,5,6,gap,8...]
@@ -306,7 +307,7 @@ sequenceDiagram
     Timer->>Timer: 启动 500ms 计时器
     
     Note over Timer: 500ms 计时器到期
-    Timer->>Server: sync_updates(seq_start=100, limit=100)
+    Timer->>Server: sync_updates(after_seq=100, limit=100)
     Note over Server: 预期 seq: [101,102,...,200]
     Server-->>Client: updates [101,102,...,150,gap,gap...]
     
@@ -606,7 +607,7 @@ gorm.Config{
 
 - CLI 命令定义和参数解析
 - 调用 `pkg/client` 和 `pkg/store` 执行操作
-- 格式化输出（控制台 + JSONL 文件）
+- 格式化输出（控制台 + SQLite 日志查询）
 - 进程锁管理（保证单实例）
 
 ### 5.2 命令结构
@@ -632,7 +633,7 @@ gorm.Config{
    - 启动心跳（每 30 秒）
    - 启动重试队列轮询（每 1 秒）
    - 接收消息并处理
-   - 输出到控制台 + JSONL 文件
+   - 输出到控制台 + 写入 SQLite 日志表
    - Ctrl+C 优雅退出
    ```
 
@@ -945,7 +946,7 @@ gorm.Config{
 
 5. **优雅降级**
    - 非关键错误不阻塞主流程
-   - 示例：JSONL 文件写入失败时，仅记录日志，不阻塞消息处理
+   - 示例：日志写入失败时，仅记录到错误日志，不阻塞消息处理
 
 ### 6.3 错误示例
 
@@ -1162,8 +1163,8 @@ flowchart TD
     F --> G[执行测试用例]
     G --> H{运行 go run cmd/xyncra-client *}
     H --> I[查看控制台输出]
-    H --> J[查看 JSONL 通知文件]
-    H --> K[查看 JSONL 日志文件]
+    H --> J[使用 logs 命令查询日志]
+    H --> K[查看本地数据库]
     
     I --> L[判断是否符合预期]
     J --> L
@@ -1279,9 +1280,9 @@ flowchart TD
    预期：消息发送成功，显示消息 ID
    ```
 
-3. 查看 JSONL 日志文件：
+3. 查看日志：
    ```bash
-   cat ~/.xyncra/alice/device1/logs/rpc.log.jsonl
+   go run cmd/xyncra-client/main.go logs search --method send_message --limit 10
    ```
    预期：包含 send_message 请求和响应
 
@@ -1353,7 +1354,7 @@ flowchart TD
 ## 附录
 
 - [测试用例详情](./xyncra-client-test-cases.md)
-- [JSONL 日志样本](./logs/sample-rpc.log.jsonl)
+- [日志查询示例](./logs-query-examples.md)
 ```
 
 ### 9.5 Claude Code 子代理测试工作流
@@ -1381,16 +1382,15 @@ flowchart TD
    # 另一个终端
    go run cmd/xyncra-client/main.go send --user-id alice --conversation-id conv-123 --content "test"
    
-   # 查看输出
-   cat ~/.xyncra/alice/device1/logs/notifications.jsonl
-   cat ~/.xyncra/alice/device1/logs/rpc.log.jsonl
+   # 查看日志
+   go run cmd/xyncra-client/main.go logs search --method send_message --limit 10
    ```
 
 4. **判断结果**
    ```markdown
    对比预期结果和实际结果：
    - 控制台输出是否符合预期？
-   - JSONL 文件内容是否正确？
+   - logs 命令查询结果是否正确？
    - 本地数据库数据是否完整？
    ```
 
