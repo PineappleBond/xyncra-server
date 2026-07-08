@@ -22,6 +22,9 @@ xyncra-server/
 ├── internal/
 │   ├── e2e/
 │   │   └── e2e_test.go              # 端到端集成测试（需要 Redis）
+│   ├── cleanup/
+│   │   ├── cleanup.go              # UserUpdate 过期清理 goroutine（D-016）
+│   │   └── cleanup_test.go
 │   ├── handler/
 │   │   ├── register.go              # Handler 注册中心（RegisterAll）
 │   │   ├── heartbeat.go             # heartbeat RPC handler
@@ -54,6 +57,11 @@ xyncra-server/
 │   │   ├── redis_connection_store.go    # Redis 实现（生产用）
 │   │   ├── memory_connection_store.go   # 内存实现（测试用）
 │   │   ├── test_helpers.go          # 测试辅助函数
+│   │   ├── node_broadcaster.go      # NodeBroadcaster 接口（D-018）
+│   │   ├── redis_node_broadcaster.go # Redis Pub/Sub 实现（D-018）
+│   │   ├── node_broadcaster_test.go
+│   │   ├── websocket_server_broadcast_test.go
+│   │   ├── websocket_server_benchmark_test.go
 │   │   └── *_test.go
 │   └── store/
 │       ├── store.go                 # Store 聚合 + StoreAPI 接口
@@ -66,14 +74,19 @@ xyncra-server/
 │       │   ├── conversation.go      # Conversation GORM 模型
 │       │   ├── message.go           # Message GORM 模型
 │       │   └── user_update.go       # UserUpdate GORM 模型
+│       ├── benchmark_test.go
 │       └── *_test.go
 ├── pkg/
 │   └── protocol/
-│       └── protocol.go              # WebSocket 协议类型定义（Package, Request, Response）
+│       ├── protocol.go              # WebSocket 协议类型定义（Package, Request, Response）
+│       ├── errors.go                # HandlerError + ResponseCode 常量
+│       └── errors_test.go
 ├── scripts/
 │   └── test.sh                      # 测试运行脚本
 ├── go.mod
 ├── go.sum
+├── Dockerfile                    # Docker 镜像构建
+├── docker-compose.yml            # Docker Compose 编排
 └── README.md
 ```
 

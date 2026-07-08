@@ -300,9 +300,7 @@ send_message 的核心数据（消息 + UserUpdate + 会话更新）在数据库
 
 ## 相关文档
 
-- [架构设计](./architecture.md) - 系统架构详解
-- [部署指南](./deployment.md) - 生产环境部署说明
-- [API 文档](./api.md) - WebSocket 协议说明
+- [API 文档](./API.md) - WebSocket 协议说明
 
 ---
 
