@@ -74,9 +74,20 @@ func NewRootCommand() *cobra.Command {
 	cmd.PersistentFlags().String("db-path", "", "Database path (default: $USER_DIR/xyncra.db) (env: XYNCRA_DB_PATH)")
 	cmd.PersistentFlags().String("log-dir", "", "Log directory (default: $USER_DIR/logs/) (env: XYNCRA_LOG_DIR)")
 
-	// Subcommands — defined in listen.go and send.go.
+	// Subcommands — defined in their respective files.
 	cmd.AddCommand(newListenCommand())
 	cmd.AddCommand(newSendCommand())
+	cmd.AddCommand(newCreateConversationCommand())
+	cmd.AddCommand(newDeleteConversationCommand())
+	cmd.AddCommand(newRestoreConversationCommand())
+	cmd.AddCommand(newListConversationsCommand())
+	cmd.AddCommand(newGetConversationCommand())
+	cmd.AddCommand(newDeleteMessageCommand())
+	cmd.AddCommand(newMarkAsReadCommand())
+	cmd.AddCommand(newGetMessagesCommand())
+	cmd.AddCommand(newSearchMessagesCommand())
+	cmd.AddCommand(newDraftCommand())
+	cmd.AddCommand(newSyncUpdatesCommand())
 
 	return cmd
 }

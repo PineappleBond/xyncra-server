@@ -68,57 +68,16 @@ func (cs *ConversationStore) GetByUser(ctx context.Context, userID string, offse
 		offset = 0
 	}
 
-	fetchLimit := offset + limit
-
-	var asUser1 []*model.Conversation
+	var convs []*model.Conversation
 	if err := cs.db.WithContext(ctx).
-		Where("user_id1 = ?", userID).
+		Where("(user_id1 = ? OR user_id2 = ?) AND user_id2 != ''", userID, userID).
 		Order("last_message_at DESC").
-		Limit(fetchLimit).
-		Find(&asUser1).Error; err != nil {
-		return nil, classifyError(fmt.Errorf("store: get conversations by user (user1): %w", err))
+		Offset(offset).
+		Limit(limit).
+		Find(&convs).Error; err != nil {
+		return nil, classifyError(fmt.Errorf("store: get conversations by user: %w", err))
 	}
-
-	var asUser2 []*model.Conversation
-	if err := cs.db.WithContext(ctx).
-		Where("user_id2 = ? AND user_id2 != ''", userID).
-		Order("last_message_at DESC").
-		Limit(fetchLimit).
-		Find(&asUser2).Error; err != nil {
-		return nil, classifyError(fmt.Errorf("store: get conversations by user (user2): %w", err))
-	}
-
-	// Merge and deduplicate by ID, preserving LastMessageAt DESC order.
-	seen := make(map[string]bool, len(asUser1)+len(asUser2))
-	var merged []*model.Conversation
-	for _, c := range asUser1 {
-		if !seen[c.ID] {
-			seen[c.ID] = true
-			merged = append(merged, c)
-		}
-	}
-	for _, c := range asUser2 {
-		if !seen[c.ID] {
-			seen[c.ID] = true
-			merged = append(merged, c)
-		}
-	}
-
-	sortConversationsByLastMessageAt(merged)
-
-	if offset >= len(merged) {
-		return []*model.Conversation{}, nil
-	}
-	return merged[offset:min(offset+limit, len(merged))], nil
-}
-
-// sortConversationsByLastMessageAt sorts conversations by LastMessageAt descending.
-func sortConversationsByLastMessageAt(convs []*model.Conversation) {
-	for i := 1; i < len(convs); i++ {
-		for j := i; j > 0 && convs[j].LastMessageAt.After(convs[j-1].LastMessageAt); j-- {
-			convs[j], convs[j-1] = convs[j-1], convs[j]
-		}
-	}
+	return convs, nil
 }
 
 // Update saves all fields of the conversation back to the database.
@@ -210,29 +169,22 @@ func (cs *ConversationStore) UpdateLastMessage(ctx context.Context, convID strin
 
 // UpdateLastRead updates the last-read message ID for the specified user.
 // Uses MAX semantics: only advances forward, never backward (D-012).
+// Uses a single SQL statement to avoid TOCTOU races.
 func (cs *ConversationStore) UpdateLastRead(ctx context.Context, convID, userID string, messageID uint32) error {
-	conv, err := cs.Get(ctx, convID)
-	if err != nil {
-		return err
-	}
-
-	var column string
-	switch {
-	case conv.UserID1 == userID:
-		column = "last_read_message_id1"
-	case conv.UserID2 == userID:
-		column = "last_read_message_id2"
-	default:
-		return ErrNotFound
-	}
-
-	// Use CASE WHEN for MAX semantics — works across SQLite, PostgreSQL, MySQL.
+	// Single UPDATE with CASE WHEN for both columns; only the matching user column advances.
+	// WHERE clause ensures the user belongs to this conversation and RowsAffected catches missing records.
 	result := cs.db.WithContext(ctx).
 		Model(&model.Conversation{}).
-		Where("id = ?", convID).
-		Update(column, gorm.Expr("CASE WHEN ? > ? THEN ? ELSE ? END", gorm.Expr(column), messageID, gorm.Expr(column), messageID))
+		Where("id = ? AND (user_id1 = ? OR user_id2 = ?)", convID, userID, userID).
+		Updates(map[string]any{
+			"last_read_message_id1": gorm.Expr("CASE WHEN user_id1 = ? AND ? > last_read_message_id1 THEN ? ELSE last_read_message_id1 END", userID, messageID, messageID),
+			"last_read_message_id2": gorm.Expr("CASE WHEN user_id2 = ? AND ? > last_read_message_id2 THEN ? ELSE last_read_message_id2 END", userID, messageID, messageID),
+		})
 	if result.Error != nil {
 		return classifyError(fmt.Errorf("store: update last read: %w", result.Error))
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
@@ -119,9 +120,10 @@ func (h *syncUpdatesHandler) HandleRequest(ctx context.Context, client *server.C
 			})
 		} else {
 			result = append(result, protocol.PackageDataUpdate{
-				Seq:     seq,
-				Type:    protocol.UpdateTypeGap,
-				Payload: nil,
+				Seq:       seq,
+				Type:      protocol.UpdateTypeGap,
+				Payload:   nil,
+				CreatedAt: time.Now(),
 			})
 		}
 	}

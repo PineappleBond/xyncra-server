@@ -123,7 +123,7 @@ func (rm *retryManager) executeTask(ctx context.Context, task *model.RetryTask) 
 	}
 
 	// Calculate next retry time with exponential backoff
-	delay := backoffDelay(task.Attempt, rm.baseDelay, 30*time.Second)
+	delay := backoffDelay(task.Attempt, rm.baseDelay, 16*time.Second)
 	task.NextRetry = time.Now().Add(delay)
 
 	if updateErr := rm.db.Queue.Update(ctx, task); updateErr != nil {

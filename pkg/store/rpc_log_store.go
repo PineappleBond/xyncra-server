@@ -27,6 +27,14 @@ func (rs *RPCLogStore) Save(ctx context.Context, log *model.RPCLog) error {
 	return nil
 }
 
+// Update updates an existing RPC log record (e.g. after receiving the response).
+func (rs *RPCLogStore) Update(ctx context.Context, log *model.RPCLog) error {
+	if err := rs.db.WithContext(ctx).Save(log).Error; err != nil {
+		return classifyError(fmt.Errorf("store: update rpc log: %w", err))
+	}
+	return nil
+}
+
 // RPCLogFilter defines optional filters for listing RPC logs.
 type RPCLogFilter struct {
 	StartTime      *time.Time

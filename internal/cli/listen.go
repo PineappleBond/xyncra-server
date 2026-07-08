@@ -248,4 +248,100 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient) {
 		}
 		return NewIPCResponse(req.ID, result)
 	})
+
+	// sync_updates triggers a FullSync on the daemon (D-036).
+	s.Register("sync_updates", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
+		if err := xc.FullSync(ctx); err != nil {
+			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
+		}
+		return NewIPCResponse(req.ID, map[string]string{"status": "ok"})
+	})
+
+	// create_conversation creates a new 1-on-1 conversation.
+	s.Register("create_conversation", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
+		var params struct {
+			UserID2 string `json:"user_id2"`
+			Title   string `json:"title"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil
+		}
+		result, err := xc.CreateConversation(ctx, params.UserID2, params.Title)
+		if err != nil {
+			if ce, ok := errors.AsType[*client.ClientError](err); ok {
+				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
+			}
+			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
+		}
+		return NewIPCResponse(req.ID, result)
+	})
+
+	// delete_conversation soft-deletes a conversation (void RPC).
+	s.Register("delete_conversation", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
+		var params struct {
+			ConversationID string `json:"conversation_id"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil
+		}
+		if err := xc.DeleteConversation(ctx, params.ConversationID); err != nil {
+			if ce, ok := errors.AsType[*client.ClientError](err); ok {
+				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
+			}
+			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
+		}
+		return NewIPCResponse(req.ID, nil)
+	})
+
+	// restore_conversation restores a previously soft-deleted conversation (void RPC).
+	s.Register("restore_conversation", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
+		var params struct {
+			ConversationID string `json:"conversation_id"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil
+		}
+		if err := xc.RestoreConversation(ctx, params.ConversationID); err != nil {
+			if ce, ok := errors.AsType[*client.ClientError](err); ok {
+				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
+			}
+			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
+		}
+		return NewIPCResponse(req.ID, nil)
+	})
+
+	// delete_message soft-deletes a message (void RPC).
+	s.Register("delete_message", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
+		var params struct {
+			MessageID string `json:"message_id"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil
+		}
+		if err := xc.DeleteMessage(ctx, params.MessageID); err != nil {
+			if ce, ok := errors.AsType[*client.ClientError](err); ok {
+				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
+			}
+			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
+		}
+		return NewIPCResponse(req.ID, nil)
+	})
+
+	// mark_as_read advances the read cursor for the current user (void RPC).
+	s.Register("mark_as_read", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
+		var params struct {
+			ConversationID string `json:"conversation_id"`
+			MessageID      uint32 `json:"message_id"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil
+		}
+		if err := xc.MarkAsRead(ctx, params.ConversationID, params.MessageID); err != nil {
+			if ce, ok := errors.AsType[*client.ClientError](err); ok {
+				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
+			}
+			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
+		}
+		return NewIPCResponse(req.ID, nil)
+	})
 }

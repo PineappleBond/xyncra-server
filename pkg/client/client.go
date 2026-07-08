@@ -290,7 +290,6 @@ func (c *XyncraClient) connectionMonitor() {
 					break // back to outer loop waiting for next disconnect
 				}
 				c.logger.Error("reconnect failed", "error", err)
-				time.Sleep(backoffDelay(c.connMgr.Attempt(), c.opts.reconnectBaseDelay, c.opts.reconnectMaxDelay))
 			}
 		}
 	}
@@ -359,12 +358,15 @@ func (c *XyncraClient) Call(ctx context.Context, method string, params any) (jso
 	startTime := time.Now()
 
 	if err := c.connMgr.SendPackage(pkg); err != nil {
+		// Enqueue for retry on connection error (transient failure).
+		_ = c.retryMgr.Enqueue(ctx, method, paramsBytes)
 		return nil, NewConnectionError(fmt.Errorf("send package: %w", err))
 	}
 
 	// Persist an initial RPC log entry (status 0 = in-flight).
 	rpcLog := &model.RPCLog{
 		ID:        uuid.New().String(),
+		Type:      "request",
 		RequestID: reqID,
 		Method:    method,
 		Params:    paramsBytes,
@@ -381,29 +383,36 @@ func (c *XyncraClient) Call(ctx context.Context, method string, params any) (jso
 		rpcLog.Duration = time.Since(startTime)
 		rpcLog.ErrorMsg = ctx.Err().Error()
 		rpcLog.StatusCode = int(ErrorCodeTimeoutError)
-		_ = c.db.RPCLogs.Save(ctx, rpcLog)
+		rpcLog.Type = "response"
+		_ = c.db.RPCLogs.Update(ctx, rpcLog)
+		// Enqueue for retry on context cancellation (transient failure).
+		_ = c.retryMgr.Enqueue(ctx, method, paramsBytes)
 		return nil, NewTimeoutError(ctx.Err())
 	case <-time.After(c.opts.rpcTimeout):
 		rpcLog.Duration = time.Since(startTime)
 		rpcLog.ErrorMsg = fmt.Sprintf("rpc %s timed out", method)
 		rpcLog.StatusCode = int(ErrorCodeTimeoutError)
-		_ = c.db.RPCLogs.Save(ctx, rpcLog)
+		rpcLog.Type = "response"
+		_ = c.db.RPCLogs.Update(ctx, rpcLog)
+		// Enqueue for retry on timeout (transient failure).
+		_ = c.retryMgr.Enqueue(ctx, method, paramsBytes)
 		return nil, NewTimeoutError(fmt.Errorf("rpc %s timed out", method))
 	}
 
 	rpcLog.Duration = time.Since(startTime)
+	rpcLog.Type = "response"
 
 	if resp.Code == protocol.ResponseCodeOK {
 		rpcLog.StatusCode = 0
 		rpcLog.Response = resp.Data
-		_ = c.db.RPCLogs.Save(ctx, rpcLog)
+		_ = c.db.RPCLogs.Update(ctx, rpcLog)
 		return resp.Data, nil
 	}
 
 	// Server returned an error.
 	rpcLog.StatusCode = int(resp.Code)
 	rpcLog.ErrorMsg = resp.Msg
-	_ = c.db.RPCLogs.Save(ctx, rpcLog)
+	_ = c.db.RPCLogs.Update(ctx, rpcLog)
 	return nil, &ClientError{Code: resp.Code, Message: resp.Msg}
 }
 
@@ -660,4 +669,12 @@ func (c *XyncraClient) MarkAsRead(ctx context.Context, convID string, messageID 
 	}
 	_, err := c.Call(ctx, "mark_as_read", params)
 	return err
+}
+
+// FullSync triggers a blocking, paginated synchronization with the server,
+// fetching all updates after the current localMaxSeq until has_more is false.
+// Exposed for IPC handlers (e.g. sync-updates CLI command) to trigger sync
+// through the daemon's existing pipeline.
+func (c *XyncraClient) FullSync(ctx context.Context) error {
+	return c.syncMgr.FullSync(ctx)
 }

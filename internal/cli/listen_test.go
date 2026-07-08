@@ -2,10 +2,20 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
+
+	"github.com/PineappleBond/xyncra-server/pkg/client"
+	"github.com/PineappleBond/xyncra-server/pkg/protocol"
+	"github.com/PineappleBond/xyncra-server/pkg/store"
 	"github.com/PineappleBond/xyncra-server/pkg/store/model"
 )
 
@@ -277,5 +287,251 @@ func TestLogTimestamp(t *testing.T) {
 	}
 	if !matched {
 		t.Errorf("logTimestamp() = %q, want format YYYY-MM-DD HH:MM:SS", ts)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IPC handler tests — verify registerIPCHandlers dispatches correctly
+// ---------------------------------------------------------------------------
+
+// setupIPCWithClient creates a mock WebSocket server + XyncraClient + IPCServer
+// with handlers registered via registerIPCHandlers. Returns the IPC socket path.
+func setupIPCWithClient(t *testing.T) (sockPath string, cleanup func()) {
+	t.Helper()
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			var pkg protocol.Package
+			if err := conn.ReadJSON(&pkg); err != nil {
+				return
+			}
+			var req protocol.PackageDataRequest
+			_ = json.Unmarshal(pkg.Data, &req)
+
+			var respJSON []byte
+			switch req.Method {
+			case "sync_updates":
+				data, _ := json.Marshal(client.SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+				respData, _ := json.Marshal(protocol.PackageDataResponse{ID: req.ID, Code: protocol.ResponseCodeOK, Msg: "ok", Data: data})
+				respJSON = respData
+			case "send_message":
+				result := client.SendMessageResult{
+					Message: &model.Message{MessageID: 100, ConversationID: "conv-1", ClientMessageID: "cid-1", Content: "hello"},
+				}
+				data, _ := json.Marshal(result)
+				respData, _ := json.Marshal(protocol.PackageDataResponse{ID: req.ID, Code: protocol.ResponseCodeOK, Data: data})
+				respJSON = respData
+			case "create_conversation":
+				result := client.CreateConversationResult{
+					Conversation: &model.Conversation{ID: "conv-new", UserID2: "peer1"},
+					Duplicate:    false,
+				}
+				data, _ := json.Marshal(result)
+				respData, _ := json.Marshal(protocol.PackageDataResponse{ID: req.ID, Code: protocol.ResponseCodeOK, Data: data})
+				respJSON = respData
+			case "delete_conversation", "restore_conversation", "delete_message", "mark_as_read":
+				respData, _ := json.Marshal(protocol.PackageDataResponse{ID: req.ID, Code: protocol.ResponseCodeOK, Data: json.RawMessage(`{}`)})
+				respJSON = respData
+			default:
+				respData, _ := json.Marshal(protocol.PackageDataResponse{ID: req.ID, Code: protocol.ResponseCodeOK, Data: json.RawMessage(`{}`)})
+				respJSON = respData
+			}
+
+			respPkg := protocol.Package{Version: 1, Type: protocol.PackageTypeResponse, Data: json.RawMessage(respJSON)}
+			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			_ = conn.WriteJSON(respPkg)
+		}
+	}))
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
+	tmpDir, err := os.MkdirTemp("/tmp", "xyncra-ipc-*")
+	if err != nil {
+		ts.Close()
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+
+	db, err := store.New(tmpDir + "/test.db")
+	if err != nil {
+		ts.Close()
+		t.Fatalf("open db: %v", err)
+	}
+
+	xc, err := client.New(
+		client.WithServerURL(wsURL),
+		client.WithUserID("testuser"),
+		client.WithDB(db),
+	)
+	if err != nil {
+		_ = db.Close()
+		ts.Close()
+		t.Fatalf("create client: %v", err)
+	}
+
+	// Start client in background so it connects.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = xc.Start(ctx) }()
+
+	// Give it a moment to connect.
+	time.Sleep(500 * time.Millisecond)
+
+	sockPath = tmpDir + "/xyncra.sock"
+	ipcServer := NewIPCServer(sockPath)
+	registerIPCHandlers(ipcServer, xc)
+	if err := ipcServer.Start(context.Background()); err != nil {
+		cancel()
+		xc.Stop()
+		_ = db.Close()
+		ts.Close()
+		t.Fatalf("IPC server start: %v", err)
+	}
+
+	cleanup = func() {
+		cancel()
+		xc.Stop()
+		_ = ipcServer.Stop()
+		_ = db.Close()
+		ts.Close()
+		_ = os.RemoveAll(tmpDir)
+	}
+	return sockPath, cleanup
+}
+
+func TestIPCHandler_CreateConversation(t *testing.T) {
+	sockPath, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "create_conversation", map[string]any{
+		"user_id2": "peer1",
+		"title":    "Test",
+	})
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("handler error: %v", resp.Error)
+	}
+}
+
+func TestIPCHandler_DeleteConversation(t *testing.T) {
+	sockPath, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "delete_conversation", map[string]any{
+		"conversation_id": "conv-1",
+	})
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("handler error: %v", resp.Error)
+	}
+}
+
+func TestIPCHandler_RestoreConversation(t *testing.T) {
+	sockPath, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "restore_conversation", map[string]any{
+		"conversation_id": "conv-1",
+	})
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("handler error: %v", resp.Error)
+	}
+}
+
+func TestIPCHandler_DeleteMessage(t *testing.T) {
+	sockPath, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "delete_message", map[string]any{
+		"message_id": "msg-123",
+	})
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("handler error: %v", resp.Error)
+	}
+}
+
+func TestIPCHandler_MarkAsRead(t *testing.T) {
+	sockPath, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "mark_as_read", map[string]any{
+		"conversation_id": "conv-1",
+		"message_id":      uint32(42),
+	})
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("handler error: %v", resp.Error)
+	}
+}
+
+func TestIPCHandler_SyncUpdates(t *testing.T) {
+	sockPath, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "sync_updates", nil)
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("handler error: %v", resp.Error)
+	}
+}
+
+func TestIPCHandler_InvalidParams(t *testing.T) {
+	sockPath, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	// Send invalid params (a string instead of an object) for create_conversation.
+	resp, err := ipcClient.Call(context.Background(), "create_conversation", "invalid")
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	// Handler should return an error response for invalid params.
+	if resp.Error == nil {
+		t.Fatal("expected error response for invalid params")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
+func TestIPCHandler_UnknownMethod(t *testing.T) {
+	sockPath, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "nonexistent_method", nil)
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatal("expected error for unknown method")
+	}
+	if resp.Error.Code != -32601 {
+		t.Errorf("error code = %d, want -32601", resp.Error.Code)
 	}
 }

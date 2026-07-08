@@ -214,4 +214,43 @@ func TestNewRootCommand(t *testing.T) {
 	if !names["send"] {
 		t.Error("missing 'send' subcommand")
 	}
+
+	// Phase 2 commands.
+	expectedCmds := []string{
+		"create-conversation",
+		"delete-conversation",
+		"restore-conversation",
+		"list-conversations",
+		"get-conversation",
+		"delete-message",
+		"mark-as-read",
+		"get-messages",
+		"search-messages",
+		"draft",
+		"sync-updates",
+	}
+	for _, name := range expectedCmds {
+		if !names[name] {
+			t.Errorf("missing %q subcommand", name)
+		}
+	}
+}
+
+func TestNewRootCommand_TotalSubcommandCount(t *testing.T) {
+	cmd := NewRootCommand()
+	// 13 subcommands: listen, send, create-conversation, delete-conversation,
+	// restore-conversation, list-conversations, get-conversation, delete-message,
+	// mark-as-read, get-messages, search-messages, draft, sync-updates.
+	if got := len(cmd.Commands()); got != 13 {
+		t.Errorf("expected 13 subcommands, got %d", got)
+	}
+}
+
+func TestNewRootCommand_HelpTexts(t *testing.T) {
+	cmd := NewRootCommand()
+	for _, sub := range cmd.Commands() {
+		if sub.Short == "" {
+			t.Errorf("subcommand %q has empty Short help text", sub.Use)
+		}
+	}
 }

@@ -22,6 +22,10 @@
 | D-032 | CLI IPC Fallback 策略 | IPC 优先，失败 fallback 到 WebSocket 短连接 |
 | D-033 | CLI 设备 ID 生成 | 主机名 SHA256 前 8 位十六进制，匿名化 |
 | D-034 | CLI 环境变量命名规范 | XYNCRA_ 前缀，flag > 环境变量 > 默认值 |
+| D-035 | CLI 查询命令使用本地数据库读取 | list-conversations/get-conversation/get-messages/search-messages 直接读本地 SQLite |
+| D-036 | sync-updates 命令为 IPC-only | 触发守护进程的 FullSync，无 standalone fallback（D-032 例外） |
+| D-037 | CLI flag 不遮蔽全局 flag | create-conversation 使用 --peer-id 而非 --user-id |
+| D-038 | CLI 消息 ID flag 类型区分 | delete-message 用 --message-id (string UUID)，mark-as-read 用 --message-id (uint32) |
 
 ---
 
@@ -734,10 +738,92 @@ CLI 命令（如 send）优先通过 Unix Socket IPC 连接到运行中的 liste
 
 ---
 
+## D-035: CLI 查询命令使用本地数据库读取
+
+### 决策
+
+`list-conversations`、`get-conversation`、`get-messages`、`search-messages` 四个查询命令直接读取本地 SQLite 数据库，不通过 IPC 转发到守护进程。使用 `store.New()` 打开数据库（WAL 模式支持并发读），读取完成后关闭连接。
+
+### 原因
+
+1. **本地优先架构**：数据已由 `listen` 守护进程同步到本地，无需再经网络获取
+2. **离线可用**：即使服务器不可达，用户仍可查询已同步的数据
+3. **性能**：避免 IPC + WebSocket 的双重开销
+4. **与 D-023 一致**：AutoMigrate 保证表结构存在，新命令首次运行自动创建数据库
+
+### 约束
+
+- 查询结果反映的是最后一次同步时的状态，非实时
+- 本地 SQLite 使用 WAL 模式 + `busy_timeout(5000)`，支持守护进程写入时并发读取
+- `store.New()` 会运行 AutoMigrate（写操作），如果守护进程正在写入可能短暂等待
+
+---
+
+## D-036: sync-updates 命令为 IPC-only
+
+### 决策
+
+`sync-updates` 命令仅通过 IPC 触发守护进程的 `FullSync` 流程，不提供 standalone WebSocket fallback。当守护进程未运行时，返回错误并提示用户启动 `listen`。
+
+### 原因
+
+1. **状态一致性**：守护进程持有 `localMaxSeq` 和 WebSocket 连接。独立的 WebSocket 连接直接调用 `sync_updates` RPC 会与守护进程的同步状态竞争 SQLite 写入
+2. **去重安全**：守护进程的 `syncManager` 通过 NotificationLog 表去重。独立连接可能导致重复处理
+3. **FullSync 是守护进程的职责**：它管理分页、防抖拉取、和 ApplyUpdate 链
+
+### 错误信息
+
+```text
+错误：守护进程未运行
+建议：先启动 xyncra-client listen --user-id <user>
+```
+
+### 对 D-032 的影响
+
+这是 D-032（IPC Fallback 策略）的例外。D-032 仍然适用于所有其他 CLI 命令。
+
+---
+
+## D-037: CLI flag 不遮蔽全局 flag
+
+### 决策
+
+命令局部 flag 不得使用与全局 persistent flag 相同的名称但语义不同。具体地：
+- `--user-id` / `-u` 是全局 flag，表示当前用户身份
+- `create-conversation` 使用 `--peer-id` 表示对方用户 ID，不使用 `--user-id`
+
+### 原因
+
+1. **避免混淆**：`xyncra-client --user-id alice create-conversation --user-id bob` 中两个 `--user-id` 含义不同，极度困惑
+2. **Cobra 行为**：局部 flag 会遮蔽全局 flag，但用户无法直觉判断哪个生效
+3. **一致性**：所有命令的 `--user-id` 始终表示当前用户
+
+---
+
+## D-038: CLI 消息 ID flag 类型区分
+
+### 决策
+
+不同命令中 `--message-id` 的含义通过 flag 描述文本明确区分：
+- `delete-message --message-id`：string UUID（Message 表的 primary key ID）
+- `mark-as-read --message-id`：uint32（会话内消息序号 MessageID）
+- `get-messages --after-message-id`：uint32（分页游标，MessageID）
+
+flag 描述中注明类型，例如：`--message-id string   Message UUID to delete` vs `--message-id uint32   Message sequence number to mark as read`。
+
+### 原因
+
+1. **模型区分**：`Message.ID`（string UUID, primary key）和 `Message.MessageID`（uint32, 会话内序号）是两个不同的标识符
+2. **服务器协议一致**：`delete_message` RPC 接受 `message_id`（string UUID），`mark_as_read` RPC 接受 `message_id`（uint32）
+3. **自文档化**：flag 帮助文本直接展示类型，减少用户错误
+
+---
+
 ## 版本历史
 
 | 日期       | 版本 | 变更                                                                                |
 | ---------- | ---- | ----------------------------------------------------------------------------------- |
+| 2026-07-09 | v2.2 | 新增 D-035 到 D-038（CLI 查询命令本地读取、sync-updates IPC-only、flag 命名规范）    |
 | 2026-07-09 | v2.1 | 新增 D-030 到 D-034（CLI 层产品决策）                                              |
 | 2026-07-08 | v2.0 | 新增 D-028（UserUpdate 类型字段）、D-029（sync_updates 补空策略）                   |
 | 2026-07-08 | v1.9 | 新增 D-027（客户端扩展错误码体系）                                                 |

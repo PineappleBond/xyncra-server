@@ -926,3 +926,92 @@ func TestDeleteMessage_CorrectParams(t *testing.T) {
 		t.Errorf("expected message_id=msg-abc, got %v", params["message_id"])
 	}
 }
+
+// ---------------------------------------------------------------------------
+// FullSync — delegates to syncManager.FullSync
+// ---------------------------------------------------------------------------
+
+// TestFullSync_Success verifies that FullSync completes successfully when the
+// mock server returns an empty update batch (has_more=false).
+func TestFullSync_Success(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	if err := c.FullSync(context.Background()); err != nil {
+		t.Fatalf("FullSync() error: %v", err)
+	}
+}
+
+// TestFullSync_WithError verifies that FullSync propagates errors from the
+// underlying sync_updates RPC.
+func TestFullSync_WithError(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return nil, fmt.Errorf("server unavailable")
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	err := c.FullSync(context.Background())
+	if err == nil {
+		t.Fatal("FullSync() should fail when sync_updates returns an error")
+	}
+	clientErr, ok := err.(*ClientError)
+	if !ok {
+		t.Fatalf("expected *ClientError, got %T: %v", err, err)
+	}
+	if clientErr.Code != ErrorCodeSyncError {
+		t.Fatalf("expected code %d, got %d", ErrorCodeSyncError, clientErr.Code)
+	}
+}
+
+// TestFullSync_DelegatesToSyncManager verifies that FullSync delegates to the
+// syncManager by checking the correct RPC method is called.
+func TestFullSync_DelegatesToSyncManager(t *testing.T) {
+	server := newMockWSServer(t)
+
+	var syncCalls int
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		syncCalls++
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	callsBefore := syncCalls
+	if err := c.FullSync(context.Background()); err != nil {
+		t.Fatalf("FullSync() error: %v", err)
+	}
+	// FullSync should have made at least one additional sync_updates call.
+	if syncCalls <= callsBefore {
+		t.Error("FullSync did not call sync_updates")
+	}
+}

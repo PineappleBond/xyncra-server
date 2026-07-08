@@ -42,8 +42,8 @@
 3. **Updates 完整性保证**：
    - 客户端检测 seq 间隙，触发防抖拉取
    - 服务器补空设计（缺失 seq 用空 Update 填充）
-4. **单连接保证**：整个应用只维护一条 WebSocket 连接
-5. **进程间通信**：listen 命令作为守护进程，其他命令通过 Unix Socket 通信
+4. **单连接保证**：每个 listen 实例（同一 user_id + device_id）只维护一条 WebSocket 连接
+5. **进程间通信**：listen 命令可运行多个实例，每个实例由 (User ID, Device ID) 唯一标识。其他命令通过 Unix Socket 连接到对应的 listen 实例
 
 ### 1.3 技术选型
 
@@ -118,6 +118,7 @@ xyncra-server/
    - 调用 pkg/client 执行操作
    - 格式化输出（控制台 + SQLite 日志查询）
    - 进程锁管理
+   - 多实例路由：通过 (user_id, device_id) 定位对应的 listen 实例
 
 ---
 
@@ -126,7 +127,7 @@ xyncra-server/
 ### 3.1 核心职责
 
 - WebSocket 连接管理（建立、维护、断开、重连）
-- **单连接保证**：整个应用生命周期内只维护一条 WebSocket 连接
+- **单连接保证**：每个 listen 实例内只维护一条 WebSocket 连接（不同实例各自独立）
 - RPC 请求/响应处理（请求 ID 匹配、超时处理）
 - 服务器推送消息接收（Updates、Requests）
 - **Updates 完整性处理**：检测 seq 间隙，触发防抖拉取逻辑
@@ -137,9 +138,10 @@ xyncra-server/
 
 #### 3.2.1 单连接保证
 
-- 全局唯一的 WebSocket 连接实例，通过连接管理器控制
-- `listen` 命令持有并管理该连接
-- 其他命令（send、list-conversations 等）复用 `listen` 的连接，或通过 Unix Socket/共享内存与 `listen` 进程通信
+- 每个 listen 实例（即一个 user_id + device_id 组合）内只维护一条 WebSocket 连接
+- 不同 (user_id, device_id) 的 listen 实例各自独立维护自己的连接
+- `listen` 命令持有并管理其所属实例的连接
+- 其他命令（send、list-conversations 等）通过匹配自身的 (user_id, device_id) 找到对应的 listen 实例，通过 Unix Socket 与其通信
 - 连接断开时自动重连，重连期间其他命令排队等待
 
 #### 3.2.2 连接管理
@@ -689,6 +691,12 @@ gorm.Config{
 - 使用 `busy_timeout` 避免锁冲突
 - 关键操作使用事务保证一致性
 
+**多实例并发**：
+
+- 不同 (user_id, device_id) 的 listen 实例是独立进程，各自维护独立的 SQLite 数据库
+- 每个实例的数据库文件位于 `~/.xyncra/{user_id}/{device_id}/` 目录下
+- 实例之间不共享数据库，无跨实例锁竞争
+
 #### 4.6.4 性能优化建议
 
 1. **批量写入优化**
@@ -711,16 +719,17 @@ gorm.Config{
 - CLI 命令定义和参数解析
 - 调用 `pkg/client` 和 `pkg/store` 执行操作
 - 格式化输出（控制台 + SQLite 日志查询）
-- 进程锁管理（保证单实例）
+- 进程锁管理（保证每个 user_id + device_id 单实例）
 
 ### 5.2 命令结构
 
 **全局参数**（所有命令共享）：
 ```
 --user-id, -u          用户 ID（必填）
---device-id            设备 ID（默认：主机名）
+--device-id            设备 ID（必填）
 --server, -s           服务器 URL（默认：ws://localhost:8080/ws）
 --log-dir              日志目录（默认：~/.xyncra/{user_id}/{device_id}/logs/）
+--db-path              数据库路径（默认：~/.xyncra/{user_id}/{device_id}/xyncra.db）
 ```
 
 **命令列表**：
@@ -729,7 +738,7 @@ gorm.Config{
    ```
    功能：建立 WebSocket 连接，接收 Updates 和 Requests
    行为：
-   - 获取进程锁（防止重复启动）
+   - 获取进程锁（防止同一 user_id + device_id 重复启动，不同组合可同时运行各自的 listen）
    - 初始化数据库（AutoMigrate）
    - 建立 WebSocket 连接
    - 自动同步（拉取离线 Updates）
@@ -901,14 +910,19 @@ gorm.Config{
 
 ### 5.3 进程间通信（IPC）
 
-**listen 命令**作为守护进程，其他命令需要与之通信：
+**listen 命令**支持多实例运行，每个实例由 (user_id, device_id) 唯一标识。其他命令通过匹配自身的 (user_id, device_id) 找到对应的 listen 实例进行通信：
 
 1. **Unix Socket**
    - 路径：`~/.xyncra/{user_id}/{device_id}/xyncra.sock`
    - 协议：**JSON-RPC 2.0 over Unix Socket**
-   - 用途：其他命令通过 Socket 向 listen 发送 RPC 请求
+   - 用途：其他命令通过自身的 `--user-id` 和 `--device-id` 构造 Socket 路径，自动路由到对应的 listen 实例
 
-2. **JSON-RPC 消息格式**
+2. **多实例共存**
+   - 同一台机器可同时运行多个 listen 实例，只要 (user_id, device_id) 组合不同
+   - 例如：用户 A 可以在 device-1 和 device-2 上各运行一个 listen；用户 A（device-1）和用户 B（device-1）也可以各自运行 listen
+   - Socket 路径中的 `{user_id}/{device_id}` 层级天然隔离了不同实例
+
+3. **JSON-RPC 消息格式**
 
    **请求格式**：
    ```json
@@ -948,18 +962,18 @@ gorm.Config{
    }
    ```
 
-3. **通信流程**
+4. **通信流程**
    ```
    CLI 命令 → Unix Socket (JSON-RPC) → listen 进程 → WebSocket → 服务器
    服务器响应 → WebSocket → listen 进程 → Unix Socket (JSON-RPC) → CLI 命令
    ```
 
-4. **fallback 方案**
+5. **fallback 方案**
    - 如果 listen 未运行（Unix Socket 连接失败），其他命令直接建立 WebSocket 连接
    - 执行完操作后关闭连接（短连接模式）
    - 这种模式称为"独立模式"，性能较差但可用
 
-5. **两种运行模式**
+6. **两种运行模式**
 
    **守护进程模式（推荐）**：
    - listen 命令正在运行
@@ -1045,15 +1059,19 @@ gorm.Config{
 **锁文件路径**：`~/.xyncra/{user_id}/{device_id}/xyncra.lock`
 
 **锁策略**：
+
+- 锁的作用范围是单个 (user_id, device_id) 组合，防止同一组合重复启动 listen
+- 不同 (user_id, device_id) 组合的 listen 实例可同时运行，互不影响
 - `listen` 命令：获取排他锁（Exclusive Lock）
 - 其他命令：获取共享锁（Shared Lock）或直接连接 listen
 - 锁内容：PID + 启动时间
 - 锁检测：读取锁文件，检查 PID 是否存活
 
 **锁行为**：
-- `listen` 启动时：检查锁文件，如果已存在且 PID 存活，报错退出
+
+- `listen` 启动时：检查对应 (user_id, device_id) 的锁文件，如果已存在且 PID 存活，报错退出
 - `listen` 退出时：释放锁（删除锁文件）
-- 其他命令：不获取锁，直接连接 listen 的 Unix Socket
+- 其他命令：不获取锁，直接连接对应 listen 实例的 Unix Socket
 
 ---
 
@@ -1076,7 +1094,7 @@ gorm.Config{
 
 3. **CLI 错误**（internal/cli）
    - 参数错误：缺少必填参数、参数格式错误
-   - 进程锁错误：listen 已在运行
+   - 进程锁错误：同一 (user_id, device_id) 的 listen 已在运行
    - IPC 错误：Unix Socket 连接失败
 
 ### 6.2 错误处理原则
@@ -1153,7 +1171,8 @@ gorm.Config{
      - 发送消息 → 接收消息
      - 增量同步（有 gap 的情况）
      - 重试队列（失败 → 重试 → 成功）
-     - 进程锁（重复启动 listen）
+     - 进程锁（同一 user_id + device_id 重复启动 listen 被拒绝）
+       - 多实例共存（不同 user_id + device_id 的 listen 同时运行）
 
 3. **端到端测试**（E2E Tests）
    - 完整的用户场景测试
@@ -1409,6 +1428,13 @@ flowchart TD
    - [ ] `logs cleanup` 清理旧日志
    - [ ] `logs cleanup --dry-run` 模拟运行
 
+9. **多实例测试**
+   - [ ] 两个不同 (user_id, device_id) 的 listen 同时运行
+   - [ ] send 命令路由到正确的 listen 实例
+   - [ ] 不同实例的锁互不干扰
+   - [ ] 不同实例的数据库互不干扰
+   - [ ] 停止一个实例不影响其他实例
+
 ### 9.3 测试用例文档格式
 
 **文件名**：`tests/xyncra-client-test-cases.md`
@@ -1482,9 +1508,10 @@ flowchart TD
 | 错误处理 | 8 | 7 | 1 | 0 |
 | 数据完整性 | 6 | 6 | 0 | 0 |
 | 性能测试 | 4 | 4 | 0 | 0 |
-| **总计** | **53** | **48** | **5** | **0** |
+| 多实例测试 | 5 | 5 | 0 | 0 |
+| **总计** | **58** | **53** | **5** | **0** |
 
-**通过率**：90.6%
+**通过率**：91.4%
 
 ## 失败用例分析
 
@@ -1578,7 +1605,7 @@ flowchart TD
 ### A. 关键决策记录
 
 1. **D-020：单连接保证**
-   - 决策：整个应用只维护一条 WebSocket 连接
+   - 决策：每个 listen 实例（同一 user_id + device_id）只维护一条 WebSocket 连接
    - 原因：简化连接管理，避免重复连接和消息重复
 
 2. **D-021：Updates 完整性保证**
@@ -1586,8 +1613,8 @@ flowchart TD
    - 原因：保证数据完整性，避免消息丢失
 
 3. **D-022：进程间通信**
-   - 决策：使用 Unix Socket 进行进程间通信
-   - 原因：listen 作为守护进程，其他命令复用连接
+   - 决策：使用 Unix Socket 进行进程间通信，支持 listen 多实例运行
+   - 原因：每个 listen 实例由 (user_id, device_id) 唯一标识，Socket 路径天然编码了实例身份，其他命令通过匹配 (user_id, device_id) 自动路由到正确的 listen 实例
 
 4. **D-023：GORM 自动迁移**
    - 决策：每次运行命令时自动执行 AutoMigrate
@@ -1629,7 +1656,7 @@ flowchart TD
 
 ### C. 安全考虑
 
-1. **进程锁**：防止重复启动 listen
+1. **进程锁**：防止同一 (user_id, device_id) 重复启动 listen
 2. **文件权限**：数据库和日志文件权限 600
 3. **Unix Socket**：仅本地访问，权限 600
 
