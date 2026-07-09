@@ -1658,7 +1658,7 @@ func TestKillNoDaemon(t *testing.T) {
 		"--user-id", userID, "--device-id", deviceID,
 		"kill",
 	)
-	requireExitCode(t, result, 0)
+	requireExitCode(t, result, 1)
 	assert.Contains(t, result.Stderr, "No running daemon")
 }
 

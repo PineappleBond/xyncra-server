@@ -45,7 +45,7 @@ func runKill(cmd *cobra.Command, args []string) error {
 		if errors.Is(err, os.ErrNotExist) {
 			// Lock file does not exist — no daemon running.
 			fmt.Fprintln(os.Stderr, "No running daemon found.")
-			return nil
+			return fmt.Errorf("kill: no running daemon found")
 		}
 		return fmt.Errorf("kill: %w", err)
 	}

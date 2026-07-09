@@ -101,6 +101,11 @@ func runLogsTail(cmd *cobra.Command, args []string) error {
 	limit, _ := cmd.Flags().GetInt("limit")
 	sinceStr, _ := cmd.Flags().GetString("since")
 
+	// Validate limit is positive.
+	if limit <= 0 {
+		return fmt.Errorf("logs tail: --limit must be a positive integer")
+	}
+
 	since, err := parseTimeArg(sinceStr)
 	if err != nil {
 		return fmt.Errorf("logs tail: %w", err)
@@ -208,6 +213,11 @@ func runLogsSearch(cmd *cobra.Command, args []string) error {
 	convID, _ := cmd.Flags().GetString("conversation-id")
 	reqID, _ := cmd.Flags().GetString("request-id")
 	limit, _ := cmd.Flags().GetInt("limit")
+
+	// Validate limit is positive.
+	if limit <= 0 {
+		return fmt.Errorf("logs search: --limit must be a positive integer")
+	}
 
 	db, err := store.New(cliCtx.DBPath)
 	if err != nil {
