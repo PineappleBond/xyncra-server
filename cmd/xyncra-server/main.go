@@ -43,6 +43,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Version information, injected at build time via -ldflags.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildTime = "unknown"
+)
+
 func main() {
 	// ---------------------------------------------------------------
 	// Configuration
@@ -64,7 +71,7 @@ func main() {
 		"Max connections per user (0 = unlimited)")
 	flag.Parse()
 
-	log.Printf("starting xyncra-server on %s", *addr)
+	log.Printf("starting xyncra-server %s (%s) built %s on %s", version, commit, buildTime, *addr)
 
 	// ---------------------------------------------------------------
 	// Database / Store

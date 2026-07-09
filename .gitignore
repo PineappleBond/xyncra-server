@@ -16,6 +16,8 @@ go.work.sum
 # Go 编译二进制（项目名）
 /xyncra-server
 /xyncra-server.*
+/xyncra-client
+/xyncra-client.*
 
 # === 本地开发数据库 ===
 *.db
