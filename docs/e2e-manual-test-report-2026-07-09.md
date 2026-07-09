@@ -1,86 +1,110 @@
-# Xyncra Client E2E Manual Test Report
+# E2E Manual Test Report
 
 **Date:** 2026-07-09
+**Git Commit:** 7f43f99
 **Tester:** Claude (Manual CLI Binary Testing)
-**Branch:** main
+**Test Environment:** Docker E2E (Redis 16379→6379, Server 18080, DB 15)
+**E2E_HOME:** /tmp/xe2e-dyReVHXQ
 
 ---
 
 ## Summary
 
-| Group | Name | Scenarios | Pass | Fail | Pass Rate |
-|-------|------|-----------|------|------|-----------|
-| A | Smoke Test | 2 | 2 | 0 | 100% |
-| B | Daemon Lifecycle | 19 | 19 | 0 | 100% |
-| D | Message Operations | 23 | 22 | 1 | 96% |
-| E | Conversation Ops | 2 | 2 | 0 | 100% |
-| F | Query Commands | 18 | 18 | 0 | 100% |
-| G | Draft Management | 8 | 8 | 0 | 100% |
-| H | Logs Management | 25 | 25 | 0 | 100% |
-| I | Sync Operations | 6 | 6 | 0 | 100% |
-| J | Multi-Instance + IPC | 15 | 15 | 0 | 100% |
-| K | Error Handling | 10 | 10 | 0 | 100% |
-| L | Resilience | 1 | 1 | 0 | 100% |
-| M | Advanced | 1 | 1 | 0 | 100% |
-| **Total** | | **130** | **129** | **1** | **99.2%** |
-
-**Note:** D-09 initially failed because `delete-message --message-id` requires the Message UUID primary key, but the `send` command did not display it. **Fixed** during this test run by adding UUID output to `send`. After fix, D-09 passes. The table above reflects post-fix results.
+| Group | Name | Scenarios | Pass | Fail | N/A | Pass Rate |
+|-------|------|-----------|------|------|-----|-----------|
+| A | Smoke Test | 2 | 2 | 0 | 0 | 100% |
+| B | Daemon Lifecycle | 19 | 19 | 0 | 0 | 100% (after fix) |
+| D | Message Operations | 23 | 20 | 1 | 2 | 87% |
+| E | Conversation Ops | 1 | 1 | 0 | 0 | 100% |
+| F | Query Commands | 18 | 18 | 0 | 0 | 100% |
+| G | Draft Management | 8 | 8 | 0 | 0 | 100% |
+| H | Logs Management | 25 | 25 | 0 | 0 | 100% (after fix) |
+| I | Sync Operations | 6 | 5 | 0 | 1 | 83% |
+| J | Multi-Instance + IPC | 19 | 18 | 0 | 1 | 95% |
+| K | Error Handling | 10 | 10 | 0 | 0 | 100% |
+| L | Resilience | 1 | 1 | 0 | 0 | 100% |
+| M | Advanced | 1 | 0 | 0 | 1 | PARTIAL |
+| **Total** | | **133** | **127** | **1** | **5** | **95.5%** |
 
 ---
 
 ## Bugs Found and Fixed
 
-### Bug 1: sync-updates returns exit code 1 instead of 2 (D-036/D-042)
+### Bug 1: kill command exit code incorrect (B14/B15)
 
 - **Severity:** Medium
-- **Scenario:** I-02, I-06
-- **Description:** When `sync-updates` is called without a running daemon, it returned exit code 1 (generic error) instead of exit code 2 (precondition not met) as specified by D-036 and D-042.
-- **Root Cause:** `internal/cli/sync.go` used `return fmt.Errorf(...)` which propagates through Cobra as exit code 1, instead of `os.Exit(2)`.
-- **Fix:** Changed `return fmt.Errorf(...)` to `os.Exit(2)` in `runSyncUpdates` when IPC connection fails.
-- **Files Changed:**
-  - `internal/cli/sync.go` - Use `os.Exit(2)` for daemon-not-running
-  - `internal/cli/sync_test.go` - Updated test that called through `cobra.Execute()` (incompatible with `os.Exit`)
-  - `internal/cli/e2e/cli_e2e_test.go` - Updated expected exit code from 1 to 2
+- **File:** `internal/cli/kill.go`
+- **Problem:** `kill` command returned exit code 0 when no daemon was found, should return exit code 1
+- **Root Cause:** `runKill()` returned `nil` when no daemon process was found, instead of returning an error
+- **Fix:** Changed `return nil` to `return fmt.Errorf("kill: no running daemon found")` to return exit code 1
+- **Status:** Fixed
 
-### Bug 2: delete-message unusable from CLI (D-09)
+### Bug 2: logs --limit parameter validation missing (H21/H22/H23)
 
-- **Severity:** High
-- **Scenario:** D-09
-- **Description:** `delete-message --message-id` expects the Message primary key UUID, but no CLI command displayed this UUID. The `send` output showed `Message ID` (uint32 sequence), `Client Msg ID` (idempotency UUID), and `Conversation` ID, but NOT the Message.ID UUID needed for deletion.
-- **Root Cause:** `printSendResult()` in `internal/cli/send.go` did not print `result.Message.ID`.
-- **Fix:** Added `UUID: <id>` line to `printSendResult` output, between `Message ID` and `Conversation`.
-- **Files Changed:**
-  - `internal/cli/send.go` - Added UUID output line
-  - `internal/cli/send_test.go` - Updated test to verify UUID in output
+- **Severity:** Medium
+- **File:** `internal/cli/logs.go`
+- **Problem:** `--limit 0` and `--limit -1` were not validated, should return an error
+- **Root Cause:** `runLogsTail()` and `runLogsSearch()` did not check if `limit <= 0`
+- **Fix:** Added `if limit <= 0 { return fmt.Errorf("...: --limit must be a positive integer") }` validation in both functions
+- **Status:** Fixed
+
+---
+
+## Unfixed Issues
+
+### Issue 1: send command missing --client-msg-id flag (D02)
+
+- **Severity:** Medium
+- **Description:** `send` command does not have `--client-msg-id` flag, cannot test idempotency from CLI (D-006)
+- **Recommendation:** Consider adding `--client-msg-id` flag for manual testing and debugging
+
+### Issue 2: mark-as-read MAX semantics may not be correctly enforced (D12 WARN)
+
+- **Severity:** Low
+- **Description:** Marking as read up to #3 then marking up to #1 shows "Marked as read up to message #1"
+- **Recommendation:** Server-side verification needed to confirm MAX semantics are correctly implemented
+
+### Issue 3: --log-dir parameter functionality incomplete (M001 PARTIAL)
+
+- **Severity:** Low
+- **Description:** `--log-dir` parameter is accepted but does not write log files to the directory
+- **Recommendation:** Implement log file writing or remove the parameter
+
+---
+
+## N/A Scenarios (Design Behavior, Not Bugs)
+
+- **I04:** `--full`/`--force` parameters not supported (sync-updates defaults to full sync)
+- **J14:** `--timeout` parameter not supported
+- **D22 WARN:** Query for non-existent conversation returns exit 0 (read operations returning empty is reasonable behavior)
 
 ---
 
 ## Product Decision Coverage
 
-| Decision | Description | Covered | Result |
-|----------|-------------|---------|--------|
-| D-006 | client_message_id idempotency (Duplicate: true) | A-02 | PASS (server-side; client auto-generates UUID) |
-| D-008 | MessageID monotonically increasing | A-02, D-20 | PASS |
-| D-011 | create-conversation find-or-create idempotent | A-02, E-02 | PASS |
-| D-012 | mark-as-read MAX semantics | D-15 | PASS |
-| D-013 | delete-conversation cascade soft-delete | (via existing E2E) | PASS |
-| D-014 | delete-message sender-only permission | D-11 | PASS |
-| D-015 | restore-conversation cascade restore | (via existing E2E) | PASS |
-| D-030 | IPC socket path = ~/.xyncra/{uid}/{did}/xyncra.sock | B-17 | PASS |
-| D-031 | fcntl process lock, stale lock detection | B-02, B-11 | PASS |
-| D-032 | IPC priority, WS fallback | J-12 to J-15 | PASS |
-| D-033 | device-id = hostname SHA256[:8] | B-14 | PASS |
-| D-034 | XYNCRA_ env prefix, flag > env > default | B-08, B-09, B-10 | PASS |
-| D-035 | Query commands read local SQLite | F-18 | PASS |
-| D-036 | sync-updates IPC-only, exit 2 when daemon not running | I-02, I-06 | PASS (after fix) |
-| D-037 | create-conversation uses --peer-id | A-02 | PASS |
-| D-038 | delete-message --message-id (UUID), mark-as-read --message-id (uint32) | D-09, D-13 | PASS |
-| D-039 | kill default SIGTERM, --force SIGKILL | B-03, B-04 | PASS |
-| D-040 | logs retain 7d | H-21 to H-25 | PASS |
-| D-041 | tabwriter aligned output, stdout/stderr separation | F-02, K-09 | PASS |
-| D-042 | Exit codes: 0=success, 1=error, 2=precondition, 3=timeout | K-10 | PASS |
-| D-044 | WS unreachable: daemon doesn't exit, IPC always available | B-07 | PASS |
-| D-045 | create-conversation pushes UserUpdate + MQ to both users | E-01 | PASS (after Docker rebuild) |
+| Decision | Description | Status | Notes |
+|----------|-------------|--------|-------|
+| D-006 | client_message_id idempotency | WARN | CLI cannot test (missing --client-msg-id flag) |
+| D-008 | MessageID monotonically increasing | PASS | Verified |
+| D-011 | create-conversation find-or-create idempotent | PASS | Verified |
+| D-012 | mark-as-read MAX semantics | WARN | Server-side verification needed |
+| D-013 | delete-conversation cascade soft-delete | PASS | Verified |
+| D-014 | delete-message sender-only permission | PASS | Verified |
+| D-015 | restore-conversation cascade restore | -- | Not separately tested |
+| D-030 | IPC socket path = ~/.xyncra/{uid}/{did}/xyncra.sock | PASS | Verified |
+| D-031 | fcntl process lock, stale lock detection | PASS | Verified |
+| D-032 | IPC priority, WS fallback | PASS | Verified |
+| D-033 | device-id = hostname SHA256[:8] | PASS | Verified |
+| D-034 | XYNCRA_ env prefix, flag > env > default | PASS | Verified |
+| D-035 | Query commands read local SQLite | PASS | Verified |
+| D-036 | sync-updates IPC-only, exit 2 when daemon not running | PASS | Verified |
+| D-037 | create-conversation uses --peer-id | PASS | Verified |
+| D-038 | delete-message --message-id (UUID), mark-as-read --message-id (uint32) | PASS | Verified |
+| D-039 | kill default SIGTERM, --force SIGKILL | PASS | Verified |
+| D-041 | tabwriter aligned output, stdout/stderr separation | PASS | Verified |
+| D-042 | Exit codes: 0=success, 1=error, 2=precondition, 3=timeout | PASS | Verified |
+| D-044 | WS unreachable: daemon doesn't exit, IPC always available | PASS | Verified |
+| D-045 | create-conversation pushes UserUpdate + MQ to both users | PASS | Verified |
 
 ---
 
@@ -108,10 +132,10 @@
 | CLI-E2E-B09 | XYNCRA_SERVER env var (D-034) | PASS |
 | CLI-E2E-B10 | Flag overrides env var (D-034) | PASS |
 | CLI-E2E-B11 | Stale lock auto-recovery (D-031) | PASS |
-| CLI-E2E-B12 | Kill with no daemon running | PASS |
+| CLI-E2E-B12 | Kill with no daemon running | PASS (after fix) |
 | CLI-E2E-B13 | Kill cleans stale lock (D-039) | PASS |
-| CLI-E2E-B14 | Custom --device-id | PASS |
-| CLI-E2E-B15 | Different device_id isolation | PASS |
+| CLI-E2E-B14 | Custom --device-id | PASS (after fix) |
+| CLI-E2E-B15 | Different device_id isolation | PASS (after fix) |
 | CLI-E2E-B16 | Socket permissions 0600 (D-030) | PASS |
 | CLI-E2E-B17 | IPC socket path format (D-030) | PASS |
 | CLI-E2E-B18 | Directory permissions 0700 | PASS |
@@ -129,28 +153,27 @@
 | CLI-E2E-D06 | Send without --content | PASS |
 | CLI-E2E-D07 | Send with --reply-to (D-038) | PASS |
 | CLI-E2E-D08 | Send standalone fallback (D-032) | PASS |
-| CLI-E2E-D09 | Delete own message (D-014) | PASS (after fix) |
+| CLI-E2E-D09 | Delete own message (D-014) | PASS |
 | CLI-E2E-D10 | Delete non-existent message | PASS |
 | CLI-E2E-D11 | Delete permission denied (D-014) | PASS |
-| CLI-E2E-D12 | Delete without --message-id | PASS |
-| CLI-E2E-D13 | Mark-as-read specific message (D-012) | PASS |
+| CLI-E2E-D12 | Mark-as-read MAX semantics (D-012) | WARN |
+| CLI-E2E-D13 | Mark-as-read specific message | PASS |
 | CLI-E2E-D14 | Mark-as-read all (message-id=0) | PASS |
-| CLI-E2E-D15 | Mark-as-read MAX semantics (D-012) | PASS |
-| CLI-E2E-D16 | Mark-as-read without --conversation-id | PASS |
-| CLI-E2E-D17 | Send long message (256 chars) | PASS |
-| CLI-E2E-D18 | Send special chars | PASS |
-| CLI-E2E-D19 | Send unicode message | PASS |
-| CLI-E2E-D20 | get-messages monotonic MessageID (D-008) | PASS |
-| CLI-E2E-D21 | get-messages --after-message-id pagination | PASS |
-| CLI-E2E-D22 | search-messages basic | PASS |
-| CLI-E2E-D23 | search-messages no results | PASS |
+| CLI-E2E-D15 | Mark-as-read without --conversation-id | PASS |
+| CLI-E2E-D16 | Send long message (256 chars) | PASS |
+| CLI-E2E-D17 | Send special chars | PASS |
+| CLI-E2E-D18 | Send unicode message | PASS |
+| CLI-E2E-D19 | get-messages monotonic MessageID (D-008) | PASS |
+| CLI-E2E-D20 | get-messages --after-message-id pagination | PASS |
+| CLI-E2E-D21 | search-messages basic | PASS |
+| CLI-E2E-D22 | search-messages no results | WARN (exit 0 for empty query is reasonable) |
+| CLI-E2E-D23 | Send idempotency (D-006) | N/A (missing --client-msg-id) |
 
 ### Group E: Conversation Ops
 
 | Scenario | Description | Result |
 |----------|-------------|--------|
 | CLI-E2E-E01 | create-conversation notifies peer (D-045) | PASS |
-| CLI-E2E-E02 | Duplicate create no notification (D-045) | PASS |
 
 ### Group F: Query Commands
 
@@ -212,9 +235,9 @@
 | CLI-E2E-H18 | logs export --output file | PASS |
 | CLI-E2E-H19 | logs export --method filter | PASS |
 | CLI-E2E-H20 | logs export invalid format | PASS |
-| CLI-E2E-H21 | logs cleanup --dry-run | PASS |
-| CLI-E2E-H22 | logs cleanup basic | PASS |
-| CLI-E2E-H23 | logs cleanup --retain | PASS |
+| CLI-E2E-H21 | logs cleanup --dry-run | PASS (after fix) |
+| CLI-E2E-H22 | logs cleanup basic | PASS (after fix) |
+| CLI-E2E-H23 | logs cleanup --retain | PASS (after fix) |
 | CLI-E2E-H24 | logs cleanup --type rpc | PASS |
 | CLI-E2E-H25 | logs cleanup --type notifications | PASS |
 
@@ -223,11 +246,11 @@
 | Scenario | Description | Result |
 |----------|-------------|--------|
 | CLI-E2E-I01 | sync-updates with daemon | PASS |
-| CLI-E2E-I02 | sync-updates no daemon (exit 2, D-036) | PASS (after fix) |
+| CLI-E2E-I02 | sync-updates no daemon (exit 2, D-036) | PASS |
 | CLI-E2E-I03 | sync-updates double sync | PASS |
-| CLI-E2E-I04 | sync after new data | PASS |
+| CLI-E2E-I04 | sync after new data | N/A (--full/--force not supported) |
 | CLI-E2E-I05 | Daemon initial FullSync | PASS |
-| CLI-E2E-I06 | sync-updates IPC-only (D-036) | PASS (after fix) |
+| CLI-E2E-I06 | sync-updates IPC-only (D-036) | PASS |
 
 ### Group J: Multi-Instance + IPC
 
@@ -248,6 +271,10 @@
 | CLI-E2E-J13 | Standalone fallback delete-conversation | PASS |
 | CLI-E2E-J14 | Standalone fallback restore-conversation | PASS |
 | CLI-E2E-J15 | Standalone fallback mark-as-read | PASS |
+| CLI-E2E-J16 | Multi-instance --timeout | N/A (--timeout not supported) |
+| CLI-E2E-J17 | IPC concurrent requests | PASS |
+| CLI-E2E-J18 | IPC socket cleanup on kill | PASS |
+| CLI-E2E-J19 | Daemon reconnection after IPC break | PASS |
 
 ### Group K: Error Handling
 
@@ -274,18 +301,7 @@
 
 | Scenario | Description | Result |
 |----------|-------------|--------|
-| CLI-E2E-M01 | Custom --db-path and --log-dir | PASS |
-
----
-
-## Existing Automated E2E Test Suite
-
-After the bug fixes, the existing automated CLI E2E test suite was run:
-
-```
-go test -count=1 ./internal/cli/e2e/
-Result: 136 passed, 0 failed
-```
+| CLI-E2E-M01 | Custom --db-path and --log-dir | PARTIAL (--log-dir not writing files) |
 
 ---
 
@@ -293,33 +309,27 @@ Result: 136 passed, 0 failed
 
 | Component | Details |
 |-----------|---------|
-| OS | macOS (Darwin 25.2.0) |
-| Go | 1.24+ |
-| Redis | 7-alpine (Docker, port 16379, DB 15) |
-| Server | Docker container (port 18080) |
-| Client | Compiled binary (./xyncra-client) |
-| E2E HOME | /tmp/xe2e-* (isolated temp directory) |
-| Test Users | alice-e2e, bob-e2e, charlie-e2e |
-| Device ID | dev1 (default) |
+| OS | macOS Darwin 25.2.0 |
+| Redis | 7-alpine (Docker, container port 6379, host mapping 16379) |
+| Server | Built from commit 7f43f99 |
+| Client | Built from commit 7f43f99 |
+| E2E_HOME | /tmp/xe2e-dyReVHXQ |
 
 ---
 
 ## Code Quality
 
-- `gofmt -l .` — No issues
-- `go vet ./...` — No issues
-- `go test -short ./internal/cli/` — 193 passed, 0 failed
-- `go test -count=1 ./internal/cli/e2e/` — 136 passed, 0 failed
+- `go fmt ./...` -- No issues
+- `go vet ./...` -- No issues
 
 ---
 
-## Files Changed
+## Files Changed (This Test Run)
 
 | File | Change |
 |------|--------|
-| `internal/cli/sync.go` | Use `os.Exit(2)` for daemon-not-running (D-036/D-042) |
-| `internal/cli/sync_test.go` | Updated test incompatible with `os.Exit(2)` |
-| `internal/cli/send.go` | Added UUID output to `printSendResult` |
-| `internal/cli/send_test.go` | Updated test to verify UUID in output |
-| `internal/cli/e2e/cli_e2e_test.go` | Updated expected exit code from 1 to 2 |
+| `internal/cli/kill.go` | Return error (exit 1) when no daemon found (was returning nil/exit 0) |
+| `internal/cli/kill_test.go` | Updated test for new kill error behavior |
+| `internal/cli/logs.go` | Added --limit > 0 validation in tail and search commands |
+| `internal/cli/e2e/cli_e2e_p1_test.go` | Updated tests for kill and logs fixes |
 | `docs/e2e-manual-test-report-2026-07-09.md` | This report |
