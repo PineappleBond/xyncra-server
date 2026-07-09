@@ -7,6 +7,16 @@
 
 ---
 
+## 测试执行记录
+
+| 日期 | Git Commit | 执行者 | 结果 | 报告 |
+|------|-----------|--------|------|------|
+| 2026-07-09 | 7f43f99 | E2E Manual (CLI-driven) | 127/133 PASS (95.5%) | [e2e-manual-test-report-2026-07-09.md](e2e-manual-test-report-2026-07-09.md) |
+
+> 下次测试前请参考上方记录，避免重复已通过的场景。详细验证矩阵见 [第 5 节](#5-手动-cli-e2e-测试验证矩阵-2026-07-09)。
+
+---
+
 ## 目录
 
 1. [测试场景清单](#1-测试场景清单)
@@ -890,3 +900,217 @@ jobs:
 1. **ipcRawCall error code**: JSON-RPC error response 的 error code 解析不正确
 2. **mark-as-read standalone DB path**: standalone 模式下 mark-as-read 未正确更新本地 DB 的已读游标
 3. **delete-message permission error message**: 删除他人消息时返回的错误信息不符合预期格式
+
+---
+
+## 5. 手动 CLI E2E 测试验证矩阵 (2026-07-09)
+
+> **执行者**: E2E Manual (CLI-driven)
+> **Git Commit**: 7f43f99
+> **总计**: 127/133 PASS (95.5%) — 1 FAIL, 2 WARN, 2 N/A, 1 PARTIAL
+
+### Group A: Smoke Test (2/2 PASS)
+
+| 场景 | 描述 | 状态 |
+|------|------|------|
+| CLI-E2E-A001 | 环境健康检查 (Redis PONG, Server /health) | ✅ PASS |
+| CLI-E2E-A002 | 端到端快乐路径 (create, send, query, sync, kill) | ✅ PASS |
+
+### Group B: Daemon Lifecycle (19/19 PASS, 修复后)
+
+| 场景 | 描述 | 状态 |
+|------|------|------|
+| CLI-E2E-B01 | listen 创建状态文件 (sock, lock, db) | ✅ PASS |
+| CLI-E2E-B02 | 重复 listen 拒绝 (exit 2, D-031) | ✅ PASS |
+| CLI-E2E-B03 | kill 发送 SIGTERM (D-039) | ✅ PASS |
+| CLI-E2E-B04 | kill --force 发送 SIGKILL (D-039) | ✅ PASS |
+| CLI-E2E-B05 | SIGINT 正常退出 | ✅ PASS |
+| CLI-E2E-B06 | listen 缺少 --user-id 失败 | ✅ PASS |
+| CLI-E2E-B07 | WS 不可达时 IPC 仍可用 (D-044) | ✅ PASS |
+| CLI-E2E-B08 | XYNCRA_USER_ID 环境变量 (D-034) | ✅ PASS |
+| CLI-E2E-B09 | XYNCRA_SERVER 环境变量 (D-034) | ✅ PASS |
+| CLI-E2E-B10 | flag 优先级高于环境变量 (D-034) | ✅ PASS |
+| CLI-E2E-B11 | stale lock 自动恢复 (D-031) | ✅ PASS |
+| CLI-E2E-B12 | kill 无 daemon 运行 | ✅ PASS |
+| CLI-E2E-B13 | kill 清理 stale lock (D-039) | ✅ PASS |
+| CLI-E2E-B14 | 自定义 --device-id | ✅ PASS |
+| CLI-E2E-B15 | 不同 device_id 隔离 | ✅ PASS |
+| CLI-E2E-B16 | socket 权限 0600 (D-030) | ✅ PASS |
+| CLI-E2E-B17 | IPC socket 路径格式 (D-030) | ✅ PASS |
+| CLI-E2E-B18 | 目录权限 0700 | ✅ PASS |
+| CLI-E2E-B19 | kill --timeout flag | ✅ PASS |
+
+### Group D: Message Operations (20/23, 1 FAIL, 2 WARN)
+
+| 场景 | 描述 | 状态 |
+|------|------|------|
+| CLI-E2E-D01 | send 消息基本功能 | ✅ PASS |
+| CLI-E2E-D02 | send 第二条消息 (递增 ID) | ❌ FAIL (send 缺少 --client-msg-id flag) |
+| CLI-E2E-D03 | send 空内容被拒绝 | ✅ PASS |
+| CLI-E2E-D04 | send 到不存在的 conversation | ✅ PASS |
+| CLI-E2E-D05 | send 缺少 --conversation-id | ✅ PASS |
+| CLI-E2E-D06 | send 缺少 --content | ✅ PASS |
+| CLI-E2E-D07 | send 带 --reply-to (D-038) | ✅ PASS |
+| CLI-E2E-D08 | send standalone fallback (D-032) | ✅ PASS |
+| CLI-E2E-D09 | delete 自己的消息 (D-014) | ✅ PASS |
+| CLI-E2E-D10 | delete 不存在的消息 | ✅ PASS |
+| CLI-E2E-D11 | delete 权限拒绝 (D-014) | ✅ PASS |
+| CLI-E2E-D12 | mark-as-read MAX 语义 (D-012) | ⚠️ WARN (需服务端验证) |
+| CLI-E2E-D13 | mark-as-read 指定消息 | ✅ PASS |
+| CLI-E2E-D14 | mark-as-read 全部 (message-id=0) | ✅ PASS |
+| CLI-E2E-D15 | mark-as-read 缺少 --conversation-id | ✅ PASS |
+| CLI-E2E-D16 | send 长消息 (256 字符) | ✅ PASS |
+| CLI-E2E-D17 | send 特殊字符 | ✅ PASS |
+| CLI-E2E-D18 | send Unicode 消息 | ✅ PASS |
+| CLI-E2E-D19 | get-messages 单调递增 MessageID (D-008) | ✅ PASS |
+| CLI-E2E-D20 | get-messages --after-message-id 分页 | ✅ PASS |
+| CLI-E2E-D21 | search-messages 基本 | ✅ PASS |
+| CLI-E2E-D22 | search-messages 无结果 | ⚠️ WARN (exit 0 可能是设计行为) |
+| CLI-E2E-D23 | send 幂等性 (D-006) | ✅ PASS |
+
+### Group E: Conversation Ops (1/1 PASS)
+
+| 场景 | 描述 | 状态 |
+|------|------|------|
+| CLI-E2E-E001 | create-conversation 通知对端 (D-045) | ✅ PASS |
+
+### Group F: Query Commands (18/18 PASS)
+
+| 场景 | 描述 | 状态 |
+|------|------|------|
+| CLI-E2E-F01 | list-conversations 基本 | ✅ PASS |
+| CLI-E2E-F02 | tabwriter 对齐 (D-041) | ✅ PASS |
+| CLI-E2E-F03 | list-conversations 空列表 | ✅ PASS |
+| CLI-E2E-F04 | list-conversations --limit | ✅ PASS |
+| CLI-E2E-F05 | list-conversations --offset | ✅ PASS |
+| CLI-E2E-F06 | get-conversation 详情 | ✅ PASS |
+| CLI-E2E-F07 | get-conversation not found | ✅ PASS |
+| CLI-E2E-F08 | get-messages 基本 (D-035) | ✅ PASS |
+| CLI-E2E-F09 | get-messages 升序 | ✅ PASS |
+| CLI-E2E-F10 | get-messages --after-message-id | ✅ PASS |
+| CLI-E2E-F11 | get-messages --limit | ✅ PASS |
+| CLI-E2E-F12 | get-messages 空 conversation | ✅ PASS |
+| CLI-E2E-F13 | search-messages 基本 | ✅ PASS |
+| CLI-E2E-F14 | search-messages 降序 | ✅ PASS |
+| CLI-E2E-F15 | search-messages --limit | ✅ PASS |
+| CLI-E2E-F16 | search-messages 无结果 | ✅ PASS |
+| CLI-E2E-F17 | get-conversation 未读计数 | ✅ PASS |
+| CLI-E2E-F18 | 查询命令无需 daemon (D-035) | ✅ PASS |
+
+### Group G: Draft Management (8/8 PASS)
+
+| 场景 | 描述 | 状态 |
+|------|------|------|
+| CLI-E2E-G01 | draft save | ✅ PASS |
+| CLI-E2E-G02 | draft get | ✅ PASS |
+| CLI-E2E-G03 | draft save upsert | ✅ PASS |
+| CLI-E2E-G04 | draft get 显示更新内容 | ✅ PASS |
+| CLI-E2E-G05 | draft delete | ✅ PASS |
+| CLI-E2E-G06 | draft get 删除后 | ✅ PASS |
+| CLI-E2E-G07 | draft save 缺少参数 | ✅ PASS |
+| CLI-E2E-G08 | draft get 不存在 | ✅ PASS |
+
+### Group H: Logs Management (25/25 PASS, 修复后)
+
+| 场景 | 描述 | 状态 |
+|------|------|------|
+| CLI-E2E-H01 | logs tail 基本 | ✅ PASS |
+| CLI-E2E-H02 | logs tail --type rpc | ✅ PASS |
+| CLI-E2E-H03 | logs tail --type notifications | ✅ PASS |
+| CLI-E2E-H04 | logs tail --limit | ✅ PASS |
+| CLI-E2E-H05 | logs tail --since | ✅ PASS |
+| CLI-E2E-H06 | logs search 基本 | ✅ PASS |
+| CLI-E2E-H07 | logs search --method | ✅ PASS |
+| CLI-E2E-H08 | logs search --error | ✅ PASS |
+| CLI-E2E-H09 | logs search --from --to | ✅ PASS |
+| CLI-E2E-H10 | logs search --conversation-id | ✅ PASS |
+| CLI-E2E-H11 | logs search --request-id | ✅ PASS |
+| CLI-E2E-H12 | logs stats 基本 | ✅ PASS |
+| CLI-E2E-H13 | logs stats --since | ✅ PASS |
+| CLI-E2E-H14 | logs stats --interval | ✅ PASS |
+| CLI-E2E-H15 | logs stats --interval 无效 | ✅ PASS |
+| CLI-E2E-H16 | logs export CSV | ✅ PASS |
+| CLI-E2E-H17 | logs export JSON | ✅ PASS |
+| CLI-E2E-H18 | logs export --output 文件 | ✅ PASS |
+| CLI-E2E-H19 | logs export --method 过滤 | ✅ PASS |
+| CLI-E2E-H20 | logs export 无效格式 | ✅ PASS |
+| CLI-E2E-H21 | logs cleanup --dry-run | ✅ PASS |
+| CLI-E2E-H22 | logs cleanup 基本 | ✅ PASS |
+| CLI-E2E-H23 | logs cleanup --retain | ✅ PASS |
+| CLI-E2E-H24 | logs cleanup --type rpc | ✅ PASS |
+| CLI-E2E-H25 | logs cleanup --type notifications | ✅ PASS |
+
+### Group I: Sync Operations (5/6, 1 N/A)
+
+| 场景 | 描述 | 状态 |
+|------|------|------|
+| CLI-E2E-I01 | sync-updates with daemon | ✅ PASS |
+| CLI-E2E-I02 | sync-updates no daemon (exit 2, D-036) | ✅ PASS |
+| CLI-E2E-I03 | sync-updates 重复同步 | ✅ PASS |
+| CLI-E2E-I04 | sync 新数据后 --full/--force | ⬜ N/A (不支持，默认即完全同步) |
+| CLI-E2E-I05 | daemon 初始 FullSync | ✅ PASS |
+| CLI-E2E-I06 | sync-updates IPC-only (D-036) | ✅ PASS |
+
+### Group J: Multi-Instance + IPC (18/19, 1 N/A)
+
+| 场景 | 描述 | 状态 |
+|------|------|------|
+| CLI-E2E-J01 | 多用户隔离 | ✅ PASS |
+| CLI-E2E-J02 | 多设备隔离 | ✅ PASS |
+| CLI-E2E-J03 | IPC 路由到正确 daemon | ✅ PASS |
+| CLI-E2E-J04 | kill 一个 daemon 不影响其他 | ✅ PASS |
+| CLI-E2E-J05 | 不同 DB 文件 per device | ✅ PASS |
+| CLI-E2E-J06 | 不同 lock 文件 per device | ✅ PASS |
+| CLI-E2E-J07 | Bob daemon send | ✅ PASS |
+| CLI-E2E-J08 | 跨用户数据隔离 | ✅ PASS |
+| CLI-E2E-J09 | IPC JSON-RPC 2.0 协议 (D-030) | ✅ PASS |
+| CLI-E2E-J10 | IPC 无效方法 | ✅ PASS |
+| CLI-E2E-J11 | IPC 无效 JSON | ✅ PASS |
+| CLI-E2E-J12 | standalone fallback create-conversation | ✅ PASS |
+| CLI-E2E-J13 | standalone fallback delete-conversation | ✅ PASS |
+| CLI-E2E-J14 | standalone fallback restore-conversation | ⬜ N/A (--timeout 不支持) |
+| CLI-E2E-J15 | standalone fallback mark-as-read | ✅ PASS |
+| CLI-E2E-J16 | multi-instance --timeout | ✅ PASS |
+| CLI-E2E-J17 | IPC 并发请求 | ✅ PASS |
+| CLI-E2E-J18 | IPC socket kill 后清理 | ✅ PASS |
+| CLI-E2E-J19 | daemon IPC 断开后重连 | ✅ PASS |
+
+### Group K: Error Handling (10/10 PASS)
+
+| 场景 | 描述 | 状态 |
+|------|------|------|
+| CLI-E2E-K01 | send 缺少 --user-id | ✅ PASS |
+| CLI-E2E-K02 | 无效服务器 URL | ✅ PASS |
+| CLI-E2E-K03 | 无效 UUID conversation-id | ✅ PASS |
+| CLI-E2E-K04 | get-conversation 缺少 -c | ✅ PASS |
+| CLI-E2E-K05 | send 到不存在的 conversation | ✅ PASS |
+| CLI-E2E-K06 | delete 不存在的 conversation | ✅ PASS |
+| CLI-E2E-K07 | restore 不存在的 conversation | ✅ PASS |
+| CLI-E2E-K08 | listen 缺少 --user-id | ✅ PASS |
+| CLI-E2E-K09 | 双重原因错误 (IPC+WS 均失败) | ✅ PASS |
+| CLI-E2E-K10 | 退出码标准 (D-042) | ✅ PASS |
+
+### Group L: Resilience (1/1 PASS)
+
+| 场景 | 描述 | 状态 |
+|------|------|------|
+| CLI-E2E-L001 | daemon 服务器重启后存活 (D-044) | ✅ PASS |
+
+### Group M: Advanced (0/1, 1 PARTIAL)
+
+| 场景 | 描述 | 状态 |
+|------|------|------|
+| CLI-E2E-M001 | 自定义 --db-path 和 --log-dir | ⚠️ PARTIAL (--log-dir 未写入日志文件) |
+
+---
+
+## 待改进场景
+
+| 场景 | 状态 | 原因 | 建议 |
+|------|------|------|------|
+| D02 | ❌ FAIL | send 缺少 --client-msg-id flag | 添加 flag 支持 CLI 幂等性测试 |
+| D12 | ⚠️ WARN | mark-as-read MAX 语义需服务端验证 | 服务端检查并确认 |
+| D22 | ⚠️ WARN | 不存在会话查询返回 exit 0 | 确认是否期望行为 |
+| I04 | ⬜ N/A | --full/--force 不支持 | 如需单独触发全量同步则添加 |
+| J14 | ⬜ N/A | --timeout 不支持 | 如需超时控制则添加 |
+| M001 | ⚠️ PARTIAL | --log-dir 未写入日志文件 | 实现日志文件写入或移除参数 |
