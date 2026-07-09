@@ -33,6 +33,8 @@
 | D-043 | E2E 测试端口约定 | Redis 16379, Server 18080, DB 15 |
 | D-044 | listen daemon 连接韧性策略 | 无限重试 WS 连接，IPC 始终可用 |
 | D-045 | create_conversation 实时通知 | 创建会话时推送 UserUpdate + MQ 广播 |
+| D-046 | CLI send --client-msg-id 可选 flag | 默认自动生成 UUID，用于调试和测试 D-006 幂等性 |
+| D-047 | mark-as-read 显示 server 实际游标 | CLI 显示 MAX 语义后的实际 last_read_message_id |
 
 ---
 
@@ -985,10 +987,74 @@ Redis 使用 DB 15（最高编号），避免与开发数据（DB 0）冲突。E
 
 ---
 
+## D-046: CLI send --client-msg-id 可选 flag
+
+### 决策
+
+CLI `send` 命令新增可选 `--client-msg-id` flag（string 类型，UUID 格式）。当未提供时，CLI 自动生成 UUID v4 作为 `client_message_id`（与 D-006 一致）。当提供时，使用用户指定的值。IPC handler 透传此字段到守护进程。
+
+### 原因
+
+1. **可测试性**：允许手动测试 D-006 幂等性（EXT-003）
+2. **调试友好**：开发者可以指定已知的 client_message_id 进行调试
+3. **向后兼容**：默认行为不变（自动生成 UUID），现有脚本无需修改
+4. **与 D-006 一致**：不改变幂等性机制，只是暴露了控制入口
+
+### 实现
+
+```go
+// send.go
+var clientMsgID string
+cmd.Flags().StringVar(&clientMsgID, "client-msg-id", "", "Client-generated message ID for idempotency (auto UUID if empty)")
+
+// 如果未提供，自动生成
+if clientMsgID == "" {
+    clientMsgID = uuid.New().String()
+}
+```
+
+### 约束
+
+- flag 值为空字符串时自动生成 UUID
+- 不进行格式校验（与 D-006 一致：服务器不做格式校验）
+- 仅影响 `send` 命令，其他命令不变
+
+---
+
+## D-047: mark-as-read 显示 server 实际游标
+
+### 决策
+
+CLI `mark-as-read` 命令输出显示 server 返回的 `last_read_message_id`（即 MAX 语义后的实际游标值），而非用户请求的 `--message-id` 值。三层修改：server handler 返回实际游标、IPC handler 捕获并转发 server 响应、CLI 显示 server 确认的值。
+
+### 原因
+
+1. **准确性**：用户看到的是实际状态，而非请求值
+2. **与 D-012 一致**：MAX 语义下，请求值可能被忽略（回退场景），显示实际值避免误导
+3. **向后兼容**：仅显示层修改，不影响协议或数据结构
+4. **调试友好**：开发者可以直接看到 server 端的实际游标位置
+
+### 示例
+
+```bash
+# 当前游标在 #3
+$ xyncra-client mark-as-read --conversation-id $CONV_ID --message-id 1 --user-id alice
+Marked as read up to message #3   # 显示实际游标（MAX 语义保持 #3），而非请求的 #1
+```
+
+### 约束
+
+- 仅影响 CLI 输出显示
+- IPC 协议中新增 `last_read_message_id` 响应字段
+- 旧版 CLI 不受影响（忽略新字段）
+
+---
+
 ## 版本历史
 
 | 日期       | 版本 | 变更                                                                                |
 | ---------- | ---- | ----------------------------------------------------------------------------------- |
+| 2026-07-10 | v2.6 | 新增 D-046（CLI send --client-msg-id flag）、D-047（mark-as-read 显示实际游标）     |
 | 2026-07-09 | v2.5 | 新增 D-044（daemon 连接韧性策略）、D-045（create_conversation 实时通知）       |
 | 2026-07-09 | v2.4 | 新增 D-043（E2E 测试端口约定），修正 D-042（补充退出码 3）                       |
 | 2026-07-09 | v2.3 | 新增 D-039 到 D-042（kill 命令规范、logs 保留策略、输出格式、退出码标准）            |
