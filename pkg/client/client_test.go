@@ -487,8 +487,8 @@ func TestCreateConversation_CorrectParams(t *testing.T) {
 	if err := json.Unmarshal(receivedReq.Params, &params); err != nil {
 		t.Fatalf("unmarshal params: %v", err)
 	}
-	if params["user_id2"] != "user-2" {
-		t.Errorf("expected user_id2=user-2, got %v", params["user_id2"])
+	if params["user_id"] != "user-2" {
+		t.Errorf("expected user_id=user-2, got %v", params["user_id"])
 	}
 	if params["title"] != "Test Chat" {
 		t.Errorf("expected title=Test Chat, got %v", params["title"])

@@ -105,8 +105,8 @@ func createConversationViaIPC(ctx context.Context, cliCtx *CLIContext, peerID, t
 // IPC channel is unavailable (D-032).
 func createConversationStandalone(ctx context.Context, cliCtx *CLIContext, peerID, title string) (*client.CreateConversationResult, error) {
 	data, err := standaloneRPC(ctx, cliCtx, "create_conversation", map[string]any{
-		"user_id2": peerID,
-		"title":    title,
+		"user_id": peerID,
+		"title":   title,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("standalone create-conversation: %w", err)

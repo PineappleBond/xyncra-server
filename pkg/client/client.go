@@ -546,8 +546,8 @@ func (c *XyncraClient) SyncUpdates(ctx context.Context, afterSeq uint32, limit i
 // CreateConversation creates a new 1-on-1 conversation with the specified user.
 func (c *XyncraClient) CreateConversation(ctx context.Context, userID2, title string) (*CreateConversationResult, error) {
 	params := map[string]any{
-		"user_id2": userID2,
-		"title":    title,
+		"user_id": userID2,
+		"title":   title,
 	}
 	data, err := c.Call(ctx, "create_conversation", params)
 	if err != nil {
