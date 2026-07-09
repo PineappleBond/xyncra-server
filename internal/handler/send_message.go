@@ -71,10 +71,11 @@ func NewSendMessageHandler(store store.StoreAPI, broker mq.Broker) *sendMessageH
 }
 
 // HandleRequest implements MethodHandler. It processes a "send_message" RPC
-// call: validates parameters, performs an idempotency check, persists the
-// message atomically (with MessageID and seq allocation inside the
-// transaction), enqueues an async MQ delivery task (fire-and-forget), and
-// returns the resulting message to the caller.
+// call: validates parameters, persists the message atomically (with MessageID
+// and seq allocation inside the transaction), enqueues an async MQ delivery
+// task (fire-and-forget), and returns the resulting message to the caller.
+// Idempotency (D-006) is enforced by catching the unique constraint violation
+// on client_message_id after the insert, avoiding a TOCTOU race.
 func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
 	// 1. Parse parameters.
 	var params sendMessageParams
@@ -98,19 +99,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 		params.Type = "text"
 	}
 
-	// 2. Idempotency check (D-006).
-	if existing, err := h.store.MessageStore().GetByClientMessageID(ctx, params.ClientMessageID); err == nil {
-		// Duplicate — return the already-persisted message.
-		resp := sendMessageResponse{
-			Message:   existing,
-			Duplicate: true,
-		}
-		return marshalResponse(resp)
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return nil, protocol.NewInternalError(fmt.Errorf("check idempotency: %w", err))
-	}
-
-	// 3. Fetch conversation and verify membership. This is a preliminary
+	// 2. Fetch conversation and verify membership. This is a preliminary
 	// check for a clear error message; the store's SendMessage transaction
 	// also reads the conversation atomically (D-008).
 	conv, err := h.store.ConversationStore().Get(ctx, params.ConversationID)
@@ -127,7 +116,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 		return nil, protocol.NewPermissionDeniedError("user is not a member of the conversation")
 	}
 
-	// 4. Build model.Message. MessageID is left at zero; the store allocates
+	// 3. Build model.Message. MessageID is left at zero; the store allocates
 	// it atomically inside the transaction (D-008).
 	now := time.Now()
 	msg := &model.Message{
@@ -142,15 +131,27 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 		CreatedAt:       now,
 	}
 
-	// 5. Atomic persist: the store allocates MessageID and per-user seq
+	// 4. Atomic persist: the store allocates MessageID and per-user seq
 	// values inside the transaction, then inserts the message, user updates,
 	// and updates the conversation metadata.
 	sendResult, err := h.store.SendMessage(ctx, msg, members)
 	if err != nil {
+		// TOCTOU-safe idempotency: catch unique constraint violation on
+		// client_message_id and return the already-persisted message (D-006).
+		if errors.Is(err, store.ErrDuplicateKey) {
+			existing, lookupErr := h.store.MessageStore().GetByClientMessageID(ctx, params.ClientMessageID)
+			if lookupErr == nil {
+				resp := sendMessageResponse{
+					Message:   existing,
+					Duplicate: true,
+				}
+				return marshalResponse(resp)
+			}
+		}
 		return nil, protocol.NewInternalError(fmt.Errorf("send message: %w", err))
 	}
 
-	// 6. Build MQ task from the allocated result and enqueue asynchronously
+	// 5. Build MQ task from the allocated result and enqueue asynchronously
 	//    (fire-and-forget, D-007).
 	recipients := make([]sendMessageRecipient, 0, len(sendResult.Updates))
 	for _, u := range sendResult.Updates {
@@ -181,7 +182,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 		}
 	}
 
-	// 7. Return success.
+	// 6. Return success.
 	resp := sendMessageResponse{
 		Message:   sendResult.Message,
 		Duplicate: false,

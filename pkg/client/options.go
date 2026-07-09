@@ -62,6 +62,10 @@ const (
 	// defaultReconnectMaxDelay caps the exponential reconnect backoff.
 	defaultReconnectMaxDelay = 30 * time.Second
 	// defaultReconnectMaxRetries is the maximum reconnect attempts; 0 means unlimited.
+	//
+	// Deprecated: connectionMonitorWithInitialConnect retries indefinitely by
+	// design (D-044). This constant is retained only to keep the struct field
+	// initialiser valid; it has no runtime effect.
 	defaultReconnectMaxRetries = 0
 )
 
@@ -208,17 +212,22 @@ type UpdateHandler interface {
 // clientOptions holds the full set of configuration values for a Client.
 // Default values are applied by New() before user-supplied options override them.
 type clientOptions struct {
-	serverURL           string
-	userID              string
-	rpcTimeout          time.Duration
-	heartbeatInterval   time.Duration
-	syncBatchSize       int
-	pullDebounce        time.Duration
-	retryBaseDelay      time.Duration
-	retryMaxAttempts    int
-	retryPollInterval   time.Duration
-	reconnectBaseDelay  time.Duration
-	reconnectMaxDelay   time.Duration
+	serverURL          string
+	userID             string
+	rpcTimeout         time.Duration
+	heartbeatInterval  time.Duration
+	syncBatchSize      int
+	pullDebounce       time.Duration
+	retryBaseDelay     time.Duration
+	retryMaxAttempts   int
+	retryPollInterval  time.Duration
+	reconnectBaseDelay time.Duration
+	reconnectMaxDelay  time.Duration
+	// reconnectMaxRetries is no longer used: connectionMonitorWithInitialConnect
+	// retries indefinitely by design (D-044). The field is retained to avoid
+	// breaking the public option API; it has no runtime effect.
+	//
+	// Deprecated: retained for API compatibility only.
 	reconnectMaxRetries int
 	db                  *store.ClientDB
 	updateHandler       UpdateHandler
@@ -285,6 +294,10 @@ func WithReconnectMaxDelay(d time.Duration) ClientOption {
 
 // WithReconnectMaxRetries sets the maximum number of reconnect attempts.
 // A value of 0 means unlimited.
+//
+// Deprecated: connectionMonitorWithInitialConnect retries indefinitely by
+// design (D-044). This option has no runtime effect and is retained only for
+// API compatibility.
 func WithReconnectMaxRetries(n int) ClientOption {
 	return func(o *clientOptions) { o.reconnectMaxRetries = n }
 }

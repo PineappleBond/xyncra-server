@@ -743,3 +743,57 @@ func TestNotificationLogStore_CountBefore_Basic(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), count)
 }
+
+// ---------------------------------------------------------------------------
+// Bug #11: StatusCodeLessThan filter
+// ---------------------------------------------------------------------------
+
+// TestRPCLogStore_List_FilterByStatusCodeLessThan verifies that the
+// StatusCodeLessThan filter returns only logs where status_code < value.
+func TestRPCLogStore_List_FilterByStatusCodeLessThan(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	now := time.Now()
+	// status_code = 0 (success)
+	l1 := &model.RPCLog{ID: uid(), RequestID: uid(), Method: "M1", StatusCode: 0, CreatedAt: now}
+	// status_code = -1 (error)
+	l2 := &model.RPCLog{ID: uid(), RequestID: uid(), Method: "M2", StatusCode: -1, CreatedAt: now}
+	// status_code = -2 (error)
+	l3 := &model.RPCLog{ID: uid(), RequestID: uid(), Method: "M3", StatusCode: -2, CreatedAt: now}
+	// status_code = 200 (success)
+	l4 := &model.RPCLog{ID: uid(), RequestID: uid(), Method: "M4", StatusCode: 200, CreatedAt: now}
+
+	for _, l := range []*model.RPCLog{l1, l2, l3, l4} {
+		require.NoError(t, db.RPCLogs.Save(ctx, l))
+	}
+
+	// Filter: status_code < 0 → should return l2 and l3 only.
+	threshold := 0
+	logs, err := db.RPCLogs.List(ctx, RPCLogFilter{StatusCodeLessThan: &threshold})
+	require.NoError(t, err)
+	require.Len(t, logs, 2)
+	for _, l := range logs {
+		assert.Less(t, l.StatusCode, 0)
+	}
+
+	// Filter: status_code < 100 → should return l1, l2, l3 (0, -1, -2 are all < 100).
+	threshold = 100
+	logs, err = db.RPCLogs.List(ctx, RPCLogFilter{StatusCodeLessThan: &threshold})
+	require.NoError(t, err)
+	require.Len(t, logs, 3)
+
+	// Filter: status_code < -1 → should return l3 only (status_code = -2).
+	threshold = -1
+	logs, err = db.RPCLogs.List(ctx, RPCLogFilter{StatusCodeLessThan: &threshold})
+	require.NoError(t, err)
+	require.Len(t, logs, 1)
+	assert.Equal(t, l3.ID, logs[0].ID)
+
+	// Filter: status_code < -3 → should return nothing.
+	threshold = -3
+	logs, err = db.RPCLogs.List(ctx, RPCLogFilter{StatusCodeLessThan: &threshold})
+	require.NoError(t, err)
+	assert.Empty(t, logs)
+}

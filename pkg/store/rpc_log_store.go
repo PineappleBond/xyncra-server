@@ -37,12 +37,13 @@ func (rs *RPCLogStore) Update(ctx context.Context, log *model.RPCLog) error {
 
 // RPCLogFilter defines optional filters for listing RPC logs.
 type RPCLogFilter struct {
-	StartTime      *time.Time
-	EndTime        *time.Time
-	Method         string
-	StatusCode     *int
-	ConversationID string
-	Limit          int
+	StartTime          *time.Time
+	EndTime            *time.Time
+	Method             string
+	StatusCode         *int
+	StatusCodeLessThan *int // StatusCodeLessThan filters logs where status_code < value.
+	ConversationID     string
+	Limit              int
 }
 
 // List returns RPC logs matching the given filters, ordered by CreatedAt
@@ -61,6 +62,9 @@ func (rs *RPCLogStore) List(ctx context.Context, filter RPCLogFilter) ([]*model.
 	}
 	if filter.StatusCode != nil {
 		query = query.Where("status_code = ?", *filter.StatusCode)
+	}
+	if filter.StatusCodeLessThan != nil {
+		query = query.Where("status_code < ?", *filter.StatusCodeLessThan)
 	}
 	if filter.ConversationID != "" {
 		query = query.Where("conversation_id = ?", filter.ConversationID)

@@ -259,8 +259,8 @@ func runLogsSearch(cmd *cobra.Command, args []string) error {
 			filter.EndTime = &t
 		}
 		if errOnly {
-			sc := -1
-			filter.StatusCode = &sc
+			sc := 0
+			filter.StatusCodeLessThan = &sc
 		}
 
 		logs, err := db.RPCLogs.List(ctx, filter)

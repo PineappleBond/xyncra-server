@@ -257,6 +257,9 @@ func runGetMessages(cmd *cobra.Command, args []string) error {
 	convID, _ := cmd.Flags().GetString("conversation-id")
 	afterMsgID, _ := cmd.Flags().GetUint32("after-message-id")
 	limit, _ := cmd.Flags().GetInt("limit")
+	if limit <= 0 {
+		return fmt.Errorf("get-messages: --limit must be a positive integer")
+	}
 
 	if convID == "" {
 		return errors.New("get-messages: --conversation-id is required")

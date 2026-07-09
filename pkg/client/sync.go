@@ -34,9 +34,11 @@ type deleteMessagePayload struct {
 }
 
 // markReadPayload is the JSON structure of a "mark_read" update.
+// The field name must match the server's markReadUpdatePayload
+// (internal/handler/mark_as_read.go) which uses "last_read_message_id".
 type markReadPayload struct {
-	ConversationID string `json:"conversation_id"`
-	MessageID      uint32 `json:"message_id"`
+	ConversationID    string `json:"conversation_id"`
+	LastReadMessageID uint32 `json:"last_read_message_id"`
 }
 
 // conversationUpdatePayload is the JSON structure of a "conversation" update
@@ -46,6 +48,15 @@ type markReadPayload struct {
 type conversationUpdatePayload struct {
 	ConversationID string `json:"conversation_id"`
 	Action         string `json:"action"` // "delete" or "restore"
+}
+
+// createConversationUpdatePayload is the JSON structure of a "create" action
+// conversation update emitted by create_conversation (D-045). The server wraps
+// the full model.Conversation with an "action" field for consistency with
+// delete and restore events.
+type createConversationUpdatePayload struct {
+	Action       string              `json:"action"` // "create"
+	Conversation *model.Conversation `json:"conversation"`
 }
 
 // syncUpdatesResponse is the JSON structure returned by the sync_updates RPC.
@@ -289,7 +300,7 @@ func (sm *syncManager) handleMarkRead(ctx context.Context, payload json.RawMessa
 
 	// Update conversation read cursor. The store method determines which
 	// column (last_read_message_id1 or 2) based on userID.
-	if err := sm.db.Conversations.UpdateLastRead(ctx, mp.ConversationID, sm.userID, mp.MessageID); err != nil {
+	if err := sm.db.Conversations.UpdateLastRead(ctx, mp.ConversationID, sm.userID, mp.LastReadMessageID); err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			return NewSyncError(fmt.Errorf("update last read: %w", err))
 		}
@@ -297,7 +308,7 @@ func (sm *syncManager) handleMarkRead(ctx context.Context, payload json.RawMessa
 
 	// Notify handler.
 	if sm.handler != nil {
-		if err := sm.handler.OnMarkRead(ctx, mp.ConversationID, mp.MessageID); err != nil {
+		if err := sm.handler.OnMarkRead(ctx, mp.ConversationID, mp.LastReadMessageID); err != nil {
 			sm.logger.Error("handler OnMarkRead failed", "conversation_id", mp.ConversationID, "error", err)
 		}
 	}
@@ -328,8 +339,11 @@ func (sm *syncManager) handleConversation(ctx context.Context, payload json.RawM
 		return sm.handleConversationDelete(ctx, peek.ConversationID)
 	case "restore":
 		return sm.handleConversationRestore(ctx, peek.ConversationID)
+	case "create":
+		return sm.handleConversationCreate(ctx, payload)
 	default:
-		// No action field — treat as a full conversation record (e.g. create).
+		// No action field — treat as a full conversation record (backward
+		// compatibility with legacy create events that omit the action).
 		return sm.handleConversationUpsert(ctx, payload)
 	}
 }
@@ -371,6 +385,33 @@ func (sm *syncManager) handleConversationRestore(ctx context.Context, convID str
 		conv := &model.Conversation{ID: convID}
 		if err := sm.handler.OnConversation(ctx, conv); err != nil {
 			sm.logger.Error("handler OnConversation (restore) failed", "conversation_id", convID, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// handleConversationCreate processes a "create" action for a conversation
+// update. The payload carries the full model.Conversation wrapped with an
+// "action" field (D-045). The conversation is upserted into the local store
+// and the handler is notified.
+func (sm *syncManager) handleConversationCreate(ctx context.Context, payload json.RawMessage) error {
+	var wrapped createConversationUpdatePayload
+	if err := json.Unmarshal(payload, &wrapped); err != nil {
+		return NewSyncError(fmt.Errorf("unmarshal create conversation payload: %w", err))
+	}
+	if wrapped.Conversation == nil {
+		return NewSyncError(fmt.Errorf("create conversation payload has nil conversation"))
+	}
+	conv := wrapped.Conversation
+
+	if err := sm.db.Conversations.Upsert(ctx, conv); err != nil {
+		return NewSyncError(fmt.Errorf("upsert conversation: %w", err))
+	}
+
+	if sm.handler != nil {
+		if err := sm.handler.OnConversation(ctx, conv); err != nil {
+			sm.logger.Error("handler OnConversation (create) failed", "conversation_id", conv.ID, "error", err)
 		}
 	}
 

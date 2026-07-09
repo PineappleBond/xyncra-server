@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
+	"gorm.io/gorm"
 )
 
 // --------------------------------------------------------------------------
@@ -37,6 +40,16 @@ type createConversationResponse struct {
 	Duplicate    bool                `json:"duplicate"`
 }
 
+// createConversationUpdatePayload is the JSON structure stored inside the
+// create_conversation UserUpdate. It wraps the full conversation model with an
+// "action" field so that clients can dispatch it through the same handler used
+// for delete and restore events (consistent with conversationUpdatePayload in
+// pkg/client/sync.go).
+type createConversationUpdatePayload struct {
+	Action       string              `json:"action"` // "create"
+	Conversation *model.Conversation `json:"conversation"`
+}
+
 // --------------------------------------------------------------------------
 // Handler
 // --------------------------------------------------------------------------
@@ -50,13 +63,16 @@ type createConversationResponse struct {
 // The handler is stateless (only holds an immutable dependency reference) and
 // therefore safe for concurrent use.
 type createConversationHandler struct {
-	store store.StoreAPI
+	store  store.StoreAPI
+	broker mq.Broker
 }
 
 // NewCreateConversationHandler creates a createConversationHandler backed by
-// the given Store.
-func NewCreateConversationHandler(store store.StoreAPI) *createConversationHandler {
-	return &createConversationHandler{store: store}
+// the given Store and Broker. The broker is used to enqueue a fire-and-forget
+// MQ task that pushes the create_conversation update to both conversation
+// members' online devices (D-045).
+func NewCreateConversationHandler(store store.StoreAPI, broker mq.Broker) *createConversationHandler {
+	return &createConversationHandler{store: store, broker: broker}
 }
 
 // HandleRequest implements MethodHandler. It processes a "create_conversation"
@@ -137,10 +153,110 @@ func (h *createConversationHandler) HandleRequest(ctx context.Context, client *s
 		return nil, protocol.NewInternalError(fmt.Errorf("create conversation: %w", err))
 	}
 
-	// 6. Return success.
+	// 6. Create UserUpdates for both conversation members and broadcast via MQ
+	// (D-045: real-time notification on conversation creation). The payload
+	// carries the full conversation model wrapped with an "action" field so
+	// that clients can dispatch it through the same handler used for delete
+	// and restore events.
+	//
+	// Seq allocation and UserUpdate creation are wrapped in a single database
+	// transaction to prevent a TOCTOU race when concurrent operations target
+	// the same user (mirrors the pattern used by Store.SendMessage).
+	members := []string{conv.UserID1, conv.UserID2}
+	convPayload, _ := json.Marshal(createConversationUpdatePayload{
+		Action:       "create",
+		Conversation: conv,
+	})
+
+	now2 := time.Now()
+	var updates []model.UserUpdate
+	var recipients []sendMessageRecipient
+
+	if err := h.store.Transaction(ctx, func(tx *gorm.DB) error {
+		updates = make([]model.UserUpdate, 0, len(members))
+		recipients = make([]sendMessageRecipient, 0, len(members))
+
+		for _, memberID := range members {
+			var latestSeq uint32
+			if err := tx.Model(&model.UserUpdate{}).
+				Where("user_id = ?", memberID).
+				Select("COALESCE(MAX(seq), 0)").
+				Scan(&latestSeq).Error; err != nil {
+				return fmt.Errorf("create_conversation: get latest seq for user %s: %w", memberID, err)
+			}
+			newSeq := latestSeq + 1
+
+			updates = append(updates, model.UserUpdate{
+				ID:        uuid.New().String(),
+				UserID:    memberID,
+				Seq:       newSeq,
+				Type:      protocol.UpdateTypeConversation,
+				Payload:   convPayload,
+				CreatedAt: now2,
+			})
+
+			recipients = append(recipients, sendMessageRecipient{
+				UserID: memberID,
+				Updates: []protocol.PackageDataUpdate{
+					{
+						Seq:       newSeq,
+						Type:      protocol.UpdateTypeConversation,
+						Payload:   convPayload,
+						CreatedAt: now2,
+					},
+				},
+			})
+		}
+
+		if len(updates) > 0 {
+			if err := tx.CreateInBatches(updates, 100).Error; err != nil {
+				return fmt.Errorf("create_conversation: insert user updates: %w", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		// UserUpdate creation failure does not affect the main flow (D-007
+		// fire-and-forget spirit). The conversation was already created.
+		log.Printf("create_conversation: failed to create UserUpdates in transaction: %v", err)
+	} else {
+		// MQ broadcast to both members' online devices (fire-and-forget, D-007).
+		broadcastCreateConversationUpdates(ctx, h.broker, recipients)
+	}
+
+	// 7. Return success.
 	resp := createConversationResponse{
 		Conversation: conv,
 		Duplicate:    false,
 	}
 	return marshalResponse(resp)
+}
+
+// broadcastCreateConversationUpdates enqueues a fire-and-forget MQ task to push
+// the create_conversation update to both conversation members' online devices.
+// It reuses the sendMessageRecipient / sendMessageTaskPayload structures and the
+// TypeSendMessage task type because they are sufficiently generic.
+//
+// Errors are logged but never returned (D-007: MQ failures do not affect data
+// integrity — the update was already persisted and will be delivered via
+// sync_updates on the next pull).
+func broadcastCreateConversationUpdates(ctx context.Context, broker mq.Broker, recipients []sendMessageRecipient) {
+	if broker == nil {
+		return
+	}
+
+	taskPayload := sendMessageTaskPayload{Recipients: recipients}
+
+	payloadBytes, err := json.Marshal(taskPayload)
+	if err != nil {
+		log.Printf("create_conversation: failed to marshal MQ payload: %v", err)
+		return
+	}
+
+	task := &mq.Task{
+		Type:    mq.TypeSendMessage,
+		Payload: payloadBytes,
+	}
+	if _, err := broker.Enqueue(ctx, task); err != nil {
+		log.Printf("create_conversation: MQ enqueue failed (fire-and-forget): %v", err)
+	}
 }

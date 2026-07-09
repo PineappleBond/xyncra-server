@@ -34,7 +34,7 @@ func RegisterAll(h *server.DefaultMessageHandler, deps Dependencies) {
 	h.RegisterMethod("heartbeat", NewHeartbeatHandler(deps.ConnStore))
 	h.RegisterMethod("send_message", NewSendMessageHandler(deps.Store, deps.Broker))
 	h.RegisterMethod("sync_updates", NewSyncUpdatesHandler(deps.Store))
-	h.RegisterMethod("create_conversation", NewCreateConversationHandler(deps.Store))
+	h.RegisterMethod("create_conversation", NewCreateConversationHandler(deps.Store, deps.Broker))
 	h.RegisterMethod("list_conversations", NewListConversationsHandler(deps.Store))
 	h.RegisterMethod("get_messages", NewGetMessagesHandler(deps.Store))
 	h.RegisterMethod("search_messages", NewSearchMessagesHandler(deps.Store))

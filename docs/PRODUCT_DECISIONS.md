@@ -31,6 +31,8 @@
 | D-041 | CLI 输出格式标准 | 标准库 tabwriter，不引入第三方依赖 |
 | D-042 | CLI 退出码标准 | 0=成功, 1=通用错误, 2=前置条件不满足, 3=超时退出 |
 | D-043 | E2E 测试端口约定 | Redis 16379, Server 18080, DB 15 |
+| D-044 | listen daemon 连接韧性策略 | 无限重试 WS 连接，IPC 始终可用 |
+| D-045 | create_conversation 实时通知 | 创建会话时推送 UserUpdate + MQ 广播 |
 
 ---
 
@@ -925,10 +927,69 @@ Redis 使用 DB 15（最高编号），避免与开发数据（DB 0）冲突。E
 
 ---
 
+## D-044: listen daemon 连接韧性策略
+
+### 决策
+
+`listen` 守护进程在初始 WebSocket 连接失败时**不退出**，而是使用指数退避无限重试。IPC 服务器（Unix Socket）在 WS 连接建立之前就已启动，确保本地 CLI 始终可用。守护进程仅在上下文取消（SIGTERM/SIGKILL）或显式 `kill` 命令时退出。
+
+### 原因
+
+1. **离线可用**：开发者可能在无网络环境下启动 daemon，服务器恢复后应自动重连
+2. **IPC 始终可用**：本地查询命令（D-035）依赖本地 SQLite，即使 WS 断开也应可用
+3. **与 D-001 一致**：零配置、开箱即用——daemon 不应因临时网络问题退出
+4. **与 D-032 互补**：IPC fallback 的前提是 IPC 始终可用
+
+### 实现
+
+- `XyncraClient.Start()` 不再因初始 `Connect()` 失败而返回错误
+- 新增 `connectionMonitorWithInitialConnect()` 方法，包含初始连接重试 + 后续断线重连
+- 重试策略复用已有的指数退避（`reconnectInitialBackoff`），无最大重试次数限制
+- 连接状态通过日志输出（`logger.Info`/`logger.Error`），开发者可通过 `logs search --error` 监控
+
+### 约束
+
+- 初始连接重试无超时——daemon 会一直重试直到 context 取消
+- 开发者不应依赖 daemon 退出作为连接失败的信号——应检查日志或使用 `logs search --error`
+
+---
+
+## D-045: create_conversation 实时通知
+
+### 决策
+
+`create_conversation` 在成功创建新会话（非幂等命中）时，为**双方用户**创建 `conversation` 类型的 UserUpdate，并通过 MQ 广播（fire-and-forget，D-007）推送给在线设备。幂等命中（`duplicate=true`）不创建 UserUpdate 也不广播。
+
+客户端收到 `conversation` 类型更新后，根据 payload 中的 `action` 字段处理：`"create"` 表示新会话创建，客户端应 fetch 完整会话并 upsert 到本地 SQLite。
+
+### 原因
+
+1. **实时发现**：对方用户无需等待下次 `sync_updates` 轮询即可感知新会话
+2. **与 D-028 一致**：`conversation` 是已定义的 UserUpdate 类型之一
+3. **与 D-007 一致**：MQ 失败不影响数据完整性，离线用户通过 `sync_updates` 最终一致
+4. **与 D-011 互补**：幂等命中不产生重复通知
+
+### 实现
+
+- `create_conversation` handler 新增 `broker mq.Broker` 依赖
+- 创建成功后：获取双方 latest seq → 创建 UserUpdate（type=conversation）→ 批量写入 → MQ enqueue
+- MQ payload 复用 `sendMessageTaskPayload` / `sendMessageRecipient` 结构（与 `mark_as_read`、`send_message` 一致）
+- 客户端 `syncManager` 新增 `"create"` case 处理 conversation update
+- 客户端 `ConversationStore` 新增 `Upsert` 方法
+
+### 约束
+
+- 幂等命中（`duplicate=true`）**不**触发 UserUpdate 创建和 MQ 广播
+- MQ enqueue 失败仅记录日志，不影响 RPC 响应
+- 客户端必须处理 `conversation` 类型更新，否则新会话只能等下次全量同步
+
+---
+
 ## 版本历史
 
 | 日期       | 版本 | 变更                                                                                |
 | ---------- | ---- | ----------------------------------------------------------------------------------- |
+| 2026-07-09 | v2.5 | 新增 D-044（daemon 连接韧性策略）、D-045（create_conversation 实时通知）       |
 | 2026-07-09 | v2.4 | 新增 D-043（E2E 测试端口约定），修正 D-042（补充退出码 3）                       |
 | 2026-07-09 | v2.3 | 新增 D-039 到 D-042（kill 命令规范、logs 保留策略、输出格式、退出码标准）            |
 | 2026-07-09 | v2.2 | 新增 D-035 到 D-038（CLI 查询命令本地读取、sync-updates IPC-only、flag 命名规范）    |

@@ -412,3 +412,59 @@ func TestConversationStore_Restore_NotDeleted(t *testing.T) {
 	err := db.Conversations.Restore(ctx, conv.ID)
 	assert.NoError(t, err)
 }
+
+// ---------------------------------------------------------------------------
+// Upsert tests (Bug #5 — D-045)
+// ---------------------------------------------------------------------------
+
+func TestConversationStore_Upsert_Create(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	conv := newTestConv(uid(), uid(), uid(), "direct", "UpsertNew")
+	// Upsert on a non-existing record should create it.
+	err := db.Conversations.Upsert(ctx, conv)
+	require.NoError(t, err)
+
+	got, err := db.Conversations.Get(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Equal(t, conv.ID, got.ID)
+	assert.Equal(t, "UpsertNew", got.Title)
+}
+
+func TestConversationStore_Upsert_Update(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	conv := newTestConv(uid(), uid(), uid(), "direct", "Original")
+	require.NoError(t, db.Conversations.Create(ctx, conv))
+
+	// Upsert on an existing record should update it.
+	conv.Title = "Updated"
+	conv.Pinned = true
+	err := db.Conversations.Upsert(ctx, conv)
+	require.NoError(t, err)
+
+	got, err := db.Conversations.Get(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Updated", got.Title)
+	assert.True(t, got.Pinned)
+}
+
+func TestConversationStore_Upsert_Idempotent(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	conv := newTestConv(uid(), uid(), uid(), "direct", "Idempotent")
+	// Call Upsert twice — should succeed both times without error.
+	require.NoError(t, db.Conversations.Upsert(ctx, conv))
+	require.NoError(t, db.Conversations.Upsert(ctx, conv))
+
+	// Only one record should exist.
+	got, err := db.Conversations.Get(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Equal(t, conv.ID, got.ID)
+}

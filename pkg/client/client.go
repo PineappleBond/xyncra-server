@@ -128,9 +128,11 @@ func New(opts ...ClientOption) (*XyncraClient, error) {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-// Start connects to the server, launches background goroutines for heartbeat
-// and connection monitoring, starts the sync and retry managers, performs a
-// full sync, and then blocks until ctx is cancelled. On exit it runs cleanup.
+// Start launches background goroutines for heartbeat and connection monitoring,
+// starts the sync and retry managers, and blocks until ctx is cancelled.
+// The initial WebSocket connection is established asynchronously inside the
+// connection monitor goroutine, which retries indefinitely on failure — the
+// daemon never exits due to an unreachable server (see D-044).
 func (c *XyncraClient) Start(ctx context.Context) error {
 	c.muState.Lock()
 	if c.closed {
@@ -145,29 +147,19 @@ func (c *XyncraClient) Start(ctx context.Context) error {
 	c.syncMgr.Start(c.ctx)
 	c.retryMgr.Start(c.ctx)
 
-	// 2. Establish the initial WebSocket connection.
-	if err := c.connMgr.Connect(c.ctx); err != nil {
-		c.cancel()
-		return err
-	}
-
-	// 3. Heartbeat goroutine.
+	// 2. Heartbeat goroutine.
 	c.wg.Add(1)
 	go c.heartbeatLoop()
 
-	// 4. Full sync to catch up on any offline updates.
-	if err := c.syncMgr.FullSync(c.ctx); err != nil {
-		c.logger.Error("initial full sync failed", "error", err)
-	}
-
-	// 5. Connection monitor goroutine.
+	// 3. Connection monitor goroutine — handles initial connection (with
+	//    infinite retries) and subsequent reconnection after disconnects.
 	c.wg.Add(1)
-	go c.connectionMonitor()
+	go c.connectionMonitorWithInitialConnect()
 
-	// 6. Block until the context is done.
+	// 4. Block until the context is done.
 	<-c.ctx.Done()
 
-	// 7. Cleanup.
+	// 5. Cleanup.
 	c.shutdown()
 	return nil
 }
@@ -262,11 +254,37 @@ func (c *XyncraClient) heartbeatLoop() {
 	}
 }
 
-// connectionMonitor watches for unexpected disconnections and triggers
-// reconnection with exponential backoff. After a successful reconnect it
-// performs a full sync to catch up on any missed updates.
-func (c *XyncraClient) connectionMonitor() {
+// connectionMonitorWithInitialConnect establishes the initial WebSocket
+// connection, retrying indefinitely on failure (D-044: daemon never exits due
+// to an unreachable server). Once connected it falls through to the standard
+// reconnect loop that watches for unexpected disconnections and reconnects
+// with exponential backoff, performing a full sync after every successful
+// reconnection.
+func (c *XyncraClient) connectionMonitorWithInitialConnect() {
 	defer c.wg.Done()
+
+	// Phase 1 — initial connection with infinite retries.
+	for {
+		if c.ctx.Err() != nil {
+			return
+		}
+		err := c.connMgr.Connect(c.ctx)
+		if err == nil {
+			c.logger.Info("initial connection established")
+			if syncErr := c.syncMgr.FullSync(c.ctx); syncErr != nil {
+				c.logger.Error("initial full sync failed", "error", syncErr)
+			}
+			break
+		}
+		c.logger.Error("initial connection failed, retrying...", "error", err)
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-time.After(c.opts.reconnectBaseDelay):
+		}
+	}
+
+	// Phase 2 — standard reconnect loop (disconnect → reconnect with backoff).
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -275,10 +293,6 @@ func (c *XyncraClient) connectionMonitor() {
 			c.logger.Info("connection lost, reconnecting...")
 			for {
 				if c.ctx.Err() != nil {
-					return
-				}
-				if c.opts.reconnectMaxRetries > 0 && c.connMgr.Attempt() > c.opts.reconnectMaxRetries {
-					c.logger.Error("max reconnect retries exhausted, giving up")
 					return
 				}
 				err := c.connMgr.Reconnect(c.ctx)
@@ -357,6 +371,15 @@ func (c *XyncraClient) Call(ctx context.Context, method string, params any) (jso
 
 	startTime := time.Now()
 
+	// Best-effort extract conversation_id from params for logging.
+	var conversationID string
+	var paramsMap map[string]json.RawMessage
+	if json.Unmarshal(paramsBytes, &paramsMap) == nil {
+		if raw, ok := paramsMap["conversation_id"]; ok {
+			_ = json.Unmarshal(raw, &conversationID)
+		}
+	}
+
 	if err := c.connMgr.SendPackage(pkg); err != nil {
 		// Enqueue for retry on connection error (transient failure).
 		_ = c.retryMgr.Enqueue(ctx, method, paramsBytes)
@@ -365,12 +388,13 @@ func (c *XyncraClient) Call(ctx context.Context, method string, params any) (jso
 
 	// Persist an initial RPC log entry (status 0 = in-flight).
 	rpcLog := &model.RPCLog{
-		ID:        uuid.New().String(),
-		Type:      "request",
-		RequestID: reqID,
-		Method:    method,
-		Params:    paramsBytes,
-		CreatedAt: startTime,
+		ID:             uuid.New().String(),
+		Type:           "request",
+		RequestID:      reqID,
+		Method:         method,
+		Params:         paramsBytes,
+		ConversationID: conversationID,
+		CreatedAt:      startTime,
 	}
 	// Best-effort save; errors are not fatal to the RPC.
 	_ = c.db.RPCLogs.Save(ctx, rpcLog)

@@ -121,7 +121,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	assert.False(t, sendResult.Duplicate)
 
 	// 4. CreateConversation handler (find-or-create, D-011).
-	createHandler := NewCreateConversationHandler(deps.Store)
+	createHandler := NewCreateConversationHandler(deps.Store, deps.Broker)
 	createReq := &protocol.PackageDataRequest{
 		ID:     "req-create",
 		Method: "create_conversation",
@@ -379,7 +379,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	require.NoError(t, err, "Store and Broker dependencies should be correctly injected")
 
 	// CreateConversation uses Store.
-	createHandler := NewCreateConversationHandler(deps.Store)
+	createHandler := NewCreateConversationHandler(deps.Store, deps.Broker)
 	createReq := &protocol.PackageDataRequest{
 		ID:     "req-create-dep",
 		Method: "create_conversation",
@@ -658,7 +658,7 @@ func TestRegisterAll_HandlersInvokable(t *testing.T) {
 		case "send_message":
 			handler = NewSendMessageHandler(deps.Store, deps.Broker)
 		case "create_conversation":
-			handler = NewCreateConversationHandler(deps.Store)
+			handler = NewCreateConversationHandler(deps.Store, deps.Broker)
 		case "list_conversations":
 			handler = NewListConversationsHandler(deps.Store)
 		case "get_messages":

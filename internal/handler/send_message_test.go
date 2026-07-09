@@ -557,3 +557,119 @@ func TestSendMessage_MultipleMessages(t *testing.T) {
 		assert.Equal(t, protocol.UpdateTypeMessage, update.Type, "UserUpdate Type should be 'message'")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Bug #7: Concurrent idempotency — ErrDuplicateKey catch
+// ---------------------------------------------------------------------------
+
+// TestSendMessage_ConcurrentIdempotency verifies that two concurrent sends
+// with the same client_message_id result in exactly one message in the
+// database, with one returning duplicate=false and the other duplicate=true
+// (or both seeing the same persisted message via ErrDuplicateKey catch).
+func TestSendMessage_ConcurrentIdempotency(t *testing.T) {
+	s := setupTestSQLite(t)
+	broker := &mockBroker{}
+	handler := NewSendMessageHandler(s, broker)
+	ctx := context.Background()
+
+	convID := "conv-concurrent-1"
+	createTestConversation(t, s, convID, "alice", "bob")
+
+	clientMsgID := uuid.New().String()
+	params := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": clientMsgID,
+		"content":           "Concurrent send",
+	}
+
+	client := server.NewTestClient("alice")
+
+	// Launch two concurrent sends with the same client_message_id.
+	type result struct {
+		data json.RawMessage
+		err  error
+	}
+	results := make(chan result, 2)
+
+	for i := 0; i < 2; i++ {
+		go func() {
+			req := newTestRequest("req-concurrent", "send_message", params)
+			data, err := handler.HandleRequest(ctx, client, req)
+			results <- result{data, err}
+		}()
+	}
+
+	var msgs []*model.Message
+	var duplicates []bool
+	for i := 0; i < 2; i++ {
+		r := <-results
+		require.NoError(t, r.err)
+		msg, dup := parseSendMessageResponse(t, r.data)
+		msgs = append(msgs, msg)
+		duplicates = append(duplicates, dup)
+	}
+
+	// Both should return the same message ID.
+	assert.Equal(t, msgs[0].ID, msgs[1].ID, "concurrent sends should return the same message ID")
+
+	// Exactly one should be duplicate=false, the other duplicate=true.
+	dupCount := 0
+	nonDupCount := 0
+	for _, d := range duplicates {
+		if d {
+			dupCount++
+		} else {
+			nonDupCount++
+		}
+	}
+	assert.Equal(t, 1, nonDupCount, "exactly one send should return duplicate=false")
+	assert.Equal(t, 1, dupCount, "exactly one send should return duplicate=true")
+
+	// Verify only one message in DB.
+	dbMsgs, err := s.MessageStore().ListByConversation(ctx, convID, 0, 100)
+	require.NoError(t, err)
+	assert.Len(t, dbMsgs, 1, "should only have one message in database after concurrent sends")
+}
+
+// TestSendMessage_EnqueueError_DuplicateNotAffected verifies that when a
+// duplicate is detected via ErrDuplicateKey, the handler returns the existing
+// message regardless of whether the broker succeeds or fails.
+func TestSendMessage_EnqueueError_DuplicateNotAffected(t *testing.T) {
+	s := setupTestSQLite(t)
+	broker := &failingBroker{} // always fails
+	handler := NewSendMessageHandler(s, broker)
+	ctx := context.Background()
+
+	convID := "conv-dup-fail-1"
+	createTestConversation(t, s, convID, "alice", "bob")
+
+	clientMsgID := uuid.New().String()
+
+	// First send — succeeds despite broker failure (D-007).
+	params1 := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": clientMsgID,
+		"content":           "First send",
+	}
+	client := server.NewTestClient("alice")
+	req1 := newTestRequest("req-1", "send_message", params1)
+	data1, err1 := handler.HandleRequest(ctx, client, req1)
+	require.NoError(t, err1)
+	msg1, dup1 := parseSendMessageResponse(t, data1)
+	assert.False(t, dup1)
+
+	// Second send — duplicate, should return same message, broker still fails
+	// but that's OK (fire-and-forget).
+	params2 := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": clientMsgID,
+		"content":           "Duplicate attempt",
+	}
+	req2 := newTestRequest("req-2", "send_message", params2)
+	data2, err2 := handler.HandleRequest(ctx, client, req2)
+	require.NoError(t, err2)
+	msg2, dup2 := parseSendMessageResponse(t, data2)
+	assert.True(t, dup2, "second send should return duplicate=true")
+	assert.Equal(t, msg1.ID, msg2.ID, "duplicate should return same message ID")
+	assert.Equal(t, "First send", msg2.Content, "duplicate should return original content")
+}

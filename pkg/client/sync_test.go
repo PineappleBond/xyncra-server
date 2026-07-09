@@ -272,8 +272,8 @@ func TestApplyUpdate_TypeMarkRead(t *testing.T) {
 	}
 
 	mp := markReadPayload{
-		ConversationID: "conv-mr",
-		MessageID:      99,
+		ConversationID:    "conv-mr",
+		LastReadMessageID: 99,
 	}
 	payload, _ := json.Marshal(mp)
 	update := newTestUpdate(1, protocol.UpdateTypeMarkRead, payload)
@@ -908,5 +908,208 @@ func TestApplyUpdate_ConversationRestore(t *testing.T) {
 	}
 	if msg.Content != "hello" {
 		t.Errorf("restored message content: got=%q want=%q", msg.Content, "hello")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bug #4: JSON deserialization validation and handleMarkRead UserID2
+// ---------------------------------------------------------------------------
+
+// TestApplyUpdate_InvalidJSONPayload verifies that an invalid JSON payload
+// returns a SyncError rather than panicking.
+func TestApplyUpdate_InvalidJSONPayload(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Send a message update with invalid JSON payload.
+	update := newTestUpdate(1, protocol.UpdateTypeMessage, json.RawMessage(`{invalid json`))
+	err := sm.ApplyUpdate(ctx, &update)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON payload, got nil")
+	}
+}
+
+// TestApplyUpdate_TypeMarkRead_UserID2 verifies that handleMarkRead updates
+// the correct column (LastReadMessageID2) when the current user is UserID2.
+func TestApplyUpdate_TypeMarkRead_UserID2(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	// The current user is "user-b", who is UserID2 in the conversation.
+	sm := newSyncManager(db, handler, "user-b", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Pre-create the conversation with user-a as UserID1, user-b as UserID2.
+	now := time.Now().Truncate(time.Second)
+	conv := &model.Conversation{
+		ID:        "conv-mr-u2",
+		UserID1:   "user-a",
+		UserID2:   "user-b",
+		Type:      "1-on-1",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+
+	mp := markReadPayload{
+		ConversationID:    "conv-mr-u2",
+		LastReadMessageID: 77,
+	}
+	payload, _ := json.Marshal(mp)
+	update := newTestUpdate(1, protocol.UpdateTypeMarkRead, payload)
+
+	if err := sm.ApplyUpdate(ctx, &update); err != nil {
+		t.Fatalf("ApplyUpdate mark_read: %v", err)
+	}
+
+	// Verify that LastReadMessageID2 (not ID1) was updated for user-b.
+	gotConv, err := db.Conversations.Get(ctx, "conv-mr-u2")
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if gotConv.LastReadMessageID1 != 0 {
+		t.Errorf("LastReadMessageID1 should remain 0 (user-a not affected), got=%d", gotConv.LastReadMessageID1)
+	}
+	if gotConv.LastReadMessageID2 != 77 {
+		t.Errorf("LastReadMessageID2: got=%d want=77", gotConv.LastReadMessageID2)
+	}
+
+	// Verify handler was called.
+	handler.mu.Lock()
+	if len(handler.markReads) != 1 {
+		t.Errorf("handler markReads count: got=%d want=1", len(handler.markReads))
+	} else if handler.markReads[0].MessageID != 77 {
+		t.Errorf("handler markRead MessageID: got=%d want=77", handler.markReads[0].MessageID)
+	}
+	handler.mu.Unlock()
+}
+
+// TestApplyUpdate_TypeConversationCreate verifies that a "conversation" type
+// update with action="create" upserts the conversation into the local store.
+func TestApplyUpdate_TypeConversationCreate(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	conv := model.Conversation{
+		ID:        "conv-create-action",
+		UserID1:   "test-user",
+		UserID2:   "other-user",
+		Type:      "1-on-1",
+		Title:     "Created via action",
+		CreatedAt: time.Now().Truncate(time.Second),
+		UpdatedAt: time.Now().Truncate(time.Second),
+	}
+	convPayload, _ := json.Marshal(conv)
+	// handleConversationCreate unmarshals the raw payload as model.Conversation.
+	update := newTestUpdate(1, protocol.UpdateTypeConversation, convPayload)
+
+	if err := sm.ApplyUpdate(ctx, &update); err != nil {
+		t.Fatalf("ApplyUpdate conversation create: %v", err)
+	}
+
+	// Verify conversation was created via Upsert.
+	got, err := db.Conversations.Get(ctx, "conv-create-action")
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if got.Title != "Created via action" {
+		t.Errorf("conversation title: got=%q want=%q", got.Title, "Created via action")
+	}
+
+	// Verify handler was called.
+	handler.mu.Lock()
+	if len(handler.conversations) != 1 {
+		t.Errorf("handler conversations count: got=%d want=1", len(handler.conversations))
+	}
+	handler.mu.Unlock()
+}
+
+// TestApplyUpdate_MessageDuplicateIdempotent verifies that receiving the same
+// message update twice does not create duplicate records.
+func TestApplyUpdate_MessageDuplicateIdempotent(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Pre-create conversation.
+	now := time.Now().Truncate(time.Second)
+	conv := &model.Conversation{
+		ID:        "conv-msg-dup",
+		UserID1:   "test-user",
+		UserID2:   "other-user",
+		Type:      "1-on-1",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+
+	msg := model.Message{
+		ID:              "msg-dup-1",
+		ClientMessageID: "cmid-dup-1",
+		ConversationID:  "conv-msg-dup",
+		MessageID:       1,
+		SenderID:        "other-user",
+		Content:         "duplicate test",
+		Type:            "text",
+		Status:          "sent",
+		CreatedAt:       now,
+	}
+	payload, _ := json.Marshal(msg)
+	update := newTestUpdate(1, protocol.UpdateTypeMessage, payload)
+
+	// Apply first time.
+	if err := sm.ApplyUpdate(ctx, &update); err != nil {
+		t.Fatalf("ApplyUpdate message (first): %v", err)
+	}
+
+	// Apply second time with same seq — should be skipped (dedup).
+	update2 := newTestUpdate(1, protocol.UpdateTypeMessage, payload)
+	if err := sm.ApplyUpdate(ctx, &update2); err != nil {
+		t.Fatalf("ApplyUpdate message (dedup): %v", err)
+	}
+
+	// Only one message should exist.
+	got, err := db.Messages.Get(ctx, "msg-dup-1")
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	if got.Content != "duplicate test" {
+		t.Errorf("message content: got=%q want=%q", got.Content, "duplicate test")
 	}
 }

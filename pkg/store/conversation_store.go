@@ -88,6 +88,21 @@ func (cs *ConversationStore) Update(ctx context.Context, conv *model.Conversatio
 	return nil
 }
 
+// Upsert creates the conversation if it does not exist, or saves (overwrites)
+// it if it already exists. This is used by the client sync pipeline to apply
+// conversation create events idempotently (D-045).
+func (cs *ConversationStore) Upsert(ctx context.Context, conv *model.Conversation) error {
+	var existing model.Conversation
+	err := cs.db.WithContext(ctx).Where("id = ?", conv.ID).First(&existing).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return cs.Create(ctx, conv)
+		}
+		return classifyError(fmt.Errorf("store: upsert conversation: %w", err))
+	}
+	return cs.Update(ctx, conv)
+}
+
 // Delete performs a cascading soft delete: the conversation and all its messages
 // are soft-deleted within a single transaction (D-013).
 func (cs *ConversationStore) Delete(ctx context.Context, id string) error {

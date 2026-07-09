@@ -390,3 +390,80 @@ func TestMarkAsRead_MessageID_IsUint32(t *testing.T) {
 		t.Errorf("--message-id type = %q, want %q (D-038: mark-as-read uses Message.MessageID uint32)", f.Value.Type(), "uint32")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Bug #10: get-messages --limit validation
+// ---------------------------------------------------------------------------
+
+// TestGetMessages_LimitValidation verifies that the get-messages command
+// rejects limit values <= 0 with a clear error message.
+func TestGetMessages_LimitValidation(t *testing.T) {
+	cliCtx := newTestCLIContext(t)
+	_ = openTestDB(t, cliCtx)
+
+	tests := []struct {
+		name  string
+		limit string
+	}{
+		{"zero", "0"},
+		{"negative", "-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newGetMessagesCommand()
+			cmd.Flags().AddFlagSet(newTestCommand().PersistentFlags())
+			_ = cmd.Flags().Set("conversation-id", "conv-1")
+			_ = cmd.Flags().Set("limit", tt.limit)
+			cmd.Flags().Lookup("limit").Changed = true
+			// Set persistent flags for NewCLIContext.
+			_ = cmd.Flags().Set("db-path", cliCtx.DBPath)
+			cmd.Flags().Lookup("db-path").Changed = true
+			_ = cmd.Flags().Set("user-id", "testuser")
+			cmd.Flags().Lookup("user-id").Changed = true
+			cmd.SetContext(context.Background())
+
+			err := cmd.RunE(cmd, nil)
+			if err == nil {
+				t.Fatal("expected error for limit <= 0, got nil")
+			}
+			if !strings.Contains(err.Error(), "positive integer") {
+				t.Errorf("error = %q, want it to contain 'positive integer'", err.Error())
+			}
+		})
+	}
+}
+
+// TestGetMessages_LimitPositive verifies that the get-messages command accepts
+// a positive limit without error.
+func TestGetMessages_LimitPositive(t *testing.T) {
+	cliCtx := newTestCLIContext(t)
+	db := openTestDB(t, cliCtx)
+
+	// Seed a message so there is something to return.
+	seedMessage(t, db, &model.Message{
+		ID:              "msg-limit-ok",
+		ClientMessageID: "cid-limit-ok",
+		ConversationID:  "conv-limit-ok",
+		MessageID:       1,
+		SenderID:        "alice",
+		Content:         "hello",
+		CreatedAt:       time.Now(),
+	})
+
+	cmd := newGetMessagesCommand()
+	cmd.Flags().AddFlagSet(newTestCommand().PersistentFlags())
+	_ = cmd.Flags().Set("conversation-id", "conv-limit-ok")
+	_ = cmd.Flags().Set("limit", "10")
+	cmd.Flags().Lookup("limit").Changed = true
+	_ = cmd.Flags().Set("db-path", cliCtx.DBPath)
+	cmd.Flags().Lookup("db-path").Changed = true
+	_ = cmd.Flags().Set("user-id", "testuser")
+	cmd.Flags().Lookup("user-id").Changed = true
+	cmd.SetContext(context.Background())
+
+	err := cmd.RunE(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error for positive limit: %v", err)
+	}
+}

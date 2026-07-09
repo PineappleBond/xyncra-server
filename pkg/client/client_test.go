@@ -1015,3 +1015,194 @@ func TestFullSync_DelegatesToSyncManager(t *testing.T) {
 		t.Error("FullSync did not call sync_updates")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Bug #6: conversation_id extraction from params
+// ---------------------------------------------------------------------------
+
+// TestCall_ConversationIDExtraction_Normal verifies that a normal
+// conversation_id string param is correctly extracted for RPC logging.
+func TestCall_ConversationIDExtraction_Normal(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+
+	var receivedConvID string
+	server.SetRPCHandler("test_method", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		// Verify the request has the conversation_id in params.
+		var params map[string]any
+		_ = json.Unmarshal(req.Params, &params)
+		if cid, ok := params["conversation_id"].(string); ok {
+			receivedConvID = cid
+		}
+		return json.RawMessage(`{}`), nil
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	params := map[string]any{
+		"conversation_id": "conv-extract-1",
+		"content":         "test",
+	}
+	_, err := c.Call(context.Background(), "test_method", params)
+	if err != nil {
+		t.Fatalf("Call failed: %v", err)
+	}
+	if receivedConvID != "conv-extract-1" {
+		t.Errorf("expected conversation_id=conv-extract-1, got %q", receivedConvID)
+	}
+}
+
+// TestCall_ConversationIDExtraction_Missing verifies that a missing
+// conversation_id does not cause an error (graceful degradation).
+func TestCall_ConversationIDExtraction_Missing(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+	server.SetRPCHandler("test_method", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.RawMessage(`{}`), nil
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// No conversation_id in params — should succeed without error.
+	params := map[string]any{"content": "test"}
+	_, err := c.Call(context.Background(), "test_method", params)
+	if err != nil {
+		t.Fatalf("Call should succeed without conversation_id: %v", err)
+	}
+}
+
+// TestCall_ConversationIDExtraction_NonString verifies that a non-string
+// conversation_id (e.g. integer) does not crash the client.
+func TestCall_ConversationIDExtraction_NonString(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+	server.SetRPCHandler("test_method", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.RawMessage(`{}`), nil
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// conversation_id as integer — extraction should gracefully handle this.
+	params := map[string]any{"conversation_id": 12345}
+	_, err := c.Call(context.Background(), "test_method", params)
+	if err != nil {
+		t.Fatalf("Call should succeed with non-string conversation_id: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bug #8: Initial connection failure retry, context cancel clean exit
+// ---------------------------------------------------------------------------
+
+// TestConnectionMonitor_InitialConnectRetry verifies that the client retries
+// the initial connection when the server is unreachable and exits cleanly
+// when the context is cancelled.
+func TestConnectionMonitor_InitialConnectRetry(t *testing.T) {
+	// Create a client pointing to a non-existent server.
+	db := newTestStore(t)
+	c, err := New(
+		WithServerURL("ws://127.0.0.1:1/no-server"),
+		WithUserID("test-user"),
+		WithDB(db),
+		WithLogger(&testLogger{t: t}),
+		WithReconnectBaseDelay(50*time.Millisecond),
+		WithReconnectMaxDelay(100*time.Millisecond),
+		WithReconnectMaxRetries(1),
+		WithHeartbeatInterval(1*time.Hour),
+		WithPullDebounce(10*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.Start(ctx)
+	}()
+
+	// Wait for the client to attempt at least one connection.
+	time.Sleep(200 * time.Millisecond)
+
+	// Cancel context — should exit cleanly.
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Start() should return nil after context cancel, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start() did not return after context cancellation")
+	}
+}
+
+// TestStop_CleanExit verifies that Stop() causes Start() to return promptly.
+func TestStop_CleanExit(t *testing.T) {
+	db := newTestStore(t)
+	c, err := New(
+		WithServerURL("ws://127.0.0.1:1/no-server"),
+		WithUserID("test-user"),
+		WithDB(db),
+		WithLogger(&testLogger{t: t}),
+		WithReconnectBaseDelay(50*time.Millisecond),
+		WithReconnectMaxDelay(100*time.Millisecond),
+		WithHeartbeatInterval(1*time.Hour),
+		WithPullDebounce(10*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	ctx := context.Background()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.Start(ctx)
+	}()
+
+	// Wait a moment for goroutines to start.
+	time.Sleep(100 * time.Millisecond)
+
+	// Stop should cause Start to return.
+	c.Stop()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Start() should return nil after Stop(), got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start() did not return after Stop()")
+	}
+}
