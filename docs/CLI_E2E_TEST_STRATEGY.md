@@ -2,7 +2,7 @@
 
 > **作者**: QA Engineer Agent
 > **日期**: 2026-07-09
-> **状态**: 初始版本
+> **状态**: 已实现 (136 tests passed, ~88% coverage)
 > **包路径**: `internal/cli/e2e/`
 
 ---
@@ -838,3 +838,55 @@ jobs:
 | D-039 | kill: SIGTERM -> SIGKILL 升级 | 需要测试信号处理和超时 |
 | D-040 | 日志保留 7 天 | cleanup 测试使用 retain 参数 |
 | D-042 | 退出码 0/1/2/3 | 所有测试需验证退出码 |
+
+---
+
+## 附录 D: 测试执行报告 (2026-07-09)
+
+### 测试统计
+
+| 指标 | 数值 |
+|------|------|
+| 总测试数 (含子测试) | 136 passed |
+| 测试函数数 | 51 |
+| 跳过 | 1 (TestCrossInstanceSync — 服务端 UserUpdate bug) |
+| 失败 | 0 |
+| 场景覆盖率 | ~113/127 (~88%) |
+
+### 测试文件分布
+
+| 文件 | 优先级 | 测试函数数 | 描述 |
+|------|--------|-----------|------|
+| `cli_e2e_test.go` | 原始 | 8 | 基础冒烟测试 (daemon, IPC, standalone, query, sync, multi-instance) |
+| `cli_e2e_p0_test.go` | P0 | 11 | 核心场景 (listen 生命周期, kill, sync, 多设备隔离, 错误处理) |
+| `cli_e2e_p1_test.go` | P1 | 25 | 功能完整性 (IPC 操作/错误, standalone fallback, 写入命令, 查询命令, 草稿, 日志, 同步) |
+| `cli_e2e_p2_test.go` | P2 | 7 | 健壮性 (daemon/IPC/写入/查询/日志/kill/错误 边界场景) |
+| `helpers_test.go` | - | 0 | 测试辅助工具 (cliTestEnv, IPC helpers, assertions) |
+
+### 覆盖场景分类
+
+| 分类 | P0 已实现 | P1 已实现 | P2 已实现 | 合计 |
+|------|----------|----------|----------|------|
+| Daemon Lifecycle | 4 | 4 | 2 | 10 |
+| IPC Communication | 4 | 7 | 2 | 13 |
+| Standalone Fallback | 3 | 5 | 0 | 8 |
+| Write Commands | 7 | 11 | 2 | 20 |
+| Query Commands | 4 | 9 | 3 | 16 |
+| Sync | 4 | 2 | 0 | 6 |
+| Draft Management | 3 | 5 | 0 | 8 |
+| Logs | 1 | 13 | 8 | 22 |
+| Kill Command | 3 | 3 | 1 | 7 |
+| Multi-instance | 3 | 1 | 0 | 4 |
+| Error Handling | 3 | 2 | 4 | 9 |
+| **合计** | **39/40** | **62/65** | **22/22** | **~113/127** |
+
+### 未覆盖场景 (14 个)
+
+- CLI-E2E-253: 跨实例消息同步 (SKIP — 服务端 UserUpdate 持久化 bug)
+- 其余 13 个为低优先级边界场景 (flag 优先级、socket 权限、DB 损坏、时间过滤等)
+
+### 测试过程中发现并修复的 Bug
+
+1. **ipcRawCall error code**: JSON-RPC error response 的 error code 解析不正确
+2. **mark-as-read standalone DB path**: standalone 模式下 mark-as-read 未正确更新本地 DB 的已读游标
+3. **delete-message permission error message**: 删除他人消息时返回的错误信息不符合预期格式

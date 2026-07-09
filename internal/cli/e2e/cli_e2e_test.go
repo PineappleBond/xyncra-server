@@ -11,9 +11,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -481,62 +478,3 @@ func TestMultiInstanceIsolation(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// requireStopDaemon sends SIGTERM to the daemon process, waits for it to
-// exit, and allows a brief grace period for file cleanup. It does NOT use
-// SIGKILL fallback — if the daemon does not exit gracefully, the test fails.
-func requireStopDaemon(t *testing.T, dp *daemonProcess) {
-	t.Helper()
-	if dp.cmd.Process == nil {
-		return
-	}
-	_ = dp.cmd.Process.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() {
-		_ = dp.cmd.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		// Process exited gracefully.
-	case <-time.After(5 * time.Second):
-		_ = dp.cmd.Process.Kill()
-		<-done
-		t.Fatal("daemon did not exit within timeout after SIGTERM")
-	}
-	// Allow a moment for deferred file cleanup in the daemon.
-	time.Sleep(500 * time.Millisecond)
-}
-
-// convIDPattern matches UUIDs in the standard 8-4-4-4-12 hex format.
-var convIDPattern = regexp.MustCompile(`([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
-
-// extractConversationID parses the conversation ID from create-conversation
-// output. The expected format is:
-//
-//	Conversation created.
-//	  Conversation ID: <uuid>
-//	  Peer: <peer-id>
-//
-// or:
-//
-//	Conversation already exists (find-or-create).
-//	  Conversation ID: <uuid>
-//	  Peer: <peer-id>
-func extractConversationID(t *testing.T, output string) string {
-	t.Helper()
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Conversation ID:") {
-			id := strings.TrimSpace(strings.TrimPrefix(line, "Conversation ID:"))
-			if id != "" {
-				return id
-			}
-		}
-	}
-	// Fallback: try to find a UUID anywhere in the output.
-	if match := convIDPattern.FindString(output); match != "" {
-		return match
-	}
-	return ""
-}
