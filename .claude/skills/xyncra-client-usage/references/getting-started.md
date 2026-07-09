@@ -9,6 +9,106 @@
 
 > 服务器和客户端均遵循 **D-001**（零配置启动）原则，使用合理的默认值，无需配置文件。
 
+## 服务器设置
+
+### 启动服务器
+
+```bash
+go build -o xyncra-server ./cmd/xyncra-server
+./xyncra-server
+```
+
+服务器是零配置的，默认监听 `:8080`。
+
+### 依赖
+
+**Redis（必需）**
+- 默认地址：`localhost:6379`
+- 用途：连接存储、任务队列（Asynq）、Pub/Sub 广播
+- 如果 Redis 不可用，服务器启动失败
+
+**数据库（可选，默认 SQLite）**
+- SQLite：默认，数据存储在 `xyncra.db`
+- PostgreSQL：通过环境变量配置
+- MySQL：通过环境变量配置
+
+### 配置
+
+服务器支持以下配置（通过 flag 或环境变量）：
+
+| Flag | 环境变量 | 默认值 | 说明 |
+|------|----------|--------|------|
+| `-addr` | `XYNCRA_ADDR` | `:8080` | HTTP 监听地址 |
+| `-redis-addr` | `XYNCRA_REDIS_ADDR` | `localhost:6379` | Redis 地址 |
+| `-db-driver` | `XYNCRA_DB_DRIVER` | `sqlite` | 数据库驱动（sqlite/postgres/mysql） |
+| `-db-dsn` | `XYNCRA_DB_DSN` | `xyncra.db` | 数据库连接字符串 |
+
+优先级：flag > env var > default
+
+### 日志
+
+服务器日志输出到 **stderr**，包含三种级别：
+- `[INFO]`：常规信息（启动、连接、断开）
+- `[ERROR]`：错误信息
+- `[DEBUG]`：调试信息（当前始终输出，无开关）
+
+示例：
+```
+2026/07/09 12:00:00 [INFO]  starting xyncra-server on :8080
+2026/07/09 12:00:00 [INFO]  database migrated successfully
+2026/07/09 12:00:01 [ERROR] websocket: health check: connection store ping failed: ...
+```
+
+### 健康检查
+
+```bash
+curl http://localhost:8080/health
+```
+
+返回 JSON：
+```json
+{"status":"ok","connections":5}
+```
+
+或（Redis 不可用时）：
+```json
+{"status":"degraded","connections":0}
+```
+
+### 启动失败排查
+
+**错误 1：Redis 连接失败**
+```
+failed to create connection store: server: redis ping failed: dial tcp [::1]:6379: connect: connection refused
+```
+解决：启动 Redis `redis-server`
+
+**错误 2：端口被占用**
+```
+server error: websocket: listen on :8080: listen tcp :8080: bind: address already in use
+```
+解决：更换端口 `-addr :8081` 或停止占用端口的进程
+
+**错误 3：数据库初始化失败**
+```
+failed to open database: ...
+```
+解决：检查数据库配置、权限、磁盘空间
+
+### 优雅关闭
+
+服务器支持 SIGINT（Ctrl+C）和 SIGTERM 信号，会：
+1. 停止接受新连接
+2. 等待现有连接完成（最长 10 秒）
+3. 关闭 Redis 连接
+4. 退出
+
+### WebSocket 端点
+
+客户端连接：`ws://localhost:8080/ws?user_id=<ID>`
+
+> 服务器不做认证（**D-002**），通过 URL 查询参数 `user_id` 识别用户。生产环境应在反向代理层注入已认证的用户身份。
+
 ## 构建
 
 ```bash
@@ -18,15 +118,6 @@ go build -o xyncra-server ./cmd/xyncra-server
 # 构建客户端
 go build -o xyncra-client ./cmd/xyncra-client
 ```
-
-## 启动服务器
-
-```bash
-./xyncra-server
-# 服务器默认监听 :8080，需要 Redis 在 localhost:6379
-```
-
-> 服务器不做认证（**D-002**），通过 URL 查询参数 `user_id` 识别用户。生产环境应在反向代理层注入已认证的用户身份。
 
 ## 首次运行 listen
 

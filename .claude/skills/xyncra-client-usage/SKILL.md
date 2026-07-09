@@ -2,6 +2,12 @@
 
 Use this skill when working with the xyncra-client CLI tool.
 
+## 前置条件
+
+1. **启动 Redis**：`redis-server`（默认 localhost:6379）
+2. **启动服务器**：`./xyncra-server`（默认 :8080）
+3. **启动客户端 daemon**：`./xyncra-client listen --user-id <user>`
+
 ## Decision Tree (read first)
 
 1. Start the daemon? → `xyncra-client listen --user-id <user>`

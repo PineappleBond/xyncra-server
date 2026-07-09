@@ -405,6 +405,106 @@ Flag resolution priority is: flag > environment variable > default (D-034). If a
 
 ---
 
+## 11. WebSocket 连接被拒绝
+
+**Symptoms:**
+
+客户端报错：
+
+```
+dial tcp 127.0.0.1:8080: connect: connection refused
+```
+
+**Cause:**
+
+服务器未运行或端口配置错误。
+
+**Solution:**
+
+1. 检查服务器进程：
+   ```bash
+   ps aux | grep xyncra-server
+   ```
+
+2. 检查服务器端口：
+   ```bash
+   curl http://localhost:8080/health
+   ```
+
+3. 启动服务器：
+   ```bash
+   ./xyncra-server
+   ```
+
+---
+
+## 12. 消息发送失败（RPC failed）
+
+**Symptoms:**
+
+客户端 `send` 命令失败，错误信息包含 `conversation not found` 或 `RPC failed`。
+
+**Cause:**
+
+- 服务器不可达
+- Redis 不可用
+- 会话不存在
+
+**Solution:**
+
+1. 检查服务器健康：
+   ```bash
+   curl http://localhost:8080/health
+   ```
+
+2. 检查 Redis：
+   ```bash
+   redis-cli ping
+   ```
+
+3. 查看服务器日志：检查 stderr 输出中的 `[ERROR]`
+
+---
+
+## 13. 多客户端消息不同步
+
+**Symptoms:**
+
+客户端 A 发送消息，客户端 B 收不到。
+
+**Cause:**
+
+- Redis Pub/Sub 不可用
+- 客户端未启动 listen daemon
+- WebSocket 连接断开
+
+**Solution:**
+
+1. 检查 Redis Pub/Sub：查看服务器日志中的 Pub/Sub 相关信息
+2. 确保两个客户端都运行了 `listen`
+3. 检查 WebSocket 连接状态
+
+---
+
+## 14. 服务器连接数异常
+
+**Symptoms:**
+
+`/health` 返回的 `connections` 数量异常高或为 0。
+
+**Cause:**
+
+- 连接泄漏（WebSocket 未正确关闭）
+- Redis 不可用导致连接失败
+
+**Solution:**
+
+1. 重启服务器
+2. 检查 Redis 连接
+3. 查看服务器日志中的连接/断开记录
+
+---
+
 ## Quick Reference
 
 | Symptom | Likely Cause | First Action |
@@ -419,6 +519,10 @@ Flag resolution priority is: flag > environment variable > default (D-034). If a
 | "daemon not running" on sync | IPC-only command (D-036) | Start `listen` first |
 | "peer-id" error | Flag naming (D-037) | Use `--peer-id`, not `--user-id` |
 | Env vars ignored | Wrong names or flag override | Use `XYNCRA_` prefix, check priority (D-034) |
+| WS "connection refused" | Server not running | Start `./xyncra-server`, check `curl :8080/health` |
+| "RPC failed" / send fails | Server or Redis down | Check server health + `redis-cli ping` |
+| Messages not synced across clients | Redis Pub/Sub or daemon issue | Verify both clients run `listen`, check server logs |
+| `/health` connections abnormal | Connection leak or Redis down | Restart server, check Redis connection |
 
 ---
 
