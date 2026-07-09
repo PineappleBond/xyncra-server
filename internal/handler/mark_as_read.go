@@ -122,8 +122,21 @@ func (h *markAsReadHandler) HandleRequest(ctx context.Context, client *server.Cl
 		return nil, protocol.NewInternalError(fmt.Errorf("update last read: %w", err))
 	}
 
-	// 7. Calculate unread count.
-	unreadCount, err := h.store.MessageStore().CountUnread(ctx, params.ConversationID, messageID)
+	// 6b. Re-read the conversation to obtain the actual cursor value. The
+	// store enforces MAX semantics at the SQL level, so the actual cursor
+	// may differ from the requested value when the request would move the
+	// cursor backward (D-012).
+	updatedConv, err := h.store.ConversationStore().Get(ctx, params.ConversationID)
+	if err != nil {
+		return nil, protocol.NewInternalError(fmt.Errorf("get conversation after update: %w", err))
+	}
+	actualCursor := updatedConv.LastReadMessageID1
+	if userID == updatedConv.UserID2 {
+		actualCursor = updatedConv.LastReadMessageID2
+	}
+
+	// 7. Calculate unread count using the actual cursor.
+	unreadCount, err := h.store.MessageStore().CountUnread(ctx, params.ConversationID, actualCursor)
 	if err != nil {
 		return nil, protocol.NewInternalError(fmt.Errorf("count unread: %w", err))
 	}
@@ -133,7 +146,7 @@ func (h *markAsReadHandler) HandleRequest(ctx context.Context, client *server.Cl
 	// synchronise the read cursor via sync_updates.
 	updatePayload, _ := json.Marshal(markReadUpdatePayload{
 		ConversationID:    params.ConversationID,
-		LastReadMessageID: messageID,
+		LastReadMessageID: actualCursor,
 	})
 
 	latestSeq, err := h.store.UserUpdateStore().GetLatestSeq(ctx, userID)
@@ -162,11 +175,12 @@ func (h *markAsReadHandler) HandleRequest(ctx context.Context, client *server.Cl
 		broadcastMarkReadUpdate(h.broker, userID, newSeq, updatePayload, now)
 	}
 
-	// 10. Return success.
+	// 10. Return success. Use actualCursor (not the requested messageID) so
+	// the client sees the server-confirmed cursor after MAX semantics (D-012).
 	resp := markAsReadResponse{
 		Status:            "ok",
 		UnreadCount:       unreadCount,
-		LastReadMessageID: messageID,
+		LastReadMessageID: actualCursor,
 	}
 	return marshalResponse(resp)
 }

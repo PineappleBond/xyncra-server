@@ -75,13 +75,16 @@ func TestMarkAsReadViaIPC_Success(t *testing.T) {
 	cliCtx := newTestCLIContext(t)
 	startIPCServer(t, cliCtx.SocketPath(), map[string]func(ctx context.Context, req *IPCRequest) (*IPCResponse, error){
 		"mark_as_read": func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
-			return NewIPCResponse(req.ID, nil)
+			return NewIPCResponse(req.ID, map[string]uint32{"last_read_message_id": 42})
 		},
 	})
 
-	err := markAsReadViaIPC(context.Background(), cliCtx, "conv-1", 42)
+	got, err := markAsReadViaIPC(context.Background(), cliCtx, "conv-1", 42)
 	if err != nil {
 		t.Fatalf("markAsReadViaIPC() error: %v", err)
+	}
+	if got != 42 {
+		t.Errorf("got = %d, want 42", got)
 	}
 }
 

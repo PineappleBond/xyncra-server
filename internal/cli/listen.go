@@ -243,16 +243,17 @@ func runListen(cmd *cobra.Command, _ []string) error {
 func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.ClientDB) {
 	s.Register("send_message", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
 		var params struct {
-			ConversationID string `json:"conversation_id"`
-			Content        string `json:"content"`
-			ReplyTo        uint32 `json:"reply_to"`
+			ConversationID  string `json:"conversation_id"`
+			Content         string `json:"content"`
+			ReplyTo         uint32 `json:"reply_to"`
+			ClientMessageID string `json:"client_message_id"`
 		}
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil
 		}
 
-		// clientMsgID is left empty — XyncraClient auto-generates a UUID v4 (D-006).
-		result, err := xc.SendMessage(ctx, params.ConversationID, params.Content, "", params.ReplyTo)
+		// If client_message_id is empty, XyncraClient auto-generates a UUID v4 (D-006).
+		result, err := xc.SendMessage(ctx, params.ConversationID, params.Content, params.ClientMessageID, params.ReplyTo)
 		if err != nil {
 			if ce, ok := errors.AsType[*client.ClientError](err); ok {
 				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
@@ -352,7 +353,9 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 		return NewIPCResponse(req.ID, nil)
 	})
 
-	// mark_as_read advances the read cursor for the current user (void RPC).
+	// mark_as_read advances the read cursor for the current user.
+	// The server returns the actual cursor value (MAX semantics, D-012), which
+	// we forward to the CLI so it can display the server-confirmed position.
 	s.Register("mark_as_read", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
 		var params struct {
 			ConversationID string `json:"conversation_id"`
@@ -361,13 +364,25 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil
 		}
-		if err := xc.MarkAsRead(ctx, params.ConversationID, params.MessageID); err != nil {
+		callParams := map[string]any{
+			"conversation_id": params.ConversationID,
+			"message_id":      params.MessageID,
+		}
+		data, err := xc.Call(ctx, "mark_as_read", callParams)
+		if err != nil {
 			if ce, ok := errors.AsType[*client.ClientError](err); ok {
 				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
 			}
 			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
 		}
-		return NewIPCResponse(req.ID, nil)
+		// Parse the server's actual last_read_message_id from the response.
+		var result struct {
+			LastReadMessageID uint32 `json:"last_read_message_id"`
+		}
+		if err := json.Unmarshal(data, &result); err != nil {
+			return NewIPCErrorResponse(req.ID, -300, fmt.Sprintf("unmarshal mark_as_read result: %v", err)), nil
+		}
+		return NewIPCResponse(req.ID, result)
 	})
 }
 

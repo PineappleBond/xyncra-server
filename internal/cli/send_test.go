@@ -139,7 +139,7 @@ func TestSendViaIPC_Success(t *testing.T) {
 	}
 	defer func() { _ = srv2.Stop() }()
 
-	res, err := sendViaIPC(context.Background(), cliCtx, "conv-1", "hello", 0)
+	res, err := sendViaIPC(context.Background(), cliCtx, "conv-1", "hello", 0, "")
 	if err != nil {
 		t.Fatalf("sendViaIPC() error: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestSendViaIPC_NoDaemon(t *testing.T) {
 		UserDir: t.TempDir(), // No IPC server running here.
 	}
 
-	_, err := sendViaIPC(context.Background(), cliCtx, "conv-1", "hello", 0)
+	_, err := sendViaIPC(context.Background(), cliCtx, "conv-1", "hello", 0, "")
 	if err == nil {
 		t.Fatal("sendViaIPC() should fail when no daemon is running")
 	}
@@ -180,7 +180,7 @@ func TestSendViaIPC_HandlerError(t *testing.T) {
 	}
 	defer func() { _ = srv.Stop() }()
 
-	_, err := sendViaIPC(context.Background(), cliCtx, "conv-1", "hello", 0)
+	_, err := sendViaIPC(context.Background(), cliCtx, "conv-1", "hello", 0, "")
 	if err == nil {
 		t.Fatal("sendViaIPC() should fail when handler returns error")
 	}
@@ -252,7 +252,7 @@ func TestSendStandalone_Success(t *testing.T) {
 		UserDir:   t.TempDir(),
 	}
 
-	res, err := sendStandalone(context.Background(), cliCtx, "conv-1", "hello", 0)
+	res, err := sendStandalone(context.Background(), cliCtx, "conv-1", "hello", 0, "")
 	if err != nil {
 		t.Fatalf("sendStandalone() error: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestSendStandalone_ServerError(t *testing.T) {
 		UserDir:   t.TempDir(),
 	}
 
-	_, err := sendStandalone(context.Background(), cliCtx, "conv-1", "hello", 0)
+	_, err := sendStandalone(context.Background(), cliCtx, "conv-1", "hello", 0, "")
 	if err == nil {
 		t.Fatal("sendStandalone() should fail on server error response")
 	}
@@ -321,7 +321,7 @@ func TestSendStandalone_NoServer(t *testing.T) {
 		UserDir:   t.TempDir(),
 	}
 
-	_, err := sendStandalone(context.Background(), cliCtx, "conv-1", "hello", 0)
+	_, err := sendStandalone(context.Background(), cliCtx, "conv-1", "hello", 0, "")
 	if err == nil {
 		t.Fatal("sendStandalone() should fail when server is unreachable")
 	}

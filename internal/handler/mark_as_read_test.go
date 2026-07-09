@@ -170,9 +170,8 @@ func TestMarkAsRead_MAXSemantics(t *testing.T) {
 
 	status, _, lastReadMessageID := parseMarkAsReadResponse(t, data)
 	assert.Equal(t, "ok", status)
-	// The handler still returns the requested messageID in the response,
-	// but the store enforces MAX semantics so the actual cursor stays at 5.
-	assert.Equal(t, uint32(2), lastReadMessageID, "handler returns requested messageID")
+	// The handler returns the actual (MAX'd) cursor, not the requested value.
+	assert.Equal(t, uint32(5), lastReadMessageID, "handler returns actual cursor after MAX semantics")
 
 	// Verify the actual cursor in the database stayed at 5 (MAX semantics).
 	conv, err = s.ConversationStore().Get(ctx, convID)

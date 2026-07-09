@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -149,9 +150,9 @@ func runMarkAsRead(cmd *cobra.Command, args []string) error {
 		msgID = resolved
 	}
 
-	ipcErr := markAsReadViaIPC(ctx, cliCtx, convID, msgID)
+	confirmedID, ipcErr := markAsReadViaIPC(ctx, cliCtx, convID, msgID)
 	if ipcErr == nil {
-		fmt.Printf("Marked as read up to message #%d.\n", msgID)
+		fmt.Printf("Marked as read up to message #%d.\n", confirmedID)
 		return nil
 	}
 
@@ -190,8 +191,9 @@ func resolveLastProcessedMessageID(ctx context.Context, cliCtx *CLIContext, conv
 }
 
 // markAsReadViaIPC attempts to mark messages as read through the running daemon
-// via the Unix socket IPC channel (D-030).
-func markAsReadViaIPC(ctx context.Context, cliCtx *CLIContext, convID string, msgID uint32) error {
+// via the Unix socket IPC channel (D-030). It returns the server-confirmed
+// last_read_message_id so the CLI can display the actual cursor value.
+func markAsReadViaIPC(ctx context.Context, cliCtx *CLIContext, convID string, msgID uint32) (uint32, error) {
 	ipcClient := NewIPCClient(cliCtx.SocketPath(), 5*time.Second)
 
 	resp, err := ipcClient.Call(ctx, "mark_as_read", map[string]any{
@@ -199,12 +201,20 @@ func markAsReadViaIPC(ctx context.Context, cliCtx *CLIContext, convID string, ms
 		"message_id":      msgID,
 	})
 	if err != nil {
-		return fmt.Errorf("ipc mark-as-read: %w", err)
+		return 0, fmt.Errorf("ipc mark-as-read: %w", err)
 	}
 	if resp.Error != nil {
-		return fmt.Errorf("ipc mark-as-read: %s", resp.Error.Message)
+		return 0, fmt.Errorf("ipc mark-as-read: %s", resp.Error.Message)
 	}
-	return nil
+
+	// Parse the server-confirmed cursor from the response.
+	var result struct {
+		LastReadMessageID uint32 `json:"last_read_message_id"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return 0, fmt.Errorf("ipc mark-as-read unmarshal result: %w", err)
+	}
+	return result.LastReadMessageID, nil
 }
 
 // markAsReadStandalone marks messages as read directly over a fresh WebSocket

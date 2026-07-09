@@ -25,6 +25,7 @@ func newSendCommand() *cobra.Command {
 	cmd.Flags().StringP("conversation-id", "c", "", "Conversation ID (required)")
 	cmd.Flags().StringP("content", "m", "", "Message content (required)")
 	cmd.Flags().Uint32("reply-to", 0, "Message ID to reply to")
+	cmd.Flags().String("client-msg-id", "", "Client message ID for idempotency (auto-generated UUID if empty)")
 
 	_ = cmd.MarkFlagRequired("conversation-id")
 	_ = cmd.MarkFlagRequired("content")
@@ -46,6 +47,7 @@ func runSend(cmd *cobra.Command, args []string) error {
 	convID, _ := cmd.Flags().GetString("conversation-id")
 	content, _ := cmd.Flags().GetString("content")
 	replyTo, _ := cmd.Flags().GetUint32("reply-to")
+	clientMsgID, _ := cmd.Flags().GetString("client-msg-id")
 
 	if convID == "" {
 		return errors.New("send: --conversation-id is required")
@@ -54,13 +56,13 @@ func runSend(cmd *cobra.Command, args []string) error {
 		return errors.New("send: --content is required")
 	}
 
-	result, ipcErr := sendViaIPC(ctx, cliCtx, convID, content, replyTo)
+	result, ipcErr := sendViaIPC(ctx, cliCtx, convID, content, replyTo, clientMsgID)
 	if ipcErr == nil {
 		printSendResult(result)
 		return nil
 	}
 
-	result, wsErr := sendStandalone(ctx, cliCtx, convID, content, replyTo)
+	result, wsErr := sendStandalone(ctx, cliCtx, convID, content, replyTo, clientMsgID)
 	if wsErr == nil {
 		printSendResult(result)
 		return nil
@@ -75,14 +77,18 @@ func runSend(cmd *cobra.Command, args []string) error {
 }
 
 // sendViaIPC attempts to send a message through the running daemon via the
-// Unix socket IPC channel (D-030).
-func sendViaIPC(ctx context.Context, cliCtx *CLIContext, convID, content string, replyTo uint32) (*client.SendMessageResult, error) {
+// Unix socket IPC channel (D-030). clientMsgID may be empty to let the server
+// auto-generate a UUID (D-006).
+func sendViaIPC(ctx context.Context, cliCtx *CLIContext, convID, content string, replyTo uint32, clientMsgID string) (*client.SendMessageResult, error) {
 	ipcClient := NewIPCClient(cliCtx.SocketPath(), 5*time.Second)
 
 	params := map[string]any{
 		"conversation_id": convID,
 		"content":         content,
 		"reply_to":        replyTo,
+	}
+	if clientMsgID != "" {
+		params["client_message_id"] = clientMsgID
 	}
 
 	resp, err := ipcClient.Call(ctx, "send_message", params)
@@ -103,9 +109,12 @@ func sendViaIPC(ctx context.Context, cliCtx *CLIContext, convID, content string,
 
 // sendStandalone sends a message directly over a fresh WebSocket connection,
 // bypassing the daemon. This is the fallback when the IPC channel is
-// unavailable (D-032).
-func sendStandalone(ctx context.Context, cliCtx *CLIContext, convID, content string, replyTo uint32) (*client.SendMessageResult, error) {
-	clientMsgID := uuid.New().String()
+// unavailable (D-032). clientMsgID may be empty; a UUID v4 is generated in that
+// case (D-006).
+func sendStandalone(ctx context.Context, cliCtx *CLIContext, convID, content string, replyTo uint32, clientMsgID string) (*client.SendMessageResult, error) {
+	if clientMsgID == "" {
+		clientMsgID = uuid.New().String()
+	}
 	data, err := standaloneRPC(ctx, cliCtx, "send_message", map[string]any{
 		"conversation_id":   convID,
 		"content":           content,
