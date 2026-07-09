@@ -693,18 +693,19 @@ func TestSendMessage(t *testing.T) {
 
 		msg := &model.Message{
 			ID: "msg-send-1", ClientMessageID: "client-send-1",
-			ConversationID: "conv-send", MessageID: 1,
-			SenderID: "alice", Content: "Hello Bob!",
+			ConversationID: "conv-send",
+			SenderID:       "alice", Content: "Hello Bob!",
 			CreatedAt: testNow,
 		}
-		updates := []model.UserUpdate{
-			{ID: "uu-send-1", UserID: "alice", Seq: 1, Payload: []byte(`{}`), CreatedAt: testNow},
-			{ID: "uu-send-2", UserID: "bob", Seq: 1, Payload: []byte(`{}`), CreatedAt: testNow},
-		}
 
-		err := s.SendMessage(ctx, msg, updates, "conv-send", msg.CreatedAt, msg.MessageID)
+		result, err := s.SendMessage(ctx, msg, []string{"alice", "bob"})
 		if err != nil {
 			t.Fatalf("SendMessage failed: %v", err)
+		}
+
+		// Verify MessageID was allocated
+		if result.Message.MessageID != 1 {
+			t.Fatalf("expected MessageID 1, got %d", result.Message.MessageID)
 		}
 
 		// Verify message exists
@@ -737,20 +738,17 @@ func TestSendMessageBatchLimit(t *testing.T) {
 
 		msg := &model.Message{
 			ID: "msg-limit", ClientMessageID: "client-limit",
-			ConversationID: "conv-limit", MessageID: 1,
-			SenderID: "alice", Content: "test", CreatedAt: testNow,
+			ConversationID: "conv-limit",
+			SenderID:       "alice", Content: "test", CreatedAt: testNow,
 		}
 
-		// Create 501 updates (exceeds limit)
-		updates := make([]model.UserUpdate, 501)
-		for i := range updates {
-			updates[i] = model.UserUpdate{
-				ID: fmt.Sprintf("lu-%d", i), UserID: "alice", Seq: uint32(i + 1),
-				Payload: []byte(`{}`), CreatedAt: testNow,
-			}
+		// Create 501 member IDs (exceeds limit)
+		memberIDs := make([]string, 501)
+		for i := range memberIDs {
+			memberIDs[i] = fmt.Sprintf("user-%d", i)
 		}
 
-		err := s.SendMessage(ctx, msg, updates, "conv-limit", testNow, 1)
+		_, err := s.SendMessage(ctx, msg, memberIDs)
 		if err == nil {
 			t.Fatal("expected error for exceeding batch limit")
 		}

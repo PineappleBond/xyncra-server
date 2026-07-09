@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
+	"github.com/PineappleBond/xyncra-server/pkg/store"
 	"github.com/PineappleBond/xyncra-server/pkg/store/model"
 )
 
@@ -785,4 +786,127 @@ func TestScheduleDebouncedPull(t *testing.T) {
 		t.Error("pullTimer should not change on coalesced schedule")
 	}
 	sm.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// Bug 1 verification: handleConversation payload mismatch (D-013, D-015)
+// ---------------------------------------------------------------------------
+
+// seedConversation inserts a conversation and a message into the local DB so
+// that delete/restore sync events have data to operate on.
+func seedConversation(t *testing.T, db *store.ClientDB, convID string) {
+	t.Helper()
+	ctx := context.Background()
+	conv := &model.Conversation{
+		ID:      convID,
+		UserID1: "test-user",
+		UserID2: "peer-user",
+		Type:    "1-on-1",
+		Title:   "test conversation",
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("seed conversation create: %v", err)
+	}
+	msg := &model.Message{
+		ID:             "msg-1",
+		ConversationID: convID,
+		SenderID:       "peer-user",
+		Content:        "hello",
+		MessageID:      1,
+	}
+	if err := db.Messages.Create(ctx, msg); err != nil {
+		t.Fatalf("seed message create: %v", err)
+	}
+}
+
+// TestApplyUpdate_ConversationDelete verifies that a "delete" conversation
+// update soft-deletes the local conversation and its messages rather than
+// creating a ghost record with an empty ID.
+func TestApplyUpdate_ConversationDelete(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+	convID := "conv-abc-123"
+	seedConversation(t, db, convID)
+
+	// The server sends delete_conversation updates with the shape:
+	// {"conversation_id": "...", "action": "delete"}
+	payload := json.RawMessage(`{"conversation_id":"` + convID + `","action":"delete"}`)
+	update := newTestUpdate(1, protocol.UpdateTypeConversation, payload)
+	if err := sm.ApplyUpdate(ctx, &update); err != nil {
+		t.Fatalf("ApplyUpdate conversation delete: %v", err)
+	}
+
+	// Conversation must be soft-deleted, not replaced by a ghost record.
+	_, err := db.Conversations.Get(ctx, convID)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("conversation Get: expected ErrNotFound after delete, got: %v", err)
+	}
+
+	// There must be no conversation with an empty ID.
+	_, err = db.Conversations.Get(ctx, "")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("ghost conversation with empty ID should not exist, got: %v", err)
+	}
+
+	// Messages in the conversation must be soft-deleted.
+	_, err = db.Messages.Get(ctx, "msg-1")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("message Get: expected ErrNotFound after cascade delete, got: %v", err)
+	}
+}
+
+// TestApplyUpdate_ConversationRestore verifies that a "restore" conversation
+// update restores a soft-deleted conversation and its messages.
+func TestApplyUpdate_ConversationRestore(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+	convID := "conv-abc-123"
+	seedConversation(t, db, convID)
+
+	// Delete first so we can restore.
+	if err := db.Conversations.Delete(ctx, convID); err != nil {
+		t.Fatalf("seed delete: %v", err)
+	}
+
+	payload := json.RawMessage(`{"conversation_id":"` + convID + `","action":"restore"}`)
+	update := newTestUpdate(1, protocol.UpdateTypeConversation, payload)
+	if err := sm.ApplyUpdate(ctx, &update); err != nil {
+		t.Fatalf("ApplyUpdate conversation restore: %v", err)
+	}
+
+	// Conversation must be visible again.
+	conv, err := db.Conversations.Get(ctx, convID)
+	if err != nil {
+		t.Fatalf("conversation Get after restore: %v", err)
+	}
+	if conv.ID != convID {
+		t.Errorf("restored conversation ID: got=%q want=%q", conv.ID, convID)
+	}
+
+	// Messages must be restored too.
+	msg, err := db.Messages.Get(ctx, "msg-1")
+	if err != nil {
+		t.Fatalf("message Get after restore: %v", err)
+	}
+	if msg.Content != "hello" {
+		t.Errorf("restored message content: got=%q want=%q", msg.Content, "hello")
+	}
 }

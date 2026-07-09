@@ -81,13 +81,24 @@ func NewDatabase(cfg DatabaseConfig) (*Database, error) {
 	}
 
 	// Apply connection pool defaults (reduced from 100/10 to 25/5).
+	// SQLite uses a single connection to prevent deadlocks in shared-cache
+	// mode, since SQLite serializes writes at the file level regardless.
 	maxIdle := cfg.MaxIdleConns
-	if maxIdle == 0 {
-		maxIdle = 5
-	}
 	maxOpen := cfg.MaxOpenConns
-	if maxOpen == 0 {
-		maxOpen = 25
+	if cfg.Driver == "sqlite" || cfg.Driver == "sqlite3" {
+		if maxOpen == 0 {
+			maxOpen = 1
+		}
+		if maxIdle == 0 {
+			maxIdle = 1
+		}
+	} else {
+		if maxIdle == 0 {
+			maxIdle = 5
+		}
+		if maxOpen == 0 {
+			maxOpen = 25
+		}
 	}
 	sqlDB.SetMaxIdleConns(maxIdle)
 	sqlDB.SetMaxOpenConns(maxOpen)

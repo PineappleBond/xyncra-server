@@ -100,7 +100,7 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 	_ = redisClient.Close()
 
 	// 3. SQLite in-memory database (each test gets its own named DB).
-	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name())
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared&_pragma=busy_timeout(5000)", t.Name())
 	db, err := store.NewDatabase(store.DatabaseConfig{
 		Driver: "sqlite",
 		DSN:    dsn,

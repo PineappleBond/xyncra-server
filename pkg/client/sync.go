@@ -39,6 +39,15 @@ type markReadPayload struct {
 	MessageID      uint32 `json:"message_id"`
 }
 
+// conversationUpdatePayload is the JSON structure of a "conversation" update
+// emitted by delete_conversation and restore_conversation (D-013, D-015). The
+// server does not send a full model.Conversation; it only carries the
+// conversation ID and the action performed.
+type conversationUpdatePayload struct {
+	ConversationID string `json:"conversation_id"`
+	Action         string `json:"action"` // "delete" or "restore"
+}
+
 // syncUpdatesResponse is the JSON structure returned by the sync_updates RPC.
 type syncUpdatesResponse struct {
 	Updates   []protocol.PackageDataUpdate `json:"updates"`
@@ -296,10 +305,81 @@ func (sm *syncManager) handleMarkRead(ctx context.Context, payload json.RawMessa
 	return nil
 }
 
-// handleConversation parses the payload as a model.Conversation and creates or
-// updates the local record. If the conversation does not exist it is created;
-// otherwise it is updated in place.
+// handleConversation processes a "conversation" type update. The server sends
+// this payload for delete_conversation (D-013) and restore_conversation (D-015)
+// events. The payload shape is {"conversation_id": "...", "action": "..."}.
+//
+// Recognised actions:
+//
+//   - "delete"  — cascade soft-delete the local conversation and its messages.
+//   - "restore" — cascade restore the conversation and its messages.
+//
+// If the action is unrecognised (or absent), the payload is treated as a
+// full model.Conversation for backward compatibility with create events.
 func (sm *syncManager) handleConversation(ctx context.Context, payload json.RawMessage) error {
+	// Peek at the action field to decide how to handle the update.
+	var peek conversationUpdatePayload
+	if err := json.Unmarshal(payload, &peek); err != nil {
+		return NewSyncError(fmt.Errorf("unmarshal conversation update peek: %w", err))
+	}
+
+	switch peek.Action {
+	case "delete":
+		return sm.handleConversationDelete(ctx, peek.ConversationID)
+	case "restore":
+		return sm.handleConversationRestore(ctx, peek.ConversationID)
+	default:
+		// No action field — treat as a full conversation record (e.g. create).
+		return sm.handleConversationUpsert(ctx, payload)
+	}
+}
+
+// handleConversationDelete cascade soft-deletes the conversation and its
+// messages in the local database (D-013).
+func (sm *syncManager) handleConversationDelete(ctx context.Context, convID string) error {
+	// ErrNotFound is acceptable — the conversation may not have been synced
+	// locally yet.
+	if err := sm.db.Conversations.Delete(ctx, convID); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			return NewSyncError(fmt.Errorf("delete conversation locally: %w", err))
+		}
+		sm.logger.Debug("conversation delete: not found locally, skipping", "conversation_id", convID)
+	}
+
+	if sm.handler != nil {
+		// Notify with a minimal conversation record carrying just the ID.
+		conv := &model.Conversation{ID: convID}
+		if err := sm.handler.OnConversation(ctx, conv); err != nil {
+			sm.logger.Error("handler OnConversation (delete) failed", "conversation_id", convID, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// handleConversationRestore cascade restores a previously soft-deleted
+// conversation and its messages in the local database (D-015).
+func (sm *syncManager) handleConversationRestore(ctx context.Context, convID string) error {
+	if err := sm.db.Conversations.Restore(ctx, convID); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			return NewSyncError(fmt.Errorf("restore conversation locally: %w", err))
+		}
+		sm.logger.Debug("conversation restore: not found locally, skipping", "conversation_id", convID)
+	}
+
+	if sm.handler != nil {
+		conv := &model.Conversation{ID: convID}
+		if err := sm.handler.OnConversation(ctx, conv); err != nil {
+			sm.logger.Error("handler OnConversation (restore) failed", "conversation_id", convID, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// handleConversationUpsert creates or updates a conversation from a full
+// model.Conversation payload.
+func (sm *syncManager) handleConversationUpsert(ctx context.Context, payload json.RawMessage) error {
 	var conv model.Conversation
 	if err := json.Unmarshal(payload, &conv); err != nil {
 		return NewSyncError(fmt.Errorf("unmarshal conversation payload: %w", err))

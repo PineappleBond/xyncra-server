@@ -2,17 +2,32 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
 )
 
-// maxSendMessageUpdates is the maximum number of user updates allowed in a
-// single SendMessage call.
+// maxSendMessageUpdates is the maximum number of user updates (conversation
+// members) allowed in a single SendMessage call.
 const maxSendMessageUpdates = 500
+
+// SendMessageResult is returned by Store.SendMessage after a successful atomic
+// persist. It contains the message with its allocated MessageID and the
+// per-user update records with their allocated seq values. The caller uses
+// these to build MQ push payloads.
+type SendMessageResult struct {
+	// Message is the persisted message with its allocated MessageID.
+	Message *model.Message
+
+	// Updates are the per-user update records with their allocated seq values.
+	Updates []model.UserUpdate
+}
 
 // StoreAPI defines the public interface for the Store, useful for dependency
 // injection and mocking in tests.
@@ -23,7 +38,7 @@ type StoreAPI interface {
 	UserUpdateStore() *UserUpdateStore
 
 	// Composite operations
-	SendMessage(ctx context.Context, msg *model.Message, updates []model.UserUpdate, convID string, lastMessageAt time.Time, lastProcessedMessageID uint32) error
+	SendMessage(ctx context.Context, msg *model.Message, memberIDs []string) (*SendMessageResult, error)
 
 	// Transaction support
 	Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error
@@ -94,65 +109,112 @@ func (s *Store) AutoMigrate(ctx context.Context) error {
 	return nil
 }
 
-// SendMessage atomically persists a message together with its fan-out user
-// updates and the conversation's last-message metadata. All three writes
-// happen inside a single database transaction.
+// SendMessage atomically allocates a MessageID (D-008), persists the message,
+// allocates per-user seq values, creates fan-out UserUpdate records, and
+// updates the conversation's last-message metadata. All reads and writes happen
+// inside a single database transaction, eliminating the TOCTOU race that occurs
+// when IDs are allocated outside the transaction.
 //
 // Parameters:
-//   - msg: the message to insert.
-//   - updates: the per-user update records (one per conversation member). Max 500.
-//   - convID: the conversation whose LastMessageAt / LastProcessedMessageID
-//     should be updated. Typically this equals msg.ConversationID.
-//   - lastMessageAt: the timestamp to set as the conversation's latest message time.
-//     Typically this equals msg.CreatedAt.
-//   - lastProcessedMessageID: the message's MessageID to record on the conversation.
-//     Typically this equals msg.MessageID.
+//   - msg: the message to insert. msg.MessageID must be zero; it is allocated
+//     inside the transaction from the conversation's LastProcessedMessageID.
+//   - memberIDs: the conversation member user IDs. One UserUpdate is created
+//     per member. Must have at most 500 entries.
 //
-// Note: convID, lastMessageAt, and lastProcessedMessageID are passed explicitly
-// rather than derived from msg, so that callers can override them (e.g. to
-// batch-update a conversation's metadata with a different timestamp). For the
-// common case, pass msg.ConversationID, msg.CreatedAt, and msg.MessageID.
+// Returns a SendMessageResult containing the message with its allocated
+// MessageID and the UserUpdate records with their allocated seq values.
 func (s *Store) SendMessage(
 	ctx context.Context,
 	msg *model.Message,
-	updates []model.UserUpdate,
-	convID string,
-	lastMessageAt time.Time,
-	lastProcessedMessageID uint32,
-) error {
-	if len(updates) > maxSendMessageUpdates {
-		return fmt.Errorf("store: too many updates (%d), max is %d", len(updates), maxSendMessageUpdates)
+	memberIDs []string,
+) (*SendMessageResult, error) {
+	if len(memberIDs) > maxSendMessageUpdates {
+		return nil, fmt.Errorf("store: too many members (%d), max is %d", len(memberIDs), maxSendMessageUpdates)
 	}
 
-	return s.Transaction(ctx, func(tx *gorm.DB) error {
-		// 1. Insert the message.
+	var result SendMessageResult
+
+	err := s.Transaction(ctx, func(tx *gorm.DB) error {
+		// 1. Read conversation inside the transaction to get the current
+		//    LastProcessedMessageID. This is the critical section that prevents
+		//    concurrent senders from allocating the same MessageID (D-008).
+		var conv model.Conversation
+		if err := tx.Where("id = ?", msg.ConversationID).First(&conv).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return classifyError(fmt.Errorf("store: send message - get conversation: %w", err))
+		}
+
+		// 2. Allocate MessageID atomically.
+		msg.MessageID = conv.LastProcessedMessageID + 1
+
+		// 3. Marshal the message (now with its allocated MessageID) for use
+		//    as the UserUpdate payload.
+		payload, err := json.Marshal(msg)
+		if err != nil {
+			return fmt.Errorf("store: send message - marshal message: %w", err)
+		}
+
+		// 4. Allocate per-user seq values and build UserUpdate records.
+		now := time.Now()
+		updates := make([]model.UserUpdate, 0, len(memberIDs))
+		for _, memberID := range memberIDs {
+			var latestSeq uint32
+			if err := tx.Model(&model.UserUpdate{}).
+				Where("user_id = ?", memberID).
+				Select("COALESCE(MAX(seq), 0)").
+				Scan(&latestSeq).Error; err != nil {
+				return classifyError(fmt.Errorf("store: send message - get latest seq for user %s: %w", memberID, err))
+			}
+
+			update := model.UserUpdate{
+				ID:        uuid.New().String(),
+				UserID:    memberID,
+				Seq:       latestSeq + 1,
+				Type:      "message",
+				Payload:   payload,
+				CreatedAt: now,
+			}
+			updates = append(updates, update)
+		}
+
+		// 5. Insert the message.
 		if err := tx.Create(msg).Error; err != nil {
 			return classifyError(fmt.Errorf("store: send message - insert message: %w", err))
 		}
 
-		// 2. Batch insert user updates (fan-out).
+		// 6. Batch insert user updates (fan-out).
 		if len(updates) > 0 {
 			if err := tx.CreateInBatches(updates, 100).Error; err != nil {
 				return classifyError(fmt.Errorf("store: send message - insert user updates: %w", err))
 			}
 		}
 
-		// 3. Update conversation last-message metadata.
-		result := tx.Model(&model.Conversation{}).
-			Where("id = ?", convID).
+		// 7. Update conversation last-message metadata.
+		updateResult := tx.Model(&model.Conversation{}).
+			Where("id = ?", msg.ConversationID).
 			Updates(map[string]interface{}{
-				"last_message_at":           lastMessageAt,
-				"last_processed_message_id": lastProcessedMessageID,
+				"last_message_at":           msg.CreatedAt,
+				"last_processed_message_id": msg.MessageID,
 			})
-		if result.Error != nil {
-			return classifyError(fmt.Errorf("store: send message - update conversation: %w", result.Error))
+		if updateResult.Error != nil {
+			return classifyError(fmt.Errorf("store: send message - update conversation: %w", updateResult.Error))
 		}
-		if result.RowsAffected == 0 {
+		if updateResult.RowsAffected == 0 {
 			return ErrNotFound
 		}
 
+		// Capture results for the caller.
+		result.Message = msg
+		result.Updates = updates
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &result, nil
 }
 
 // Transaction executes fn inside a database transaction. If fn returns an error,

@@ -66,7 +66,7 @@ func setupConcurrentE2E(t *testing.T) *e2eEnv {
 	_ = redisClient.Close()
 
 	// 3. SQLite in-memory database (unique name for this suite).
-	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name())
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared&_pragma=busy_timeout(5000)", t.Name())
 	db, err := store.NewDatabase(store.DatabaseConfig{
 		Driver: "sqlite",
 		DSN:    dsn,

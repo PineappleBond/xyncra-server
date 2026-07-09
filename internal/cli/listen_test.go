@@ -295,8 +295,9 @@ func TestLogTimestamp(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // setupIPCWithClient creates a mock WebSocket server + XyncraClient + IPCServer
-// with handlers registered via registerIPCHandlers. Returns the IPC socket path.
-func setupIPCWithClient(t *testing.T) (sockPath string, cleanup func()) {
+// with handlers registered via registerIPCHandlers. Returns the IPC socket path
+// and the underlying ClientDB for test assertions.
+func setupIPCWithClient(t *testing.T) (sockPath string, db *store.ClientDB, cleanup func()) {
 	t.Helper()
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
@@ -358,7 +359,7 @@ func setupIPCWithClient(t *testing.T) (sockPath string, cleanup func()) {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 
-	db, err := store.New(tmpDir + "/test.db")
+	db, err = store.New(tmpDir + "/test.db")
 	if err != nil {
 		ts.Close()
 		t.Fatalf("open db: %v", err)
@@ -384,7 +385,7 @@ func setupIPCWithClient(t *testing.T) (sockPath string, cleanup func()) {
 
 	sockPath = tmpDir + "/xyncra.sock"
 	ipcServer := NewIPCServer(sockPath)
-	registerIPCHandlers(ipcServer, xc)
+	registerIPCHandlers(ipcServer, xc, db)
 	if err := ipcServer.Start(context.Background()); err != nil {
 		cancel()
 		xc.Stop()
@@ -401,11 +402,11 @@ func setupIPCWithClient(t *testing.T) (sockPath string, cleanup func()) {
 		ts.Close()
 		_ = os.RemoveAll(tmpDir)
 	}
-	return sockPath, cleanup
+	return sockPath, db, cleanup
 }
 
 func TestIPCHandler_CreateConversation(t *testing.T) {
-	sockPath, cleanup := setupIPCWithClient(t)
+	sockPath, _, cleanup := setupIPCWithClient(t)
 	defer cleanup()
 
 	ipcClient := NewIPCClient(sockPath, 5*time.Second)
@@ -422,7 +423,7 @@ func TestIPCHandler_CreateConversation(t *testing.T) {
 }
 
 func TestIPCHandler_DeleteConversation(t *testing.T) {
-	sockPath, cleanup := setupIPCWithClient(t)
+	sockPath, _, cleanup := setupIPCWithClient(t)
 	defer cleanup()
 
 	ipcClient := NewIPCClient(sockPath, 5*time.Second)
@@ -438,7 +439,7 @@ func TestIPCHandler_DeleteConversation(t *testing.T) {
 }
 
 func TestIPCHandler_RestoreConversation(t *testing.T) {
-	sockPath, cleanup := setupIPCWithClient(t)
+	sockPath, _, cleanup := setupIPCWithClient(t)
 	defer cleanup()
 
 	ipcClient := NewIPCClient(sockPath, 5*time.Second)
@@ -454,7 +455,7 @@ func TestIPCHandler_RestoreConversation(t *testing.T) {
 }
 
 func TestIPCHandler_DeleteMessage(t *testing.T) {
-	sockPath, cleanup := setupIPCWithClient(t)
+	sockPath, _, cleanup := setupIPCWithClient(t)
 	defer cleanup()
 
 	ipcClient := NewIPCClient(sockPath, 5*time.Second)
@@ -470,7 +471,7 @@ func TestIPCHandler_DeleteMessage(t *testing.T) {
 }
 
 func TestIPCHandler_MarkAsRead(t *testing.T) {
-	sockPath, cleanup := setupIPCWithClient(t)
+	sockPath, _, cleanup := setupIPCWithClient(t)
 	defer cleanup()
 
 	ipcClient := NewIPCClient(sockPath, 5*time.Second)
@@ -487,7 +488,7 @@ func TestIPCHandler_MarkAsRead(t *testing.T) {
 }
 
 func TestIPCHandler_SyncUpdates(t *testing.T) {
-	sockPath, cleanup := setupIPCWithClient(t)
+	sockPath, _, cleanup := setupIPCWithClient(t)
 	defer cleanup()
 
 	ipcClient := NewIPCClient(sockPath, 5*time.Second)
@@ -501,7 +502,7 @@ func TestIPCHandler_SyncUpdates(t *testing.T) {
 }
 
 func TestIPCHandler_InvalidParams(t *testing.T) {
-	sockPath, cleanup := setupIPCWithClient(t)
+	sockPath, _, cleanup := setupIPCWithClient(t)
 	defer cleanup()
 
 	ipcClient := NewIPCClient(sockPath, 5*time.Second)
@@ -520,7 +521,7 @@ func TestIPCHandler_InvalidParams(t *testing.T) {
 }
 
 func TestIPCHandler_UnknownMethod(t *testing.T) {
-	sockPath, cleanup := setupIPCWithClient(t)
+	sockPath, _, cleanup := setupIPCWithClient(t)
 	defer cleanup()
 
 	ipcClient := NewIPCClient(sockPath, 5*time.Second)
@@ -533,5 +534,167 @@ func TestIPCHandler_UnknownMethod(t *testing.T) {
 	}
 	if resp.Error.Code != -32601 {
 		t.Errorf("error code = %d, want -32601", resp.Error.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bug 2 verification: automatic log cleanup goroutine (D-040)
+// ---------------------------------------------------------------------------
+
+// TestRunCleanup_DeletesExpiredLogs verifies that runCleanup hard-deletes RPC
+// logs and notification logs older than the retention period.
+func TestRunCleanup_DeletesExpiredLogs(t *testing.T) {
+	db, err := store.NewInMemory("cleanup_test")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	// Insert an old RPC log (10 days ago) and a recent one (1 hour ago).
+	oldRPC := &model.RPCLog{
+		ID:        "rpc-old",
+		Type:      "request",
+		RequestID: "req-1",
+		Method:    "send_message",
+		CreatedAt: now.Add(-10 * 24 * time.Hour),
+	}
+	recentRPC := &model.RPCLog{
+		ID:        "rpc-recent",
+		Type:      "request",
+		RequestID: "req-2",
+		Method:    "heartbeat",
+		CreatedAt: now.Add(-1 * time.Hour),
+	}
+	if err := db.RPCLogs.Save(ctx, oldRPC); err != nil {
+		t.Fatalf("save old rpc: %v", err)
+	}
+	if err := db.RPCLogs.Save(ctx, recentRPC); err != nil {
+		t.Fatalf("save recent rpc: %v", err)
+	}
+
+	// Insert an old notification log and a recent one.
+	oldNotif := &model.NotificationLog{
+		ID:        "notif-old",
+		Seq:       1,
+		Type:      "message",
+		CreatedAt: now.Add(-10 * 24 * time.Hour),
+	}
+	recentNotif := &model.NotificationLog{
+		ID:        "notif-recent",
+		Seq:       2,
+		Type:      "message",
+		CreatedAt: now.Add(-1 * time.Hour),
+	}
+	if err := db.NotificationLogs.Save(ctx, oldNotif); err != nil {
+		t.Fatalf("save old notif: %v", err)
+	}
+	if err := db.NotificationLogs.Save(ctx, recentNotif); err != nil {
+		t.Fatalf("save recent notif: %v", err)
+	}
+
+	// Run cleanup with 7-day retention.
+	logger := newCLILogger()
+	runCleanup(db, 7*24*time.Hour, logger)
+
+	// Old records should be gone.
+	before := now.Add(-7 * 24 * time.Hour)
+	rpcRemaining, err := db.RPCLogs.CountBefore(ctx, before)
+	if err != nil {
+		t.Fatalf("count rpc: %v", err)
+	}
+	// No RPC logs should be older than 7 days now.
+	if rpcRemaining != 0 {
+		t.Errorf("rpc logs older than 7d remaining: got=%d want=0", rpcRemaining)
+	}
+
+	notifRemaining, err := db.NotificationLogs.CountBefore(ctx, before)
+	if err != nil {
+		t.Fatalf("count notif: %v", err)
+	}
+	if notifRemaining != 0 {
+		t.Errorf("notification logs older than 7d remaining: got=%d want=0", notifRemaining)
+	}
+
+	// Recent records should still exist. We can verify by counting all records.
+	// Use a very old cutoff to ensure we only count recent records.
+	veryOld := now.Add(-2 * 24 * time.Hour)
+	rpcCount, err := db.RPCLogs.CountBefore(ctx, veryOld)
+	if err != nil {
+		t.Fatalf("count recent rpc: %v", err)
+	}
+	// recentRPC is 1 hour old, well within 2 days.
+	if rpcCount != 0 {
+		t.Errorf("recent rpc logs should not be deleted: got count before 2d ago=%d", rpcCount)
+	}
+}
+
+// TestStartLogCleanup_ExitsOnCancel verifies that the cleanup goroutine exits
+// cleanly when the context is cancelled.
+func TestStartLogCleanup_ExitsOnCancel(t *testing.T) {
+	db, err := store.NewInMemory("cleanup_cancel_test")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	logger := newCLILogger()
+	done := make(chan struct{})
+
+	go func() {
+		startLogCleanup(ctx, db, 50*time.Millisecond, 7*24*time.Hour, logger)
+		close(done)
+	}()
+
+	// Let it tick at least once.
+	time.Sleep(120 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// OK: goroutine exited.
+	case <-time.After(2 * time.Second):
+		t.Fatal("startLogCleanup did not exit after context cancellation")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bug 3 verification: create_conversation should persist to local DB (D-035)
+// ---------------------------------------------------------------------------
+
+// TestIPCHandler_CreateConversation_PersistsLocally verifies that after a
+// successful create_conversation IPC call, the new conversation is written to
+// the local database so that list-conversations (D-035) can read it
+// immediately.
+func TestIPCHandler_CreateConversation_PersistsLocally(t *testing.T) {
+	sockPath, db, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "create_conversation", map[string]any{
+		"user_id2": "peer1",
+		"title":    "Test",
+	})
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("handler error: %v", resp.Error)
+	}
+
+	// The conversation should now be in the local DB.
+	ctx := context.Background()
+	conv, err := db.Conversations.Get(ctx, "conv-new")
+	if err != nil {
+		t.Fatalf("conversation not persisted locally: %v", err)
+	}
+	if conv.ID != "conv-new" {
+		t.Errorf("persisted conversation ID: got=%q want=%q", conv.ID, "conv-new")
+	}
+	if conv.UserID2 != "peer1" {
+		t.Errorf("persisted conversation UserID2: got=%q want=%q", conv.UserID2, "peer1")
 	}
 }

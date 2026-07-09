@@ -18,6 +18,14 @@ import (
 	"github.com/PineappleBond/xyncra-server/pkg/store/model"
 )
 
+// defaultLogRetention is the default retention period for client-side logs
+// (RPC logs and notification logs). Records older than this are hard-deleted
+// by the periodic cleanup goroutine (D-040).
+const defaultLogRetention = 7 * 24 * time.Hour // 7 days
+
+// defaultCleanupInterval is the interval between automatic log cleanup runs.
+const defaultCleanupInterval = 1 * time.Hour
+
 // ---------------------------------------------------------------------------
 // cliUpdateHandler — implements client.UpdateHandler
 // ---------------------------------------------------------------------------
@@ -194,7 +202,7 @@ func runListen(cmd *cobra.Command, _ []string) error {
 	defer xc.Stop()
 
 	// Register IPC method handlers.
-	registerIPCHandlers(ipcServer, xc)
+	registerIPCHandlers(ipcServer, xc, db)
 
 	// Start the IPC server in the background.
 	ctx := context.Background()
@@ -217,6 +225,9 @@ func runListen(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Start automatic log cleanup goroutine (D-040).
+	go startLogCleanup(ctx, db, defaultCleanupInterval, defaultLogRetention, logger)
+
 	// Start the client (blocks until context is cancelled).
 	return xc.Start(ctx)
 }
@@ -226,8 +237,10 @@ func runListen(cmd *cobra.Command, _ []string) error {
 // ---------------------------------------------------------------------------
 
 // registerIPCHandlers binds JSON-RPC method handlers on the IPC server that
-// forward requests to the corresponding XyncraClient methods.
-func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient) {
+// forward requests to the corresponding XyncraClient methods. The db parameter
+// is used by handlers that need to update the local database (e.g.
+// create_conversation writes the new conversation for D-035 local reads).
+func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.ClientDB) {
 	s.Register("send_message", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
 		var params struct {
 			ConversationID string `json:"conversation_id"`
@@ -257,7 +270,9 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient) {
 		return NewIPCResponse(req.ID, map[string]string{"status": "ok"})
 	})
 
-	// create_conversation creates a new 1-on-1 conversation.
+	// create_conversation creates a new 1-on-1 conversation and persists it
+	// to the local database so that list-conversations (D-035) can show it
+	// immediately without waiting for the next sync cycle.
 	s.Register("create_conversation", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
 		var params struct {
 			UserID2 string `json:"user_id2"`
@@ -273,6 +288,16 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient) {
 			}
 			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
 		}
+
+		// Persist the conversation to the local DB (D-035).
+		if result.Conversation != nil && db != nil {
+			if err := db.Conversations.Create(ctx, result.Conversation); err != nil {
+				// Log but do not fail the RPC — the conversation was
+				// created on the server successfully.
+				fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to persist created conversation locally: %v\n", err)
+			}
+		}
+
 		return NewIPCResponse(req.ID, result)
 	})
 
@@ -344,4 +369,48 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient) {
 		}
 		return NewIPCResponse(req.ID, nil)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Automatic log cleanup (D-040)
+// ---------------------------------------------------------------------------
+
+// startLogCleanup runs a periodic cleanup of expired RPC logs and notification
+// logs from the client database. It ticks every interval and hard-deletes
+// records older than retention. The goroutine exits when ctx is cancelled.
+//
+// Cleanup failures are logged but do not terminate the daemon.
+func startLogCleanup(ctx context.Context, db *store.ClientDB, interval, retention time.Duration, logger *cliLogger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runCleanup(db, retention, logger)
+		}
+	}
+}
+
+// runCleanup performs a single cleanup pass, deleting RPC logs and notification
+// logs older than retention.
+func runCleanup(db *store.ClientDB, retention time.Duration, logger *cliLogger) {
+	ctx := context.Background()
+	before := time.Now().Add(-retention)
+
+	rpcDeleted, err := db.RPCLogs.CleanupBefore(ctx, before)
+	if err != nil {
+		logger.Error("auto-cleanup: rpc logs", "error", err)
+	} else if rpcDeleted > 0 {
+		logger.Info("auto-cleanup: deleted expired rpc logs", "count", rpcDeleted)
+	}
+
+	notifDeleted, err := db.NotificationLogs.CleanupBefore(ctx, before)
+	if err != nil {
+		logger.Error("auto-cleanup: notification logs", "error", err)
+	} else if notifDeleted > 0 {
+		logger.Info("auto-cleanup: deleted expired notification logs", "count", notifDeleted)
+	}
 }
