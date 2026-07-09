@@ -127,6 +127,7 @@ func printSendResult(result *client.SendMessageResult) {
 	fmt.Println("Message sent.")
 	if result.Message != nil {
 		fmt.Printf("  Message ID: %d\n", result.Message.MessageID)
+		fmt.Printf("  UUID: %s\n", result.Message.ID)
 		fmt.Printf("  Conversation: %s\n", result.Message.ConversationID)
 		fmt.Printf("  Client Msg ID: %s\n", result.Message.ClientMessageID)
 	}

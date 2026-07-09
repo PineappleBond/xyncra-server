@@ -41,9 +41,10 @@ func runSyncUpdates(cmd *cobra.Command, _ []string) error {
 	resp, err := ipcClient.Call(ctx, "sync_updates", nil)
 	if err != nil {
 		// IPC connection failed — daemon is not running.
+		// D-036/D-042: exit code 2 = precondition not met.
 		fmt.Fprintln(os.Stderr, "Error: daemon not running.")
 		fmt.Fprintln(os.Stderr, "Hint: Start with 'xyncra-client listen --user-id <user>'")
-		return fmt.Errorf("sync-updates: %w", err)
+		os.Exit(2)
 	}
 
 	if resp.Error != nil {

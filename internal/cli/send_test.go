@@ -19,6 +19,7 @@ import (
 func TestPrintSendResult(t *testing.T) {
 	result := &client.SendMessageResult{
 		Message: &model.Message{
+			ID:              "msg-uuid-1",
 			MessageID:       42,
 			ConversationID:  "conv-1",
 			ClientMessageID: "client-msg-1",
@@ -35,6 +36,9 @@ func TestPrintSendResult(t *testing.T) {
 	}
 	if !strings.Contains(output, "Message ID: 42") {
 		t.Errorf("output should contain 'Message ID: 42', got %q", output)
+	}
+	if !strings.Contains(output, "UUID: msg-uuid-1") {
+		t.Errorf("output should contain 'UUID: msg-uuid-1', got %q", output)
 	}
 	if !strings.Contains(output, "Conversation: conv-1") {
 		t.Errorf("output should contain 'Conversation: conv-1', got %q", output)

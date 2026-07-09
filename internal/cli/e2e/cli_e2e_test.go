@@ -357,10 +357,8 @@ func TestSyncUpdatesIPCOnly(t *testing.T) {
 		"--server", env.serverURL,
 		"sync-updates",
 	)
-	// The current implementation returns exit code 1 (generic error).
-	// D-042 specifies exit code 2 for precondition not met; the
-	// implementation may be updated in the future.
-	requireExitCode(t, syncResult2, 1)
+	// D-036/D-042: sync-updates without daemon exits with code 2 (precondition not met).
+	requireExitCode(t, syncResult2, 2)
 	assert.Contains(t, syncResult2.Stderr, "daemon not running",
 		"stderr should indicate daemon is not running")
 }
