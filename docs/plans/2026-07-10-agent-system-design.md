@@ -126,7 +126,161 @@ graph TB
     CMGR <--> ST
 ```
 
-### 2.2 数据流
+### 2.2 消息路由与触发
+
+**触发条件**：当用户发送消息时，检查**对话对方的 UserID** 是否是 Agent。
+
+```mermaid
+graph TB
+    SendMsg[用户发送消息] --> GetConv[获取 Conversation]
+    GetConv --> CheckPeer[检查对方 UserID]
+    CheckPeer -->|对方是普通用户| NormalFlow[正常消息流程]
+    CheckPeer -->|对方是 Agent<br/>agent/ 前缀| AgentFlow[Agent 处理流程]
+    AgentFlow --> EnqueueMQ[入队 MQ<br/>TypeAgentProcess]
+    
+    style CheckPeer fill:#fff4e1
+    style AgentFlow fill:#e1f5ff
+```
+
+**为什么检查对方 UserID？**
+
+- Conversation 模型是 1-on-1 的，有 `UserID1` 和 `UserID2`
+- 发送消息时，sender 是当前用户，receiver 是对话的另一方
+- 如果 receiver 是 Agent（`agent/` 前缀），则触发 Agent 处理
+
+### 2.3 分布式处理保障
+
+```mermaid
+graph TB
+    subgraph "Asynq MQ 保障"
+        Task[Agent Task] -->|入队| Queue[(Redis Queue)]
+        Queue -->|出队| Worker1[Worker Node 1]
+        Queue -->|出队| Worker2[Worker Node 2]
+        Queue -->|出队| Worker3[Worker Node 3]
+        
+        Note1[每个 Task 只被<br/>一个 Worker 消费]
+        Note2[消费失败自动重试]
+        Note3[Worker 宕机后<br/>Task 重新可见]
+    end
+    
+    style Queue fill:#e1f5ff
+    style Note1 fill:#e8f5e9
+    style Note2 fill:#fff4e1
+    style Note3 fill:#ffebee
+```
+
+#### 2.3.1 消费者唯一性
+
+**问题**：分布式系统中，多个节点可能同时消费同一个 Task。
+
+**解决方案**：Asynq MQ 保障 **Exactly-Once 语义**
+
+- 每个 Task 出队时被 Redis 标记为 processing
+- 其他 Worker 看不到该 Task，避免重复消费
+- 消费完成后，Task 从队列中移除
+
+#### 2.3.2 消费失败处理
+
+```mermaid
+graph TB
+    Start[Task 消费] --> Process[处理 Agent 请求]
+    Process -->|成功| Complete[标记完成]
+    Process -->|失败| CheckRetry{重试次数<br/>< 上限?}
+    CheckRetry -->|是| Backoff[指数退避]
+    Backoff --> Retry[重新入队]
+    Retry --> Process
+    CheckRetry -->|否| DeadLetter[Dead Letter Queue]
+    DeadLetter --> Alert[告警通知]
+    
+    style CheckRetry fill:#fff4e1
+    style DeadLetter fill:#ffebee
+```
+
+**失败场景与处理**：
+
+| 失败类型 | 处理策略 | 重试配置 |
+| -------- | -------- | -------- |
+| LLM API 超时 | 自动重试 | MaxRetries=3, Backoff=1s/2s/4s |
+| LLM API 限流 | 延迟重试 | Backoff=5s/10s/20s |
+| 网络错误 | 自动重试 | MaxRetries=5 |
+| 数据库错误 | 自动重试 | MaxRetries=3 |
+| 业务逻辑错误 | 不重试，记录错误 | 进入 Dead Letter Queue |
+
+#### 2.3.3 消费中重启
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant R as Redis
+    participant T as Task
+    
+    W->>R: Dequeue Task
+    R->>R: 标记为 processing<br/>设置 Timeout=30min
+    W->>W: 开始处理
+    Note over W: Worker 宕机
+    R->>R: Timeout 到期<br/>Task 重新可见
+    R->>W2: 其他 Worker 出队
+    W2->>W2: 继续处理
+    
+    Note over W,W2: Task 不会丢失
+```
+
+**问题**：Worker 在处理 Task 过程中宕机。
+
+**解决方案**：
+
+1. **Processing Timeout**：Asynq 为每个 processing Task 设置超时（如 30 分钟）
+2. **自动恢复**：超时后，Task 重新变为可见，其他 Worker 可以消费
+3. **幂等性保障**：Task 处理逻辑必须幂等，或支持断点续传
+
+#### 2.3.4 幂等性设计
+
+```mermaid
+graph TB
+    Task[Agent Task] --> CheckDup{是否重复<br/>处理?}
+    CheckDup -->|首次| Process[正常处理]
+    CheckDup -->|重复| Skip[跳过处理]
+    Process --> SaveState[保存处理状态]
+    SaveState --> Complete[完成]
+    
+    style CheckDup fill:#fff4e1
+```
+
+**幂等性保障**：
+
+- Task Payload 包含唯一标识（MessageID + ConversationID）
+- 处理前检查是否已处理（通过 DB 或 Redis）
+- 已处理则跳过，未处理则执行
+
+#### 2.3.5 断点续传（高级）
+
+```mermaid
+graph TB
+    Start[开始处理] --> LoadContext[加载上下文]
+    LoadContext --> CallLLM[调用 LLM]
+    CallLLM --> StreamChunks[流式接收 chunks]
+    StreamChunks --> Checkpoint{每 N 个 chunk<br/>保存 checkpoint}
+    Checkpoint --> Save[保存到 Redis]
+    Save --> StreamChunks
+    StreamChunks -->|完成| Finalize[持久化消息]
+    
+    StreamChunks -->|中断| Resume[从 checkpoint 恢复]
+    Resume --> LoadLast[加载最后 checkpoint]
+    LoadLast --> CallLLM
+    
+    style Checkpoint fill:#fff4e1
+    style Save fill:#e8f5e9
+```
+
+**适用场景**：长对话、多轮 tool 调用
+
+**实现方式**：
+
+- 每处理完一轮 LLM 调用或 tool 调用，保存 checkpoint
+- Checkpoint 包含：已处理的消息、当前上下文、tool 调用结果
+- 中断后从 checkpoint 恢复，避免重复处理
+
+### 2.4 数据流
 
 ```mermaid
 sequenceDiagram
