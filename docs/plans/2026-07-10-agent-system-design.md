@@ -459,8 +459,8 @@ Eino 框架内置了两个核心的上下文压缩中间件：
 
 **工作原理**：
 - 基于 LLM 的智能摘要压缩
-- 在 `BeforeModelRewriteState` 钩子中执行
-- 每次调用 LLM 之前自动检查
+- 在 `BeforeModelRewriteState` 钩子中执行（每次调用 LLM 之前）
+- 自动检查并压缩上下文
 
 **触发条件**：
 - Token 阈值：当对话总 token 数超过 `ContextTokens`（默认 160k）
@@ -469,22 +469,41 @@ Eino 框架内置了两个核心的上下文压缩中间件：
 **执行流程**：
 
 ```mermaid
-graph TB
-    Start[BeforeModelRewriteState] --> Check{检查是否需要压缩}
-    Check -->|不需要| Return[直接返回]
-    Check -->|需要| CallLLM[调用 LLM 生成摘要]
-    CallLLM --> Preserve[保留最近用户消息<br/>默认 30k tokens]
-    Preserve --> Replace[用摘要 + 保留消息替换历史]
-    Replace --> ReturnCompressed[返回压缩后的消息]
+sequenceDiagram
+    participant Task as Agent Task
+    participant DB as Database
+    participant MW as Summarization Middleware
+    participant CompModel as 压缩模型
+    participant MainModel as 主模型
     
-    style CallLLM fill:#ffebee
-    style Check fill:#fff4e1
+    Task->>DB: 加载消息历史
+    DB-->>Task: messages
+    
+    loop ReAct Loop
+        Note over Task,MW: 每次 LLM 调用前
+        Task->>MW: BeforeModelRewriteState
+        MW->>MW: 检查 token 数
+        
+        alt 超过阈值
+            Note over MW,CompModel: 阻塞：压缩进行中
+            MW->>CompModel: 调用压缩模型生成摘要
+            CompModel-->>MW: summary text
+            MW->>MW: 替换原始消息为摘要
+        end
+        
+        Note over MW,MainModel: 阻塞结束
+        MW-->>Task: 压缩后的消息
+        Task->>MainModel: 调用主模型
+        MainModel-->>Task: 响应
+    end
 ```
 
-**性能影响**：
-- Token 计数：~1-5ms（本地计算）
-- LLM 摘要生成：~1-10s（同步阻塞）
-- 重试机制：默认最多 3 次，指数退避
+**关键理解**：
+
+- 压缩发生在**每次 LLM 调用之前**，通过 `BeforeModelRewriteState` 中间件钩子
+- 压缩是**同步阻塞**的：压缩完成前，任务处理被阻塞，不能继续调用主模型
+- 不会阻塞消息队列（其他 Task 可以被其他 Worker 处理），但会延迟当前 Task 的响应时间
+- 压缩延迟：1-10 秒（取决于上下文长度和压缩模型速度）
 
 **关键配置**：
 
