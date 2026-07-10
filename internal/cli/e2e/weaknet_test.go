@@ -1,6 +1,7 @@
 package cli_e2e_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -95,6 +96,17 @@ type weakNetServer struct {
 	// original response with duplicate=true.
 	clientMsgIDMu    sync.Mutex
 	clientMsgIDIndex map[string]json.RawMessage
+
+	// userConns maps userID to their active WebSocket connections.
+	// Used for server push (typing/streaming ephemeral broadcasts).
+	userConns map[string][]*websocket.Conn
+
+	// convMembers maps conversation ID to member userIDs.
+	// Populated when create_conversation is called.
+	convMembers map[string][]string
+
+	// userConnsMu protects userConns from concurrent access.
+	userConnsMu sync.Mutex
 }
 
 // newWeakNetServer creates and starts a weakNetServer with the given config.
@@ -115,6 +127,8 @@ func newWeakNetServer(t *testing.T, cfg weakNetConfig) *weakNetServer {
 		nextSeq:          make(map[string]uint32),
 		msgSeqs:          make(map[string]uint32),
 		clientMsgIDIndex: make(map[string]json.RawMessage),
+		userConns:        make(map[string][]*websocket.Conn),
+		convMembers:      make(map[string][]string),
 		ctx:              ctx,
 		cancel:           cancel,
 	}
@@ -128,6 +142,8 @@ func newWeakNetServer(t *testing.T, cfg weakNetConfig) *weakNetServer {
 	s.rpcHandlers["delete_message"] = s.handleDeleteMessage
 	s.rpcHandlers["delete_conversation"] = s.handleDeleteConversation
 	s.rpcHandlers["restore_conversation"] = s.handleRestoreConversation
+	s.rpcHandlers["set_typing"] = s.handleSetTyping
+	s.rpcHandlers["stream_text"] = s.handleStreamText
 
 	// Set up HTTP handler.
 	mux := http.NewServeMux()
@@ -235,6 +251,23 @@ func waitForConnection(t *testing.T, server *weakNetServer, target int, timeout 
 		target, timeout, elapsed, server.ConnectedCount())
 }
 
+// waitForTotalConnections polls until the mock server has at least `target`
+// cumulative connections (including reconnects), or timeout expires.
+func waitForTotalConnections(t *testing.T, server *weakNetServer, target int, timeout time.Duration) {
+	t.Helper()
+	start := time.Now()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if server.TotalConnections() >= target {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	elapsed := time.Since(start)
+	t.Fatalf("waitForTotalConnections: server did not reach %d total connections within %s (elapsed: %s, current: %d)",
+		target, timeout, elapsed, server.TotalConnections())
+}
+
 // ---------------------------------------------------------------------------
 // HTTP handler
 // ---------------------------------------------------------------------------
@@ -260,6 +293,10 @@ func (s *weakNetServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	s.totalConns++
 	s.mu.Unlock()
 
+	s.userConnsMu.Lock()
+	s.userConns[userID] = append(s.userConns[userID], conn)
+	s.userConnsMu.Unlock()
+
 	go s.handleConn(conn, userID)
 }
 
@@ -273,6 +310,7 @@ func (s *weakNetServer) handleConn(conn *websocket.Conn, userID string) {
 	defer func() {
 		conn.Close()
 		s.removeConn(conn)
+		s.removeUserConn(userID, conn)
 	}()
 
 	for {
@@ -342,6 +380,10 @@ func (s *weakNetServer) disconnectLoop() {
 		s.conns = nil
 		s.disconnects++
 		s.mu.Unlock()
+
+		s.userConnsMu.Lock()
+		s.userConns = make(map[string][]*websocket.Conn)
+		s.userConnsMu.Unlock()
 
 		offline := s.cfg.offlineDuration
 		if s.cfg.jitter > 0 {
@@ -525,6 +567,10 @@ func (s *weakNetServer) handleCreateConversation(userID string, req *protocol.Pa
 
 	s.appendUpdate(userID, protocol.UpdateTypeConversation, payload)
 
+	s.updatesMu.Lock()
+	s.convMembers[convID] = []string{userID, params.UserID2}
+	s.updatesMu.Unlock()
+
 	// RPC response must include all model.Conversation fields using Go field
 	// names (no json tags on model.Conversation → JSON keys are uppercase Go names).
 	resp, _ := json.Marshal(map[string]any{
@@ -640,6 +686,97 @@ func (s *weakNetServer) handleRestoreConversation(userID string, req *protocol.P
 	return resp, nil
 }
 
+// handleSetTyping implements the set_typing RPC. It broadcasts a typing
+// ephemeral update (Seq=0) to all conversation members (D-050).
+func (s *weakNetServer) handleSetTyping(userID string, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+	var params struct {
+		ConversationID string `json:"conversation_id"`
+		IsTyping       bool   `json:"is_typing"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil, fmt.Errorf("invalid params")
+	}
+	if params.ConversationID == "" {
+		return nil, fmt.Errorf("missing conversation_id")
+	}
+
+	// Build ephemeral update (Seq=0, D-050).
+	payload, _ := json.Marshal(map[string]any{
+		"user_id":         userID,
+		"conversation_id": params.ConversationID,
+		"is_typing":       params.IsTyping,
+		"timestamp":       time.Now().Unix(),
+	})
+	update := protocol.PackageDataUpdate{
+		Seq:     0, // ephemeral
+		Type:    protocol.UpdateTypeTyping,
+		Payload: payload,
+	}
+
+	// Broadcast to ALL members (including caller, D-050).
+	s.updatesMu.Lock()
+	origMembers := s.convMembers[params.ConversationID]
+	members := make([]string, len(origMembers))
+	copy(members, origMembers)
+	s.updatesMu.Unlock()
+	for _, memberID := range members {
+		s.pushToUser(memberID, &protocol.PackageDataUpdates{
+			Updates: []protocol.PackageDataUpdate{update},
+		})
+	}
+
+	return json.Marshal(map[string]string{"status": "ok"})
+}
+
+// handleStreamText implements the stream_text RPC. It broadcasts a streaming
+// ephemeral update (Seq=0) to all conversation members (D-050, D-051).
+func (s *weakNetServer) handleStreamText(userID string, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+	var params struct {
+		ConversationID string `json:"conversation_id"`
+		StreamID       string `json:"stream_id"`
+		Text           string `json:"text"`
+		IsDone         bool   `json:"is_done"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil, fmt.Errorf("invalid params")
+	}
+	if params.ConversationID == "" {
+		return nil, fmt.Errorf("missing conversation_id")
+	}
+	if params.StreamID == "" {
+		return nil, fmt.Errorf("missing stream_id")
+	}
+
+	// Build ephemeral update (Seq=0, D-050).
+	payload, _ := json.Marshal(map[string]any{
+		"user_id":         userID,
+		"conversation_id": params.ConversationID,
+		"stream_id":       params.StreamID,
+		"text":            params.Text,
+		"is_done":         params.IsDone,
+		"timestamp":       time.Now().Unix(),
+	})
+	update := protocol.PackageDataUpdate{
+		Seq:     0, // ephemeral
+		Type:    protocol.UpdateTypeStreaming,
+		Payload: payload,
+	}
+
+	// Broadcast to ALL members (including caller, D-050).
+	s.updatesMu.Lock()
+	origMembers := s.convMembers[params.ConversationID]
+	members := make([]string, len(origMembers))
+	copy(members, origMembers)
+	s.updatesMu.Unlock()
+	for _, memberID := range members {
+		s.pushToUser(memberID, &protocol.PackageDataUpdates{
+			Updates: []protocol.PackageDataUpdate{update},
+		})
+	}
+
+	return json.Marshal(map[string]string{"status": "ok"})
+}
+
 // ---------------------------------------------------------------------------
 // Helper methods
 // ---------------------------------------------------------------------------
@@ -671,6 +808,43 @@ func (s *weakNetServer) removeConn(conn *websocket.Conn) {
 			s.conns = append(s.conns[:i], s.conns[i+1:]...)
 			return
 		}
+	}
+}
+
+// removeUserConn removes a connection from the per-user connection list.
+func (s *weakNetServer) removeUserConn(userID string, conn *websocket.Conn) {
+	s.userConnsMu.Lock()
+	defer s.userConnsMu.Unlock()
+	conns := s.userConns[userID]
+	for i, c := range conns {
+		if c == conn {
+			s.userConns[userID] = append(conns[:i], conns[i+1:]...)
+			return
+		}
+	}
+}
+
+// pushToUser sends a PackageDataUpdates to all connections of the given user.
+// Used for ephemeral broadcasts (typing, streaming). Write failures are
+// silently ignored (fire-and-forget, D-007).
+//
+// The userConnsMu lock is held for the entire duration to serialize writes
+// across goroutines, since gorilla/websocket does not support concurrent
+// writers on the same connection.
+func (s *weakNetServer) pushToUser(userID string, updates *protocol.PackageDataUpdates) {
+	data, err := json.Marshal(updates)
+	if err != nil {
+		return
+	}
+	pkg := protocol.Package{
+		Type: protocol.PackageTypeUpdates,
+		Data: data,
+	}
+
+	s.userConnsMu.Lock()
+	defer s.userConnsMu.Unlock()
+	for _, conn := range s.userConns[userID] {
+		_ = conn.WriteJSON(pkg) // fire-and-forget
 	}
 }
 
@@ -894,11 +1068,11 @@ func TestWeakNet_WN001_BasicReconnectFullSync(t *testing.T) {
 	t.Logf("WN-001: created conversation %s", convID)
 
 	// Send 3 messages.
-	for i := 1; i <= 3; i++ {
+	for i := range 3 {
 		sendResult := env.runCLI(t,
 			"--user-id", alice, "--device-id", "dev1",
 			"send", "--conversation-id", convID,
-			"--content", fmt.Sprintf("msg%d", i),
+			"--content", fmt.Sprintf("msg%d", i+1),
 		)
 		requireExitCode(t, sendResult, 0)
 	}
@@ -917,9 +1091,11 @@ func TestWeakNet_WN001_BasicReconnectFullSync(t *testing.T) {
 		return count >= 3
 	})
 
-	// Wait for at least 1 disconnect cycle to complete before asserting
-	// connection stats. This ensures the assertion is not racy.
+	// Wait for at least 1 disconnect cycle to complete.
 	waitForServerPhase(t, env.mockServer, 1, 30*time.Second)
+
+	// Wait for daemon to reconnect after the disconnect cycle.
+	waitForTotalConnections(t, env.mockServer, 2, 15*time.Second)
 
 	// Verify mock server stats: at least 2 connections (initial + reconnect).
 	assert.GreaterOrEqual(t, env.mockServer.TotalConnections(), 2,
@@ -1016,11 +1192,11 @@ func TestWeakNet_WN003_MultipleDisconnects(t *testing.T) {
 	convID := extractConversationID(t, createResult.Stdout)
 	require.NotEmpty(t, convID, "should extract conversation ID")
 
-	for i := 1; i <= 5; i++ {
+	for i := range 5 {
 		sendResult := env.runCLI(t,
 			"--user-id", alice, "--device-id", "dev1",
 			"send", "--conversation-id", convID,
-			"--content", fmt.Sprintf("msg%d", i),
+			"--content", fmt.Sprintf("msg%d", i+1),
 		)
 		requireExitCode(t, sendResult, 0)
 	}
@@ -1077,13 +1253,13 @@ func TestWeakNet_WN004_FullSyncPagination(t *testing.T) {
 	})
 	env.mockServer.SeedUpdate(alice, protocol.UpdateTypeConversation, convPayload)
 
-	for i := 1; i <= 149; i++ {
+	for i := range 149 {
 		msgPayload, _ := json.Marshal(map[string]any{
 			"ID":              uuid.New().String(),
 			"ConversationID":  convID,
-			"Content":         fmt.Sprintf("seeded-msg-%d", i),
+			"Content":         fmt.Sprintf("seeded-msg-%d", i+1),
 			"SenderID":        alice,
-			"MessageID":       uint32(i),
+			"MessageID":       uint32(i + 1),
 			"ClientMessageID": uuid.New().String(),
 			"Type":            "text",
 			"Status":          "sent",
@@ -1352,13 +1528,13 @@ func TestWeakNet_WN009_FullSyncPaginationInterrupted(t *testing.T) {
 	})
 	env.mockServer.SeedUpdate(alice, protocol.UpdateTypeConversation, convPayload)
 
-	for i := 1; i <= 249; i++ {
+	for i := range 249 {
 		msgPayload, _ := json.Marshal(map[string]any{
 			"ID":              uuid.New().String(),
 			"ConversationID":  convID,
-			"Content":         fmt.Sprintf("seeded-%d", i),
+			"Content":         fmt.Sprintf("seeded-%d", i+1),
 			"SenderID":        alice,
-			"MessageID":       uint32(i + 1),
+			"MessageID":       uint32(i + 2),
 			"ClientMessageID": uuid.New().String(),
 			"Type":            "text",
 			"Status":          "sent",
@@ -1445,11 +1621,11 @@ func TestWeakNet_WN010_DeleteMessageDuringWeakNet(t *testing.T) {
 	t.Logf("WN-010: created conversation %s", convID)
 
 	// Send 2 messages.
-	for i := 1; i <= 2; i++ {
+	for i := range 2 {
 		sendResult := env.runCLI(t,
 			"--user-id", alice, "--device-id", "dev1",
 			"send", "--conversation-id", convID,
-			"--content", fmt.Sprintf("msg%d", i),
+			"--content", fmt.Sprintf("msg%d", i+1),
 		)
 		requireExitCode(t, sendResult, 0)
 	}
@@ -1697,4 +1873,791 @@ func TestWeakNet_WN012_ServerUnavailableAtStartup(t *testing.T) {
 		"should have at least 1 successful connection after server comes online")
 	t.Logf("WN-012: total connections=%d, disconnects=%d",
 		totalConns, env.mockServer.DisconnectCount())
+}
+
+// ---------------------------------------------------------------------------
+// weakNetDaemon — daemon wrapper with stdout capture for ephemeral events
+// ---------------------------------------------------------------------------
+
+// weakNetDaemon wraps daemonProcess with stdout capture for ephemeral event verification.
+type weakNetDaemon struct {
+	*daemonProcess
+	stdoutLines chan string   // buffered channel of stdout lines
+	stdoutDone  chan struct{} // closed when stdout goroutine exits
+}
+
+// startWeakNetDaemonWithStdout starts the daemon with stdout capture for
+// ephemeral event verification (typing/streaming output lines).
+func (env *weakNetTestEnv) startWeakNetDaemonWithStdout(t *testing.T, userID, deviceID string) *weakNetDaemon {
+	t.Helper()
+	userDir := env.userDir(userID, deviceID)
+	require.NoError(t, os.MkdirAll(userDir, 0700), "create user dir")
+
+	socketPath := env.socketPathFor(userID, deviceID)
+
+	cmd := exec.Command(env.binaryPath, "listen",
+		"--user-id", userID,
+		"--device-id", deviceID,
+		"--server", env.mockServer.URL(),
+	)
+
+	// Build env with test reconnect delays injected (D-048).
+	envVars := env.buildEnv()
+	envVars = append(envVars,
+		"XYNCRA_TEST_RECONNECT_BASE_DELAY=100ms",
+		"XYNCRA_TEST_RECONNECT_MAX_DELAY=500ms",
+	)
+	cmd.Env = envVars
+
+	// Capture stdout via pipe for ephemeral event verification.
+	stdoutPipe, err := cmd.StdoutPipe()
+	require.NoError(t, err, "create stdout pipe")
+
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+
+	require.NoError(t, cmd.Start(), "start weak net daemon with stdout")
+
+	// Read stdout lines into a buffered channel.
+	stdoutLines := make(chan string, 100)
+	stdoutDone := make(chan struct{})
+	go func() {
+		defer close(stdoutDone)
+		defer close(stdoutLines)
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			line := scanner.Text()
+			select {
+			case stdoutLines <- line:
+			default:
+				// Drop line if channel is full (shouldn't happen with buffer=100)
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "weaknet daemon stdout scanner error: %v\n", err)
+		}
+	}()
+
+	dp := &daemonProcess{
+		cmd:        cmd,
+		socketPath: socketPath,
+		homeDir:    env.tempHome,
+		userID:     userID,
+		deviceID:   deviceID,
+	}
+
+	// Wait for the IPC socket to appear.
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer waitCancel()
+	if err := waitForSocket(waitCtx, socketPath); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("daemon stdout socket did not appear at %s: %v\ndaemon stderr:\n%s",
+			socketPath, err, stderrBuf.String())
+	}
+
+	t.Cleanup(func() {
+		t.Logf("weak net daemon (stdout) stderr for %s:\n%s", userID, stderrBuf.String())
+	})
+
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		done := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
+	})
+
+	return &weakNetDaemon{
+		daemonProcess: dp,
+		stdoutLines:   stdoutLines,
+		stdoutDone:    stdoutDone,
+	}
+}
+
+// waitForStdoutLine waits for a stdout line containing the given substring.
+// Returns the matching line or fails the test after timeout.
+func waitForStdoutLine(t *testing.T, d *weakNetDaemon, substring string, timeout time.Duration) string {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case line, ok := <-d.stdoutLines:
+			if !ok {
+				t.Fatalf("stdout channel closed while waiting for %q", substring)
+			}
+			if strings.Contains(line, substring) {
+				return line
+			}
+		case <-timer.C:
+			t.Fatalf("timeout waiting for stdout line containing %q (%s)", substring, timeout)
+			return "" // unreachable, but satisfies compiler
+		}
+	}
+}
+
+// expectNoStdoutLine waits for the given duration and fails if a matching
+// stdout line appears. Used to verify ephemeral events are NOT received.
+//
+// WARNING: non-matching lines are consumed and discarded from the channel.
+// Do not call this before other assertions that depend on reading from
+// the same stdout channel.
+func expectNoStdoutLine(t *testing.T, d *weakNetDaemon, substring string, wait time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	for {
+		select {
+		case line, ok := <-d.stdoutLines:
+			if !ok {
+				return // channel closed, no matching line found
+			}
+			if strings.Contains(line, substring) {
+				t.Fatalf("unexpected stdout line containing %q: %s", substring, line)
+			}
+		case <-timer.C:
+			return // OK — no matching line within wait period
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Typing weak-network tests (D-050, D-036)
+// ---------------------------------------------------------------------------
+
+// TestWeakNet_WNT001_TypingDuringOnlinePhase verifies that typing indicators
+// are broadcast to all conversation members (including the sender, D-050)
+// during a stable online phase.
+func TestWeakNet_WNT001_TypingDuringOnlinePhase(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  10 * time.Second,
+		offlineDuration: 2 * time.Second,
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+
+	aliceDaemon := env.startWeakNetDaemonWithStdout(t, alice, "dev1")
+	defer requireStopDaemon(t, aliceDaemon.daemonProcess)
+	bobDaemon := env.startWeakNetDaemonWithStdout(t, bob, "dev2")
+	defer requireStopDaemon(t, bobDaemon.daemonProcess)
+
+	// Wait for both daemons to connect.
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	// Create conversation.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+
+	// Alice starts typing.
+	typingResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"set-typing", "--conversation-id", convID, "--user-id", alice,
+	)
+	requireExitCode(t, typingResult, 0)
+
+	// D-050: sender (alice) also receives the typing event.
+	waitForStdoutLine(t, aliceDaemon, "[typing]", 5*time.Second)
+	// Bob also receives the typing event.
+	waitForStdoutLine(t, bobDaemon, "[typing]", 5*time.Second)
+}
+
+// TestWeakNet_WNT002_TypingDuringDisconnect_LostEvent verifies that typing
+// indicators sent during a disconnect cycle are lost (fire-and-forget, D-007).
+func TestWeakNet_WNT002_TypingDuringDisconnect_LostEvent(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  3 * time.Second,
+		offlineDuration: 5 * time.Second,
+		rejectOnOffline: true, // reject connections during offline to ensure CLI fails
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+
+	aliceDaemon := env.startWeakNetDaemonWithStdout(t, alice, "dev1")
+	defer requireStopDaemon(t, aliceDaemon.daemonProcess)
+	bobDaemon := env.startWeakNetDaemonWithStdout(t, bob, "dev2")
+	defer requireStopDaemon(t, bobDaemon.daemonProcess)
+
+	// Wait for both daemons to connect.
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	// Create conversation.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+
+	// Wait for first disconnect cycle (server goes offline).
+	waitForServerPhase(t, env.mockServer, 1, 10*time.Second)
+
+	// Wait for WS connections to fully close before sending (avoid race).
+	time.Sleep(500 * time.Millisecond)
+
+	// Bob tries to set-typing during disconnect. IPC succeeds (daemon is
+	// running), but the daemon's WS RPC fails (server offline, rejectOnOffline).
+	typingResult := env.runCLI(t,
+		"--user-id", bob, "--device-id", "dev2",
+		"set-typing", "--conversation-id", convID, "--user-id", bob,
+	)
+	t.Logf("WNT-002: set-typing during disconnect: exit=%d stderr=%s",
+		typingResult.ExitCode, typingResult.Stderr)
+	assert.NotEqual(t, 0, typingResult.ExitCode, "set-typing should fail during disconnect")
+
+	// Alice should NOT receive any typing event.
+	expectNoStdoutLine(t, aliceDaemon, "[typing]", 3*time.Second)
+}
+
+// TestWeakNet_WNT003_TypingAfterReconnect_ResumeBroadcast verifies that
+// typing indicators work again after a disconnect-reconnect cycle.
+func TestWeakNet_WNT003_TypingAfterReconnect_ResumeBroadcast(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  3 * time.Second,
+		offlineDuration: 2 * time.Second,
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+
+	aliceDaemon := env.startWeakNetDaemonWithStdout(t, alice, "dev1")
+	defer requireStopDaemon(t, aliceDaemon.daemonProcess)
+	bobDaemon := env.startWeakNetDaemonWithStdout(t, bob, "dev2")
+	defer requireStopDaemon(t, bobDaemon.daemonProcess)
+
+	// Wait for both daemons to connect.
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	// Create conversation.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+
+	// Wait for one disconnect-reconnect cycle.
+	waitForServerPhase(t, env.mockServer, 1, 10*time.Second)
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	// Bob starts typing after reconnect.
+	typingResult := env.runCLI(t,
+		"--user-id", bob, "--device-id", "dev2",
+		"set-typing", "--conversation-id", convID, "--user-id", bob,
+	)
+	requireExitCode(t, typingResult, 0)
+
+	// Alice receives the typing event.
+	waitForStdoutLine(t, aliceDaemon, "[typing]", 5*time.Second)
+	// D-050: Bob also receives his own typing event.
+	waitForStdoutLine(t, bobDaemon, "[typing]", 5*time.Second)
+}
+
+// TestWeakNet_WNT004_TypingDaemonSurvivesDisconnect verifies that the daemon
+// survives multiple disconnect-reconnect cycles and can still send typing
+// indicators afterwards (D-044).
+func TestWeakNet_WNT004_TypingDaemonSurvivesDisconnect(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  2 * time.Second,
+		offlineDuration: 2 * time.Second,
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+
+	aliceDaemon := env.startWeakNetDaemonWithStdout(t, alice, "dev1")
+	defer requireStopDaemon(t, aliceDaemon.daemonProcess)
+
+	// Wait for alice to connect.
+	waitForConnection(t, env.mockServer, 1, 10*time.Second)
+
+	// Create conversation.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+
+	// Wait for 3 disconnect-reconnect cycles.
+	waitForServerPhase(t, env.mockServer, 3, 30*time.Second)
+	waitForConnection(t, env.mockServer, 1, 10*time.Second)
+
+	// Alice starts typing.
+	startResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"set-typing", "--conversation-id", convID, "--user-id", alice,
+	)
+	requireExitCode(t, startResult, 0)
+
+	// Verify daemon received the typing event via stdout (D-050).
+	waitForStdoutLine(t, aliceDaemon, "started typing", 5*time.Second)
+
+	// Alice stops typing.
+	stopResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"set-typing", "--conversation-id", convID, "--stop", "--user-id", alice,
+	)
+	requireExitCode(t, stopResult, 0)
+
+	// Verify daemon received the stop-typing event via stdout (D-050).
+	waitForStdoutLine(t, aliceDaemon, "stopped typing", 5*time.Second)
+}
+
+// TestWeakNet_WNT005_StopTypingDuringWeakNet verifies that stop-typing works
+// after a disconnect-reconnect cycle.
+func TestWeakNet_WNT005_StopTypingDuringWeakNet(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  5 * time.Second,
+		offlineDuration: 3 * time.Second,
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+
+	aliceDaemon := env.startWeakNetDaemonWithStdout(t, alice, "dev1")
+	defer requireStopDaemon(t, aliceDaemon.daemonProcess)
+	bobDaemon := env.startWeakNetDaemonWithStdout(t, bob, "dev2")
+	defer requireStopDaemon(t, bobDaemon.daemonProcess)
+
+	// Wait for both daemons to connect.
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	// Create conversation.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+
+	// Alice starts typing (online).
+	startResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"set-typing", "--conversation-id", convID, "--user-id", alice,
+	)
+	requireExitCode(t, startResult, 0)
+
+	// Bob receives started typing.
+	waitForStdoutLine(t, bobDaemon, "started typing", 5*time.Second)
+	// D-050: Alice (sender) also receives her own typing event.
+	waitForStdoutLine(t, aliceDaemon, "started typing", 5*time.Second)
+
+	// Wait for disconnect + reconnect.
+	waitForServerPhase(t, env.mockServer, 1, 10*time.Second)
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	// Alice stops typing (after reconnect).
+	stopResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"set-typing", "--conversation-id", convID, "--stop", "--user-id", alice,
+	)
+	requireExitCode(t, stopResult, 0)
+
+	// Bob receives stopped typing.
+	waitForStdoutLine(t, bobDaemon, "stopped typing", 5*time.Second)
+	// D-050: Alice (sender) also receives her own stop-typing event.
+	waitForStdoutLine(t, aliceDaemon, "stopped typing", 5*time.Second)
+}
+
+// TestWeakNet_WNT006_TypingMultiDisconnectCycle verifies that typing
+// indicators work correctly across multiple disconnect-reconnect cycles.
+func TestWeakNet_WNT006_TypingMultiDisconnectCycle(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  3 * time.Second,
+		offlineDuration: 2 * time.Second,
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+
+	aliceDaemon := env.startWeakNetDaemonWithStdout(t, alice, "dev1")
+	defer requireStopDaemon(t, aliceDaemon.daemonProcess)
+	bobDaemon := env.startWeakNetDaemonWithStdout(t, bob, "dev2")
+	defer requireStopDaemon(t, bobDaemon.daemonProcess)
+
+	// Wait for both daemons to connect.
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	// Create conversation.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+
+	// Loop 3 times: send typing, verify, wait for disconnect.
+	for i := range 3 {
+		// Wait for connection (online phase).
+		waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+		// Alice sends typing.
+		typingResult := env.runCLI(t,
+			"--user-id", alice, "--device-id", "dev1",
+			"set-typing", "--conversation-id", convID, "--user-id", alice,
+		)
+		requireExitCode(t, typingResult, 0)
+
+		// Bob receives typing.
+		waitForStdoutLine(t, bobDaemon, "[typing]", 5*time.Second)
+
+		// Wait for a disconnect cycle.
+		waitForServerPhase(t, env.mockServer, i+1, 15*time.Second)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Streaming weak-network tests (D-050, D-051, D-036)
+// ---------------------------------------------------------------------------
+
+// TestWeakNet_WNS001_StreamingDuringOnlinePhase verifies that streaming text
+// is broadcast to all conversation members during a stable online phase.
+func TestWeakNet_WNS001_StreamingDuringOnlinePhase(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  10 * time.Second,
+		offlineDuration: 2 * time.Second,
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+
+	aliceDaemon := env.startWeakNetDaemonWithStdout(t, alice, "dev1")
+	defer requireStopDaemon(t, aliceDaemon.daemonProcess)
+	bobDaemon := env.startWeakNetDaemonWithStdout(t, bob, "dev2")
+	defer requireStopDaemon(t, bobDaemon.daemonProcess)
+
+	// Wait for both daemons to connect.
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	// Create conversation.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+
+	streamID := uuid.New().String()
+
+	// Alice streams text.
+	streamResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"stream-text", "--conversation-id", convID,
+		"--stream-id", streamID, "--text", "Hello", "--user-id", alice,
+	)
+	requireExitCode(t, streamResult, 0)
+
+	// Alice receives her own streaming event (D-050).
+	waitForStdoutLine(t, aliceDaemon, "[streaming]", 5*time.Second)
+	// Bob receives the streaming event.
+	bobLine := waitForStdoutLine(t, bobDaemon, "[streaming]", 5*time.Second)
+	assert.Contains(t, bobLine, "Hello", "bob should receive the streamed text")
+}
+
+// TestWeakNet_WNS002_StreamingFramesDuringDisconnect verifies that streaming
+// frames sent during a disconnect are lost (fire-and-forget, D-007).
+func TestWeakNet_WNS002_StreamingFramesDuringDisconnect(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  3 * time.Second,
+		offlineDuration: 5 * time.Second,
+		rejectOnOffline: true, // reject connections during offline to ensure CLI fails
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+
+	aliceDaemon := env.startWeakNetDaemonWithStdout(t, alice, "dev1")
+	defer requireStopDaemon(t, aliceDaemon.daemonProcess)
+	bobDaemon := env.startWeakNetDaemonWithStdout(t, bob, "dev2")
+	defer requireStopDaemon(t, bobDaemon.daemonProcess)
+
+	// Wait for both daemons to connect.
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	// Create conversation.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+
+	// Send 2 frames during online phase.
+	for i, text := range []string{"frame1", "frame2"} {
+		streamResult := env.runCLI(t,
+			"--user-id", alice, "--device-id", "dev1",
+			"stream-text", "--conversation-id", convID,
+			"--stream-id", fmt.Sprintf("s-%d", i), "--text", text, "--user-id", alice,
+		)
+		requireExitCode(t, streamResult, 0)
+	}
+
+	// Bob should receive both frames.
+	waitForStdoutLine(t, bobDaemon, "frame1", 5*time.Second)
+	waitForStdoutLine(t, bobDaemon, "frame2", 5*time.Second)
+
+	// Drain alice daemon lines (she also received the events).
+	_ = aliceDaemon
+
+	// Wait for disconnect.
+	waitForServerPhase(t, env.mockServer, 1, 10*time.Second)
+
+	// Wait for WS connections to fully close before sending (avoid race).
+	time.Sleep(500 * time.Millisecond)
+
+	// Alice tries to stream during disconnect. Should fail.
+	streamResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"stream-text", "--conversation-id", convID,
+		"--stream-id", "s-offline", "--text", "lost", "--user-id", alice,
+	)
+	t.Logf("WNS-002: stream during disconnect: exit=%d stderr=%s",
+		streamResult.ExitCode, streamResult.Stderr)
+	assert.NotEqual(t, 0, streamResult.ExitCode, "stream-text should fail during disconnect")
+
+	// Bob should NOT receive any new streaming events.
+	expectNoStdoutLine(t, bobDaemon, "[streaming]", 3*time.Second)
+}
+
+// TestWeakNet_WNS003_StreamingDoneThenSendMessage verifies the D-052 two-step
+// finish protocol: first stream-text --done, then send.
+func TestWeakNet_WNS003_StreamingDoneThenSendMessage(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  10 * time.Second,
+		offlineDuration: 2 * time.Second,
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+
+	aliceDaemon := env.startWeakNetDaemonWithStdout(t, alice, "dev1")
+	defer requireStopDaemon(t, aliceDaemon.daemonProcess)
+	bobDaemon := env.startWeakNetDaemonWithStdout(t, bob, "dev2")
+	defer requireStopDaemon(t, bobDaemon.daemonProcess)
+
+	// Wait for both daemons to connect.
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	// Create conversation.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+
+	streamID := uuid.New().String()
+
+	// Step 1: stream-text --done (D-052).
+	doneResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"stream-text", "--conversation-id", convID,
+		"--stream-id", streamID, "--text", "Final", "--done", "--user-id", alice,
+	)
+	requireExitCode(t, doneResult, 0)
+
+	// Bob receives status=done.
+	bobLine := waitForStdoutLine(t, bobDaemon, "status=done", 5*time.Second)
+	assert.Contains(t, bobLine, "Final", "bob should receive the done text")
+
+	// Drain alice daemon lines.
+	_ = aliceDaemon
+
+	// Step 2: send message to persist (D-052).
+	sendResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"send", "--conversation-id", convID,
+		"--content", "Final message",
+	)
+	requireExitCode(t, sendResult, 0)
+
+	// Verify alice's local DB contains the message (D-035: sent messages
+	// are persisted locally by the sender's daemon).
+	aliceDBPath := env.dbPathFor(alice, "dev1")
+	waitForSync(t, aliceDBPath, 15*time.Second, func(db *clientstore.ClientDB) bool {
+		count, _ := db.Messages.CountUnread(context.Background(), convID, 0)
+		return count >= 1
+	})
+}
+
+// TestWeakNet_WNS004_StreamingAfterReconnect verifies that streaming text
+// works again after a disconnect-reconnect cycle.
+func TestWeakNet_WNS004_StreamingAfterReconnect(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  3 * time.Second,
+		offlineDuration: 2 * time.Second,
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+
+	aliceDaemon := env.startWeakNetDaemonWithStdout(t, alice, "dev1")
+	defer requireStopDaemon(t, aliceDaemon.daemonProcess)
+	bobDaemon := env.startWeakNetDaemonWithStdout(t, bob, "dev2")
+	defer requireStopDaemon(t, bobDaemon.daemonProcess)
+
+	// Wait for both daemons to connect.
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	// Create conversation.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+
+	// Wait for one disconnect-reconnect cycle.
+	waitForServerPhase(t, env.mockServer, 1, 10*time.Second)
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	streamID := uuid.New().String()
+
+	// Alice streams text after reconnect.
+	streamResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"stream-text", "--conversation-id", convID,
+		"--stream-id", streamID, "--text", "After reconnect", "--user-id", alice,
+	)
+	requireExitCode(t, streamResult, 0)
+
+	// Bob receives the streaming event.
+	bobLine := waitForStdoutLine(t, bobDaemon, "[streaming]", 5*time.Second)
+	assert.Contains(t, bobLine, "After reconnect", "bob should receive the streamed text")
+
+	// Drain alice daemon lines.
+	_ = aliceDaemon
+}
+
+// TestWeakNet_WNS005_StreamingCumulativeText verifies the cumulative text
+// pattern (D-051): each frame contains the complete text snapshot.
+func TestWeakNet_WNS005_StreamingCumulativeText(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  10 * time.Second,
+		offlineDuration: 2 * time.Second,
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+
+	aliceDaemon := env.startWeakNetDaemonWithStdout(t, alice, "dev1")
+	defer requireStopDaemon(t, aliceDaemon.daemonProcess)
+	bobDaemon := env.startWeakNetDaemonWithStdout(t, bob, "dev2")
+	defer requireStopDaemon(t, bobDaemon.daemonProcess)
+
+	// Wait for both daemons to connect.
+	waitForConnection(t, env.mockServer, 2, 10*time.Second)
+
+	// Create conversation.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+
+	streamID := uuid.New().String()
+
+	// Send 3 frames with cumulative text.
+	for _, text := range []string{"H", "He", "Hello"} {
+		streamResult := env.runCLI(t,
+			"--user-id", alice, "--device-id", "dev1",
+			"stream-text", "--conversation-id", convID,
+			"--stream-id", streamID, "--text", text, "--user-id", alice,
+		)
+		requireExitCode(t, streamResult, 0)
+	}
+
+	// Bob should receive all 3 frames with the correct text.
+	waitForStdoutLine(t, bobDaemon, "H", 5*time.Second)
+	waitForStdoutLine(t, bobDaemon, "He", 5*time.Second)
+	waitForStdoutLine(t, bobDaemon, "Hello", 5*time.Second)
+
+	// Drain alice daemon lines.
+	_ = aliceDaemon
+}
+
+// TestWeakNet_WNS006_StreamingDaemonSurvivesRapidDisconnect verifies that
+// the daemon survives rapid disconnect-reconnect cycles and can still stream
+// text afterwards (D-044).
+func TestWeakNet_WNS006_StreamingDaemonSurvivesRapidDisconnect(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  2 * time.Second,
+		offlineDuration: 2 * time.Second,
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+
+	aliceDaemon := env.startWeakNetDaemonWithStdout(t, alice, "dev1")
+	defer requireStopDaemon(t, aliceDaemon.daemonProcess)
+
+	// Wait for alice to connect.
+	waitForConnection(t, env.mockServer, 1, 10*time.Second)
+
+	// Create conversation.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+
+	// Wait for 3 rapid disconnect-reconnect cycles.
+	waitForServerPhase(t, env.mockServer, 3, 30*time.Second)
+	waitForConnection(t, env.mockServer, 1, 10*time.Second)
+
+	streamID := uuid.New().String()
+
+	// Alice streams text after rapid disconnects.
+	streamResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"stream-text", "--conversation-id", convID,
+		"--stream-id", streamID, "--text", "Survived", "--user-id", alice,
+	)
+	requireExitCode(t, streamResult, 0)
+
+	// Verify alice's daemon printed the streaming event to stdout.
+	waitForStdoutLine(t, aliceDaemon, "[streaming]", 5*time.Second)
 }
