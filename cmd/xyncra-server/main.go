@@ -35,6 +35,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PineappleBond/xyncra-server/internal/agent"
 	"github.com/PineappleBond/xyncra-server/internal/cleanup"
 	"github.com/PineappleBond/xyncra-server/internal/handler"
 	"github.com/PineappleBond/xyncra-server/internal/mq"
@@ -145,6 +146,16 @@ func main() {
 	// ---------------------------------------------------------------
 
 	msgHandler := server.NewDefaultMessageHandler()
+
+	// ---------------------------------------------------------------
+	// Agent Registry
+	// ---------------------------------------------------------------
+
+	agentRegistry := agent.NewRegistry()
+	if err := agentRegistry.Load(agent.AgentConfigs); err != nil {
+		log.Fatalf("failed to load agent configurations: %v", err)
+	}
+	log.Printf("loaded %d agent configuration(s)", agentRegistry.Count())
 
 	// ---------------------------------------------------------------
 	// WebSocket Server
