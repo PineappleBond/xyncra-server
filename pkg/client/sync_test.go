@@ -1639,3 +1639,281 @@ func TestApplyUpdates_BatchWithMixedEphemeralAndNormal(t *testing.T) {
 		t.Errorf("LastReadMessageID1: got=%d want=1", gotConv.LastReadMessageID1)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// D-051: Client-side streaming text sync pipeline tests
+// ---------------------------------------------------------------------------
+
+// TestApplyUpdate_StreamingEphemeral_BypassesPersistence verifies that a Seq=0
+// streaming update bypasses persistence, does not advance localMaxSeq, leaves
+// the NotificationLog untouched, and is dispatched to the StreamingHandler.
+func TestApplyUpdate_StreamingEphemeral_BypassesPersistence(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Construct a streaming ephemeral update (Seq=0).
+	streamPayload := json.RawMessage(`{"stream_id":"s1","user_id":"alice","conversation_id":"conv1","text":"hello","is_done":false,"timestamp":1234567890}`)
+	update := newTestUpdate(0, protocol.UpdateTypeStreaming, streamPayload)
+
+	if err := sm.ApplyUpdate(ctx, &update); err != nil {
+		t.Fatalf("ApplyUpdate ephemeral streaming: unexpected error: %v", err)
+	}
+
+	// Verify handler was notified.
+	handler.mu.Lock()
+	if len(handler.streamings) != 1 {
+		t.Fatalf("handler streamings count: got=%d want=1", len(handler.streamings))
+	}
+	if handler.streamings[0].userID != "alice" {
+		t.Errorf("handler streaming userID: got=%q want=%q", handler.streamings[0].userID, "alice")
+	}
+	if handler.streamings[0].conversationID != "conv1" {
+		t.Errorf("handler streaming conversationID: got=%q want=%q", handler.streamings[0].conversationID, "conv1")
+	}
+	if handler.streamings[0].streamID != "s1" {
+		t.Errorf("handler streaming streamID: got=%q want=%q", handler.streamings[0].streamID, "s1")
+	}
+	if handler.streamings[0].text != "hello" {
+		t.Errorf("handler streaming text: got=%q want=%q", handler.streamings[0].text, "hello")
+	}
+	if handler.streamings[0].isDone != false {
+		t.Errorf("handler streaming isDone: got=%v want=false", handler.streamings[0].isDone)
+	}
+	handler.mu.Unlock()
+
+	// Verify localMaxSeq was NOT advanced.
+	assertSyncState(t, db, "local_max_seq", 0)
+
+	// Verify NotificationLog has no new records.
+	logs, err := db.NotificationLogs.ListBySeqRange(ctx, 0, 10)
+	if err != nil {
+		t.Fatalf("list notification logs: %v", err)
+	}
+	if len(logs) != 0 {
+		t.Errorf("notification log should be empty for ephemeral streaming updates, found %d entries", len(logs))
+	}
+}
+
+// TestApplyUpdate_StreamingEphemeral_NoGapDetection verifies that a Seq=0
+// streaming update does not trigger errSeqGap even when localMaxSeq is > 0.
+func TestApplyUpdate_StreamingEphemeral_NoGapDetection(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Pre-set localMaxSeq=10.
+	if err := db.SyncStates.SetLocalMaxSeq(ctx, 10); err != nil {
+		t.Fatalf("set local max seq: %v", err)
+	}
+
+	// Send Seq=0 streaming update — should not trigger errSeqGap.
+	streamPayload := json.RawMessage(`{"stream_id":"s2","user_id":"bob","conversation_id":"conv2","text":"world","is_done":false,"timestamp":1234567891}`)
+	update := newTestUpdate(0, protocol.UpdateTypeStreaming, streamPayload)
+
+	err := sm.ApplyUpdate(ctx, &update)
+	if err != nil {
+		t.Fatalf("ApplyUpdate ephemeral streaming after seq=10: expected nil, got: %v", err)
+	}
+
+	// Verify localMaxSeq is still 10.
+	assertSyncState(t, db, "local_max_seq", 10)
+}
+
+// TestApplyUpdate_StreamingEphemeral_DoesNotAffectSequence verifies that a
+// Seq=0 streaming update inserted between normal seq updates does not disrupt
+// the sequence continuity of subsequent normal updates.
+func TestApplyUpdate_StreamingEphemeral_DoesNotAffectSequence(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Pre-set localMaxSeq=5.
+	if err := db.SyncStates.SetLocalMaxSeq(ctx, 5); err != nil {
+		t.Fatalf("set local max seq: %v", err)
+	}
+
+	// Send Seq=0 streaming update.
+	streamPayload := json.RawMessage(`{"stream_id":"s3","user_id":"carol","conversation_id":"conv3","text":"interlude","is_done":false,"timestamp":1234567892}`)
+	ephemeral := newTestUpdate(0, protocol.UpdateTypeStreaming, streamPayload)
+	if err := sm.ApplyUpdate(ctx, &ephemeral); err != nil {
+		t.Fatalf("ApplyUpdate ephemeral streaming: %v", err)
+	}
+
+	// Now send Seq=6 normal gap update — should be accepted without gap.
+	normal := newTestUpdate(6, protocol.UpdateTypeGap, json.RawMessage(`{}`))
+	if err := sm.ApplyUpdate(ctx, &normal); err != nil {
+		t.Fatalf("ApplyUpdate seq=6 after ephemeral streaming: expected nil, got: %v", err)
+	}
+
+	// localMaxSeq should advance to 6.
+	assertSyncState(t, db, "local_max_seq", 6)
+}
+
+// TestBackwardCompat_HandlerWithoutOnStreaming verifies that when the handler
+// does not implement StreamingHandler, a streaming ephemeral update does not
+// panic and returns nil.
+func TestBackwardCompat_HandlerWithoutOnStreaming(t *testing.T) {
+	db := newTestStore(t)
+	// plainHandler only implements UpdateHandler, not StreamingHandler.
+	handler := &plainHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	streamPayload := json.RawMessage(`{"stream_id":"s4","user_id":"dave","conversation_id":"conv4","text":"test","is_done":false,"timestamp":1234567893}`)
+	update := newTestUpdate(0, protocol.UpdateTypeStreaming, streamPayload)
+
+	// Should not panic and should return nil.
+	err := sm.ApplyUpdate(ctx, &update)
+	if err != nil {
+		t.Fatalf("ApplyUpdate ephemeral streaming with non-StreamingHandler: expected nil, got: %v", err)
+	}
+}
+
+// plainHandler implements only UpdateHandler (not StreamingHandler or TypingHandler),
+// used to test backward compatibility.
+type plainHandler struct {
+	mu sync.Mutex
+}
+
+func (h *plainHandler) OnMessage(ctx context.Context, msg *model.Message) error { return nil }
+func (h *plainHandler) OnDeleteMessage(ctx context.Context, messageID, conversationID string) error {
+	return nil
+}
+func (h *plainHandler) OnMarkRead(ctx context.Context, conversationID string, messageID uint32) error {
+	return nil
+}
+func (h *plainHandler) OnConversation(ctx context.Context, conv *model.Conversation) error {
+	return nil
+}
+func (h *plainHandler) OnGap(ctx context.Context, seq uint32) error { return nil }
+
+// TestApplyUpdates_BatchWithMixedStreamingAndNormal verifies that a batch
+// containing both streaming (Seq=0) and normal updates processes them
+// correctly: streaming events dispatched to OnStreaming, normal events
+// processed in order, and localMaxSeq advances to the highest normal seq.
+func TestApplyUpdates_BatchWithMixedStreamingAndNormal(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Pre-create conversation for the message update.
+	now := time.Now().Truncate(time.Second)
+	conv := &model.Conversation{
+		ID:        "conv-mixed-stream",
+		UserID1:   "test-user",
+		UserID2:   "other-user",
+		Type:      "1-on-1",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+
+	// Build the mixed batch: [Seq=0 streaming, Seq=1 message, Seq=0 streaming, Seq=2 gap].
+	streamPayload1 := json.RawMessage(`{"stream_id":"s5","user_id":"eve","conversation_id":"conv-mixed-stream","text":"partial","is_done":false,"timestamp":1234567894}`)
+
+	msg := model.Message{
+		ID:              "msg-mixed-stream-1",
+		ClientMessageID: "cmid-mixed-stream-1",
+		ConversationID:  "conv-mixed-stream",
+		MessageID:       1,
+		SenderID:        "other-user",
+		Content:         "mixed stream msg",
+		Type:            "text",
+		Status:          "sent",
+		CreatedAt:       now,
+	}
+	msgPayload, _ := json.Marshal(msg)
+
+	streamPayload2 := json.RawMessage(`{"stream_id":"s5","user_id":"eve","conversation_id":"conv-mixed-stream","text":"partial complete","is_done":true,"timestamp":1234567895}`)
+
+	updates := []protocol.PackageDataUpdate{
+		newTestUpdate(0, protocol.UpdateTypeStreaming, streamPayload1),
+		newTestUpdate(1, protocol.UpdateTypeMessage, msgPayload),
+		newTestUpdate(0, protocol.UpdateTypeStreaming, streamPayload2),
+		newTestUpdate(2, protocol.UpdateTypeGap, json.RawMessage(`{}`)),
+	}
+
+	if err := sm.ApplyUpdates(ctx, updates); err != nil {
+		t.Fatalf("ApplyUpdates mixed streaming+normal batch: %v", err)
+	}
+
+	// Verify: 2 streaming events dispatched.
+	handler.mu.Lock()
+	if len(handler.streamings) != 2 {
+		t.Errorf("handler streamings count: got=%d want=2", len(handler.streamings))
+	} else {
+		if handler.streamings[0].userID != "eve" || handler.streamings[0].text != "partial" || handler.streamings[0].isDone != false {
+			t.Errorf("first streaming: got userID=%q text=%q isDone=%v, want eve/partial/false",
+				handler.streamings[0].userID, handler.streamings[0].text, handler.streamings[0].isDone)
+		}
+		if handler.streamings[1].userID != "eve" || handler.streamings[1].text != "partial complete" || handler.streamings[1].isDone != true {
+			t.Errorf("second streaming: got userID=%q text=%q isDone=%v, want eve/partial complete/true",
+				handler.streamings[1].userID, handler.streamings[1].text, handler.streamings[1].isDone)
+		}
+	}
+
+	// Verify: 1 message received.
+	if len(handler.messages) != 1 {
+		t.Errorf("handler messages count: got=%d want=1", len(handler.messages))
+	}
+
+	// Verify: 1 gap received.
+	if len(handler.gaps) != 1 || handler.gaps[0] != 2 {
+		t.Errorf("handler gaps: got=%v want=[2]", handler.gaps)
+	}
+	handler.mu.Unlock()
+
+	// Verify: localMaxSeq advanced to 2 (highest normal seq).
+	assertSyncState(t, db, "local_max_seq", 2)
+
+	// Verify: message persisted.
+	got, err := db.Messages.Get(ctx, "msg-mixed-stream-1")
+	if err != nil {
+		t.Fatalf("get persisted message: %v", err)
+	}
+	if got.Content != "mixed stream msg" {
+		t.Errorf("persisted message content: got=%q want=%q", got.Content, "mixed stream msg")
+	}
+}

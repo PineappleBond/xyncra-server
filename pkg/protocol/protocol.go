@@ -25,6 +25,7 @@ const (
 	UpdateTypeConversation  = "conversation"   // Conversation state change (delete/restore)
 	UpdateTypeGap           = "gap"            // Synthetic gap filler (runtime only, never persisted)
 	UpdateTypeTyping        = "typing"         // ephemeral: Seq=0, never persisted, never pulled
+	UpdateTypeStreaming     = "streaming"      // ephemeral: Seq=0, cumulative text streaming
 )
 
 // Package is the top-level message envelope for the WebSocket protocol.

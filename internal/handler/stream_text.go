@@ -18,23 +18,27 @@ import (
 // Request / response types
 // --------------------------------------------------------------------------
 
-// setTypingParams is the JSON-decoded representation of the client-supplied
-// parameters for the "set_typing" method.
-type setTypingParams struct {
+// streamTextParams is the JSON-decoded representation of the client-supplied
+// parameters for the "stream_text" method.
+type streamTextParams struct {
 	ConversationID string `json:"conversation_id"`
-	IsTyping       bool   `json:"is_typing"`
+	StreamID       string `json:"stream_id"`
+	Text           string `json:"text"`
+	IsDone         bool   `json:"is_done"`
 }
 
-// setTypingResponse is the success response payload returned to the client.
-type setTypingResponse struct {
+// streamTextResponse is the success response payload returned to the client.
+type streamTextResponse struct {
 	Status string `json:"status"`
 }
 
-// typingBroadcastPayload is the JSON payload embedded in the typing update.
-type typingBroadcastPayload struct {
+// streamingBroadcastPayload is the JSON payload embedded in the streaming update.
+type streamingBroadcastPayload struct {
+	StreamID       string `json:"stream_id"`
 	UserID         string `json:"user_id"`
 	ConversationID string `json:"conversation_id"`
-	IsTyping       bool   `json:"is_typing"`
+	Text           string `json:"text"`
+	IsDone         bool   `json:"is_done"`
 	Timestamp      int64  `json:"timestamp"`
 }
 
@@ -42,24 +46,20 @@ type typingBroadcastPayload struct {
 // Rate limiter (inline token bucket)
 // --------------------------------------------------------------------------
 
-// typingRateLimiter implements a simple per-user-per-conversation rate limiter
-// that allows at most one typing event per second.
-type typingRateLimiter struct {
+// streamingRateLimiter implements a per-user-per-conversation rate limiter
+// that allows at most one streaming event per 50ms (20/s).
+type streamingRateLimiter struct {
 	mu         sync.Mutex
 	lastTime   time.Time
-	lastAccess time.Time // updated on every allow() call; used for cleanup
+	lastAccess time.Time
 }
 
-// allow returns true if at least one second has elapsed since the last
-// allowed event, and records the current time as the last allowed time.
-// Every call (whether allowed or not) refreshes lastAccess so the cleanup
-// goroutine can evict stale entries.
-func (rl *typingRateLimiter) allow() bool {
+func (rl *streamingRateLimiter) allow() bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	now := time.Now()
 	rl.lastAccess = now
-	if now.Sub(rl.lastTime) < time.Second {
+	if now.Sub(rl.lastTime) < 50*time.Millisecond {
 		return false
 	}
 	rl.lastTime = now
@@ -70,22 +70,22 @@ func (rl *typingRateLimiter) allow() bool {
 // Handler
 // --------------------------------------------------------------------------
 
-// setTypingHandler implements MethodHandler for the "set_typing" method.
-// It broadcasts ephemeral typing indicators to conversation members without
-// persisting anything to the database or enqueueing to MQ (Seq=0).
-type setTypingHandler struct {
+// streamTextHandler implements MethodHandler for the "stream_text" method.
+// It broadcasts ephemeral streaming text updates to conversation members
+// without persisting anything (Seq=0, D-051).
+type streamTextHandler struct {
 	store       store.StoreAPI
 	broadcastFn func(userID string, updates *protocol.PackageDataUpdates) error
-	limiters    sync.Map // key: "userID:convID" -> *typingRateLimiter
+	limiters    sync.Map // key: "userID:convID" -> *streamingRateLimiter
 }
 
-// NewSetTypingHandler creates a setTypingHandler and starts a background
+// NewStreamTextHandler creates a streamTextHandler and starts a background
 // goroutine that periodically evicts stale rate-limit entries.
-func NewSetTypingHandler(
+func NewStreamTextHandler(
 	store store.StoreAPI,
 	broadcastFn func(userID string, updates *protocol.PackageDataUpdates) error,
-) *setTypingHandler {
-	h := &setTypingHandler{
+) *streamTextHandler {
+	h := &streamTextHandler{
 		store:       store,
 		broadcastFn: broadcastFn,
 	}
@@ -96,7 +96,7 @@ func NewSetTypingHandler(
 // cleanupLoop runs every 5 minutes and evicts rate-limit entries that have
 // not been accessed in the last 10 minutes. This prevents unbounded growth
 // of the limiters map when many ephemeral conversations are created.
-func (h *setTypingHandler) cleanupLoop() {
+func (h *streamTextHandler) cleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
@@ -106,10 +106,10 @@ func (h *setTypingHandler) cleanupLoop() {
 
 // cleanupStaleLimiters removes all rate-limit entries whose lastAccess time
 // is older than 10 minutes.
-func (h *setTypingHandler) cleanupStaleLimiters() {
+func (h *streamTextHandler) cleanupStaleLimiters() {
 	cutoff := time.Now().Add(-10 * time.Minute)
 	h.limiters.Range(func(key, value any) bool {
-		rl := value.(*typingRateLimiter)
+		rl := value.(*streamingRateLimiter)
 		rl.mu.Lock()
 		lastAccess := rl.lastAccess
 		rl.mu.Unlock()
@@ -120,22 +120,25 @@ func (h *setTypingHandler) cleanupStaleLimiters() {
 	})
 }
 
-// HandleRequest implements MethodHandler. It processes a "set_typing" RPC
+// HandleRequest implements MethodHandler. It processes a "stream_text" RPC
 // call: validates parameters, verifies the caller is a member of the
-// conversation, and broadcasts an ephemeral typing update to all members
+// conversation, and broadcasts an ephemeral streaming update to all members
 // (including the caller, D-050).
 //
 // The update uses Seq=0 so that it is never persisted, never delivered via
 // sync_updates, and silently dropped for offline users.
-func (h *setTypingHandler) HandleRequest(ctx context.Context, client *server.Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+func (h *streamTextHandler) HandleRequest(ctx context.Context, client *server.Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
 	// 1. Parse parameters.
-	var params setTypingParams
+	var params streamTextParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return nil, protocol.NewValidationError("invalid params")
 	}
 
 	if params.ConversationID == "" {
 		return nil, protocol.NewValidationError("missing required field: conversation_id")
+	}
+	if params.StreamID == "" {
+		return nil, protocol.NewValidationError("missing required field: stream_id")
 	}
 
 	// 2. Fetch conversation.
@@ -154,29 +157,31 @@ func (h *setTypingHandler) HandleRequest(ctx context.Context, client *server.Cli
 		return nil, protocol.NewPermissionDeniedError("user is not a member of the conversation")
 	}
 
-	// 4. Rate limit (per user per conversation, 1/sec).
+	// 4. Rate limit (per user per conversation, 50ms / 20/s).
 	limiterKey := callerID + ":" + params.ConversationID
-	limiterI, _ := h.limiters.LoadOrStore(limiterKey, &typingRateLimiter{})
-	limiter := limiterI.(*typingRateLimiter)
+	limiterI, _ := h.limiters.LoadOrStore(limiterKey, &streamingRateLimiter{})
+	limiter := limiterI.(*streamingRateLimiter)
 	if !limiter.allow() {
 		// Silently return OK — rate limited requests are not errors.
-		return marshalResponse(setTypingResponse{Status: "ok"})
+		return marshalResponse(streamTextResponse{Status: "ok"})
 	}
 
 	// 5. Build payload.
-	payload, err := json.Marshal(typingBroadcastPayload{
+	payload, err := json.Marshal(streamingBroadcastPayload{
+		StreamID:       params.StreamID,
 		UserID:         callerID,
 		ConversationID: params.ConversationID,
-		IsTyping:       params.IsTyping,
+		Text:           params.Text,
+		IsDone:         params.IsDone,
 		Timestamp:      time.Now().Unix(),
 	})
 	if err != nil {
-		return nil, protocol.NewInternalError(fmt.Errorf("marshal typing payload: %w", err))
+		return nil, protocol.NewInternalError(fmt.Errorf("marshal streaming payload: %w", err))
 	}
 
 	update := protocol.PackageDataUpdate{
 		Seq:     0, // ephemeral
-		Type:    protocol.UpdateTypeTyping,
+		Type:    protocol.UpdateTypeStreaming,
 		Payload: payload,
 	}
 	updates := &protocol.PackageDataUpdates{
@@ -186,10 +191,10 @@ func (h *setTypingHandler) HandleRequest(ctx context.Context, client *server.Cli
 	// 6. Broadcast to ALL members (including the caller, D-050).
 	for _, memberID := range members {
 		if err := h.broadcastFn(memberID, updates); err != nil {
-			log.Printf("set_typing: broadcast to user %s failed (fire-and-forget): %v", memberID, err)
+			log.Printf("stream_text: broadcast to user %s failed (fire-and-forget): %v", memberID, err)
 		}
 	}
 
 	// 7. Return success.
-	return marshalResponse(setTypingResponse{Status: "ok"})
+	return marshalResponse(streamTextResponse{Status: "ok"})
 }

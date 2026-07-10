@@ -211,6 +211,12 @@ type TypingHandler interface {
 	OnTyping(ctx context.Context, userID string, conversationID string, isTyping bool) error
 }
 
+// StreamingHandler is an optional interface that UpdateHandler implementations
+// may adopt to receive ephemeral streaming text updates (D-051).
+type StreamingHandler interface {
+	OnStreaming(ctx context.Context, userID string, conversationID string, streamID string, text string, isDone bool) error
+}
+
 // ---------------------------------------------------------------------------
 // clientOptions and Functional Options
 // ---------------------------------------------------------------------------

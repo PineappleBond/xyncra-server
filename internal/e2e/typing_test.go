@@ -23,8 +23,8 @@ import (
 // ---------------------------------------------------------------------------
 
 // TestTyping_OnlineRecipientReceivesEvent verifies that when Alice sends a
-// typing indicator, Bob (online) receives a push update with Seq=0 and
-// Type="typing", and Alice only receives the response (not the push).
+// typing indicator, both Bob (online) and Alice (the sender) receive a push
+// update with Seq=0 and Type="typing" (D-050: broadcast to ALL members).
 func TestTyping_OnlineRecipientReceivesEvent(t *testing.T) {
 	env := setupE2ETest(t)
 
@@ -41,7 +41,23 @@ func TestTyping_OnlineRecipientReceivesEvent(t *testing.T) {
 		"is_typing":       true,
 	})
 
-	// Alice receives response(status=ok).
+	// Alice receives typing push first (broadcast arrives before response, D-050).
+	aliceUpdates := waitForUpdate(t, aliceConn, 5*time.Second)
+	require.Len(t, aliceUpdates.Updates, 1)
+	assert.Equal(t, uint32(0), aliceUpdates.Updates[0].Seq, "typing should be Seq=0")
+	assert.Equal(t, protocol.UpdateTypeTyping, aliceUpdates.Updates[0].Type)
+
+	var alicePayload struct {
+		UserID         string `json:"user_id"`
+		ConversationID string `json:"conversation_id"`
+		IsTyping       bool   `json:"is_typing"`
+	}
+	require.NoError(t, json.Unmarshal(aliceUpdates.Updates[0].Payload, &alicePayload))
+	assert.Equal(t, "alice", alicePayload.UserID, "push should contain sender's user_id")
+	assert.Equal(t, conv.ID, alicePayload.ConversationID)
+	assert.True(t, alicePayload.IsTyping)
+
+	// Alice also receives response(status=ok).
 	resp := readResponse(t, aliceConn, 5*time.Second)
 	require.Equal(t, "req-typing-1", resp.ID)
 	require.Equal(t, protocol.ResponseCodeOK, resp.Code)
@@ -52,7 +68,7 @@ func TestTyping_OnlineRecipientReceivesEvent(t *testing.T) {
 	require.NoError(t, json.Unmarshal(resp.Data, &respData))
 	assert.Equal(t, "ok", respData.Status)
 
-	// Bob receives PackageTypeUpdates push.
+	// Bob also receives typing push (D-050: broadcast to ALL members).
 	bobUpdates := waitForUpdate(t, bobConn, 5*time.Second)
 	require.Len(t, bobUpdates.Updates, 1)
 	assert.Equal(t, uint32(0), bobUpdates.Updates[0].Seq, "typing should be Seq=0")
@@ -67,27 +83,6 @@ func TestTyping_OnlineRecipientReceivesEvent(t *testing.T) {
 	assert.Equal(t, "alice", payload.UserID)
 	assert.Equal(t, conv.ID, payload.ConversationID)
 	assert.True(t, payload.IsTyping)
-
-	// Alice should NOT receive a typing push (only the response).
-	// Wait a short time to confirm no push arrives for Alice.
-	select {
-	case r := <-aliceConn.msgCh:
-		if r.err == nil {
-			// If we got a message, it should NOT be a typing update.
-			var pkg protocol.Package
-			if err := json.Unmarshal(r.data, &pkg); err == nil && pkg.Type == protocol.PackageTypeUpdates {
-				var updates protocol.PackageDataUpdates
-				if err := json.Unmarshal(pkg.Data, &updates); err == nil {
-					for _, u := range updates.Updates {
-						assert.NotEqual(t, protocol.UpdateTypeTyping, u.Type,
-							"alice should NOT receive typing push (only response)")
-					}
-				}
-			}
-		}
-	case <-time.After(1 * time.Second):
-		// No message within 1s — expected behavior.
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -96,8 +91,8 @@ func TestTyping_OnlineRecipientReceivesEvent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestTyping_OfflineRecipientDoesNotReceive verifies that when Alice sends a
-// typing indicator and Bob is offline, Alice still gets the response but no
-// exception occurs (fire-and-forget for offline users).
+// typing indicator and Bob is offline, Alice still gets her own push (D-050)
+// and the response, with no error (fire-and-forget for offline users).
 func TestTyping_OfflineRecipientDoesNotReceive(t *testing.T) {
 	env := setupE2ETest(t)
 
@@ -113,23 +108,16 @@ func TestTyping_OfflineRecipientDoesNotReceive(t *testing.T) {
 		"is_typing":       true,
 	})
 
-	// Alice receives response(status=ok).
+	// Alice receives her own typing push (D-050: broadcast to ALL members).
+	aliceUpdates := waitForUpdate(t, aliceConn, 5*time.Second)
+	require.Len(t, aliceUpdates.Updates, 1)
+	assert.Equal(t, uint32(0), aliceUpdates.Updates[0].Seq, "typing should be Seq=0")
+	assert.Equal(t, protocol.UpdateTypeTyping, aliceUpdates.Updates[0].Type)
+
+	// Alice also receives response(status=ok).
 	resp := readResponse(t, aliceConn, 5*time.Second)
 	require.Equal(t, "req-typing-2", resp.ID)
 	require.Equal(t, protocol.ResponseCodeOK, resp.Code)
-
-	// Wait 2 seconds and confirm no exception / no push to Alice.
-	select {
-	case r := <-aliceConn.msgCh:
-		if r.err == nil {
-			var pkg protocol.Package
-			if err := json.Unmarshal(r.data, &pkg); err == nil && pkg.Type == protocol.PackageTypeUpdates {
-				t.Fatal("alice should not receive typing push when bob is offline")
-			}
-		}
-	case <-time.After(2 * time.Second):
-		// No message — expected behavior.
-	}
 }
 
 // ---------------------------------------------------------------------------

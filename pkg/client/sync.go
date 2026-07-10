@@ -68,6 +68,16 @@ type typingUpdatePayload struct {
 	Timestamp      int64  `json:"timestamp"`
 }
 
+// streamingUpdatePayload is the JSON structure of a "streaming" ephemeral update.
+type streamingUpdatePayload struct {
+	StreamID       string `json:"stream_id"`
+	UserID         string `json:"user_id"`
+	ConversationID string `json:"conversation_id"`
+	Text           string `json:"text"`
+	IsDone         bool   `json:"is_done"`
+	Timestamp      int64  `json:"timestamp"`
+}
+
 // syncUpdatesResponse is the JSON structure returned by the sync_updates RPC.
 type syncUpdatesResponse struct {
 	Updates   []protocol.PackageDataUpdate `json:"updates"`
@@ -252,6 +262,11 @@ func (sm *syncManager) dispatchUpdateTx(ctx context.Context, tx *gorm.DB, update
 	case protocol.UpdateTypeTyping:
 		// Defense-in-depth: reachable only if a typing update with Seq > 0 is
 		// received (should never happen per D-050). Returns nil for graceful
+		// degradation rather than erroring on an unknown type.
+		return nil
+	case protocol.UpdateTypeStreaming:
+		// Defense-in-depth: reachable only if a streaming update with Seq > 0 is
+		// received (should never happen per D-051). Returns nil for graceful
 		// degradation rather than erroring on an unknown type.
 		return nil
 	default:
@@ -441,6 +456,13 @@ func (sm *syncManager) notifyHandler(ctx context.Context, update *protocol.Packa
 		if err := json.Unmarshal(update.Payload, &tp); err == nil {
 			if th, ok := sm.handler.(TypingHandler); ok {
 				_ = th.OnTyping(ctx, tp.UserID, tp.ConversationID, tp.IsTyping)
+			}
+		}
+	case protocol.UpdateTypeStreaming:
+		var sp streamingUpdatePayload
+		if err := json.Unmarshal(update.Payload, &sp); err == nil {
+			if sh, ok := sm.handler.(StreamingHandler); ok {
+				_ = sh.OnStreaming(ctx, sp.UserID, sp.ConversationID, sp.StreamID, sp.Text, sp.IsDone)
 			}
 		}
 	case protocol.UpdateTypeGap:

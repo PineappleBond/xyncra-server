@@ -22,6 +22,7 @@
   - [delete_message](#delete_message)
   - [mark_as_read](#mark_as_read)
   - [set_typing](#set_typing)
+  - [stream_text](#stream_text)
 - [错误码](#错误码)
 - [数据模型](#数据模型)
   - [Conversation](#conversation)
@@ -335,6 +336,7 @@ ws://host:port/ws?user_id={user_id}
 | `conversation` | 会话状态变更 | `{conversation_id, action}` — action 为 `"delete"` 或 `"restore"` |
 | `gap` | 补空占位 | `null` — 客户端应跳过，仅更新 local_max_seq |
 | `typing` | ephemeral (Seq=0) | `{conversation_id, user_id, is_typing}` — Typing 指示器 (D-050) |
+| `streaming` | ephemeral (Seq=0) | `{stream_id, user_id, conversation_id, text, is_done}` — 流式文本 (D-051) |
 
 **处理策略**：
 
@@ -344,6 +346,7 @@ ws://host:port/ws?user_id={user_id}
 - `conversation`：更新本地会话状态（软删除或恢复）
 - `gap`：仅递增 `local_max_seq`，不做其他处理
 - `typing`：ephemeral push，直接回调 handler，不持久化 (D-050)
+- `streaming`：ephemeral push，直接回调 handler，不持久化 (D-051)
 - 未知类型：跳过（向前兼容，未来可能新增更多类型）
 
 ### Ephemeral Updates (Seq=0)
@@ -917,7 +920,7 @@ ws://host:port/ws?user_id={user_id}
 
 ### set_typing
 
-发送 typing（正在输入）指示器给会话的其他成员。这是一种 **ephemeral push** (D-050)：不持久化、不入 MQ、离线不投递、上线不补拉。
+发送 typing（正在输入）指示器给会话的所有成员（包括调用者的其他设备，D-050）。这是一种 **ephemeral push** (D-050)：不持久化、不入 MQ、离线不投递、上线不补拉。
 
 **参数**：
 
@@ -957,9 +960,85 @@ ws://host:port/ws?user_id={user_id}
 
 **行为说明**：
 
-- 调用者不会收到自己的 typing 事件（广播给 members \ {caller}）
+- 调用者也会收到自己的 typing 事件（广播给所有成员，包括调用者的其他设备）
 - Rate limit: 每用户每会话 1次/秒/节点（多节点部署时为 best-effort 限流），超限静默返回 OK
 - 推送使用 Seq=0 标识 ephemeral 更新 (D-050)
+
+---
+
+### stream_text
+
+发送流式文本给会话的所有成员。这是一种 **ephemeral push** (D-050, D-051)：不持久化、不入 MQ、离线不投递、上线不补拉。
+
+采用**累积文本模式**：每帧包含完整文本快照（非 delta），接收方直接替换显示内容。流式结束后通过 `send_message` 持久化最终消息 (D-052)。
+
+**参数**：
+
+| 字段            | 类型   | 必填 | 默认值 | 说明                                        |
+|-----------------|--------|------|--------|---------------------------------------------|
+| conversation_id | string | 是   | -      | 会话 ID                                     |
+| stream_id       | string | 是   | -      | 流 ID（客户端生成的 UUID，服务端仅透传）      |
+| text            | string | 是   | -      | 累积文本内容（完整快照）                      |
+| is_done         | bool   | 否   | false  | true=流式结束信号                             |
+
+**请求示例**：
+
+```json
+{
+  "id": "stream-001",
+  "method": "stream_text",
+  "params": {
+    "conversation_id": "conv-uuid-001",
+    "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+    "text": "Hello, this is a streaming text",
+    "is_done": false
+  }
+}
+```
+
+**响应**：
+
+```json
+{
+  "status": "ok"
+}
+```
+
+**错误**：
+
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数无效或缺少必填字段 |
+| -101 | conversation not found | 会话不存在或已删除 |
+| -200 | user is not a member of the conversation | 调用者不是会话成员 |
+
+**行为说明**：
+
+- 所有成员（包括调用者的其他设备）都会收到流式推送（D-050）
+- Rate limit: 每用户每会话 20次/秒/节点（50ms 间隔），超限静默返回 OK
+- 推送使用 Seq=0 标识 ephemeral 更新
+- 流式结束后采用两步协议 (D-052)：
+  1. `stream_text(is_done=true, text=最终文本)` — 广播结束信号
+  2. `send_message(content=最终文本)` — 持久化消息
+
+**流式文本时序图**：
+
+```text
+发送方                          服务端                          接收方
+  │                               │                               │
+  ├──stream_text(text="Hel")──────▶│                               │
+  │                               ├────push(Seq=0,streaming)──────▶│
+  │                               │                               │
+  ├──stream_text(text="Hello")────▶│                               │
+  │                               ├────push(Seq=0,streaming)──────▶│
+  │                               │                               │
+  ├──stream_text(done=true)───────▶│                               │
+  │                               ├────push(Seq=0,is_done)────────▶│
+  │                               │                               │
+  ├──send_message("Hello")────────▶│                               │
+  │                               ├────push(Seq=N,message)────────▶│
+  │◀──────response(ok)────────────│                               │
+```
 
 ---
 
@@ -998,6 +1077,7 @@ ws://host:port/ws?user_id={user_id}
 | delete_message | -100 (validation), -101 (not found), -200 (permission denied / not a member), -300 (internal) |
 | mark_as_read | -100 (validation), -101 (not found), -200 (not a member), -300 (internal) |
 | set_typing | -100 (validation), -101 (not found), -200 (not a member) |
+| stream_text | -100 (validation), -101 (not found), -200 (not a member) |
 
 ---
 

@@ -10,6 +10,7 @@
 package e2e_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -294,8 +295,15 @@ func readResponse(t *testing.T, conn *wsConn, timeout time.Duration) *protocol.P
 		_, data, err := conn.recv(remaining)
 		require.NoError(t, err, "read message should succeed within timeout")
 
+		first, rest := firstJSON(data)
+
+		// Push remaining JSON objects back so they are not lost.
+		if len(rest) > 0 {
+			conn.msgCh <- msgResult{messageType: 1, data: rest}
+		}
+
 		var pkg protocol.Package
-		require.NoError(t, json.Unmarshal(data, &pkg), "unmarshal package should succeed")
+		require.NoError(t, json.Unmarshal(first, &pkg), "unmarshal package should succeed")
 		if pkg.Type == protocol.PackageTypeResponse {
 			var resp protocol.PackageDataResponse
 			require.NoError(t, json.Unmarshal(pkg.Data, &resp), "unmarshal response should succeed")
@@ -305,16 +313,73 @@ func readResponse(t *testing.T, conn *wsConn, timeout time.Duration) *protocol.P
 	}
 }
 
+// firstJSON extracts the first complete JSON object from data.
+// If data contains multiple concatenated JSON objects (as can happen when the
+// server's writePump batches messages into a single WebSocket frame), only the
+// first object is returned, along with the remaining bytes.
+//
+// This is needed because gorilla/websocket's ReadMessage may return multiple
+// WriteMessage calls coalesced into a single frame when they are written in
+// rapid succession.
+func firstJSON(data []byte) (first, rest []byte) {
+	data = bytes.TrimLeft(data, " \t\r\n")
+	if len(data) == 0 || data[0] != '{' {
+		return data, nil
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := 0; i < len(data); i++ {
+		b := data[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if b == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if b == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch b {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return data[:i+1], bytes.TrimLeft(data[i+1:], " \t\r\n")
+			}
+		}
+	}
+	// Incomplete JSON — return everything as first.
+	return data, nil
+}
+
 // readPackage reads a single message from the connection and returns the
-// decoded Package without checking its type.
+// decoded Package without checking its type. If the server batched multiple
+// JSON packages into a single WebSocket frame (writePump drains the send
+// channel for efficiency), only the first JSON object is consumed and the
+// remainder is pushed back to msgCh for subsequent reads.
 func readPackage(t *testing.T, conn *wsConn, timeout time.Duration) *protocol.Package {
 	t.Helper()
 
 	_, data, err := conn.recv(timeout)
 	require.NoError(t, err, "read message should succeed within timeout")
 
+	first, rest := firstJSON(data)
+
+	// Push remaining JSON objects back so they are not lost.
+	if len(rest) > 0 {
+		conn.msgCh <- msgResult{messageType: 1, data: rest}
+	}
+
 	var pkg protocol.Package
-	require.NoError(t, json.Unmarshal(data, &pkg), "unmarshal package should succeed")
+	require.NoError(t, json.Unmarshal(first, &pkg), "unmarshal package should succeed")
 	return &pkg
 }
 

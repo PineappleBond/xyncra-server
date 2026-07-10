@@ -83,9 +83,19 @@ type typingRecord struct {
 	isTyping       bool
 }
 
+// streamingRecord holds the arguments passed to OnStreaming.
+type streamingRecord struct {
+	userID         string
+	conversationID string
+	streamID       string
+	text           string
+	isDone         bool
+}
+
 // mockUpdateHandler is a mock UpdateHandler that records all invocations for
 // later inspection in tests. It also implements TypingHandler so that
-// ephemeral typing updates are captured.
+// ephemeral typing updates are captured, and StreamingHandler so that
+// ephemeral streaming text updates are captured.
 type mockUpdateHandler struct {
 	mu            sync.Mutex
 	messages      []*model.Message
@@ -94,6 +104,7 @@ type mockUpdateHandler struct {
 	conversations []*model.Conversation
 	gaps          []uint32
 	typings       []typingRecord
+	streamings    []streamingRecord
 }
 
 // deleteRecord holds the arguments passed to OnDeleteMessage.
@@ -156,6 +167,20 @@ func (h *mockUpdateHandler) OnTyping(ctx context.Context, userID string, convers
 		userID:         userID,
 		conversationID: conversationID,
 		isTyping:       isTyping,
+	})
+	return nil
+}
+
+// OnStreaming records the streaming text parameters (implements StreamingHandler).
+func (h *mockUpdateHandler) OnStreaming(ctx context.Context, userID, conversationID, streamID, text string, isDone bool) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.streamings = append(h.streamings, streamingRecord{
+		userID:         userID,
+		conversationID: conversationID,
+		streamID:       streamID,
+		text:           text,
+		isDone:         isDone,
 	})
 	return nil
 }

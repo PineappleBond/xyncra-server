@@ -178,7 +178,7 @@ type setTypingResponse struct {
 1. 解析 `setTypingParams`
 2. 校验 `conversation_id` 必填
 3. 从 `ConversationStore` 取会话，验证调用者是成员
-4. 计算接收者列表：`members \ {caller}`
+4. 计算接收者列表：所有成员（包括 caller 自身的其他设备）
 5. 构造 `PackageDataUpdate{Seq: 0, Type: "typing", Payload: {user_id, conversation_id, is_typing, ts}}`
 6. 对每个接收者调用 `BroadcastUpdates(userID, updates)`（绕过 DB、绕过 MQ）
 7. 返回 `{status: "ok"}`
@@ -238,7 +238,7 @@ flowchart TD
     C -- 否 --> E[ConversationStore.Get]
     E --> F{会话存在且调用者是成员?}
     F -- 否 --> G[返回 NotFound / PermissionDenied]
-    F -- 是 --> H[计算接收者列表 = members \ caller]
+    F -- 是 --> H[计算接收者列表 = 所有 members（含 caller）]
     H --> I[构造 PackageDataUpdate<br/>Seq=0, Type=typing]
     I --> J{对每个接收者}
     J --> K[WebSocketServer.BroadcastUpdates<br/>直接调用, 绕过 DB 与 MQ]

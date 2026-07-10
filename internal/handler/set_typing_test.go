@@ -93,11 +93,13 @@ func TestSetTyping_BasicFlow(t *testing.T) {
 	resp := parseSetTypingResponse(t, data)
 	assert.Equal(t, "ok", resp["status"])
 
-	// Verify broadcast went to bob only (not alice).
+	// Verify broadcast went to both alice and bob (D-050: all members including caller).
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
-	require.Len(t, rb.calls, 1, "broadcast should be called exactly once")
-	assert.Equal(t, "bob", rb.calls[0].userID, "broadcast should target bob, not alice")
+	require.Len(t, rb.calls, 2, "broadcast should be called exactly twice (alice + bob)")
+	broadcastTargets := []string{rb.calls[0].userID, rb.calls[1].userID}
+	assert.ElementsMatch(t, []string{"alice", "bob"}, broadcastTargets,
+		"broadcast should target both alice and bob")
 
 	// Verify payload contents.
 	require.Len(t, rb.calls[0].updates.Updates, 1)
@@ -140,7 +142,7 @@ func TestSetTyping_IsTypingFalse(t *testing.T) {
 
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
-	require.Len(t, rb.calls, 1)
+	require.Len(t, rb.calls, 2, "broadcast should be called twice (alice + bob)")
 
 	var payload typingBroadcastPayload
 	require.NoError(t, json.Unmarshal(rb.calls[0].updates.Updates[0].Payload, &payload))
@@ -225,10 +227,10 @@ func TestSetTyping_CallerNotMember(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: SenderNotBroadcastTo — caller does not receive own typing
+// Test 6: SenderAlsoReceivesBroadcast — caller also receives own typing (D-050)
 // ---------------------------------------------------------------------------
 
-func TestSetTyping_SenderNotBroadcastTo(t *testing.T) {
+func TestSetTyping_SenderAlsoReceivesBroadcast(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
 	h := NewSetTypingHandler(s, rb.broadcast)
@@ -247,9 +249,10 @@ func TestSetTyping_SenderNotBroadcastTo(t *testing.T) {
 
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
-	for _, c := range rb.calls {
-		assert.NotEqual(t, "alice", c.userID, "alice (the sender) should not receive her own typing broadcast")
-	}
+	require.Len(t, rb.calls, 2, "broadcast should be called twice (alice + bob)")
+	broadcastTargets := []string{rb.calls[0].userID, rb.calls[1].userID}
+	assert.ElementsMatch(t, []string{"alice", "bob"}, broadcastTargets,
+		"broadcast should target both alice and bob (D-050)")
 }
 
 // ---------------------------------------------------------------------------
@@ -387,9 +390,11 @@ func TestSetTyping_RateLimit(t *testing.T) {
 	func() {
 		rb.mu.Lock()
 		defer rb.mu.Unlock()
-		require.Equal(t, 1, len(rb.calls),
-			"only the first call should trigger a broadcast; subsequent calls should be rate-limited")
-		assert.Equal(t, "bob", rb.calls[0].userID)
+		require.Equal(t, 2, len(rb.calls),
+			"only the first call should trigger broadcasts (to both members); subsequent calls should be rate-limited")
+		broadcastTargets := []string{rb.calls[0].userID, rb.calls[1].userID}
+		assert.ElementsMatch(t, []string{"alice", "bob"}, broadcastTargets,
+			"broadcast should target both alice and bob")
 	}()
 
 	// Phase 2: wait for the rate limiter window to elapse, then verify a
@@ -400,8 +405,8 @@ func TestSetTyping_RateLimit(t *testing.T) {
 	assert.Equal(t, "ok", parseSetTypingResponse(t, data)["status"])
 
 	rb.mu.Lock()
-	assert.Equal(t, 2, len(rb.calls),
-		"after rate-limit window elapses, the next call should trigger another broadcast")
+	assert.Equal(t, 4, len(rb.calls),
+		"after rate-limit window elapses, the next call should trigger another round of broadcasts (2 members)")
 	rb.mu.Unlock()
 }
 
@@ -459,7 +464,7 @@ func TestSetTyping_IsTypingOmitted_DefaultsFalse(t *testing.T) {
 	// Verify payload has is_typing=false.
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
-	require.Len(t, rb.calls, 1)
+	require.Len(t, rb.calls, 2, "broadcast should be called twice (alice + bob)")
 	var payload typingBroadcastPayload
 	require.NoError(t, json.Unmarshal(rb.calls[0].updates.Updates[0].Payload, &payload))
 	assert.False(t, payload.IsTyping, "omitted is_typing should default to false")
@@ -496,8 +501,9 @@ func TestSetTyping_ConcurrentCalls(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Due to rate limiting, only 1 of 10 concurrent calls should trigger broadcast.
+	// Due to rate limiting, only 1-2 of 10 concurrent calls should trigger broadcast.
+	// Each broadcast goes to 2 members (alice + bob), so max ~4 calls.
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
-	assert.LessOrEqual(t, len(rb.calls), 2, "rate limiter should allow at most 1-2 broadcasts")
+	assert.LessOrEqual(t, len(rb.calls), 4, "rate limiter should allow at most 1-2 broadcast rounds (2 members each)")
 }

@@ -86,6 +86,17 @@ func (h *cliUpdateHandler) OnTyping(_ context.Context, userID, conversationID st
 	return nil
 }
 
+// OnStreaming prints a streaming text event to stdout (D-051 ephemeral push).
+func (h *cliUpdateHandler) OnStreaming(_ context.Context, userID, conversationID, streamID, text string, isDone bool) error {
+	status := "streaming"
+	if isDone {
+		status = "done"
+	}
+	fmt.Fprintf(os.Stdout, "[streaming] user=%s conv=%s stream=%s status=%s text=%q\n",
+		userID, conversationID, streamID, status, text)
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // cliLogger — implements client.Logger
 // ---------------------------------------------------------------------------
@@ -475,6 +486,34 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 			"is_typing":       params.IsTyping,
 		}
 		data, err := xc.Call(ctx, "set_typing", callParams)
+		if err != nil {
+			if ce, ok := errors.AsType[*client.ClientError](err); ok {
+				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
+			}
+			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
+		}
+		// Forward the server response as-is.
+		return NewIPCResponse(req.ID, json.RawMessage(data))
+	})
+
+	// stream_text forwards streaming text to the server (fire-and-forget, D-051).
+	s.Register("stream_text", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
+		var params struct {
+			ConversationID string `json:"conversation_id"`
+			StreamID       string `json:"stream_id"`
+			Text           string `json:"text"`
+			IsDone         bool   `json:"is_done"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil
+		}
+		callParams := map[string]any{
+			"conversation_id": params.ConversationID,
+			"stream_id":       params.StreamID,
+			"text":            params.Text,
+			"is_done":         params.IsDone,
+		}
+		data, err := xc.Call(ctx, "stream_text", callParams)
 		if err != nil {
 			if ce, ok := errors.AsType[*client.ClientError](err); ok {
 				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
