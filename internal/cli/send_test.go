@@ -13,6 +13,7 @@ import (
 
 	"github.com/PineappleBond/xyncra-server/pkg/client"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
+	"github.com/PineappleBond/xyncra-server/pkg/store"
 	"github.com/PineappleBond/xyncra-server/pkg/store/model"
 )
 
@@ -344,5 +345,57 @@ func TestNewSendCommand_RequiredFlags(t *testing.T) {
 	replyToFlag := cmd.Flags().Lookup("reply-to")
 	if replyToFlag == nil {
 		t.Fatal("missing --reply-to flag")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DRAFT-01: send clears draft after successful send (M-4 fix)
+// ---------------------------------------------------------------------------
+
+// TestClearDraft_RemovesDraft verifies that clearDraft removes the draft for
+// the given conversation from the local database.
+func TestClearDraft_RemovesDraft(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := tmpDir + "/xyncra.db"
+
+	// Create a real DB and seed a draft.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	ctx := context.Background()
+	draft := &model.Draft{
+		ID:             "draft-1",
+		ConversationID: "conv-draft-test",
+		Content:        "unsent message",
+	}
+	if err := db.Drafts.Save(ctx, draft); err != nil {
+		t.Fatalf("seed draft: %v", err)
+	}
+	db.Close()
+
+	// Build a CLIContext pointing to the same DB.
+	cliCtx := &CLIContext{
+		UserID: "testuser",
+		DBPath: dbPath,
+	}
+
+	// Call clearDraft.
+	clearDraft(cliCtx, "conv-draft-test")
+
+	// Verify the draft is gone.
+	db2, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db2.Close()
+
+	_, err = db2.Drafts.GetByConversation(ctx, "conv-draft-test")
+	if err == nil {
+		t.Fatal("expected draft to be cleared, but GetByConversation succeeded")
+	}
+	if err != store.ErrNotFound {
+		t.Errorf("expected ErrNotFound, got: %v", err)
 	}
 }

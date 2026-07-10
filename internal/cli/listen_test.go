@@ -338,8 +338,16 @@ func setupIPCWithClient(t *testing.T) (sockPath string, db *store.ClientDB, clea
 				data, _ := json.Marshal(result)
 				respData, _ := json.Marshal(protocol.PackageDataResponse{ID: req.ID, Code: protocol.ResponseCodeOK, Data: data})
 				respJSON = respData
-			case "delete_conversation", "restore_conversation", "delete_message", "mark_as_read":
+			case "delete_conversation", "restore_conversation", "delete_message":
 				respData, _ := json.Marshal(protocol.PackageDataResponse{ID: req.ID, Code: protocol.ResponseCodeOK, Data: json.RawMessage(`{}`)})
+				respJSON = respData
+			case "mark_as_read":
+				// Return a server-confirmed cursor value (D-012, D-047).
+				marResult := struct {
+					LastReadMessageID uint32 `json:"last_read_message_id"`
+				}{LastReadMessageID: 42}
+				marData, _ := json.Marshal(marResult)
+				respData, _ := json.Marshal(protocol.PackageDataResponse{ID: req.ID, Code: protocol.ResponseCodeOK, Data: marData})
 				respJSON = respData
 			default:
 				respData, _ := json.Marshal(protocol.PackageDataResponse{ID: req.ID, Code: protocol.ResponseCodeOK, Data: json.RawMessage(`{}`)})
@@ -385,7 +393,7 @@ func setupIPCWithClient(t *testing.T) (sockPath string, db *store.ClientDB, clea
 
 	sockPath = tmpDir + "/xyncra.sock"
 	ipcServer := NewIPCServer(sockPath)
-	registerIPCHandlers(ipcServer, xc, db)
+	registerIPCHandlers(ipcServer, xc, db, "testuser")
 	if err := ipcServer.Start(context.Background()); err != nil {
 		cancel()
 		xc.Stop()
@@ -696,5 +704,260 @@ func TestIPCHandler_CreateConversation_PersistsLocally(t *testing.T) {
 	}
 	if conv.UserID2 != "peer1" {
 		t.Errorf("persisted conversation UserID2: got=%q want=%q", conv.UserID2, "peer1")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IPC-01: send_message persists to local DB immediately (H-4 fix)
+// ---------------------------------------------------------------------------
+
+// TestIPCHandler_SendMessage_PersistsLocally verifies that after a successful
+// send_message IPC call, the sent message is written to the local database so
+// that it is immediately visible (H-4 fix).
+func TestIPCHandler_SendMessage_PersistsLocally(t *testing.T) {
+	sockPath, db, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	// Pre-create the conversation so UpdateLastMessage succeeds.
+	ctx := context.Background()
+	conv := &model.Conversation{
+		ID:      "conv-1",
+		UserID1: "testuser",
+		UserID2: "peer1",
+		Type:    "1-on-1",
+		Title:   "Test Conv",
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "send_message", map[string]any{
+		"conversation_id": "conv-1",
+		"content":         "hello",
+	})
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("handler error: %v", resp.Error)
+	}
+
+	// The message should now be in the local DB.
+	// The mock returns MessageID:100, ClientMessageID:"cid-1", ConversationID:"conv-1".
+	msgs, err := db.Messages.ListByConversation(ctx, "conv-1", 0, 100)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("expected message to be persisted locally after send_message, found none")
+	}
+	found := false
+	for _, m := range msgs {
+		if m.ClientMessageID == "cid-1" && m.Content == "hello" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("sent message (cid-1) not found in local DB after send_message")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IPC-02: delete_message soft-deletes in local DB
+// ---------------------------------------------------------------------------
+
+// TestIPCHandler_DeleteMessage_SoftDeletesLocally verifies that after a
+// successful delete_message IPC call, the message is soft-deleted in the local
+// database.
+func TestIPCHandler_DeleteMessage_SoftDeletesLocally(t *testing.T) {
+	sockPath, db, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Seed a message in the local DB.
+	msg := &model.Message{
+		ID:              "msg-to-delete",
+		ClientMessageID: "cmid-del",
+		ConversationID:  "conv-1",
+		MessageID:       10,
+		SenderID:        "testuser",
+		Content:         "to be deleted",
+		Type:            "text",
+		Status:          "sent",
+	}
+	if err := db.Messages.Create(ctx, msg); err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "delete_message", map[string]any{
+		"message_id": "msg-to-delete",
+	})
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("handler error: %v", resp.Error)
+	}
+
+	// Message should be soft-deleted (Get returns ErrNotFound).
+	_, err = db.Messages.Get(ctx, "msg-to-delete")
+	if err == nil {
+		t.Fatal("expected message to be soft-deleted in local DB, but Get succeeded")
+	}
+	if err != store.ErrNotFound {
+		t.Errorf("expected ErrNotFound, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IPC-03: mark_as_read uses server-returned cursor (D-012, D-047)
+// ---------------------------------------------------------------------------
+
+// TestIPCHandler_MarkAsRead_UsesServerCursor verifies that after a successful
+// mark_as_read IPC call, the local read cursor is set to the server-returned
+// value (not the client-requested value).
+func TestIPCHandler_MarkAsRead_UsesServerCursor(t *testing.T) {
+	sockPath, db, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Pre-create the conversation so UpdateLastRead succeeds.
+	conv := &model.Conversation{
+		ID:      "conv-read",
+		UserID1: "testuser",
+		UserID2: "peer1",
+		Type:    "1-on-1",
+		Title:   "Read Test",
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	// Request cursor at 10, but the mock server returns 42 (D-047).
+	resp, err := ipcClient.Call(context.Background(), "mark_as_read", map[string]any{
+		"conversation_id": "conv-read",
+		"message_id":      uint32(10),
+	})
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("handler error: %v", resp.Error)
+	}
+
+	// The local cursor should be 42 (server-returned), not 10 (client-requested).
+	gotConv, err := db.Conversations.Get(ctx, "conv-read")
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if gotConv.LastReadMessageID1 != 42 {
+		t.Errorf("LastReadMessageID1: got=%d want=42 (server-returned value)", gotConv.LastReadMessageID1)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IPC-04: delete_conversation soft-deletes in local DB
+// ---------------------------------------------------------------------------
+
+// TestIPCHandler_DeleteConversation_SoftDeletesLocally verifies that after a
+// successful delete_conversation IPC call, the conversation is soft-deleted in
+// the local database.
+func TestIPCHandler_DeleteConversation_SoftDeletesLocally(t *testing.T) {
+	sockPath, db, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Seed a conversation in the local DB.
+	conv := &model.Conversation{
+		ID:      "conv-del",
+		UserID1: "testuser",
+		UserID2: "peer1",
+		Type:    "1-on-1",
+		Title:   "To Delete",
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "delete_conversation", map[string]any{
+		"conversation_id": "conv-del",
+	})
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("handler error: %v", resp.Error)
+	}
+
+	// Conversation should be soft-deleted (Get returns ErrNotFound).
+	_, err = db.Conversations.Get(ctx, "conv-del")
+	if err == nil {
+		t.Fatal("expected conversation to be soft-deleted in local DB, but Get succeeded")
+	}
+	if err != store.ErrNotFound {
+		t.Errorf("expected ErrNotFound, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IPC-05: restore_conversation restores in local DB
+// ---------------------------------------------------------------------------
+
+// TestIPCHandler_RestoreConversation_RestoresLocally verifies that after a
+// successful restore_conversation IPC call, the conversation is restored in the
+// local database.
+func TestIPCHandler_RestoreConversation_RestoresLocally(t *testing.T) {
+	sockPath, db, cleanup := setupIPCWithClient(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Seed and then soft-delete a conversation.
+	conv := &model.Conversation{
+		ID:      "conv-restore",
+		UserID1: "testuser",
+		UserID2: "peer1",
+		Type:    "1-on-1",
+		Title:   "To Restore",
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	if err := db.Conversations.Delete(ctx, "conv-restore"); err != nil {
+		t.Fatalf("seed delete: %v", err)
+	}
+
+	// Verify it's deleted.
+	_, err := db.Conversations.Get(ctx, "conv-restore")
+	if err != store.ErrNotFound {
+		t.Fatalf("expected ErrNotFound after seed delete, got: %v", err)
+	}
+
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "restore_conversation", map[string]any{
+		"conversation_id": "conv-restore",
+	})
+	if err != nil {
+		t.Fatalf("IPC call: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("handler error: %v", resp.Error)
+	}
+
+	// Conversation should be restored.
+	gotConv, err := db.Conversations.Get(ctx, "conv-restore")
+	if err != nil {
+		t.Fatalf("conversation not restored in local DB: %v", err)
+	}
+	if gotConv.Title != "To Restore" {
+		t.Errorf("restored conversation title: got=%q want=%q", gotConv.Title, "To Restore")
 	}
 }

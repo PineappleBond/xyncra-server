@@ -91,12 +91,21 @@ func (cs *ConversationStore) Update(ctx context.Context, conv *model.Conversatio
 // Upsert creates the conversation if it does not exist, or saves (overwrites)
 // it if it already exists. This is used by the client sync pipeline to apply
 // conversation create events idempotently (D-045).
+// If a concurrent insert causes a duplicate key error, the operation retries
+// as an update to handle the TOCTOU race between SELECT and INSERT.
 func (cs *ConversationStore) Upsert(ctx context.Context, conv *model.Conversation) error {
 	var existing model.Conversation
 	err := cs.db.WithContext(ctx).Where("id = ?", conv.ID).First(&existing).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return cs.Create(ctx, conv)
+			if createErr := cs.db.WithContext(ctx).Create(conv).Error; createErr != nil {
+				// TOCTOU: another goroutine may have inserted between SELECT and INSERT.
+				if errors.Is(classifyError(createErr), ErrDuplicateKey) {
+					return cs.Update(ctx, conv)
+				}
+				return classifyError(fmt.Errorf("store: upsert conversation: %w", createErr))
+			}
+			return nil
 		}
 		return classifyError(fmt.Errorf("store: upsert conversation: %w", err))
 	}
@@ -244,4 +253,118 @@ func (cs *ConversationStore) GetUnscoped(ctx context.Context, id string) (*model
 		return nil, classifyError(fmt.Errorf("store: get unscoped conversation: %w", err))
 	}
 	return &conv, nil
+}
+
+// UpdateLastMessageTx updates last message fields within the given transaction.
+func (cs *ConversationStore) UpdateLastMessageTx(ctx context.Context, tx *gorm.DB, convID string, lastMessageAt time.Time, lastProcessedMessageID uint32) error {
+	result := tx.WithContext(ctx).
+		Model(&model.Conversation{}).
+		Where("id = ?", convID).
+		Updates(map[string]any{
+			"last_message_at":           lastMessageAt,
+			"last_processed_message_id": lastProcessedMessageID,
+		})
+	if result.Error != nil {
+		return classifyError(fmt.Errorf("store: update last message tx: %w", result.Error))
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateLastReadTx updates read cursor within the given transaction.
+// Uses MAX semantics: only advances forward (D-012).
+func (cs *ConversationStore) UpdateLastReadTx(ctx context.Context, tx *gorm.DB, convID, userID string, messageID uint32) error {
+	result := tx.WithContext(ctx).
+		Model(&model.Conversation{}).
+		Where("id = ? AND (user_id1 = ? OR user_id2 = ?)", convID, userID, userID).
+		Updates(map[string]any{
+			"last_read_message_id1": gorm.Expr("CASE WHEN user_id1 = ? AND ? > last_read_message_id1 THEN ? ELSE last_read_message_id1 END", userID, messageID, messageID),
+			"last_read_message_id2": gorm.Expr("CASE WHEN user_id2 = ? AND ? > last_read_message_id2 THEN ? ELSE last_read_message_id2 END", userID, messageID, messageID),
+		})
+	if result.Error != nil {
+		return classifyError(fmt.Errorf("store: update last read tx: %w", result.Error))
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpsertTx creates or updates a conversation within the given transaction.
+// If a concurrent insert causes a duplicate key error, the operation retries
+// as an update to handle the TOCTOU race between SELECT and INSERT.
+func (cs *ConversationStore) UpsertTx(ctx context.Context, tx *gorm.DB, conv *model.Conversation) error {
+	var existing model.Conversation
+	err := tx.WithContext(ctx).Where("id = ?", conv.ID).First(&existing).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if createErr := tx.WithContext(ctx).Create(conv).Error; createErr != nil {
+				// TOCTOU: another goroutine may have inserted between SELECT and INSERT.
+				// Use classifyError to detect duplicate key via SQLite error strings.
+				if errors.Is(classifyError(createErr), ErrDuplicateKey) {
+					return cs.updateExistingTx(ctx, tx, conv)
+				}
+				return classifyError(fmt.Errorf("store: upsert create tx: %w", createErr))
+			}
+			return nil
+		}
+		return classifyError(fmt.Errorf("store: upsert tx: %w", err))
+	}
+	return cs.updateExistingTx(ctx, tx, conv)
+}
+
+// updateExistingTx saves the conversation record, preserving server-controlled fields.
+func (cs *ConversationStore) updateExistingTx(ctx context.Context, tx *gorm.DB, conv *model.Conversation) error {
+	if err := tx.WithContext(ctx).Save(conv).Error; err != nil {
+		return classifyError(fmt.Errorf("store: upsert update tx: %w", err))
+	}
+	return nil
+}
+
+// SoftDeleteTx performs cascading soft delete within the given transaction (D-013).
+func (cs *ConversationStore) SoftDeleteTx(ctx context.Context, tx *gorm.DB, id string) error {
+	result := tx.WithContext(ctx).Delete(&model.Conversation{}, "id = ?", id)
+	if result.Error != nil {
+		return classifyError(fmt.Errorf("store: delete conversation tx: %w", result.Error))
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	// Cascade soft-delete messages (D-013).
+	if err := tx.WithContext(ctx).Where("conversation_id = ?", id).Delete(&model.Message{}).Error; err != nil {
+		return classifyError(fmt.Errorf("store: cascade delete messages tx: %w", err))
+	}
+	return nil
+}
+
+// RestoreTx performs cascading restore within the given transaction (D-015).
+func (cs *ConversationStore) RestoreTx(ctx context.Context, tx *gorm.DB, id string) error {
+	// Check existence (including soft-deleted).
+	var count int64
+	if err := tx.WithContext(ctx).Unscoped().Model(&model.Conversation{}).Where("id = ?", id).Count(&count).Error; err != nil {
+		return classifyError(fmt.Errorf("store: restore check tx: %w", err))
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+	// Restore conversation if soft-deleted.
+	result := tx.WithContext(ctx).Unscoped().
+		Model(&model.Conversation{}).
+		Where("id = ? AND deleted_at IS NOT NULL", id).
+		Update("deleted_at", nil)
+	if result.Error != nil {
+		return classifyError(fmt.Errorf("store: restore conversation tx: %w", result.Error))
+	}
+	// Cascade restore messages (D-015).
+	if result.RowsAffected > 0 {
+		if err := tx.WithContext(ctx).Unscoped().
+			Model(&model.Message{}).
+			Where("conversation_id = ? AND deleted_at IS NOT NULL", id).
+			Update("deleted_at", nil).Error; err != nil {
+			return classifyError(fmt.Errorf("store: cascade restore messages tx: %w", err))
+		}
+	}
+	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1111,5 +1112,192 @@ func TestApplyUpdate_MessageDuplicateIdempotent(t *testing.T) {
 	}
 	if got.Content != "duplicate test" {
 		t.Errorf("message content: got=%q want=%q", got.Content, "duplicate test")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SYNC-01: dispatchUpdateTx failure should rollback NotificationLog (H-1 fix)
+// ---------------------------------------------------------------------------
+
+// TestDispatchUpdateTx_FailureRollsBackNotificationLog verifies that when
+// dispatchUpdateTx returns an error, the NotificationLog entry is also rolled
+// back and localMaxSeq is not advanced.
+func TestDispatchUpdateTx_FailureRollsBackNotificationLog(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Use an unknown update type that dispatchUpdateTx does not recognise.
+	// This should cause dispatchUpdateTx to return an error, which should
+	// roll back the entire transaction (NotificationLog + seq advance).
+	update := newTestUpdate(1, "unknown_type_xyz", json.RawMessage(`{}`))
+	err := sm.ApplyUpdate(ctx, &update)
+	if err == nil {
+		t.Fatal("expected error for unknown update type, got nil")
+	}
+
+	// NotificationLog should NOT have been persisted (rolled back).
+	logs, listErr := db.NotificationLogs.ListBySeqRange(ctx, 1, 1)
+	if listErr != nil {
+		t.Fatalf("list notification logs: %v", listErr)
+	}
+	if len(logs) != 0 {
+		t.Errorf("notification log should have been rolled back, found %d entries", len(logs))
+	}
+
+	// localMaxSeq should remain 0 (not advanced).
+	assertSyncState(t, db, "local_max_seq", 0)
+}
+
+// ---------------------------------------------------------------------------
+// SYNC-02: Concurrent ApplyUpdates — no data race, serialized via applyMu (H-3)
+// ---------------------------------------------------------------------------
+
+// TestApplyUpdates_Concurrent verifies that concurrent ApplyUpdates calls are
+// serialized (H-3 fix) and do not cause data races.
+func TestApplyUpdates_Concurrent(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Launch multiple goroutines that each call ApplyUpdates with different
+	// sequence ranges. The applyMu should serialize them.
+	const goroutines = 5
+	errCh := make(chan error, goroutines)
+
+	for g := 0; g < goroutines; g++ {
+		go func(gID int) {
+			// Each goroutine sends a single gap update with a unique seq.
+			// Only one should succeed at a time; the rest will see either
+			// duplicate or gap errors, but no data race.
+			seq := uint32(gID*10 + 1)
+			updates := []protocol.PackageDataUpdate{
+				newTestUpdate(seq, protocol.UpdateTypeGap, json.RawMessage(`{}`)),
+			}
+			errCh <- sm.ApplyUpdates(ctx, updates)
+		}(g)
+	}
+
+	// Collect results — no panic or data race means H-3 is working.
+	for i := 0; i < goroutines; i++ {
+		<-errCh
+	}
+
+	// After all goroutines complete, localMaxSeq should be consistent.
+	// We don't check the exact value because the order of execution is
+	// non-deterministic, but we verify no crash and a valid state.
+	seq, err := db.SyncStates.GetLocalMaxSeq(ctx)
+	if err != nil {
+		t.Fatalf("get local max seq: %v", err)
+	}
+	t.Logf("final local_max_seq after concurrent updates: %d", seq)
+}
+
+// ---------------------------------------------------------------------------
+// SYNC-03: handleMessage when conversation doesn't exist — error logged, no
+// error returned (M-2 fix)
+// ---------------------------------------------------------------------------
+
+// TestHandleMessageTx_ConversationNotFound verifies that when a message update
+// references a non-existent conversation, an error is logged (M-2) but the
+// update itself succeeds (message is persisted, no error returned).
+func TestHandleMessageTx_ConversationNotFound(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Do NOT pre-create the conversation.
+	msg := model.Message{
+		ID:              "msg-no-conv",
+		ClientMessageID: "cmid-no-conv",
+		ConversationID:  "conv-nonexistent",
+		MessageID:       1,
+		SenderID:        "other-user",
+		Content:         "hello from void",
+		Type:            "text",
+		Status:          "sent",
+	}
+	payload, _ := json.Marshal(msg)
+	update := newTestUpdate(1, protocol.UpdateTypeMessage, payload)
+
+	// Should succeed (message persisted, error logged for conversation).
+	if err := sm.ApplyUpdate(ctx, &update); err != nil {
+		t.Fatalf("ApplyUpdate should succeed even when conversation is missing, got: %v", err)
+	}
+
+	// Verify the message was persisted.
+	got, err := db.Messages.Get(ctx, "msg-no-conv")
+	if err != nil {
+		t.Fatalf("message should be persisted: %v", err)
+	}
+	if got.Content != "hello from void" {
+		t.Errorf("message content: got=%q want=%q", got.Content, "hello from void")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SYNC-04: Unknown conversation action returns error (M-6 fix)
+// ---------------------------------------------------------------------------
+
+// TestHandleConversationTx_UnknownAction verifies that an unrecognised
+// conversation action returns an error (M-6 fix) instead of being silently
+// treated as an upsert.
+func TestHandleConversationTx_UnknownAction(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Send a conversation update with an unrecognised action.
+	payload := json.RawMessage(`{"conversation_id":"conv-unknown","action":"explode"}`)
+	update := newTestUpdate(1, protocol.UpdateTypeConversation, payload)
+	err := sm.ApplyUpdate(ctx, &update)
+	if err == nil {
+		t.Fatal("expected error for unknown conversation action, got nil")
+	}
+
+	// Verify the error message mentions the unknown action.
+	if !strings.Contains(err.Error(), "unknown conversation action") {
+		t.Errorf("error should mention 'unknown conversation action', got: %v", err)
+	}
+
+	// NotificationLog should have been rolled back since the transaction failed.
+	logs, listErr := db.NotificationLogs.ListBySeqRange(ctx, 1, 1)
+	if listErr != nil {
+		t.Fatalf("list notification logs: %v", listErr)
+	}
+	if len(logs) != 0 {
+		t.Errorf("notification log should have been rolled back after unknown action, found %d entries", len(logs))
 	}
 }

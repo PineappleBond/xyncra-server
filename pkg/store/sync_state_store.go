@@ -98,3 +98,18 @@ func (ss *SyncStateStore) GetLatestSeq(ctx context.Context) (uint32, error) {
 func (ss *SyncStateStore) SetLatestSeq(ctx context.Context, seq uint32) error {
 	return ss.Set(ctx, syncKeyLatestSeq, strconv.FormatUint(uint64(seq), 10))
 }
+
+// SetLocalMaxSeqTx sets local_max_seq within the given transaction.
+func (ss *SyncStateStore) SetLocalMaxSeqTx(ctx context.Context, tx *gorm.DB, seq uint32) error {
+	state := model.SyncState{Key: syncKeyLocalMaxSeq, Value: strconv.FormatUint(uint64(seq), 10)}
+	err := tx.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "key"}},
+			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
+		}).
+		Create(&state).Error
+	if err != nil {
+		return classifyError(fmt.Errorf("store: set local max seq tx: %w", err))
+	}
+	return nil
+}

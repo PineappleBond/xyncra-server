@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 	"github.com/PineappleBond/xyncra-server/pkg/store"
@@ -90,8 +91,10 @@ type syncManager struct {
 	// logger is used for diagnostic output.
 	logger Logger
 
-	// Debounce timer state, protected by mu.
-	mu          sync.Mutex
+	// mu protects debounce timer state.
+	mu sync.Mutex
+	// applyMu serializes ApplyUpdates calls from different goroutines (H-3).
+	applyMu     sync.Mutex
 	pullTimer   *time.Timer
 	pullPending bool
 
@@ -171,287 +174,252 @@ func (sm *syncManager) ApplyUpdate(ctx context.Context, update *protocol.Package
 	}
 	// update.Seq == localMaxSeq + 1 → continue processing.
 
-	// 3. Deduplicate via NotificationLog (Seq uniqueIndex).
-	nLog := &model.NotificationLog{
-		ID:        uuid.New().String(),
-		Seq:       update.Seq,
-		Type:      update.Type,
-		Payload:   []byte(update.Payload),
-		CreatedAt: time.Now(),
-	}
-	if err := sm.db.NotificationLogs.Save(ctx, nLog); err != nil {
-		if errors.Is(err, store.ErrDuplicateKey) {
-			// Duplicate — skip but still advance seq below.
-			sm.logger.Debug("duplicate update skipped", "seq", update.Seq)
-			if err := sm.db.SyncStates.SetLocalMaxSeq(ctx, update.Seq); err != nil {
-				return NewSyncError(fmt.Errorf("set local max seq after dedup: %w", err))
-			}
-			return nil
+	// Steps 3-5 wrapped in an atomic transaction (H-3).
+	var txErr error
+	txErr = sm.db.Transaction(ctx, func(tx *gorm.DB) error {
+		// 3. Deduplicate via NotificationLog (Seq uniqueIndex).
+		nLog := &model.NotificationLog{
+			ID:        uuid.New().String(),
+			Seq:       update.Seq,
+			Type:      update.Type,
+			Payload:   []byte(update.Payload),
+			CreatedAt: time.Now(),
 		}
-		return NewSyncError(fmt.Errorf("save notification log: %w", err))
+		if err := sm.db.NotificationLogs.SaveTx(ctx, tx, nLog); err != nil {
+			if errors.Is(err, store.ErrDuplicateKey) {
+				// Duplicate — advance seq and skip.
+				sm.logger.Debug("duplicate update skipped", "seq", update.Seq)
+				if err := sm.db.SyncStates.SetLocalMaxSeqTx(ctx, tx, update.Seq); err != nil {
+					return fmt.Errorf("set local max seq after dedup: %w", err)
+				}
+				return nil
+			}
+			return fmt.Errorf("save notification log: %w", err)
+		}
+
+		// 4. Dispatch by type (DB writes only, no handler notifications).
+		if err := sm.dispatchUpdateTx(ctx, tx, update); err != nil {
+			return err
+		}
+
+		// 5. Advance localMaxSeq.
+		if err := sm.db.SyncStates.SetLocalMaxSeqTx(ctx, tx, update.Seq); err != nil {
+			return fmt.Errorf("set local max seq: %w", err)
+		}
+		return nil
+	})
+	if txErr != nil {
+		return NewSyncError(txErr)
 	}
 
-	// 4. Dispatch by type.
-	if err := sm.dispatchUpdate(ctx, update); err != nil {
-		return err
-	}
-
-	// 5. Advance localMaxSeq.
-	if err := sm.db.SyncStates.SetLocalMaxSeq(ctx, update.Seq); err != nil {
-		return NewSyncError(fmt.Errorf("set local max seq: %w", err))
-	}
-
+	// Notify handler after successful transaction commit.
+	sm.notifyHandler(ctx, update)
 	return nil
 }
 
-// dispatchUpdate routes the update to the appropriate handler based on its Type.
-func (sm *syncManager) dispatchUpdate(ctx context.Context, update *protocol.PackageDataUpdate) error {
+// ---------------------------------------------------------------------------
+// Transactional dispatch (DB writes only, no handler notifications)
+// ---------------------------------------------------------------------------
+
+// dispatchUpdateTx routes the update to the appropriate *Tx handler within the
+// given transaction. Handler notifications are deferred until after commit.
+func (sm *syncManager) dispatchUpdateTx(ctx context.Context, tx *gorm.DB, update *protocol.PackageDataUpdate) error {
 	switch update.Type {
 	case protocol.UpdateTypeMessage:
-		return sm.handleMessage(ctx, update.Payload)
+		return sm.handleMessageTx(ctx, tx, update.Payload)
 	case protocol.UpdateTypeDeleteMessage:
-		return sm.handleDeleteMessage(ctx, update.Payload)
+		return sm.handleDeleteMessageTx(ctx, tx, update.Payload)
 	case protocol.UpdateTypeMarkRead:
-		return sm.handleMarkRead(ctx, update.Payload)
+		return sm.handleMarkReadTx(ctx, tx, update.Payload)
 	case protocol.UpdateTypeConversation:
-		return sm.handleConversation(ctx, update.Payload)
+		return sm.handleConversationTx(ctx, tx, update.Payload)
 	case protocol.UpdateTypeGap:
-		// D-029: gap type only advances seq, no data written.
-		if sm.handler != nil {
-			if err := sm.handler.OnGap(ctx, update.Seq); err != nil {
-				sm.logger.Error("handler OnGap failed", "seq", update.Seq, "error", err)
-			}
-		}
 		return nil
 	default:
 		return fmt.Errorf("unknown update type: %s", update.Type)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Type handlers
-// ---------------------------------------------------------------------------
-
-// handleMessage parses the payload as a model.Message, persists it, updates
-// the conversation's last-message pointer, and notifies the handler.
-func (sm *syncManager) handleMessage(ctx context.Context, payload json.RawMessage) error {
+// handleMessageTx persists the message and updates the conversation's
+// last-message pointer within the given transaction.
+func (sm *syncManager) handleMessageTx(ctx context.Context, tx *gorm.DB, payload json.RawMessage) error {
 	var msg model.Message
 	if err := json.Unmarshal(payload, &msg); err != nil {
-		return NewSyncError(fmt.Errorf("unmarshal message payload: %w", err))
+		return fmt.Errorf("unmarshal message payload: %w", err)
 	}
 
 	// Persist the message. Ignore duplicate key errors (idempotent).
-	if err := sm.db.Messages.Create(ctx, &msg); err != nil {
+	if err := sm.db.Messages.CreateTx(ctx, tx, &msg); err != nil {
 		if !errors.Is(err, store.ErrDuplicateKey) {
-			return NewSyncError(fmt.Errorf("create message: %w", err))
+			return fmt.Errorf("create message: %w", err)
 		}
 	}
 
 	// Update conversation last-message pointer.
-	if err := sm.db.Conversations.UpdateLastMessage(ctx, msg.ConversationID, msg.CreatedAt, msg.MessageID); err != nil {
+	if err := sm.db.Conversations.UpdateLastMessageTx(ctx, tx, msg.ConversationID, msg.CreatedAt, msg.MessageID); err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			return NewSyncError(fmt.Errorf("update conversation last message: %w", err))
+			return fmt.Errorf("update conversation last message: %w", err)
 		}
-	}
-
-	// Notify handler.
-	if sm.handler != nil {
-		if err := sm.handler.OnMessage(ctx, &msg); err != nil {
-			sm.logger.Error("handler OnMessage failed", "message_id", msg.ID, "error", err)
-		}
+		// M-2: log when conversation not found instead of silently ignoring.
+		sm.logger.Error("conversation not found for last message update", "conversation_id", msg.ConversationID, "message_id", msg.ID)
 	}
 
 	return nil
 }
 
-// handleDeleteMessage parses the payload, soft-deletes the local message, and
-// notifies the handler.
-func (sm *syncManager) handleDeleteMessage(ctx context.Context, payload json.RawMessage) error {
+// handleDeleteMessageTx soft-deletes the local message within the given
+// transaction.
+func (sm *syncManager) handleDeleteMessageTx(ctx context.Context, tx *gorm.DB, payload json.RawMessage) error {
 	var dp deleteMessagePayload
 	if err := json.Unmarshal(payload, &dp); err != nil {
-		return NewSyncError(fmt.Errorf("unmarshal delete_message payload: %w", err))
+		return fmt.Errorf("unmarshal delete_message payload: %w", err)
 	}
 
 	// Soft-delete the message. ErrNotFound is acceptable — the message may
 	// not have been synced locally yet.
-	if err := sm.db.Messages.Delete(ctx, dp.MessageID); err != nil {
+	if err := sm.db.Messages.SoftDeleteTx(ctx, tx, dp.MessageID); err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			return NewSyncError(fmt.Errorf("delete message: %w", err))
-		}
-	}
-
-	// Notify handler.
-	if sm.handler != nil {
-		if err := sm.handler.OnDeleteMessage(ctx, dp.MessageID, dp.ConversationID); err != nil {
-			sm.logger.Error("handler OnDeleteMessage failed", "message_id", dp.MessageID, "error", err)
+			return fmt.Errorf("delete message: %w", err)
 		}
 	}
 
 	return nil
 }
 
-// handleMarkRead parses the payload, updates the conversation read cursor for
-// the current user, and notifies the handler.
-func (sm *syncManager) handleMarkRead(ctx context.Context, payload json.RawMessage) error {
+// handleMarkReadTx updates the conversation read cursor for the current user
+// within the given transaction.
+func (sm *syncManager) handleMarkReadTx(ctx context.Context, tx *gorm.DB, payload json.RawMessage) error {
 	var mp markReadPayload
 	if err := json.Unmarshal(payload, &mp); err != nil {
-		return NewSyncError(fmt.Errorf("unmarshal mark_read payload: %w", err))
+		return fmt.Errorf("unmarshal mark_read payload: %w", err)
 	}
 
-	// Update conversation read cursor. The store method determines which
-	// column (last_read_message_id1 or 2) based on userID.
-	if err := sm.db.Conversations.UpdateLastRead(ctx, mp.ConversationID, sm.userID, mp.LastReadMessageID); err != nil {
+	// Update conversation read cursor. ErrNotFound is acceptable.
+	if err := sm.db.Conversations.UpdateLastReadTx(ctx, tx, mp.ConversationID, sm.userID, mp.LastReadMessageID); err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			return NewSyncError(fmt.Errorf("update last read: %w", err))
-		}
-	}
-
-	// Notify handler.
-	if sm.handler != nil {
-		if err := sm.handler.OnMarkRead(ctx, mp.ConversationID, mp.LastReadMessageID); err != nil {
-			sm.logger.Error("handler OnMarkRead failed", "conversation_id", mp.ConversationID, "error", err)
+			return fmt.Errorf("update last read: %w", err)
 		}
 	}
 
 	return nil
 }
 
-// handleConversation processes a "conversation" type update. The server sends
-// this payload for delete_conversation (D-013) and restore_conversation (D-015)
-// events. The payload shape is {"conversation_id": "...", "action": "..."}.
-//
-// Recognised actions:
-//
-//   - "delete"  — cascade soft-delete the local conversation and its messages.
-//   - "restore" — cascade restore the conversation and its messages.
-//
-// If the action is unrecognised (or absent), the payload is treated as a
-// full model.Conversation for backward compatibility with create events.
-func (sm *syncManager) handleConversation(ctx context.Context, payload json.RawMessage) error {
-	// Peek at the action field to decide how to handle the update.
+// handleConversationTx processes a "conversation" type update within the given
+// transaction. Unknown actions return an error (M-6).
+func (sm *syncManager) handleConversationTx(ctx context.Context, tx *gorm.DB, payload json.RawMessage) error {
 	var peek conversationUpdatePayload
 	if err := json.Unmarshal(payload, &peek); err != nil {
-		return NewSyncError(fmt.Errorf("unmarshal conversation update peek: %w", err))
+		return fmt.Errorf("unmarshal conversation update peek: %w", err)
 	}
 
 	switch peek.Action {
 	case "delete":
-		return sm.handleConversationDelete(ctx, peek.ConversationID)
+		return sm.handleConversationDeleteTx(ctx, tx, peek.ConversationID)
 	case "restore":
-		return sm.handleConversationRestore(ctx, peek.ConversationID)
+		return sm.handleConversationRestoreTx(ctx, tx, peek.ConversationID)
 	case "create":
-		return sm.handleConversationCreate(ctx, payload)
-	default:
+		return sm.handleConversationCreateTx(ctx, tx, payload)
+	case "":
 		// No action field — treat as a full conversation record (backward
 		// compatibility with legacy create events that omit the action).
-		return sm.handleConversationUpsert(ctx, payload)
+		return sm.handleConversationUpsertTx(ctx, tx, payload)
+	default:
+		// M-6: log and return error for unrecognised actions.
+		sm.logger.Error("unknown conversation action", "action", peek.Action, "conversation_id", peek.ConversationID)
+		return fmt.Errorf("unknown conversation action: %s", peek.Action)
 	}
 }
 
-// handleConversationDelete cascade soft-deletes the conversation and its
-// messages in the local database (D-013).
-func (sm *syncManager) handleConversationDelete(ctx context.Context, convID string) error {
-	// ErrNotFound is acceptable — the conversation may not have been synced
-	// locally yet.
-	if err := sm.db.Conversations.Delete(ctx, convID); err != nil {
+// handleConversationDeleteTx cascade soft-deletes the conversation and its
+// messages within the given transaction (D-013).
+func (sm *syncManager) handleConversationDeleteTx(ctx context.Context, tx *gorm.DB, convID string) error {
+	if err := sm.db.Conversations.SoftDeleteTx(ctx, tx, convID); err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			return NewSyncError(fmt.Errorf("delete conversation locally: %w", err))
+			return fmt.Errorf("delete conversation locally: %w", err)
 		}
 		sm.logger.Debug("conversation delete: not found locally, skipping", "conversation_id", convID)
 	}
-
-	if sm.handler != nil {
-		// Notify with a minimal conversation record carrying just the ID.
-		conv := &model.Conversation{ID: convID}
-		if err := sm.handler.OnConversation(ctx, conv); err != nil {
-			sm.logger.Error("handler OnConversation (delete) failed", "conversation_id", convID, "error", err)
-		}
-	}
-
 	return nil
 }
 
-// handleConversationRestore cascade restores a previously soft-deleted
-// conversation and its messages in the local database (D-015).
-func (sm *syncManager) handleConversationRestore(ctx context.Context, convID string) error {
-	if err := sm.db.Conversations.Restore(ctx, convID); err != nil {
+// handleConversationRestoreTx cascade restores a previously soft-deleted
+// conversation and its messages within the given transaction (D-015).
+func (sm *syncManager) handleConversationRestoreTx(ctx context.Context, tx *gorm.DB, convID string) error {
+	if err := sm.db.Conversations.RestoreTx(ctx, tx, convID); err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			return NewSyncError(fmt.Errorf("restore conversation locally: %w", err))
+			return fmt.Errorf("restore conversation locally: %w", err)
 		}
 		sm.logger.Debug("conversation restore: not found locally, skipping", "conversation_id", convID)
 	}
-
-	if sm.handler != nil {
-		conv := &model.Conversation{ID: convID}
-		if err := sm.handler.OnConversation(ctx, conv); err != nil {
-			sm.logger.Error("handler OnConversation (restore) failed", "conversation_id", convID, "error", err)
-		}
-	}
-
 	return nil
 }
 
-// handleConversationCreate processes a "create" action for a conversation
-// update. The payload carries the full model.Conversation wrapped with an
-// "action" field (D-045). The conversation is upserted into the local store
-// and the handler is notified.
-func (sm *syncManager) handleConversationCreate(ctx context.Context, payload json.RawMessage) error {
+// handleConversationCreateTx processes a "create" action for a conversation
+// update within the given transaction (D-045).
+func (sm *syncManager) handleConversationCreateTx(ctx context.Context, tx *gorm.DB, payload json.RawMessage) error {
 	var wrapped createConversationUpdatePayload
 	if err := json.Unmarshal(payload, &wrapped); err != nil {
-		return NewSyncError(fmt.Errorf("unmarshal create conversation payload: %w", err))
+		return fmt.Errorf("unmarshal create conversation payload: %w", err)
 	}
 	if wrapped.Conversation == nil {
-		return NewSyncError(fmt.Errorf("create conversation payload has nil conversation"))
-	}
-	conv := wrapped.Conversation
-
-	if err := sm.db.Conversations.Upsert(ctx, conv); err != nil {
-		return NewSyncError(fmt.Errorf("upsert conversation: %w", err))
+		return fmt.Errorf("create conversation payload has nil conversation")
 	}
 
-	if sm.handler != nil {
-		if err := sm.handler.OnConversation(ctx, conv); err != nil {
-			sm.logger.Error("handler OnConversation (create) failed", "conversation_id", conv.ID, "error", err)
-		}
+	if err := sm.db.Conversations.UpsertTx(ctx, tx, wrapped.Conversation); err != nil {
+		return fmt.Errorf("upsert conversation: %w", err)
 	}
-
 	return nil
 }
 
-// handleConversationUpsert creates or updates a conversation from a full
-// model.Conversation payload.
-func (sm *syncManager) handleConversationUpsert(ctx context.Context, payload json.RawMessage) error {
+// handleConversationUpsertTx creates or updates a conversation from a full
+// model.Conversation payload within the given transaction.
+func (sm *syncManager) handleConversationUpsertTx(ctx context.Context, tx *gorm.DB, payload json.RawMessage) error {
 	var conv model.Conversation
 	if err := json.Unmarshal(payload, &conv); err != nil {
-		return NewSyncError(fmt.Errorf("unmarshal conversation payload: %w", err))
+		return fmt.Errorf("unmarshal conversation payload: %w", err)
 	}
 
-	// Check existence and create or update accordingly.
-	existing, err := sm.db.Conversations.Get(ctx, conv.ID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			if err := sm.db.Conversations.Create(ctx, &conv); err != nil {
-				return NewSyncError(fmt.Errorf("create conversation: %w", err))
-			}
-		} else {
-			return NewSyncError(fmt.Errorf("get conversation: %w", err))
-		}
-	} else {
-		// Preserve fields not controlled by the server update.
-		conv.CreatedAt = existing.CreatedAt
-		if err := sm.db.Conversations.Update(ctx, &conv); err != nil {
-			return NewSyncError(fmt.Errorf("update conversation: %w", err))
-		}
+	if err := sm.db.Conversations.UpsertTx(ctx, tx, &conv); err != nil {
+		return fmt.Errorf("upsert conversation: %w", err)
 	}
-
-	// Notify handler.
-	if sm.handler != nil {
-		if err := sm.handler.OnConversation(ctx, &conv); err != nil {
-			sm.logger.Error("handler OnConversation failed", "conversation_id", conv.ID, "error", err)
-		}
-	}
-
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Post-commit handler notifications
+// ---------------------------------------------------------------------------
+
+// notifyHandler calls handler methods after the transaction commits. Errors are
+// logged but do not fail the sync pipeline.
+func (sm *syncManager) notifyHandler(ctx context.Context, update *protocol.PackageDataUpdate) {
+	if sm.handler == nil {
+		return
+	}
+	switch update.Type {
+	case protocol.UpdateTypeMessage:
+		var msg model.Message
+		if err := json.Unmarshal(update.Payload, &msg); err == nil {
+			_ = sm.handler.OnMessage(ctx, &msg)
+		}
+	case protocol.UpdateTypeDeleteMessage:
+		var dp deleteMessagePayload
+		if err := json.Unmarshal(update.Payload, &dp); err == nil {
+			_ = sm.handler.OnDeleteMessage(ctx, dp.MessageID, dp.ConversationID)
+		}
+	case protocol.UpdateTypeMarkRead:
+		var mp markReadPayload
+		if err := json.Unmarshal(update.Payload, &mp); err == nil {
+			_ = sm.handler.OnMarkRead(ctx, mp.ConversationID, mp.LastReadMessageID)
+		}
+	case protocol.UpdateTypeConversation:
+		var peek conversationUpdatePayload
+		if err := json.Unmarshal(update.Payload, &peek); err == nil {
+			conv := &model.Conversation{ID: peek.ConversationID}
+			_ = sm.handler.OnConversation(ctx, conv)
+		}
+	case protocol.UpdateTypeGap:
+		_ = sm.handler.OnGap(ctx, update.Seq)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -462,6 +430,8 @@ func (sm *syncManager) handleConversationUpsert(ctx context.Context, payload jso
 // remaining updates are not processed and errSeqGap is returned so the caller
 // can schedule a debounced pull.
 func (sm *syncManager) ApplyUpdates(ctx context.Context, updates []protocol.PackageDataUpdate) error {
+	sm.applyMu.Lock()
+	defer sm.applyMu.Unlock()
 	for i := range updates {
 		if err := sm.ApplyUpdate(ctx, &updates[i]); err != nil {
 			if errors.Is(err, errSeqGap) {
@@ -529,7 +499,21 @@ func (sm *syncManager) debouncedPull() {
 	}
 
 	if err := sm.ApplyUpdates(ctx, resp.Updates); err != nil {
-		sm.logger.Error("debounced pull: apply updates", "error", err)
+		sm.logger.Error("debounced pull: apply updates", "error", err, "retry", true)
+		// Schedule a single retry after a short delay (L-6).
+		time.AfterFunc(5*time.Second, func() {
+			sm.mu.Lock()
+			if !sm.pullPending {
+				sm.pullPending = true
+				sm.pullTimer = time.AfterFunc(sm.debounce, func() {
+					sm.mu.Lock()
+					sm.pullPending = false
+					sm.mu.Unlock()
+					sm.debouncedPull()
+				})
+			}
+			sm.mu.Unlock()
+		})
 		return
 	}
 

@@ -906,7 +906,8 @@ func TestWeakNet_WN001_BasicReconnectFullSync(t *testing.T) {
 	// Wait for mock server to disconnect + daemon to reconnect + FullSync.
 	// onlineDuration=8s -> disconnect at ~8s -> offlineDuration=3s ->
 	// reconnect at ~11s. With 100ms/500ms reconnect delays, actual
-	// reconnect is much faster. Use waitForSync to poll the DB.
+	// reconnect is much faster. Use waitForServerPhase to ensure the
+	// disconnect cycle has completed before asserting connection stats.
 	dbPath := env.dbPathFor(alice, "dev1")
 	waitForSync(t, dbPath, 30*time.Second, func(db *clientstore.ClientDB) bool {
 		count, err := db.Messages.CountUnread(context.Background(), convID, 0)
@@ -915,6 +916,10 @@ func TestWeakNet_WN001_BasicReconnectFullSync(t *testing.T) {
 		}
 		return count >= 3
 	})
+
+	// Wait for at least 1 disconnect cycle to complete before asserting
+	// connection stats. This ensures the assertion is not racy.
+	waitForServerPhase(t, env.mockServer, 1, 30*time.Second)
 
 	// Verify mock server stats: at least 2 connections (initial + reconnect).
 	assert.GreaterOrEqual(t, env.mockServer.TotalConnections(), 2,
@@ -1027,6 +1032,10 @@ func TestWeakNet_WN003_MultipleDisconnects(t *testing.T) {
 		count, _ := db.Messages.CountUnread(context.Background(), convID, 0)
 		return count >= 5
 	})
+
+	// Wait for at least 1 disconnect cycle to complete before asserting.
+	// This ensures the assertion is not racy.
+	waitForServerPhase(t, env.mockServer, 1, 30*time.Second)
 
 	// Verify at least 1 disconnect cycle occurred. The core assertion is that
 	// all 5 messages are eventually consistent, not the number of disconnects.

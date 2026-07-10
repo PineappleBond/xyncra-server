@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -77,5 +78,20 @@ func standaloneRPC(ctx context.Context, cliCtx *CLIContext, method string, param
 		return nil, &client.ClientError{Code: resp.Code, Message: resp.Msg}
 	}
 
+	if isMutationMethod(method) {
+		fmt.Fprintf(os.Stderr, "Note: Operation succeeded on server. Local database will be updated when daemon starts.\n")
+		fmt.Fprintf(os.Stderr, "Hint: Run 'xyncra-client listen --user-id <user>' to enable local queries.\n")
+	}
+
 	return resp.Data, nil
+}
+
+// isMutationMethod returns true if the RPC method modifies server state.
+func isMutationMethod(method string) bool {
+	switch method {
+	case "send_message", "delete_message", "mark_as_read",
+		"create_conversation", "delete_conversation", "restore_conversation":
+		return true
+	}
+	return false
 }

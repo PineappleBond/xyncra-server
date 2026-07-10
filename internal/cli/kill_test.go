@@ -64,11 +64,8 @@ func TestRunKill_NoLockFile(t *testing.T) {
 
 	output := captureStderr(func() {
 		err := killCmd.RunE(killCmd, nil)
-		if err == nil {
-			t.Fatal("runKill should return error when no daemon is found")
-		}
-		if !strings.Contains(err.Error(), "no running daemon") {
-			t.Errorf("error = %q, want it to contain 'no running daemon'", err.Error())
+		if err != nil {
+			t.Fatalf("runKill should return nil (D-039: exit 0) when no daemon is found, got: %v", err)
 		}
 	})
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"gorm.io/gorm"
 
 	"github.com/PineappleBond/xyncra-server/pkg/client"
 	"github.com/PineappleBond/xyncra-server/pkg/store"
@@ -219,7 +220,7 @@ func runListen(cmd *cobra.Command, _ []string) error {
 	defer xc.Stop()
 
 	// Register IPC method handlers.
-	registerIPCHandlers(ipcServer, xc, db)
+	registerIPCHandlers(ipcServer, xc, db, cliCtx.UserID)
 
 	// Start the IPC server in the background.
 	ctx := context.Background()
@@ -257,7 +258,9 @@ func runListen(cmd *cobra.Command, _ []string) error {
 // forward requests to the corresponding XyncraClient methods. The db parameter
 // is used by handlers that need to update the local database (e.g.
 // create_conversation writes the new conversation for D-035 local reads).
-func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.ClientDB) {
+// The userID parameter is required by mark_as_read to update the correct
+// read-cursor column in the local database (D-012, D-047).
+func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.ClientDB, userID string) {
 	s.Register("send_message", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
 		var params struct {
 			ConversationID  string `json:"conversation_id"`
@@ -277,6 +280,20 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 			}
 			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
 		}
+		// Persist sent message to local DB (D-035).
+		if result.Message != nil && db != nil {
+			if err := db.Messages.Create(ctx, result.Message); err != nil {
+				if !errors.Is(err, store.ErrDuplicateKey) {
+					fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to persist sent message locally: %v\n", err)
+				}
+			} else {
+				// Update conversation last-message pointer.
+				if err := db.Conversations.UpdateLastMessage(ctx, result.Message.ConversationID, result.Message.CreatedAt, result.Message.MessageID); err != nil && !errors.Is(err, store.ErrNotFound) {
+					fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to update conversation last message: %v\n", err)
+				}
+			}
+		}
+
 		return NewIPCResponse(req.ID, result)
 	})
 
@@ -309,7 +326,7 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 
 		// Persist the conversation to the local DB (D-035).
 		if result.Conversation != nil && db != nil {
-			if err := db.Conversations.Create(ctx, result.Conversation); err != nil {
+			if err := db.Conversations.Upsert(ctx, result.Conversation); err != nil {
 				// Log but do not fail the RPC — the conversation was
 				// created on the server successfully.
 				fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to persist created conversation locally: %v\n", err)
@@ -333,6 +350,14 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 			}
 			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
 		}
+
+		// Cascade soft-delete conversation in local DB (D-035, D-013).
+		if db != nil {
+			if err := db.Conversations.Delete(ctx, params.ConversationID); err != nil && !errors.Is(err, store.ErrNotFound) {
+				fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to delete conversation locally: %v\n", err)
+			}
+		}
+
 		return NewIPCResponse(req.ID, nil)
 	})
 
@@ -350,6 +375,14 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 			}
 			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
 		}
+
+		// Cascade restore conversation in local DB (D-035, D-015).
+		if db != nil {
+			if err := db.Conversations.Restore(ctx, params.ConversationID); err != nil && !errors.Is(err, store.ErrNotFound) {
+				fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to restore conversation locally: %v\n", err)
+			}
+		}
+
 		return NewIPCResponse(req.ID, nil)
 	})
 
@@ -367,6 +400,14 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 			}
 			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
 		}
+
+		// Soft-delete message in local DB (D-035).
+		if db != nil {
+			if err := db.Messages.Delete(ctx, params.MessageID); err != nil && !errors.Is(err, store.ErrNotFound) {
+				fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to delete message locally: %v\n", err)
+			}
+		}
+
 		return NewIPCResponse(req.ID, nil)
 	})
 
@@ -399,6 +440,14 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 		if err := json.Unmarshal(data, &result); err != nil {
 			return NewIPCErrorResponse(req.ID, -300, fmt.Sprintf("unmarshal mark_as_read result: %v", err)), nil
 		}
+
+		// Update local read cursor using SERVER-RETURNED value (D-012, D-047).
+		if db != nil {
+			if err := db.Conversations.UpdateLastRead(ctx, params.ConversationID, userID, result.LastReadMessageID); err != nil {
+				fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to update local read cursor: %v\n", err)
+			}
+		}
+
 		return NewIPCResponse(req.ID, result)
 	})
 }
@@ -427,22 +476,27 @@ func startLogCleanup(ctx context.Context, db *store.ClientDB, interval, retentio
 }
 
 // runCleanup performs a single cleanup pass, deleting RPC logs and notification
-// logs older than retention.
+// logs older than retention. Both deletes run inside a single transaction so
+// that either both succeed or both are rolled back (L-1).
 func runCleanup(db *store.ClientDB, retention time.Duration, logger *cliLogger) {
 	ctx := context.Background()
 	before := time.Now().Add(-retention)
 
-	rpcDeleted, err := db.RPCLogs.CleanupBefore(ctx, before)
-	if err != nil {
-		logger.Error("auto-cleanup: rpc logs", "error", err)
-	} else if rpcDeleted > 0 {
-		logger.Info("auto-cleanup: deleted expired rpc logs", "count", rpcDeleted)
-	}
+	err := db.Transaction(ctx, func(tx *gorm.DB) error {
+		rpcResult := tx.Where("created_at < ?", before).Delete(&model.RPCLog{})
+		if rpcResult.Error != nil {
+			return fmt.Errorf("cleanup rpc logs: %w", rpcResult.Error)
+		}
 
-	notifDeleted, err := db.NotificationLogs.CleanupBefore(ctx, before)
+		notifResult := tx.Where("created_at < ?", before).Delete(&model.NotificationLog{})
+		if notifResult.Error != nil {
+			return fmt.Errorf("cleanup notification logs: %w", notifResult.Error)
+		}
+
+		return nil
+	})
+
 	if err != nil {
-		logger.Error("auto-cleanup: notification logs", "error", err)
-	} else if notifDeleted > 0 {
-		logger.Info("auto-cleanup: deleted expired notification logs", "count", notifDeleted)
+		logger.Error("auto-cleanup", "error", err)
 	}
 }

@@ -163,3 +163,11 @@ func (ns *NotificationLogStore) GetLatestSeq(ctx context.Context) (uint32, error
 	}
 	return seq, nil
 }
+
+// SaveTx inserts a notification log record within the given transaction.
+func (ns *NotificationLogStore) SaveTx(ctx context.Context, tx *gorm.DB, log *model.NotificationLog) error {
+	if err := tx.WithContext(ctx).Create(log).Error; err != nil {
+		return classifyError(fmt.Errorf("store: save notification log tx: %w", err))
+	}
+	return nil
+}

@@ -990,9 +990,9 @@ func TestFullSync_WithError(t *testing.T) {
 func TestFullSync_DelegatesToSyncManager(t *testing.T) {
 	server := newMockWSServer(t)
 
-	var syncCalls int
+	var syncCalls atomic.Int64
 	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
-		syncCalls++
+		syncCalls.Add(1)
 		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
 	})
 
@@ -1006,12 +1006,12 @@ func TestFullSync_DelegatesToSyncManager(t *testing.T) {
 	}
 	time.Sleep(200 * time.Millisecond)
 
-	callsBefore := syncCalls
+	callsBefore := syncCalls.Load()
 	if err := c.FullSync(context.Background()); err != nil {
 		t.Fatalf("FullSync() error: %v", err)
 	}
 	// FullSync should have made at least one additional sync_updates call.
-	if syncCalls <= callsBefore {
+	if syncCalls.Load() <= callsBefore {
 		t.Error("FullSync did not call sync_updates")
 	}
 }

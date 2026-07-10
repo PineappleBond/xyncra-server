@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/PineappleBond/xyncra-server/pkg/client"
+	"github.com/PineappleBond/xyncra-server/pkg/store"
 )
 
 // newSendCommand creates the "send" subcommand for sending a message.
@@ -58,12 +59,14 @@ func runSend(cmd *cobra.Command, args []string) error {
 
 	result, ipcErr := sendViaIPC(ctx, cliCtx, convID, content, replyTo, clientMsgID)
 	if ipcErr == nil {
+		clearDraft(cliCtx, convID) // M-4: clean up draft after successful send.
 		printSendResult(result)
 		return nil
 	}
 
 	result, wsErr := sendStandalone(ctx, cliCtx, convID, content, replyTo, clientMsgID)
 	if wsErr == nil {
+		clearDraft(cliCtx, convID) // M-4: clean up draft after successful send.
 		printSendResult(result)
 		return nil
 	}
@@ -141,4 +144,19 @@ func printSendResult(result *client.SendMessageResult) {
 		fmt.Printf("  Client Msg ID: %s\n", result.Message.ClientMessageID)
 	}
 	fmt.Printf("  Duplicate: %t\n", result.Duplicate)
+}
+
+// clearDraft removes the draft for the given conversation (best-effort, M-4).
+// Errors are logged to stderr but do not affect the send result.
+func clearDraft(cliCtx *CLIContext, convID string) {
+	db, err := store.New(cliCtx.DBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to open database for draft cleanup: %v\n", err)
+		return
+	}
+	defer db.Close()
+
+	if err := db.Drafts.DeleteByConversation(context.Background(), convID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to clear draft: %v\n", err)
+	}
 }

@@ -936,12 +936,17 @@ func TestMarkAsRead(t *testing.T) {
 		}()
 
 		// Now mark-as-read at seq 1 — should be a no-op due to MAX semantics.
+		// D-047: CLI displays the server-confirmed cursor value (MAX result),
+		// not the requested value. Since cursor is already at lastMsgSeq (>=3),
+		// the server returns lastMsgSeq as the confirmed cursor.
 		result := env.runCLI(t,
 			"--user-id", userID, "--device-id", deviceID,
 			"mark-as-read", "-c", convID, "--message-id", "1",
 		)
 		requireExitCode(t, result, 0)
-		assert.Contains(t, result.Stdout, "Marked as read up to message #1.")
+		assert.Contains(t, result.Stdout,
+			fmt.Sprintf("Marked as read up to message #%d.", cursorAfterMarkAll),
+		)
 
 		// Sync to apply server-side cursor state to local DB.
 		syncResult2 := env.runCLI(t,
@@ -1658,7 +1663,8 @@ func TestKillNoDaemon(t *testing.T) {
 		"--user-id", userID, "--device-id", deviceID,
 		"kill",
 	)
-	requireExitCode(t, result, 1)
+	// D-039: "kill" with no daemon running should exit 0 (success — nothing to do).
+	requireExitCode(t, result, 0)
 	assert.Contains(t, result.Stderr, "No running daemon")
 }
 

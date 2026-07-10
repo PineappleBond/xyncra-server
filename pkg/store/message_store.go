@@ -196,3 +196,23 @@ func (ms *MessageStore) CountUnread(ctx context.Context, convID string, afterMes
 	}
 	return count, nil
 }
+
+// CreateTx inserts a message within the given transaction.
+func (ms *MessageStore) CreateTx(ctx context.Context, tx *gorm.DB, msg *model.Message) error {
+	if err := tx.WithContext(ctx).Create(msg).Error; err != nil {
+		return classifyError(fmt.Errorf("store: create message tx: %w", err))
+	}
+	return nil
+}
+
+// SoftDeleteTx performs a soft delete within the given transaction.
+func (ms *MessageStore) SoftDeleteTx(ctx context.Context, tx *gorm.DB, id string) error {
+	result := tx.WithContext(ctx).Delete(&model.Message{}, "id = ?", id)
+	if result.Error != nil {
+		return classifyError(fmt.Errorf("store: soft delete message tx: %w", result.Error))
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
