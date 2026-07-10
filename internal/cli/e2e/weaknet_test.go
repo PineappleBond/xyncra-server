@@ -89,6 +89,12 @@ type weakNetServer struct {
 
 	// Statistics (protected by mu).
 	syncUpdatesCalls int
+
+	// clientMsgIDIndex stores the response for each client_message_id seen,
+	// enabling D-006 idempotency: duplicate client_message_id returns the
+	// original response with duplicate=true.
+	clientMsgIDMu    sync.Mutex
+	clientMsgIDIndex map[string]json.RawMessage
 }
 
 // newWeakNetServer creates and starts a weakNetServer with the given config.
@@ -103,13 +109,14 @@ func newWeakNetServer(t *testing.T, cfg weakNetConfig) *weakNetServer {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		cfg:         cfg,
-		rpcHandlers: make(map[string]func(string, *protocol.PackageDataRequest) (json.RawMessage, error)),
-		updates:     make(map[string][]protocol.PackageDataUpdate),
-		nextSeq:     make(map[string]uint32),
-		msgSeqs:     make(map[string]uint32),
-		ctx:         ctx,
-		cancel:      cancel,
+		cfg:              cfg,
+		rpcHandlers:      make(map[string]func(string, *protocol.PackageDataRequest) (json.RawMessage, error)),
+		updates:          make(map[string][]protocol.PackageDataUpdate),
+		nextSeq:          make(map[string]uint32),
+		msgSeqs:          make(map[string]uint32),
+		clientMsgIDIndex: make(map[string]json.RawMessage),
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 
 	// Register built-in RPC handlers.
@@ -118,6 +125,9 @@ func newWeakNetServer(t *testing.T, cfg weakNetConfig) *weakNetServer {
 	s.rpcHandlers["create_conversation"] = s.handleCreateConversation
 	s.rpcHandlers["heartbeat"] = s.handleHeartbeat
 	s.rpcHandlers["mark_as_read"] = s.handleMarkAsRead
+	s.rpcHandlers["delete_message"] = s.handleDeleteMessage
+	s.rpcHandlers["delete_conversation"] = s.handleDeleteConversation
+	s.rpcHandlers["restore_conversation"] = s.handleRestoreConversation
 
 	// Set up HTTP handler.
 	mux := http.NewServeMux()
@@ -188,6 +198,41 @@ func (s *weakNetServer) LatestSeq(userID string) uint32 {
 		return next - 1
 	}
 	return 0
+}
+
+// waitForServerPhase polls the mock server until it has entered the desired
+// phase (disconnectCount >= target) or timeout expires. This replaces
+// hardcoded time.Sleep calls for phase alignment, reducing CI flakiness.
+func waitForServerPhase(t *testing.T, server *weakNetServer, targetDisconnects int, timeout time.Duration) {
+	t.Helper()
+	start := time.Now()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if server.DisconnectCount() >= targetDisconnects {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	elapsed := time.Since(start)
+	t.Fatalf("waitForServerPhase: server did not reach %d disconnects within %s (elapsed: %s, current: %d)",
+		targetDisconnects, timeout, elapsed, server.DisconnectCount())
+}
+
+// waitForConnection polls until the mock server has at least `target` active
+// connections, or timeout expires.
+func waitForConnection(t *testing.T, server *weakNetServer, target int, timeout time.Duration) {
+	t.Helper()
+	start := time.Now()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if server.ConnectedCount() >= target {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	elapsed := time.Since(start)
+	t.Fatalf("waitForConnection: server did not reach %d connections within %s (elapsed: %s, current: %d)",
+		target, timeout, elapsed, server.ConnectedCount())
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +420,10 @@ func (s *weakNetServer) handleSyncUpdates(userID string, req *protocol.PackageDa
 }
 
 // handleSendMessage implements the send_message RPC. It generates a UUID for
-// the message, creates a "message" update, and returns the message_id.
+// the message, creates a "message" update, and returns a response matching
+// the real server format ({message: model.Message, duplicate: bool}).
+// It implements D-006 idempotency: duplicate client_message_id returns the
+// original response.
 func (s *weakNetServer) handleSendMessage(userID string, req *protocol.PackageDataRequest) (json.RawMessage, error) {
 	var params struct {
 		ConversationID  string `json:"conversation_id"`
@@ -387,6 +435,22 @@ func (s *weakNetServer) handleSendMessage(userID string, req *protocol.PackageDa
 		return nil, err
 	}
 
+	// D-006: Check-and-reserve the client_message_id slot to prevent TOCTOU races.
+	if params.ClientMessageID != "" {
+		s.clientMsgIDMu.Lock()
+		if existing, ok := s.clientMsgIDIndex[params.ClientMessageID]; ok && existing != nil {
+			s.clientMsgIDMu.Unlock()
+			// Patch the duplicate flag to true for idempotent hit.
+			var patched map[string]any
+			_ = json.Unmarshal(existing, &patched)
+			patched["duplicate"] = true
+			return json.Marshal(patched)
+		}
+		// Reserve the slot with a nil placeholder.
+		s.clientMsgIDIndex[params.ClientMessageID] = nil
+		s.clientMsgIDMu.Unlock()
+	}
+
 	messageID := uuid.New().String()
 
 	// Assign per-conversation message_id_seq.
@@ -395,25 +459,39 @@ func (s *weakNetServer) handleSendMessage(userID string, req *protocol.PackageDa
 	msgSeq := s.msgSeqs[params.ConversationID]
 	s.updatesMu.Unlock()
 
-	payload, _ := json.Marshal(map[string]any{
+	// Build a full model.Message for the response and update payload
+	// (matching real server format — Go field names, no json tags).
+	// SenderID uses the authenticated userID from the WS connection, not params.
+	msg := map[string]any{
 		"ID":              messageID,
 		"ClientMessageID": params.ClientMessageID,
 		"ConversationID":  params.ConversationID,
 		"MessageID":       msgSeq,
-		"SenderID":        params.SenderID,
+		"SenderID":        userID,
 		"Content":         params.Content,
 		"Type":            "text",
 		"ReplyTo":         uint32(0),
 		"Status":          "sent",
 		"CreatedAt":       time.Now().Format(time.RFC3339Nano),
-	})
+		"DeletedAt":       nil,
+	}
 
+	payload, _ := json.Marshal(msg)
 	s.appendUpdate(userID, protocol.UpdateTypeMessage, payload)
 
-	resp, _ := json.Marshal(map[string]string{
-		"message_id":      messageID,
-		"conversation_id": params.ConversationID,
+	// Build response matching real server format: {message: Message, duplicate: bool}.
+	resp, _ := json.Marshal(map[string]any{
+		"message":   msg,
+		"duplicate": false,
 	})
+
+	// Store for idempotency (D-006).
+	if params.ClientMessageID != "" {
+		s.clientMsgIDMu.Lock()
+		s.clientMsgIDIndex[params.ClientMessageID] = resp
+		s.clientMsgIDMu.Unlock()
+	}
+
 	return resp, nil
 }
 
@@ -490,6 +568,74 @@ func (s *weakNetServer) handleMarkAsRead(userID string, req *protocol.PackageDat
 
 	resp, _ := json.Marshal(map[string]uint32{
 		"last_read_message_id": params.MessageID,
+	})
+	return resp, nil
+}
+
+// handleDeleteMessage implements the delete_message RPC. It creates a
+// "delete_message" type update and returns success (D-014).
+func (s *weakNetServer) handleDeleteMessage(userID string, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+	var params struct {
+		MessageID string `json:"message_id"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil, err
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"message_id": params.MessageID,
+		// We can't easily look up the real conversation_id in the mock, so leave it empty.
+		"conversation_id": "",
+	})
+	s.appendUpdate(userID, protocol.UpdateTypeDeleteMessage, payload)
+
+	return json.Marshal(map[string]any{"status": "ok"})
+}
+
+// handleDeleteConversation implements the delete_conversation RPC. It creates
+// a "conversation" type update with action="delete" (D-013).
+func (s *weakNetServer) handleDeleteConversation(userID string, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+	var params struct {
+		ConversationID string `json:"conversation_id"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil, err
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"conversation_id": params.ConversationID,
+		"action":          "delete",
+	})
+	s.appendUpdate(userID, protocol.UpdateTypeConversation, payload)
+
+	return json.Marshal(map[string]any{"status": "ok", "deleted_message_count": 0})
+}
+
+// handleRestoreConversation implements the restore_conversation RPC. It creates
+// a "conversation" type update with action="restore" (D-015).
+func (s *weakNetServer) handleRestoreConversation(userID string, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+	var params struct {
+		ConversationID string `json:"conversation_id"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil, err
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"conversation_id": params.ConversationID,
+		"action":          "restore",
+	})
+	s.appendUpdate(userID, protocol.UpdateTypeConversation, payload)
+
+	// Return a response matching the real server format (conversation + restored count).
+	now := time.Now().Format(time.RFC3339Nano)
+	resp, _ := json.Marshal(map[string]any{
+		"conversation": map[string]any{
+			"ID":        params.ConversationID,
+			"CreatedAt": now,
+			"UpdatedAt": now,
+		},
+		"restored_message_count": 0,
 	})
 	return resp, nil
 }
@@ -818,8 +964,8 @@ func TestWeakNet_WN002_SendDuringDisconnect(t *testing.T) {
 	})
 	t.Log("WN-002: first message synced to local DB")
 
-	// Wait for server to go offline (onlineDuration=3s + 1s buffer).
-	time.Sleep(4 * time.Second)
+	// Wait for the first disconnect cycle to ensure we're in the offline phase.
+	waitForServerPhase(t, env.mockServer, 1, 10*time.Second)
 
 	// Send during offline phase. May fail (RPC error) or succeed (retry
 	// queue processed before disconnect was detected).
@@ -1002,9 +1148,8 @@ func TestWeakNet_WN005_RejectDuringOffline(t *testing.T) {
 	connsBeforeOffline := env.mockServer.TotalConnections()
 	t.Logf("WN-005: connections before offline=%d", connsBeforeOffline)
 
-	// Wait for server to go offline and stay offline for a while.
-	// onlineDuration=3s, so at 4s we should be in the offline phase.
-	time.Sleep(4 * time.Second)
+	// Wait for the first disconnect cycle.
+	waitForServerPhase(t, env.mockServer, 1, 10*time.Second)
 
 	// During offline phase, the server rejects new connections.
 	// The daemon should be retrying in the background.
@@ -1073,10 +1218,9 @@ func TestWeakNet_WN006_IPCAvailableDuringBriefDisconnect(t *testing.T) {
 	})
 	t.Log("WN-006: conversation synced to local DB")
 
-	// Wait for the server to enter the offline phase.
-	// onlineDuration=5s + 1s buffer = 6s.
-	time.Sleep(6 * time.Second)
-	t.Logf("WN-006: server should be offline now (disconnects=%d)", env.mockServer.DisconnectCount())
+	// Wait for the first disconnect cycle.
+	waitForServerPhase(t, env.mockServer, 1, 10*time.Second)
+	t.Logf("WN-006: server has entered offline phase (disconnects=%d)", env.mockServer.DisconnectCount())
 
 	// Execute list-conversations during the offline phase.
 	// This reads from local SQLite (D-035) and does NOT require a WS connection.
@@ -1257,6 +1401,223 @@ func TestWeakNet_WN009_FullSyncPaginationInterrupted(t *testing.T) {
 		msgCount, env.mockServer.SyncUpdatesCallCount(), env.mockServer.TotalConnections())
 }
 
+// TestWeakNet_WN010_DeleteMessageDuringWeakNet verifies that a message deleted
+// via delete-message during a weak-network cycle is eventually reflected in the
+// local DB after the daemon reconnects and syncs the delete_message update
+// (D-014, D-049).
+//
+// Scenario:
+//  1. Setup mock server with short online/offline cycles (5s/3s).
+//  2. Start daemon, create a conversation, send 2 messages.
+//  3. Wait for messages to sync to local DB.
+//  4. Execute delete-message --message-id <first-msg-uuid> via CLI.
+//  5. Wait for disconnect cycle + sync_updates propagation.
+//  6. Verify exactly 1 message remains in local DB (first was soft-deleted).
+func TestWeakNet_WN010_DeleteMessageDuringWeakNet(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  5 * time.Second,
+		offlineDuration: 3 * time.Second,
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+	dp := env.startWeakNetDaemon(t, alice, "dev1")
+	defer requireStopDaemon(t, dp)
+
+	// Create conversation during online phase.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+	t.Logf("WN-010: created conversation %s", convID)
+
+	// Send 2 messages.
+	for i := 1; i <= 2; i++ {
+		sendResult := env.runCLI(t,
+			"--user-id", alice, "--device-id", "dev1",
+			"send", "--conversation-id", convID,
+			"--content", fmt.Sprintf("msg%d", i),
+		)
+		requireExitCode(t, sendResult, 0)
+	}
+
+	// Wait for messages to sync to local DB.
+	dbPath := env.dbPathFor(alice, "dev1")
+	waitForSync(t, dbPath, 30*time.Second, func(db *clientstore.ClientDB) bool {
+		count, _ := db.Messages.CountUnread(context.Background(), convID, 0)
+		return count >= 2
+	})
+	t.Log("WN-010: both messages synced to local DB")
+
+	// Open DB to get the first message's UUID for deletion.
+	db, err := clientstore.New(dbPath)
+	require.NoError(t, err, "open DB to read message IDs")
+	msgs, err := db.Messages.ListByConversation(context.Background(), convID, 0, 10)
+	_ = db.Close()
+	require.NoError(t, err, "list messages")
+	require.GreaterOrEqual(t, len(msgs), 2, "should have at least 2 messages")
+	firstMsgID := msgs[0].ID
+	t.Logf("WN-010: deleting first message %s", firstMsgID)
+
+	// Delete the first message. Retry if the daemon is temporarily disconnected.
+	// The daemon's WS connection may be down during an offline phase, causing the
+	// CLI RPC to fail. The daemon reconnects quickly (100-500ms delays), so a
+	// retry loop handles this gracefully.
+	var deleteResult CLIResult
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		deleteResult = env.runCLI(t,
+			"--user-id", alice, "--device-id", "dev1",
+			"delete-message", "--message-id", firstMsgID,
+		)
+		if deleteResult.ExitCode == 0 {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	requireExitCode(t, deleteResult, 0)
+	t.Logf("WN-010: delete-message CLI succeeded")
+
+	// Wait for a disconnect cycle so the daemon picks up the delete_message
+	// update via sync_updates.
+	waitForServerPhase(t, env.mockServer, 1, 15*time.Second)
+
+	// Wait for sync: CountUnread should be 1 (first message soft-deleted).
+	waitForSync(t, dbPath, 30*time.Second, func(db *clientstore.ClientDB) bool {
+		count, _ := db.Messages.CountUnread(context.Background(), convID, 0)
+		return count == 1
+	})
+
+	// Final verification: exactly 1 message remains.
+	db2, err := clientstore.New(dbPath)
+	require.NoError(t, err, "open DB for final count")
+	finalCount, err := db2.Messages.CountUnread(context.Background(), convID, 0)
+	_ = db2.Close()
+	require.NoError(t, err, "count messages")
+
+	assert.Equal(t, int64(1), finalCount,
+		"should have exactly 1 message after delete-message")
+	t.Logf("WN-010: final message count=%d, disconnects=%d, total connections=%d",
+		finalCount, env.mockServer.DisconnectCount(), env.mockServer.TotalConnections())
+}
+
+// TestWeakNet_WN011_DeleteRestoreConversationDuringWeakNet verifies that a
+// conversation deleted via delete-conversation and then restored via
+// restore-conversation during weak-network cycles is eventually reflected in
+// the local DB (D-013, D-015, D-049).
+//
+// Scenario:
+//  1. Setup mock server with short online/offline cycles (5s/3s).
+//  2. Start daemon, create a conversation.
+//  3. Wait for conversation to sync to local DB.
+//  4. Execute delete-conversation --conversation-id <uuid>.
+//  5. Wait for disconnect cycle + sync.
+//  6. Verify conversation disappeared from local DB (soft-deleted).
+//  7. Execute restore-conversation --conversation-id <uuid>.
+//  8. Wait for another disconnect cycle + sync.
+//  9. Verify conversation reappeared in local DB.
+func TestWeakNet_WN011_DeleteRestoreConversationDuringWeakNet(t *testing.T) {
+	env := setupWeakNetE2E(t)
+	env.mockServer = newWeakNetServer(t, weakNetConfig{
+		onlineDuration:  5 * time.Second,
+		offlineDuration: 3 * time.Second,
+	})
+
+	alice := uniqueUserID("alice")
+	bob := uniqueUserID("bob")
+	dp := env.startWeakNetDaemon(t, alice, "dev1")
+	defer requireStopDaemon(t, dp)
+
+	// Create conversation during online phase.
+	createResult := env.runCLI(t,
+		"--user-id", alice, "--device-id", "dev1",
+		"create-conversation", "--peer-id", bob,
+	)
+	requireExitCode(t, createResult, 0)
+	convID := extractConversationID(t, createResult.Stdout)
+	require.NotEmpty(t, convID, "should extract conversation ID")
+	t.Logf("WN-011: created conversation %s", convID)
+
+	// Wait for conversation to sync to local DB.
+	dbPath := env.dbPathFor(alice, "dev1")
+	waitForSync(t, dbPath, 30*time.Second, func(db *clientstore.ClientDB) bool {
+		convs, _ := db.Conversations.GetByUser(context.Background(), alice, 0, 100)
+		return len(convs) >= 1
+	})
+	t.Log("WN-011: conversation synced to local DB")
+
+	// Delete the conversation. Retry if the daemon is temporarily disconnected.
+	// The daemon's WS connection may be down during an offline phase, causing the
+	// CLI RPC to fail. The daemon reconnects quickly (100-500ms delays), so a
+	// retry loop handles this gracefully.
+	var deleteConvResult CLIResult
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		deleteConvResult = env.runCLI(t,
+			"--user-id", alice, "--device-id", "dev1",
+			"delete-conversation", "--conversation-id", convID,
+		)
+		if deleteConvResult.ExitCode == 0 {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	requireExitCode(t, deleteConvResult, 0)
+	t.Logf("WN-011: delete-conversation CLI succeeded")
+
+	// Wait for a disconnect cycle so the daemon picks up the delete update.
+	waitForServerPhase(t, env.mockServer, 1, 30*time.Second)
+
+	// Wait for sync: GetByUser should return 0 conversations (soft-deleted).
+	waitForSync(t, dbPath, 30*time.Second, func(db *clientstore.ClientDB) bool {
+		convs, _ := db.Conversations.GetByUser(context.Background(), alice, 0, 100)
+		return len(convs) == 0
+	})
+	t.Log("WN-011: conversation disappeared from local DB after delete")
+
+	// Restore the conversation. Retry if the daemon is temporarily disconnected.
+	var restoreConvResult CLIResult
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		restoreConvResult = env.runCLI(t,
+			"--user-id", alice, "--device-id", "dev1",
+			"restore-conversation", "--conversation-id", convID,
+		)
+		if restoreConvResult.ExitCode == 0 {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	requireExitCode(t, restoreConvResult, 0)
+	t.Logf("WN-011: restore-conversation CLI succeeded")
+
+	// Wait for another disconnect cycle so the daemon picks up the restore update.
+	waitForServerPhase(t, env.mockServer, 2, 30*time.Second)
+
+	// Wait for sync: GetByUser should return 1 conversation (restored).
+	waitForSync(t, dbPath, 30*time.Second, func(db *clientstore.ClientDB) bool {
+		convs, _ := db.Conversations.GetByUser(context.Background(), alice, 0, 100)
+		return len(convs) >= 1
+	})
+	t.Log("WN-011: conversation reappeared in local DB after restore")
+
+	// Final verification: conversation is visible.
+	db, err := clientstore.New(dbPath)
+	require.NoError(t, err, "open DB for final verification")
+	finalConvs, err := db.Conversations.GetByUser(context.Background(), alice, 0, 100)
+	_ = db.Close()
+	require.NoError(t, err, "list conversations")
+
+	assert.GreaterOrEqual(t, len(finalConvs), 1,
+		"should have at least 1 conversation after restore")
+	t.Logf("WN-011: final conversation count=%d, disconnects=%d, total connections=%d",
+		len(finalConvs), env.mockServer.DisconnectCount(), env.mockServer.TotalConnections())
+}
+
 // TestWeakNet_WN012_ServerUnavailableAtStartup verifies that the daemon
 // retries indefinitely when the server is initially unreachable, and
 // eventually connects when the server becomes available (D-044).
@@ -1274,10 +1635,10 @@ func TestWeakNet_WN012_ServerUnavailableAtStartup(t *testing.T) {
 	bob := uniqueUserID("bob")
 
 	// Wait for the server to enter the offline phase before starting the daemon.
-	// onlineDuration=2s + 1s buffer = 3s. The daemon will start during offline,
-	// so its initial connection attempt will be rejected (HTTP 500).
-	time.Sleep(3 * time.Second)
-	t.Logf("WN-012: server should be offline (disconnects=%d, connected=%d)",
+	// The daemon will start during offline, so its initial connection attempt
+	// will be rejected (HTTP 500).
+	waitForServerPhase(t, env.mockServer, 1, 10*time.Second)
+	t.Logf("WN-012: server has entered offline phase (disconnects=%d, connected=%d)",
 		env.mockServer.DisconnectCount(), env.mockServer.ConnectedCount())
 
 	// Start daemon while server is offline -> connection rejected -> infinite retry.
