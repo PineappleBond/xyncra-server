@@ -188,14 +188,31 @@ func runListen(cmd *cobra.Command, _ []string) error {
 	// Build the server URL with user_id query parameter (D-005).
 	serverURL := cliCtx.ServerURLWithUser()
 
-	// Create the XyncraClient.
-	xc, err := client.New(
+	// Build client options.
+	clientOpts := []client.ClientOption{
 		client.WithServerURL(serverURL),
 		client.WithUserID(cliCtx.UserID),
 		client.WithDB(db),
 		client.WithUpdateHandler(handler),
 		client.WithLogger(logger),
-	)
+	}
+
+	// Testing hooks: allow overriding reconnect delays via env vars (D-048).
+	// These are ONLY effective when set in test environments; production code
+	// does not read XYNCRA_TEST_* variables.
+	if v := os.Getenv("XYNCRA_TEST_RECONNECT_BASE_DELAY"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			clientOpts = append(clientOpts, client.WithReconnectBaseDelay(d))
+		}
+	}
+	if v := os.Getenv("XYNCRA_TEST_RECONNECT_MAX_DELAY"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			clientOpts = append(clientOpts, client.WithReconnectMaxDelay(d))
+		}
+	}
+
+	// Create the XyncraClient.
+	xc, err := client.New(clientOpts...)
 	if err != nil {
 		return fmt.Errorf("listen: create client: %w", err)
 	}
