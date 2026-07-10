@@ -349,6 +349,339 @@ sequenceDiagram
 - 支持 Anthropic Claude 和 OpenAI
 - 提供流式输出能力
 
+### 2.5 并发消息处理策略
+
+**场景**：用户发送消息 A，Agent 正在处理时，用户又发送了 B、C、D
+
+```mermaid
+graph TB
+    subgraph "消息队列策略"
+        A[消息 A] --> Q1[Conversation Queue]
+        B[消息 B] --> Q1
+        C[消息 C] --> Q1
+        D[消息 D] --> Q1
+        
+        Q1 -->|串行处理| Process[Agent 处理]
+        Process -->|处理完 A| Next[自动取 B]
+        Next -->|处理完 B| Next2[自动取 C]
+    end
+    
+    subgraph "用户通知"
+        Process --> Status1[广播 agent_status: processing]
+        Q1 --> Status2[广播 agent_status: queued<br/>队列中有 N 条消息]
+    end
+```
+
+**三种策略选择**：
+
+| 策略       | 行为                                             | 优点                   | 缺点               | 适用场景           |
+| ---------- | ------------------------------------------------ | ---------------------- | ------------------ | ------------------ |
+| **串行队列** | B、C、D 排队等待 A 完成                          | 保证顺序，上下文一致   | 用户等待时间长     | 大多数场景（推荐） |
+| **取消当前** | 取消 A 的处理，合并 A+B+C+D 重新处理             | 响应快，避免过时回复   | 浪费已处理的计算   | 用户明确取消       |
+| **并行处理** | A、B、C、D 并行处理                              | 速度快                 | 上下文混乱，可能冲突 | 独立问题           |
+
+**推荐**：默认使用**串行队列**，但提供 CLI 命令让用户可以取消当前处理。
+
+### 2.6 Human-in-the-Loop（Ask User Question）
+
+**场景**：Agent 处理过程中需要向用户提问，等待回答后继续
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant WS as WebSocket
+    participant MQ as Message Queue
+    participant Agent as Agent Task
+    participant CP as Checkpoint Store
+    
+    User->>WS: 发送消息
+    WS->>MQ: Enqueue Agent Task
+    MQ->>Agent: 开始处理
+    
+    Agent->>Agent: 执行到需要提问的点
+    Agent->>CP: 保存 Checkpoint<br/>(状态、上下文、待处理步骤)
+    Agent->>WS: 发送 agent_question 消息
+    WS-->>User: 显示问题
+    
+    Note over Agent: 任务暂停，释放 Worker
+    
+    User->>WS: 回答问题
+    WS->>MQ: Enqueue Resume Task<br/>(带 checkpoint_id)
+    MQ->>Agent: 新的 Worker 接手
+    Agent->>CP: 加载 Checkpoint
+    Agent->>Agent: 继续处理
+    
+    Agent->>WS: 发送最终结果
+```
+
+**关键设计**：
+
+1. **Checkpoint 存储**：
+
+```text
+Checkpoint {
+  id: uuid
+  conversation_id: string
+  agent_id: string
+  created_at: timestamp
+  expires_at: timestamp (如 24 小时后过期)
+  
+  // Agent 状态
+  context_messages: []Message
+  current_step: string
+  pending_tool_calls: []ToolCall
+  
+  // 等待的问题
+  question: string
+  question_context: any
+  
+  // 恢复信息
+  resume_task_type: string
+  resume_payload: any
+}
+```
+
+1. **新增 Update 类型**：
+   - `agent_question`: Agent 向用户提问
+   - `agent_status`: 状态变更（thinking, tool_calling, asking_user, resumed）
+   - `agent_checkpoint_created`: 通知客户端 checkpoint 已创建
+
+1. **超时处理**：
+   - Checkpoint 设置 TTL（如 24 小时）
+   - 超时后自动取消，发送 `agent_timeout` 消息
+   - 用户可以选择重新开始
+
+### 2.7 上下文压缩机制
+
+Eino 框架内置了两个核心的上下文压缩中间件：
+
+#### 2.7.1 Summarization Middleware（摘要压缩）
+
+**工作原理**：
+- 基于 LLM 的智能摘要压缩
+- 在 `BeforeModelRewriteState` 钩子中执行
+- 每次调用 LLM 之前自动检查
+
+**触发条件**：
+- Token 阈值：当对话总 token 数超过 `ContextTokens`（默认 160k）
+- 消息数量：当消息总数超过 `ContextMessages`（如果配置）
+
+**执行流程**：
+
+```mermaid
+graph TB
+    Start[BeforeModelRewriteState] --> Check{检查是否需要压缩}
+    Check -->|不需要| Return[直接返回]
+    Check -->|需要| CallLLM[调用 LLM 生成摘要]
+    CallLLM --> Preserve[保留最近用户消息<br/>默认 30k tokens]
+    Preserve --> Replace[用摘要 + 保留消息替换历史]
+    Replace --> ReturnCompressed[返回压缩后的消息]
+    
+    style CallLLM fill:#ffebee
+    style Check fill:#fff4e1
+```
+
+**性能影响**：
+- Token 计数：~1-5ms（本地计算）
+- LLM 摘要生成：~1-10s（同步阻塞）
+- 重试机制：默认最多 3 次，指数退避
+
+**关键配置**：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `ContextTokens` | 160000 | Token 阈值 |
+| `PreserveUserMessages.Enabled` | true | 保留用户消息 |
+| `PreserveUserMessages.MaxTokens` | 30000 | 保留的用户消息 token 上限 |
+| `Retry.MaxRetries` | 3 | 最大重试次数 |
+
+#### 2.7.2 ToolReduction Middleware（工具结果压缩）
+
+**两阶段策略**：
+
+**阶段 1：截断（Truncation）**
+- 触发时机：工具执行完成后立即检查
+- 触发条件：工具输出长度 > `MaxLengthForTrunc`（默认 50000 字符）
+- 处理方式：
+  - 保存完整内容到 Backend（文件系统）
+  - 返回截断通知给 LLM（前 25000 + 后 25000 字符）
+  - 告知文件路径，LLM 可通过 `read_file` 读取完整内容
+
+**阶段 2：清理（Clear）**
+- 触发时机：`BeforeModelRewriteState` 中
+- 触发条件：总 token 数 > `MaxTokensForClear`（默认 160000）
+- 处理方式：
+  - 遍历历史消息中的工具调用
+  - 将工具参数和结果替换为占位符
+  - 保存到 Backend
+  - 保留最近 N 轮工具调用（默认 1）
+
+**性能影响**：
+- 截断：~1-10ms（文件写入）
+- 清理：~5-50ms（遍历消息 + 文件写入）
+- **不阻塞消息队列**，仅延迟当前请求
+
+#### 2.7.3 是否阻塞消息队列？
+
+**结论**：**不阻塞消息队列，但会延迟当前请求**
+
+- Summarization 在 Agent Task Worker 内部同步执行
+- 压缩期间，Worker 被占用，无法处理其他 Task
+- 但 MQ 队列本身不受影响，其他 Task 可以继续出队
+
+**阻塞时间估算**：
+- Summarization：1-10 秒（取决于上下文长度和模型速度）
+- ToolReduction：< 50ms（可忽略）
+
+#### 2.7.4 推荐配置
+
+```mermaid
+graph LR
+    subgraph "分层压缩策略"
+        L1[第一层: ToolReduction<br/>< 50ms, 无 LLM] --> L2[第二层: Summarization<br/>1-10s, 需要 LLM]
+    end
+    
+    subgraph "模型选择"
+        M1[摘要模型: GPT-4o-mini<br/>快速、便宜] 
+        M2[主模型: GPT-4o<br/>强大、准确]
+    end
+    
+    L2 --> M1
+    L1 --> M2
+```
+
+**最佳实践**：
+
+1. **阈值设置**：
+   - Summarization: 设置为模型上下文窗口的 80%（如 128k 模型设为 100k）
+   - ToolReduction: `MaxLengthForTrunc` 设为 50k-100k
+   - ToolReduction: `MaxTokensForClear` 与 Summarization 阈值一致
+
+2. **用户感知**：
+   - 使用 `EmitInternalEvents` 检测压缩
+   - 在 UI 中显示"正在优化上下文..."提示
+   - 避免用户误以为系统卡住
+
+3. **监控指标**：
+   - 压缩触发频率
+   - 压缩比例（压缩前/后 token 数）
+   - 压缩延迟
+
+### 2.8 工具结果截取与检索
+
+当工具调用返回超长内容时，需要截取以避免超出上下文限制，同时提供检索完整内容的能力。
+
+#### 2.8.1 截取策略
+
+```mermaid
+graph TB
+    A[工具调用返回结果] --> B{结果长度 > 阈值?}
+    B -->|否| C[完整保存到数据库]
+    B -->|是| D[截取前 N 个字符]
+    D --> E[保存截取内容到数据库]
+    E --> F[完整内容保存到文件存储]
+    F --> G[在消息中添加截取标记]
+    G --> H[通知 LLM 内容已截取]
+    
+    style D fill:#ffebee
+    style H fill:#fff4e1
+```
+
+**截取规则**：
+
+- 阈值：50,000 字符（可配置）
+- 截取长度：保留前 40,000 字符
+- 存储位置：
+  - 截取内容 → 数据库 `messages` 表
+  - 完整内容 → 文件存储（本地/S3）
+
+#### 2.8.2 消息格式
+
+被截取的工具结果消息包含特殊标记：
+
+```json
+{
+  "id": "msg_123",
+  "conversation_id": "conv_456",
+  "sender_id": "agent/weather-bot",
+  "content": "工具返回的前 40,000 个字符...",
+  "type": "tool_result",
+  "metadata": {
+    "tool_name": "search_web",
+    "truncated": true,
+    "original_length": 125000,
+    "truncated_length": 40000,
+    "full_content_path": "/tmp/xyncra/tool_results/msg_123_full.txt"
+  },
+  "created_at": "2026-07-10T10:30:00Z"
+}
+```
+
+#### 2.8.3 检索工具
+
+提供 `retrieve_tool_result` 工具供 LLM 调用：
+
+```mermaid
+sequenceDiagram
+    participant LLM
+    participant Agent
+    participant FileSystem
+    
+    LLM->>Agent: 调用 retrieve_tool_result(message_id)
+    Agent->>FileSystem: 读取完整内容
+    FileSystem-->>Agent: 返回完整文本
+    Agent-->>LLM: 返回完整内容
+    Note over LLM: LLM 可以继续处理完整内容
+```
+
+**工具定义**：
+
+```yaml
+name: retrieve_tool_result
+description: 检索被截取的完整工具结果。当工具结果被截取时，消息中会包含截取标记和 message_id，调用此工具可获取完整内容。
+parameters:
+  message_id:
+    type: string
+    description: 被截取的消息 ID
+```
+
+#### 2.8.4 上下文加载策略
+
+加载上下文时，根据消息类型决定是否加载完整内容：
+
+```mermaid
+graph TB
+    A[加载对话历史] --> B{消息类型?}
+    B -->|user/assistant| C[完整加载]
+    B -->|summary| D[加载摘要内容]
+    B -->|tool_result| E{是否被截取?}
+    E -->|否| F[完整加载]
+    E -->|是| G[只加载截取部分]
+    G --> H[保留 message_id 供后续检索]
+    
+    style G fill:#fff4e1
+    style H fill:#e8f5e9
+```
+
+**关键点**：
+
+- 被截取的工具结果只加载截取部分到上下文
+- 保留 `message_id` 供 LLM 需要时检索完整内容
+- 避免一次性加载大量内容导致上下文溢出
+
+### 2.9 新增 Update 类型
+
+为了支持上述场景，需要新增以下 Update 类型：
+
+| Update Type | Seq | 用途 | Payload 示例 |
+| ----------- | --- | ---- | ------------ |
+| `agent_status` | 0 | Agent 状态变更 | `{status: "thinking", conversation_id: "..."}` |
+| `agent_question` | 0 | Agent 向用户提问 | `{question: "请确认...", checkpoint_id: "..."}` |
+| `agent_checkpoint_created` | 0 | Checkpoint 创建通知 | `{checkpoint_id: "...", expires_at: "..."}` |
+| `agent_timeout` | 0 | Agent 处理超时 | `{conversation_id: "...", reason: "checkpoint_expired"}` |
+
+**注意**：所有 Agent 相关的 Update 都是 ephemeral（Seq=0），不持久化。
+
 ---
 
 ## 3. Eino 框架集成
@@ -425,32 +758,27 @@ graph TB
 
 ## 4. Agent 配置系统
 
-### 4.1 配置文件格式
+### 4.1 单文件格式（Front Matter）
 
-Agent 通过 YAML 文件定义，存放于 `agents/` 目录：
+Agent 配置使用**单文件格式**，YAML Front Matter 包含配置，正文是 system prompt：
 
-```yaml
-# agents/weather-bot.yaml
+```markdown
+---
+# agents/weather-bot.md
 id: weather-bot
 name: Weather Bot
 description: "Provides weather information"
-model: "claude-3-5-sonnet-20241022"  # 或 "gpt-4"
-api_key_env: "ANTHROPIC_API_KEY"     # 从环境变量读取 API key
-base_url: ""                          # 可选：自定义 endpoint
-system_prompt_file: "./prompts/weather-bot.md"
+model: "claude-3-5-sonnet-20241022"
+api_key_env: "ANTHROPIC_API_KEY"
+base_url: ""
 parameters:
   temperature: 0.7
   max_tokens: 4096
 context:
   max_tokens: 4096
   max_messages: 20
-tools: []  # 可选：自定义 tools
-```
-
-### 4.2 System Prompt 文件
-
-```markdown
-# agents/prompts/weather-bot.md
+tools: []
+---
 
 You are a helpful weather assistant. You provide accurate weather information.
 
@@ -460,7 +788,80 @@ User location: {{user_location}}
 Be concise and friendly.
 ```
 
-### 4.3 AgentRegistry 加载流程
+**优势**：
+
+- 配置和 prompt 在同一文件，易于管理
+- 使用 `go:embed` 嵌入到二进制中
+- 支持 Markdown 格式的 prompt，可读性强
+
+### 4.2 使用 go:embed 嵌入
+
+```go
+// internal/agent/embed.go
+package agent
+
+import "embed"
+
+//go:embed agents/*.md
+var agentConfigs embed.FS
+```
+
+**加载流程**：
+
+```mermaid
+graph TB
+    Start[启动] --> LoadEmbed[从 embed.FS 加载]
+    LoadEmbed --> ParseFrontMatter[解析 Front Matter]
+    ParseFrontMatter --> ExtractConfig[提取配置]
+    ExtractConfig --> ExtractPrompt[提取 prompt 正文]
+    ExtractPrompt --> Store[存入 AgentRegistry]
+    
+    style LoadEmbed fill:#e1f5ff
+```
+
+### 4.3 消息类型与压缩策略
+
+数据库中的消息有类型，用于控制上下文加载和压缩：
+
+| 消息类型 | 说明 | 加载策略 | 压缩策略 |
+| -------- | ---- | -------- | -------- |
+| `user` | 用户消息 | 正常加载 | 可被压缩为摘要 |
+| `assistant` | Agent 回复 | 正常加载 | 可被压缩为摘要 |
+| `summary` | 压缩摘要 | 正常加载 | 不再压缩 |
+| `tool_call` | 工具调用 | 正常加载 | 可能截取，保留引用 |
+| `tool_result` | 工具结果 | 可能截取 | 截取后保留引用 |
+
+**压缩流程**：
+
+```mermaid
+sequenceDiagram
+    participant Task as Agent Task
+    participant DB as Database
+    participant CM as Context Manager
+    participant LLM as LLM
+    
+    Task->>CM: GetContext()
+    CM->>DB: 加载消息（按类型过滤）
+    DB-->>CM: messages (user, assistant, summary, tool_call, tool_result)
+    
+    CM->>CM: 检查 token 数
+    
+    alt 超过阈值
+        CM->>LLM: 调用压缩模型生成摘要
+        LLM-->>CM: summary text
+        CM->>DB: 保存 summary 消息
+        CM->>CM: 替换原始消息为 summary
+    end
+    
+    CM-->>Task: context messages
+    Task->>LLM: 调用主模型处理任务
+```
+
+**关键点**：
+
+- 压缩发生在任务处理过程中，不是独立步骤
+- 压缩后的 `summary` 消息不再被压缩
+- `tool_result` 可能被截取，但保留原始引用
 
 ```mermaid
 graph TB
