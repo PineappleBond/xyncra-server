@@ -60,6 +60,14 @@ type createConversationUpdatePayload struct {
 	Conversation *model.Conversation `json:"conversation"`
 }
 
+// typingUpdatePayload is the JSON structure of a "typing" ephemeral update.
+type typingUpdatePayload struct {
+	UserID         string `json:"user_id"`
+	ConversationID string `json:"conversation_id"`
+	IsTyping       bool   `json:"is_typing"`
+	Timestamp      int64  `json:"timestamp"`
+}
+
 // syncUpdatesResponse is the JSON structure returned by the sync_updates RPC.
 type syncUpdatesResponse struct {
 	Updates   []protocol.PackageDataUpdate `json:"updates"`
@@ -155,6 +163,12 @@ func (sm *syncManager) Stop() {
 // It returns errSeqGap when a gap is detected so the caller can schedule a
 // debounced pull.
 func (sm *syncManager) ApplyUpdate(ctx context.Context, update *protocol.PackageDataUpdate) error {
+	// 0. Ephemeral updates (Seq == 0) bypass seq continuity, dedup, and persistence.
+	if update.Seq == 0 {
+		sm.notifyHandler(ctx, update)
+		return nil
+	}
+
 	// 1. Read the current local maximum sequence number.
 	localMaxSeq, err := sm.db.SyncStates.GetLocalMaxSeq(ctx)
 	if err != nil {
@@ -234,6 +248,11 @@ func (sm *syncManager) dispatchUpdateTx(ctx context.Context, tx *gorm.DB, update
 	case protocol.UpdateTypeConversation:
 		return sm.handleConversationTx(ctx, tx, update.Payload)
 	case protocol.UpdateTypeGap:
+		return nil
+	case protocol.UpdateTypeTyping:
+		// Defense-in-depth: reachable only if a typing update with Seq > 0 is
+		// received (should never happen per D-050). Returns nil for graceful
+		// degradation rather than erroring on an unknown type.
 		return nil
 	default:
 		return fmt.Errorf("unknown update type: %s", update.Type)
@@ -416,6 +435,13 @@ func (sm *syncManager) notifyHandler(ctx context.Context, update *protocol.Packa
 		if err := json.Unmarshal(update.Payload, &peek); err == nil {
 			conv := &model.Conversation{ID: peek.ConversationID}
 			_ = sm.handler.OnConversation(ctx, conv)
+		}
+	case protocol.UpdateTypeTyping:
+		var tp typingUpdatePayload
+		if err := json.Unmarshal(update.Payload, &tp); err == nil {
+			if th, ok := sm.handler.(TypingHandler); ok {
+				_ = th.OnTyping(ctx, tp.UserID, tp.ConversationID, tp.IsTyping)
+			}
 		}
 	case protocol.UpdateTypeGap:
 		_ = sm.handler.OnGap(ctx, update.Seq)

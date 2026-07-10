@@ -76,6 +76,16 @@ func (h *cliUpdateHandler) OnGap(_ context.Context, seq uint32) error {
 	return nil
 }
 
+// OnTyping prints a typing indicator event to stdout (D-050 ephemeral push).
+func (h *cliUpdateHandler) OnTyping(_ context.Context, userID, conversationID string, isTyping bool) error {
+	action := "started typing"
+	if !isTyping {
+		action = "stopped typing"
+	}
+	fmt.Fprintf(os.Stdout, "[typing] user=%s conv=%s %s\n", userID, conversationID, action)
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // cliLogger — implements client.Logger
 // ---------------------------------------------------------------------------
@@ -449,6 +459,30 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 		}
 
 		return NewIPCResponse(req.ID, result)
+	})
+
+	// set_typing forwards typing indicators to the server (fire-and-forget, D-050).
+	s.Register("set_typing", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
+		var params struct {
+			ConversationID string `json:"conversation_id"`
+			IsTyping       bool   `json:"is_typing"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil
+		}
+		callParams := map[string]any{
+			"conversation_id": params.ConversationID,
+			"is_typing":       params.IsTyping,
+		}
+		data, err := xc.Call(ctx, "set_typing", callParams)
+		if err != nil {
+			if ce, ok := errors.AsType[*client.ClientError](err); ok {
+				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
+			}
+			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
+		}
+		// Forward the server response as-is.
+		return NewIPCResponse(req.ID, json.RawMessage(data))
 	})
 }
 

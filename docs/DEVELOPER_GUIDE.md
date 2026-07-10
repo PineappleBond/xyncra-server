@@ -39,6 +39,7 @@ xyncra-server/
 │   │   ├── restore_conversation.go  # restore_conversation RPC handler
 │   │   ├── delete_message.go        # delete_message RPC handler
 │   │   ├── mark_as_read.go          # mark_as_read RPC handler
+│   │   ├── set_typing.go            # set_typing RPC handler (ephemeral push, D-050)
 │   │   ├── mq_send_message.go       # MQ TaskHandler（异步消息推送）
 │   │   └── *_test.go                # 各 handler 的单元测试
 │   ├── mq/
@@ -572,6 +573,24 @@ type reactionUpdatePayload struct {
 - 所有操作共享用户级 seq 空间（D-028）
 - MQ 广播失败不影响数据完整性（D-007）
 - gap 由服务器运行时填充（D-029）
+
+### Ephemeral Update types (Seq=0)
+
+Ephemeral updates 用于 typing/presence 等瞬时业务 (D-050)，不需要持久化：
+
+1. 在 `pkg/protocol/protocol.go` 中新增 `UpdateType` 常量
+2. 创建 server handler（`internal/handler/`），使用 `broadcastFn` 直接推送 `PackageDataUpdate{Seq: 0, Type: "..."}`
+3. 在 `internal/handler/register.go` 中注册，传入 `deps.BroadcastFn`
+4. 在 `pkg/client/options.go` 中新增可选 handler 接口（如 `TypingHandler`）
+5. 在 `pkg/client/sync.go` 的 `notifyHandler` 中添加分发分支
+6. 在 `dispatchUpdateTx` 中为新的 ephemeral type 添加 `case ... : return nil` 分支（defense-in-depth：虽然 Seq=0 不会走到 dispatchUpdateTx，但防止未来重构破坏前置分支）
+
+注意：
+
+- `ApplyUpdate` 已内置 Seq=0 前置分支，ephemeral update 会在入口处直接回调 handler 并返回。步骤 6 是防御性措施。
+- Ephemeral type 不参与共享 seq 空间（D-028 例外）
+- Gap filling 不受 Seq=0 影响（D-029）
+- 推送失败可容忍（D-007 精神的更宽松变体）
 
 ---
 

@@ -145,11 +145,6 @@ func main() {
 	// ---------------------------------------------------------------
 
 	msgHandler := server.NewDefaultMessageHandler()
-	handler.RegisterAll(msgHandler, handler.Dependencies{
-		ConnStore: connStore,
-		Store:     dataStore,
-		Broker:    broker,
-	})
 
 	// ---------------------------------------------------------------
 	// WebSocket Server
@@ -166,6 +161,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to create websocket server: %v", err)
 	}
+
+	// Register method handlers after srv is created so that BroadcastFn
+	// can reference srv.BroadcastUpdates.
+	handler.RegisterAll(msgHandler, handler.Dependencies{
+		ConnStore:   connStore,
+		Store:       dataStore,
+		Broker:      broker,
+		BroadcastFn: srv.BroadcastUpdates,
+	})
 
 	// ---------------------------------------------------------------
 	// Context & signal handling

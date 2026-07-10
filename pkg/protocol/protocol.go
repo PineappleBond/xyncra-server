@@ -24,6 +24,7 @@ const (
 	UpdateTypeMarkRead      = "mark_read"      // Read cursor update
 	UpdateTypeConversation  = "conversation"   // Conversation state change (delete/restore)
 	UpdateTypeGap           = "gap"            // Synthetic gap filler (runtime only, never persisted)
+	UpdateTypeTyping        = "typing"         // ephemeral: Seq=0, never persisted, never pulled
 )
 
 // Package is the top-level message envelope for the WebSocket protocol.

@@ -131,15 +131,10 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 	})
 	require.NoError(t, err, "NewAsynqBroker should succeed")
 
-	// 7. Message handler + RegisterAll.
+	// 7. Message handler.
 	msgHandler := server.NewDefaultMessageHandler()
-	handler.RegisterAll(msgHandler, handler.Dependencies{
-		ConnStore: connStore,
-		Store:     dataStore,
-		Broker:    broker,
-	})
 
-	// 8. WebSocket server.
+	// 8. WebSocket server (created before RegisterAll so BroadcastFn is available).
 	srv, err := server.NewWebSocketServer(
 		server.WSWithAddr(":0"),
 		server.WSWithConnectionStore(connStore),
@@ -152,12 +147,20 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 	)
 	require.NoError(t, err, "NewWebSocketServer should succeed")
 
-	// 9. Task handler + Register(TypeSendMessage).
+	// 9. RegisterAll with BroadcastFn (requires srv to exist first).
+	handler.RegisterAll(msgHandler, handler.Dependencies{
+		ConnStore:   connStore,
+		Store:       dataStore,
+		Broker:      broker,
+		BroadcastFn: srv.BroadcastUpdates,
+	})
+
+	// 10. Task handler + Register(TypeSendMessage).
 	taskHandler := mq.NewTaskHandler()
 	taskHandler.Register(mq.TypeSendMessage,
 		handler.NewSendMessageTaskHandler(srv.BroadcastUpdates, srv.Logger()))
 
-	// 10. Start broker and server in goroutines (C-2).
+	// 11. Start broker and server in goroutines (C-2).
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
@@ -178,7 +181,7 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 		}
 	}()
 
-	// 11. Wait for the server to be ready (C-3).
+	// 12. Wait for the server to be ready (C-3).
 	require.Eventually(t, func() bool {
 		addr := srv.Addr()
 		return addr != ":0" && addr != ""
@@ -186,7 +189,7 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 
 	addr := srv.Addr()
 
-	// 12. Cleanup (C-1 reverse order, using t.Cleanup not defer).
+	// 13. Cleanup (C-1 reverse order, using t.Cleanup not defer).
 	t.Cleanup(func() {
 		// Cancel context first to signal goroutines to stop.
 		cancel()

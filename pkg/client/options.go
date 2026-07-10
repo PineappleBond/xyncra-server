@@ -205,6 +205,12 @@ type UpdateHandler interface {
 	OnGap(ctx context.Context, seq uint32) error
 }
 
+// TypingHandler is an optional interface that UpdateHandler implementations
+// may adopt to receive ephemeral typing indicators.
+type TypingHandler interface {
+	OnTyping(ctx context.Context, userID string, conversationID string, isTyping bool) error
+}
+
 // ---------------------------------------------------------------------------
 // clientOptions and Functional Options
 // ---------------------------------------------------------------------------

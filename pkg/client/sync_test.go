@@ -1301,3 +1301,341 @@ func TestHandleConversationTx_UnknownAction(t *testing.T) {
 		t.Errorf("notification log should have been rolled back after unknown action, found %d entries", len(logs))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// D-050: Ephemeral Push (Seq=0) — client-side sync pipeline tests
+// ---------------------------------------------------------------------------
+
+// TestApplyUpdate_EphemeralSeq0_BypassesPersistence verifies that an
+// ephemeral update (Seq=0, Type=typing) bypasses persistence, does not
+// advance localMaxSeq, leaves the NotificationLog untouched, and is
+// dispatched to the TypingHandler.
+func TestApplyUpdate_EphemeralSeq0_BypassesPersistence(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Construct a typing ephemeral update (Seq=0).
+	tp := typingUpdatePayload{
+		UserID:         "bob",
+		ConversationID: "conv-1",
+		IsTyping:       true,
+		Timestamp:      time.Now().Unix(),
+	}
+	payload, _ := json.Marshal(tp)
+	update := newTestUpdate(0, protocol.UpdateTypeTyping, payload)
+
+	if err := sm.ApplyUpdate(ctx, &update); err != nil {
+		t.Fatalf("ApplyUpdate ephemeral typing: unexpected error: %v", err)
+	}
+
+	// Verify handler was notified.
+	handler.mu.Lock()
+	if len(handler.typings) != 1 {
+		t.Fatalf("handler typings count: got=%d want=1", len(handler.typings))
+	}
+	if handler.typings[0].userID != "bob" {
+		t.Errorf("handler typing userID: got=%q want=%q", handler.typings[0].userID, "bob")
+	}
+	if handler.typings[0].conversationID != "conv-1" {
+		t.Errorf("handler typing conversationID: got=%q want=%q", handler.typings[0].conversationID, "conv-1")
+	}
+	if !handler.typings[0].isTyping {
+		t.Errorf("handler typing isTyping: got=%v want=true", handler.typings[0].isTyping)
+	}
+	handler.mu.Unlock()
+
+	// Verify localMaxSeq was NOT advanced.
+	assertSyncState(t, db, "local_max_seq", 0)
+
+	// Verify NotificationLog has no new records.
+	logs, err := db.NotificationLogs.ListBySeqRange(ctx, 0, 10)
+	if err != nil {
+		t.Fatalf("list notification logs: %v", err)
+	}
+	if len(logs) != 0 {
+		t.Errorf("notification log should be empty for ephemeral updates, found %d entries", len(logs))
+	}
+}
+
+// TestApplyUpdate_EphemeralSeq0_NoGapDetection verifies that a Seq=0 update
+// does not trigger errSeqGap even when localMaxSeq is already > 0.
+func TestApplyUpdate_EphemeralSeq0_NoGapDetection(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Pre-set localMaxSeq=5.
+	if err := db.SyncStates.SetLocalMaxSeq(ctx, 5); err != nil {
+		t.Fatalf("set local max seq: %v", err)
+	}
+
+	// Send Seq=0 typing update — should not trigger errSeqGap.
+	tp := typingUpdatePayload{
+		UserID:         "alice",
+		ConversationID: "conv-x",
+		IsTyping:       false,
+		Timestamp:      time.Now().Unix(),
+	}
+	payload, _ := json.Marshal(tp)
+	update := newTestUpdate(0, protocol.UpdateTypeTyping, payload)
+
+	err := sm.ApplyUpdate(ctx, &update)
+	if err != nil {
+		t.Fatalf("ApplyUpdate ephemeral after seq=5: expected nil, got: %v", err)
+	}
+
+	// Verify localMaxSeq is still 5.
+	assertSyncState(t, db, "local_max_seq", 5)
+}
+
+// TestApplyUpdate_EphemeralSeq0_DoesNotAffectSequence verifies that a Seq=0
+// update inserted between normal seq updates does not disrupt the sequence
+// continuity of subsequent normal updates.
+func TestApplyUpdate_EphemeralSeq0_DoesNotAffectSequence(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Pre-set localMaxSeq=5.
+	if err := db.SyncStates.SetLocalMaxSeq(ctx, 5); err != nil {
+		t.Fatalf("set local max seq: %v", err)
+	}
+
+	// Send Seq=0 typing update.
+	tp := typingUpdatePayload{
+		UserID:         "carol",
+		ConversationID: "conv-y",
+		IsTyping:       true,
+		Timestamp:      time.Now().Unix(),
+	}
+	payload, _ := json.Marshal(tp)
+	ephemeral := newTestUpdate(0, protocol.UpdateTypeTyping, payload)
+	if err := sm.ApplyUpdate(ctx, &ephemeral); err != nil {
+		t.Fatalf("ApplyUpdate ephemeral: %v", err)
+	}
+
+	// Now send Seq=6 normal gap update — should be accepted without gap.
+	normal := newTestUpdate(6, protocol.UpdateTypeGap, json.RawMessage(`{}`))
+	if err := sm.ApplyUpdate(ctx, &normal); err != nil {
+		t.Fatalf("ApplyUpdate seq=6 after ephemeral: expected nil, got: %v", err)
+	}
+
+	// localMaxSeq should advance to 6.
+	assertSyncState(t, db, "local_max_seq", 6)
+}
+
+// TestBackwardCompat_HandlerWithoutOnTyping verifies that when the handler
+// does not implement TypingHandler, an ephemeral typing update does not panic
+// and returns nil.
+func TestBackwardCompat_HandlerWithoutOnTyping(t *testing.T) {
+	db := newTestStore(t)
+	// minimalHandler only implements UpdateHandler, not TypingHandler.
+	handler := &minimalHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	tp := typingUpdatePayload{
+		UserID:         "dave",
+		ConversationID: "conv-z",
+		IsTyping:       true,
+		Timestamp:      time.Now().Unix(),
+	}
+	payload, _ := json.Marshal(tp)
+	update := newTestUpdate(0, protocol.UpdateTypeTyping, payload)
+
+	// Should not panic and should return nil.
+	err := sm.ApplyUpdate(ctx, &update)
+	if err != nil {
+		t.Fatalf("ApplyUpdate ephemeral with non-TypingHandler: expected nil, got: %v", err)
+	}
+
+	// Handler should have received no calls at all.
+	if handler.called {
+		t.Error("minimalHandler should not have been called for typing update")
+	}
+}
+
+// minimalHandler implements only UpdateHandler (not TypingHandler), used to
+// test backward compatibility when the handler lacks OnTyping.
+type minimalHandler struct {
+	called bool
+}
+
+func (h *minimalHandler) OnMessage(ctx context.Context, msg *model.Message) error {
+	h.called = true
+	return nil
+}
+func (h *minimalHandler) OnDeleteMessage(ctx context.Context, messageID string, conversationID string) error {
+	h.called = true
+	return nil
+}
+func (h *minimalHandler) OnMarkRead(ctx context.Context, conversationID string, messageID uint32) error {
+	h.called = true
+	return nil
+}
+func (h *minimalHandler) OnConversation(ctx context.Context, conv *model.Conversation) error {
+	h.called = true
+	return nil
+}
+func (h *minimalHandler) OnGap(ctx context.Context, seq uint32) error {
+	h.called = true
+	return nil
+}
+
+// TestApplyUpdates_BatchWithMixedEphemeralAndNormal verifies that a batch
+// containing both ephemeral (Seq=0) and normal updates processes them
+// correctly: typing events dispatched to OnTyping, normal events processed
+// in order, and localMaxSeq advances to the highest normal seq.
+func TestApplyUpdates_BatchWithMixedEphemeralAndNormal(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Pre-create conversation for the mark_read update.
+	now := time.Now().Truncate(time.Second)
+	conv := &model.Conversation{
+		ID:        "conv-mixed",
+		UserID1:   "test-user",
+		UserID2:   "other-user",
+		Type:      "1-on-1",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+
+	// Build the mixed batch: [Seq=0 typing, Seq=1 message, Seq=0 typing, Seq=2 mark_read].
+	tp1 := typingUpdatePayload{
+		UserID:         "eve",
+		ConversationID: "conv-mixed",
+		IsTyping:       true,
+		Timestamp:      time.Now().Unix(),
+	}
+	tp1Payload, _ := json.Marshal(tp1)
+
+	msg := model.Message{
+		ID:              "msg-mixed-1",
+		ClientMessageID: "cmid-mixed-1",
+		ConversationID:  "conv-mixed",
+		MessageID:       1,
+		SenderID:        "other-user",
+		Content:         "mixed batch msg",
+		Type:            "text",
+		Status:          "sent",
+		CreatedAt:       now,
+	}
+	msgPayload, _ := json.Marshal(msg)
+
+	tp2 := typingUpdatePayload{
+		UserID:         "frank",
+		ConversationID: "conv-mixed",
+		IsTyping:       false,
+		Timestamp:      time.Now().Unix(),
+	}
+	tp2Payload, _ := json.Marshal(tp2)
+
+	mr := markReadPayload{
+		ConversationID:    "conv-mixed",
+		LastReadMessageID: 1,
+	}
+	mrPayload, _ := json.Marshal(mr)
+
+	updates := []protocol.PackageDataUpdate{
+		newTestUpdate(0, protocol.UpdateTypeTyping, tp1Payload),
+		newTestUpdate(1, protocol.UpdateTypeMessage, msgPayload),
+		newTestUpdate(0, protocol.UpdateTypeTyping, tp2Payload),
+		newTestUpdate(2, protocol.UpdateTypeMarkRead, mrPayload),
+	}
+
+	if err := sm.ApplyUpdates(ctx, updates); err != nil {
+		t.Fatalf("ApplyUpdates mixed batch: %v", err)
+	}
+
+	// Verify: 2 typing events dispatched.
+	handler.mu.Lock()
+	if len(handler.typings) != 2 {
+		t.Errorf("handler typings count: got=%d want=2", len(handler.typings))
+	} else {
+		if handler.typings[0].userID != "eve" || !handler.typings[0].isTyping {
+			t.Errorf("first typing: got userID=%q isTyping=%v, want eve/true",
+				handler.typings[0].userID, handler.typings[0].isTyping)
+		}
+		if handler.typings[1].userID != "frank" || handler.typings[1].isTyping {
+			t.Errorf("second typing: got userID=%q isTyping=%v, want frank/false",
+				handler.typings[1].userID, handler.typings[1].isTyping)
+		}
+	}
+
+	// Verify: 1 message received.
+	if len(handler.messages) != 1 {
+		t.Errorf("handler messages count: got=%d want=1", len(handler.messages))
+	}
+
+	// Verify: 1 mark_read received.
+	if len(handler.markReads) != 1 {
+		t.Errorf("handler markReads count: got=%d want=1", len(handler.markReads))
+	}
+	handler.mu.Unlock()
+
+	// Verify: localMaxSeq advanced to 2 (highest normal seq).
+	assertSyncState(t, db, "local_max_seq", 2)
+
+	// Verify: message persisted.
+	got, err := db.Messages.Get(ctx, "msg-mixed-1")
+	if err != nil {
+		t.Fatalf("get persisted message: %v", err)
+	}
+	if got.Content != "mixed batch msg" {
+		t.Errorf("persisted message content: got=%q want=%q", got.Content, "mixed batch msg")
+	}
+
+	// Verify: mark_read cursor updated.
+	gotConv, err := db.Conversations.Get(ctx, "conv-mixed")
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if gotConv.LastReadMessageID1 != 1 {
+		t.Errorf("LastReadMessageID1: got=%d want=1", gotConv.LastReadMessageID1)
+	}
+}

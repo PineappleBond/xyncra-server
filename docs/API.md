@@ -21,6 +21,7 @@
   - [restore_conversation](#restore_conversation)
   - [delete_message](#delete_message)
   - [mark_as_read](#mark_as_read)
+  - [set_typing](#set_typing)
 - [错误码](#错误码)
 - [数据模型](#数据模型)
   - [Conversation](#conversation)
@@ -333,6 +334,7 @@ ws://host:port/ws?user_id={user_id}
 | `mark_read` | 已读位置更新 | `{conversation_id, last_read_message_id}` |
 | `conversation` | 会话状态变更 | `{conversation_id, action}` — action 为 `"delete"` 或 `"restore"` |
 | `gap` | 补空占位 | `null` — 客户端应跳过，仅更新 local_max_seq |
+| `typing` | ephemeral (Seq=0) | `{conversation_id, user_id, is_typing}` — Typing 指示器 (D-050) |
 
 **处理策略**：
 
@@ -341,7 +343,19 @@ ws://host:port/ws?user_id={user_id}
 - `mark_read`：更新本地已读位置（仅操作用户的其他设备收到）
 - `conversation`：更新本地会话状态（软删除或恢复）
 - `gap`：仅递增 `local_max_seq`，不做其他处理
+- `typing`：ephemeral push，直接回调 handler，不持久化 (D-050)
 - 未知类型：跳过（向前兼容，未来可能新增更多类型）
+
+### Ephemeral Updates (Seq=0)
+
+从 v0.x 开始，系统支持 ephemeral push 模式 (D-050)。这些更新：
+
+- 使用 `Seq=0` 标识
+- 不持久化到数据库
+- 不入 MQ 队列
+- 离线用户不投递
+- `sync_updates` 不返回
+- Client 的 `ApplyUpdate` 在入口处通过 `Seq==0` 分支直接回调 handler，绕过 seq 连续性检查、去重和本地持久化
 
 ---
 
@@ -901,6 +915,54 @@ ws://host:port/ws?user_id={user_id}
 
 ---
 
+### set_typing
+
+发送 typing（正在输入）指示器给会话的其他成员。这是一种 **ephemeral push** (D-050)：不持久化、不入 MQ、离线不投递、上线不补拉。
+
+**参数**：
+
+| 字段            | 类型   | 必填 | 默认值 | 说明                                     |
+|-----------------|--------|------|--------|------------------------------------------|
+| conversation_id | string | 是   | -      | 会话 ID                                  |
+| is_typing       | bool   | 否   | false  | true=开始输入, false=停止输入            |
+
+**请求示例**：
+
+```json
+{
+  "id": "st-001",
+  "method": "set_typing",
+  "params": {
+    "conversation_id": "conv-uuid-001",
+    "is_typing": true
+  }
+}
+```
+
+**响应**：
+
+```json
+{
+  "status": "ok"
+}
+```
+
+**错误**：
+
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数无效或缺少 conversation_id |
+| -101 | conversation not found | 会话不存在或已删除 |
+| -200 | user is not a member of the conversation | 调用者不是会话成员 |
+
+**行为说明**：
+
+- 调用者不会收到自己的 typing 事件（广播给 members \ {caller}）
+- Rate limit: 每用户每会话 1次/秒/节点（多节点部署时为 best-effort 限流），超限静默返回 OK
+- 推送使用 Seq=0 标识 ephemeral 更新 (D-050)
+
+---
+
 ## 错误码
 
 所有错误响应的 `code` 字段使用结构化错误码 (D-017)。负数表示错误，分段分配：
@@ -935,6 +997,7 @@ ws://host:port/ws?user_id={user_id}
 | restore_conversation | -100 (validation), -101 (not found), -200 (not a member), -300 (internal) |
 | delete_message | -100 (validation), -101 (not found), -200 (permission denied / not a member), -300 (internal) |
 | mark_as_read | -100 (validation), -101 (not found), -200 (not a member), -300 (internal) |
+| set_typing | -100 (validation), -101 (not found), -200 (not a member) |
 
 ---
 

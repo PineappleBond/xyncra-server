@@ -76,8 +76,16 @@ func (l *testLogger) Error(msg string, args ...any) { l.t.Logf("[ERROR] "+msg, a
 // Debug logs a debug-level message.
 func (l *testLogger) Debug(msg string, args ...any) { l.t.Logf("[DEBUG] "+msg, args...) }
 
+// typingRecord holds the arguments passed to OnTyping.
+type typingRecord struct {
+	userID         string
+	conversationID string
+	isTyping       bool
+}
+
 // mockUpdateHandler is a mock UpdateHandler that records all invocations for
-// later inspection in tests.
+// later inspection in tests. It also implements TypingHandler so that
+// ephemeral typing updates are captured.
 type mockUpdateHandler struct {
 	mu            sync.Mutex
 	messages      []*model.Message
@@ -85,6 +93,7 @@ type mockUpdateHandler struct {
 	markReads     []markReadRecord
 	conversations []*model.Conversation
 	gaps          []uint32
+	typings       []typingRecord
 }
 
 // deleteRecord holds the arguments passed to OnDeleteMessage.
@@ -136,6 +145,18 @@ func (h *mockUpdateHandler) OnGap(ctx context.Context, seq uint32) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.gaps = append(h.gaps, seq)
+	return nil
+}
+
+// OnTyping records the typing indicator parameters (implements TypingHandler).
+func (h *mockUpdateHandler) OnTyping(ctx context.Context, userID string, conversationID string, isTyping bool) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.typings = append(h.typings, typingRecord{
+		userID:         userID,
+		conversationID: conversationID,
+		isTyping:       isTyping,
+	})
 	return nil
 }
 
