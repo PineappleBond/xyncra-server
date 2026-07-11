@@ -18,6 +18,11 @@ type cachedContext struct {
 
 // DBContextManager implements ContextManager using the database for storage
 // and sync.Map for in-memory caching with TTL-based expiry.
+//
+// Design decisions (D-060):
+//   - DB-backed storage with in-memory sync.Map cache (30s default TTL)
+//   - Token-based trimming with message-count fallback
+//   - HeuristicTokenCounter (len/4) as default tokenizer (D-001)
 type DBContextManager struct {
 	messageStore *store.MessageStore
 	cache        sync.Map // conversationID -> *cachedContext
@@ -67,8 +72,22 @@ func (cm *DBContextManager) GetContext(ctx context.Context, conversationID strin
 		}
 	}
 
-	// 2. Determine fetch limit: fetch extra for trimming, at least 100.
-	fetchLimit := max(config.Context.MaxMessages*2, 100)
+	// 2. Determine fetch limit: fetch extra for trimming.
+	// When MaxTokens is set, fetch more messages to ensure sufficient content after token trimming.
+	// When only MaxMessages is set, fetch 2x the limit for trimming flexibility.
+	fetchLimit := 100
+	if config.Context.MaxMessages > 0 {
+		fetchLimit = max(config.Context.MaxMessages*2, fetchLimit)
+	}
+	if config.Context.MaxTokens > 0 {
+		// Estimate: assume average 200 tokens per message, fetch enough to cover MaxTokens.
+		estimatedMsgs := config.Context.MaxTokens / 200
+		fetchLimit = max(estimatedMsgs*2, fetchLimit)
+	}
+	// Cap at the store's maximum limit.
+	if fetchLimit > 500 {
+		fetchLimit = 500
+	}
 
 	// 3. Load from database.
 	messages, err := cm.messageStore.ListRecentByConversation(ctx, conversationID, fetchLimit)
@@ -142,7 +161,7 @@ func trimByMessages(messages []*model.Message, maxMessages int) []*model.Message
 	return messages[len(messages)-maxMessages:]
 }
 
-// defaultMessageFilter is a passthrough filter for Phase 2.
+// defaultMessageFilter is a passthrough filter for Phase 2 (D-055).
 // Future phases will filter by message type (user/assistant/summary/tool_call/tool_result).
 func defaultMessageFilter(msgs []*model.Message) []*model.Message {
 	return msgs

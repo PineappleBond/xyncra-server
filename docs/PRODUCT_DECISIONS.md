@@ -44,6 +44,7 @@
 | D-054 | Agent UserID 命名约定 | `agent/{id}` 格式，命名空间隔离 |
 | D-055 | Agent 消息格式复用 | 不新增 Message 类型，复用现有协议 |
 | D-058 | Agent 配置格式 | YAML Front Matter + Markdown body 单文件格式 |
+| D-060 | Agent 上下文管理策略 | DB 存储 + 内存缓存，Token 裁剪优先，消息数 fallback |
 
 ---
 
@@ -1306,10 +1307,37 @@ tools:
 
 ---
 
+## D-060: Agent 上下文管理策略
+
+### 决策
+
+Agent 上下文采用 DB 存储 + 内存缓存（sync.Map，TTL 30s），Token 计数裁剪优先，MaxMessages 为 fallback。
+
+### 实现要点
+
+1. **DB 存储**：通过 `MessageStore.ListRecentByConversation` 加载对话历史，确保服务重启不丢失
+2. **sync.Map 内存缓存**：减少 DB 查询开销，适合读多写少的 Agent 上下文场景，默认 TTL 30 秒
+3. **Token 裁剪优先**：`trimByTokens` 从最新消息向最旧累积 token，超出 `MaxTokens` 时裁剪最旧消息
+4. **消息数 fallback**：当 `MaxTokens == 0` 时，使用 `trimByMessages` 按 `MaxMessages` 固定数量裁剪
+5. **HeuristicTokenCounter**：默认使用 `len(text)/4` 作为 token 估算，无外部依赖（与 D-001 一致）
+6. **消息类型过滤**：Phase 2 为 passthrough（D-055），不过滤消息类型
+
+### 原因
+
+1. **持久化 + 缓存兼顾**：DB 存储保证可靠性，内存缓存保证性能
+2. **Token 裁剪优先于消息数**：LLM 的约束是 token 窗口，按 token 裁剪更精确
+3. **消息数作为 fallback**：当无法估算 token 时（MaxTokens=0），固定数量是简单可靠的替代
+4. **启发式 token 计数**：满足 D-001 零配置原则，后续可通过 `WithTokenCounter` 替换为精确 tokenizer
+
+**实现**：`internal/agent/db_context_manager.go` 中的 `DBContextManager`
+
+---
+
 ## 版本历史
 
 | 日期       | 版本 | 变更                                                                                                 |
 | ---------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| 2026-07-11 | v3.1 | 新增 D-060（Agent 上下文管理策略）                                                        |
 | 2026-07-11 | v3.0 | 新增 D-054（Agent UserID 命名约定）、D-055（Agent 消息格式复用）、D-058（Agent 配置格式）            |
 | 2026-07-10 | v2.9 | 新增 D-051/D-052/D-053（流式文本 Ephemeral Push + 协作模型 + 广播所有成员），更新 D-036               |
 | 2026-07-10 | v2.8 | 新增 D-050（Ephemeral Push 模式，Seq=0）                                                             |
