@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +13,21 @@ import (
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
 )
+
+// Logger is a structured logger interface compatible with server.Logger.
+// Implementations should output key-value pairs from the args slice.
+type Logger interface {
+	Info(msg string, args ...any)
+	Error(msg string, args ...any)
+	Debug(msg string, args ...any)
+}
+
+// noopLogger discards all log messages.
+type noopLogger struct{}
+
+func (noopLogger) Info(string, ...any)  {}
+func (noopLogger) Error(string, ...any) {}
+func (noopLogger) Debug(string, ...any) {}
 
 // ExecutePayload contains the parameters for a single agent execution.
 type ExecutePayload struct {
@@ -33,12 +46,48 @@ type AgentExecutor struct {
 	streamBridge   *StreamBridge
 	broadcaster    *BroadcastHelper
 	store          store.StoreAPI
-	sem            chan struct{} // concurrency semaphore (optional)
-	logger         *log.Logger
+	sem            *Semaphore    // concurrency semaphore (optional)
+	logger         Logger
+	totalTimeout   time.Duration // default 120s
+	typingTimeout  time.Duration // default 60s
+	metrics        LLMMetrics    // optional LLM call metrics recorder (nil = disabled)
+}
+
+// ExecutorOption configures an AgentExecutor.
+type ExecutorOption func(*AgentExecutor)
+
+// WithTotalTimeout sets the maximum total execution time for an agent task.
+// Default is 120 seconds. Ignored if d <= 0.
+func WithTotalTimeout(d time.Duration) ExecutorOption {
+	return func(e *AgentExecutor) {
+		if d > 0 {
+			e.totalTimeout = d
+		}
+	}
+}
+
+// WithTypingTimeout sets the maximum time to wait for the first LLM token
+// before clearing the typing indicator. Default is 60 seconds. Ignored if d <= 0.
+func WithTypingTimeout(d time.Duration) ExecutorOption {
+	return func(e *AgentExecutor) {
+		if d > 0 {
+			e.typingTimeout = d
+		}
+	}
+}
+
+// WithLLMMetrics sets the metrics recorder for LLM calls.
+// When set, the executor records duration, model, and error information
+// for each agent Build step. Pass nil (or omit) to disable metrics.
+func WithLLMMetrics(m LLMMetrics) ExecutorOption {
+	return func(e *AgentExecutor) {
+		e.metrics = m
+	}
 }
 
 // NewAgentExecutor creates an AgentExecutor with all dependencies.
 // If maxConcurrent > 0, a semaphore channel is created to limit parallel executions.
+// Optional ExecutorOption values override defaults (totalTimeout=120s, typingTimeout=60s).
 func NewAgentExecutor(
 	registry *AgentRegistry,
 	contextManager ContextManager,
@@ -47,7 +96,12 @@ func NewAgentExecutor(
 	broadcaster *BroadcastHelper,
 	store store.StoreAPI,
 	maxConcurrent int,
+	logger Logger,
+	opts ...ExecutorOption,
 ) *AgentExecutor {
+	if logger == nil {
+		logger = noopLogger{}
+	}
 	e := &AgentExecutor{
 		registry:       registry,
 		contextManager: contextManager,
@@ -55,10 +109,15 @@ func NewAgentExecutor(
 		streamBridge:   streamBridge,
 		broadcaster:    broadcaster,
 		store:          store,
-		logger:         log.New(os.Stderr, "[agent-executor] ", log.LstdFlags),
+		logger:         logger,
+		totalTimeout:   120 * time.Second,
+		typingTimeout:  60 * time.Second,
+	}
+	for _, opt := range opts {
+		opt(e)
 	}
 	if maxConcurrent > 0 {
-		e.sem = make(chan struct{}, maxConcurrent)
+		e.sem = NewSemaphore(maxConcurrent)
 	}
 	return e
 }
@@ -67,7 +126,7 @@ func NewAgentExecutor(
 //
 // Pipeline steps:
 //  1. Acquire semaphore (if configured).
-//  2. Apply total timeout (120s).
+//  2. Apply total timeout (default 120s, configurable via WithTotalTimeout).
 //  3. Look up agent config from registry.
 //  4. Send typing=true to the human user (D-065).
 //  5. Load conversation context.
@@ -78,18 +137,27 @@ func NewAgentExecutor(
 //  10. Send is_done=true broadcast (D-052 step 1).
 //  11. Persist the final message (D-052 step 2).
 func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) error {
+	startTime := time.Now()
+	e.logger.Info("agent executor: starting",
+		"message_id", payload.MessageID,
+		"conversation_id", payload.ConversationID,
+		"agent_id", payload.AgentID,
+	)
+
 	// 1. Semaphore: acquire with context cancellation check.
 	if e.sem != nil {
-		select {
-		case e.sem <- struct{}{}:
-			defer func() { <-e.sem }()
-		case <-ctx.Done():
-			return fmt.Errorf("execute agent: %w", ctx.Err())
+		if err := e.sem.Acquire(ctx); err != nil {
+			return fmt.Errorf("execute agent: %w", err)
 		}
+		e.logger.Debug("agent executor: semaphore acquired")
+		defer func() {
+			e.sem.Release()
+			e.logger.Debug("agent executor: semaphore released")
+		}()
 	}
 
 	// 2. Total timeout to bound execution time.
-	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, e.totalTimeout)
 	defer cancel()
 
 	// 3. Look up agent config by trimming "agent/" prefix.
@@ -103,7 +171,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 	e.broadcaster.SendTyping(ctx, payload.AgentID, payload.SenderID, payload.ConversationID, true)
 
 	// 5. Ensure typing is cleared on exit. Use sync.Once so both the
-	//    60-second typing timeout (D-065) and the first-token path can
+	//    typing timeout (D-065) and the first-token path can
 	//    safely clear the indicator without racing or double-broadcasting.
 	var typingOnce sync.Once
 	clearTyping := func() {
@@ -113,11 +181,12 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 	}
 	defer clearTyping()
 
-	// 60-second typing timeout (D-065): if no token arrives within 60s,
-	// clear the typing indicator. The 120s total timeout will eventually
-	// kill the execution; this just improves UX by stopping the spinner.
+	// Typing timeout (D-065): if no token arrives within the configured
+	// typing timeout, clear the typing indicator. The total timeout will
+	// eventually kill the execution; this just improves UX by stopping
+	// the spinner.
 	go func() {
-		timer := time.NewTimer(60 * time.Second)
+		timer := time.NewTimer(e.typingTimeout)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
@@ -133,7 +202,17 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 	}
 
 	// 7. Build the agent (LLM client + Eino runner).
+	buildStart := time.Now()
 	builtAgent, err := e.agentBuilder.Build(ctx, config)
+	buildDuration := time.Since(buildStart)
+	if e.metrics != nil {
+		e.metrics.Record(ctx, LLMCallEvent{
+			AgentID:  payload.AgentID,
+			Model:    config.Model,
+			Duration: buildDuration,
+			Error:    err,
+		})
+	}
 	if err != nil {
 		return fmt.Errorf("execute agent: build agent: %w", err)
 	}
@@ -173,7 +252,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 					CreatedAt:       time.Now(),
 				}
 				if _, persistErr := e.store.SendMessage(ctx, msg, []string{payload.SenderID, payload.AgentID}); persistErr != nil {
-					e.logger.Printf("Execute: failed to persist partial response: %v", persistErr)
+					e.logger.Error("agent executor: failed to persist partial response", "error", persistErr)
 				}
 			}
 			// Map to sentinel errors for classifyError (D-067).
@@ -223,9 +302,20 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 			CreatedAt:       time.Now(),
 		}
 		if _, err := e.store.SendMessage(ctx, msg, []string{payload.SenderID, payload.AgentID}); err != nil {
+			e.logger.Error("agent executor: failed to persist final message",
+				"agent_id", payload.AgentID,
+				"conversation_id", payload.ConversationID,
+				"error", err,
+			)
 			return fmt.Errorf("execute agent: persist message: %w", err)
 		}
 	}
+
+	e.logger.Info("agent executor: completed",
+		"agent_id", payload.AgentID,
+		"conversation_id", payload.ConversationID,
+		"duration_ms", time.Since(startTime).Milliseconds(),
+	)
 
 	return nil
 }
@@ -235,7 +325,11 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 func (e *AgentExecutor) ExecuteWithErrorMessage(ctx context.Context, payload ExecutePayload) error {
 	err := e.Execute(ctx, payload)
 	if err != nil {
-		e.logger.Printf("ExecuteWithErrorMessage: agent=%s conversation=%s error=%v", payload.AgentID, payload.ConversationID, err)
+		e.logger.Error("agent executor: execution failed",
+			"agent_id", payload.AgentID,
+			"conversation_id", payload.ConversationID,
+			"error", err,
+		)
 		classified := e.classifyError(err)
 		e.sendErrorMessage(ctx, payload, classified)
 		return err
@@ -272,6 +366,6 @@ func (e *AgentExecutor) sendErrorMessage(ctx context.Context, payload ExecutePay
 		CreatedAt:       time.Now(),
 	}
 	if _, err := e.store.SendMessage(ctx, msg, []string{payload.SenderID, payload.AgentID}); err != nil {
-		e.logger.Printf("sendErrorMessage: persist error message failed: %v", err)
+		e.logger.Error("agent executor: failed to persist error message", "error", err)
 	}
 }

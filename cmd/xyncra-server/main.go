@@ -17,6 +17,7 @@
 //	-db-driver     Database driver: sqlite, postgres, mysql (default "sqlite")
 //	-db-dsn        Database DSN / connection string (default "xyncra.db")
 //	-max-conns     Max connections per user, 0 = unlimited (default 0)
+//	-agents-dir    Path to agent config directory (default "agents")
 //
 // Environment variables (used as fallback when flags are not set):
 //
@@ -70,6 +71,8 @@ func main() {
 		"Database DSN / connection string")
 	maxConns := flag.Int("max-conns", envOrDefaultInt("XYNCRA_MAX_CONNS_PER_USER", 0),
 		"Max connections per user (0 = unlimited)")
+	agentsDir := flag.String("agents-dir", envOrDefault("XYNCRA_AGENTS_DIR", "agents"),
+		"Path to agent config directory")
 	flag.Parse()
 
 	log.Printf("starting xyncra-server %s (%s) built %s on %s", version, commit, buildTime, *addr)
@@ -152,8 +155,8 @@ func main() {
 	// ---------------------------------------------------------------
 
 	agentRegistry := agent.NewRegistry()
-	if err := agentRegistry.Load(agent.AgentConfigs); err != nil {
-		log.Fatalf("failed to load agent configurations: %v", err)
+	if err := agentRegistry.Load(*agentsDir); err != nil {
+		log.Printf("warning: failed to load agents from %s: %v", *agentsDir, err)
 	}
 	log.Printf("loaded %d agent configuration(s)", agentRegistry.Count())
 
@@ -190,9 +193,10 @@ func main() {
 	llmFactory := agent.NewLLMClientFactory()
 	agentBuilder := agent.NewAgentBuilder(llmFactory)
 	streamBridge := agent.NewStreamBridge()
-	broadcastHelper := agent.NewBroadcastHelper(srv)
+	broadcastHelper := agent.NewBroadcastHelper(srv, srv.Logger())
 	contextManager := agent.NewDBContextManager(dataStore.MessageStore())
 
+	llmMetrics := agent.NewLogMetrics(srv.Logger())
 	agentExecutor := agent.NewAgentExecutor(
 		agentRegistry,
 		contextManager,
@@ -201,6 +205,8 @@ func main() {
 		broadcastHelper,
 		dataStore,
 		10, // maxConcurrent: limit parallel LLM calls
+		srv.Logger(),
+		agent.WithLLMMetrics(llmMetrics),
 	)
 
 	// Idempotency store for agent task deduplication (D-Phase5-2).
@@ -235,8 +241,7 @@ func main() {
 		handler.NewSendMessageTaskHandler(srv.BroadcastUpdates, srv.Logger()))
 
 	// Register agent task handler (Phase 5).
-	agentTaskLogger := log.New(os.Stderr, "[agent-task] ", log.LstdFlags)
-	agentTaskHandler := agent.NewAgentTaskHandler(agentExecutor, idempotencyStore, agentTaskLogger)
+	agentTaskHandler := agent.NewAgentTaskHandler(agentExecutor, idempotencyStore, srv.Logger())
 	taskHandler.Register(mq.TypeAgentProcess, agentTaskHandler)
 
 	go func() {
