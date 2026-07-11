@@ -289,6 +289,7 @@ type AgentBuilder struct {
 	toolRegistry    *agenttools.Registry
 	registry        *AgentRegistry          // for sub-agent resolution (D-081)
 	checkpointStore compose.CheckPointStore // for HITL checkpoint persistence (D-083)
+	mcpBridge       *agenttools.MCPBridge   // for MCP server connections (D-086)
 }
 
 // NewAgentBuilder creates an AgentBuilder backed by the given LLM factory.
@@ -312,6 +313,12 @@ func (b *AgentBuilder) SetRegistry(registry *AgentRegistry) {
 // If not set, checkpoint persistence is disabled and HITL is not available.
 func (b *AgentBuilder) SetCheckPointStore(store compose.CheckPointStore) {
 	b.checkpointStore = store
+}
+
+// SetMCPBridge sets the MCP bridge used to connect to MCP servers during Build (D-086).
+// If not set, MCP servers configured in AgentConfig are ignored.
+func (b *AgentBuilder) SetMCPBridge(bridge *agenttools.MCPBridge) {
+	b.mcpBridge = bridge
 }
 
 // BuiltAgent wraps an Eino Runner together with the config it was built from.
@@ -354,6 +361,27 @@ func (b *AgentBuilder) Build(ctx context.Context, config *AgentConfig) (*BuiltAg
 			log.Default().Printf("agent %s: sub-agent resolution had errors: %v", config.ID, err)
 		}
 		einoTools = append(einoTools, subTools...)
+	}
+
+	// Connect MCP servers and add their tools (D-086).
+	if b.mcpBridge != nil && len(config.MCPServers) > 0 {
+		for _, mcpCfg := range config.MCPServers {
+			var mcpTools []tool.BaseTool
+			var err error
+			switch mcpCfg.Transport {
+			case "sse":
+				mcpTools, err = b.mcpBridge.ConnectSSE(ctx, mcpCfg.Name, mcpCfg.URL, mcpCfg.Tools)
+			case "stdio":
+				mcpTools, err = b.mcpBridge.ConnectStdio(ctx, mcpCfg.Name, mcpCfg.Command, mcpCfg.Args, mcpCfg.Env, mcpCfg.Tools)
+			default:
+				err = fmt.Errorf("mcp: unsupported transport %q for server %q", mcpCfg.Transport, mcpCfg.Name)
+			}
+			if err != nil {
+				log.Default().Printf("[WARN] agent %s: MCP connect failed for %q, skipping: %v", config.ID, mcpCfg.Name, err)
+				continue // fail-open (D-086)
+			}
+			einoTools = append(einoTools, mcpTools...)
+		}
 	}
 
 	// Build middleware chain (D-079).

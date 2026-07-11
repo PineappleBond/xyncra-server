@@ -171,4 +171,26 @@
 // Enhanced Build(): AgentBuilder.Build() now creates tools from the registry
 // (when set via SetToolRegistry) and builds the middleware chain, passing both
 // to adk.ChatModelAgentConfig.
+//
+// # Phase 8C: MCP Integration
+//
+// MCPBridge (D-086): MCPBridge manages connections to external MCP (Model
+// Context Protocol) servers. It supports SSE (Server-Sent Events) and stdio
+// transports. ConnectSSE and ConnectStdio perform the MCP handshake and tool
+// discovery, returning Eino tool.BaseTool slices that integrate seamlessly
+// with the agent's tool set. The bridge tracks all client connections for
+// lifecycle management via CloseAll.
+//
+// MCPServerConfig: Agent configs reference MCP servers in the mcp_servers
+// YAML list. Each entry specifies a name, transport ("sse" or "stdio"),
+// connection details (url for SSE, command/args/env for stdio), and optional
+// tools filter to restrict which tools are exposed to the agent.
+//
+// Build() Integration: AgentBuilder.Build() connects to all configured MCP
+// servers during agent construction. Connection failures are logged and
+// skipped (fail-open), ensuring the agent still starts even if an MCP server
+// is unavailable. The MCP tools are appended to the agent's tool set.
+//
+// Shutdown: main.go calls mcpBridge.CloseAll() after srv.GracefulStop() to
+// release all MCP client connections once in-flight requests have finished.
 package agent

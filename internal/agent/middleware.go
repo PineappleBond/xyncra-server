@@ -60,6 +60,10 @@ func (b *AgentBuilder) buildMiddleware(
 		if maxChars <= 0 {
 			maxChars = 50000
 		}
+		// TODO(Phase 8C): upgrade to filesystem backend when eino-ext provides a
+		// stable local.Backend API (D-080). Currently uses in-memory per D-080
+		// baseline. Investigated: no adk/backend/local package exists in eino-ext
+		// as of v0.9.12; reduction.Backend only requires Write().
 		mw, err := reduction.New(ctx, &reduction.Config{
 			Backend:           filesystem.NewInMemoryBackend(),
 			MaxLengthForTrunc: maxChars,

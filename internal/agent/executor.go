@@ -385,6 +385,8 @@ func (e *AgentExecutor) classifyError(err error) string {
 		return "抱歉，我无法读取对话历史，请重新发送消息。"
 	case errors.Is(err, ErrCheckpointStoreSet):
 		return "抱歉，等待时间过长，请重新发送消息。"
+	case errors.Is(err, ErrMCPUnreachable):
+		return "抱歉，外部工具服务不可用，请稍后重试。"
 	default:
 		return "抱歉，处理遇到问题，请稍后重试。"
 	}

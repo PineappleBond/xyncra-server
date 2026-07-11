@@ -237,6 +237,12 @@ func main() {
 	checkpointStore := agent.NewRedisCheckPointStore(redisIdempotencyClient, "", 0) // defaults: prefix="agent:checkpoint:", ttl=24h
 	agentBuilder.SetCheckPointStore(checkpointStore)
 
+	// MCP Bridge for external tool servers (D-086).
+	// Connections are established lazily during Agent Build; CloseAll during
+	// shutdown releases all MCP client resources.
+	mcpBridge := agenttools.NewMCPBridge(nil) // nil → uses log.Default()
+	agentBuilder.SetMCPBridge(mcpBridge)
+
 	// ---------------------------------------------------------------
 	// Context & signal handling
 	// ---------------------------------------------------------------
@@ -304,6 +310,9 @@ func main() {
 	if err := srv.GracefulStop(stopCtx); err != nil {
 		log.Printf("graceful stop error: %v", err)
 	}
+
+	// Close all MCP server connections after in-flight requests finish (D-086).
+	mcpBridge.CloseAll()
 
 	log.Println("server stopped")
 }

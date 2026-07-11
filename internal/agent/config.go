@@ -1,5 +1,7 @@
 package agent
 
+import "fmt"
+
 // MiddlewareConfig controls which Eino middleware to enable per agent.
 // All fields are optional; when the middleware block is absent from YAML,
 // no middleware is applied (backward compatible with Phase 1-7).
@@ -11,22 +13,37 @@ type MiddlewareConfig struct {
 	EnablePatchToolCalls  bool `yaml:"enable_patch_tool_calls" json:"enable_patch_tool_calls"`
 }
 
+// MCPServerConfig defines an MCP server connection (D-086).
+// Transport selects the connection method: "sse" for remote servers via
+// Server-Sent Events, "stdio" for local processes communicating over
+// standard input/output.
+type MCPServerConfig struct {
+	Name      string   `yaml:"name" json:"name"`
+	Transport string   `yaml:"transport" json:"transport"`                 // "sse" or "stdio"
+	URL       string   `yaml:"url,omitempty" json:"url,omitempty"`         // SSE endpoint
+	Command   string   `yaml:"command,omitempty" json:"command,omitempty"` // stdio command
+	Args      []string `yaml:"args,omitempty" json:"args,omitempty"`       // stdio arguments
+	Env       []string `yaml:"env,omitempty" json:"env,omitempty"`         // stdio environment variables
+	Tools     []string `yaml:"tools,omitempty" json:"tools,omitempty"`     // filter specific tools (empty = all)
+}
+
 // AgentConfig represents the configuration for an AI agent.
 // Parsed from YAML front matter in agent definition files.
 type AgentConfig struct {
-	ID           string           `yaml:"id" json:"id"`
-	Name         string           `yaml:"name" json:"name"`
-	Description  string           `yaml:"description" json:"description"`
-	Model        string           `yaml:"model" json:"model"`
-	APIKeyEnv    string           `yaml:"api_key_env" json:"api_key_env"`
-	BaseURL      string           `yaml:"base_url" json:"base_url"`
-	Parameters   AgentParameters  `yaml:"parameters" json:"parameters"`
-	Context      AgentContext     `yaml:"context" json:"context"`
-	Tools        []string         `yaml:"tools" json:"tools"`
-	ToolConfig   map[string]any   `yaml:"tool_config" json:"tool_config"` // per-tool config passed to tool factories
-	Middleware   MiddlewareConfig `yaml:"middleware" json:"middleware"`   // middleware toggles (D-079)
-	SubAgents    []string         `yaml:"sub_agents" json:"sub_agents"`   // Phase 8B placeholder (D-081)
-	SystemPrompt string           `yaml:"-" json:"system_prompt"`         // Markdown body
+	ID           string            `yaml:"id" json:"id"`
+	Name         string            `yaml:"name" json:"name"`
+	Description  string            `yaml:"description" json:"description"`
+	Model        string            `yaml:"model" json:"model"`
+	APIKeyEnv    string            `yaml:"api_key_env" json:"api_key_env"`
+	BaseURL      string            `yaml:"base_url" json:"base_url"`
+	Parameters   AgentParameters   `yaml:"parameters" json:"parameters"`
+	Context      AgentContext      `yaml:"context" json:"context"`
+	Tools        []string          `yaml:"tools" json:"tools"`
+	ToolConfig   map[string]any    `yaml:"tool_config" json:"tool_config"` // per-tool config passed to tool factories
+	Middleware   MiddlewareConfig  `yaml:"middleware" json:"middleware"`   // middleware toggles (D-079)
+	SubAgents    []string          `yaml:"sub_agents" json:"sub_agents"`   // Phase 8B placeholder (D-081)
+	MCPServers   []MCPServerConfig `yaml:"mcp_servers" json:"mcp_servers"` // MCP server connections (D-086)
+	SystemPrompt string            `yaml:"-" json:"system_prompt"`         // Markdown body
 }
 
 // AgentParameters holds model generation parameters.
@@ -43,6 +60,7 @@ type AgentContext struct {
 }
 
 // Validate checks that the AgentConfig has all required fields.
+// It also validates nested MCP server configurations (D-086).
 func (c *AgentConfig) Validate() error {
 	if c.ID == "" {
 		return ErrMissingID
@@ -55,6 +73,28 @@ func (c *AgentConfig) Validate() error {
 	}
 	if c.APIKeyEnv == "" {
 		return ErrMissingAPIKeyEnv
+	}
+	seen := make(map[string]bool)
+	for _, mcp := range c.MCPServers {
+		if mcp.Name == "" {
+			return ErrMCPMissingName
+		}
+		if seen[mcp.Name] {
+			return fmt.Errorf("%w: %q", ErrMCPDuplicateName, mcp.Name)
+		}
+		seen[mcp.Name] = true
+		switch mcp.Transport {
+		case "sse":
+			if mcp.URL == "" {
+				return ErrMCPMissingURL
+			}
+		case "stdio":
+			if mcp.Command == "" {
+				return ErrMCPMissingCommand
+			}
+		default:
+			return ErrInvalidMCPTransport
+		}
 	}
 	return nil
 }

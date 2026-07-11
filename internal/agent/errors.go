@@ -29,4 +29,12 @@ var (
 	ErrHITLInterrupted    = errors.New("agent: HITL interrupted, awaiting user input")
 	ErrCheckpointStoreSet = errors.New("agent: checkpoint store failed to persist")
 	ErrCheckpointNotFound = errors.New("agent: checkpoint not found or expired")
+
+	// MCP errors (Phase 8C, D-086)
+	ErrInvalidMCPTransport = errors.New("mcp: transport must be 'sse' or 'stdio'")
+	ErrMCPMissingURL       = errors.New("mcp: SSE transport requires url")
+	ErrMCPMissingCommand   = errors.New("mcp: stdio transport requires command")
+	ErrMCPMissingName      = errors.New("mcp: server name is required")
+	ErrMCPDuplicateName    = errors.New("mcp: duplicate server name")
+	ErrMCPUnreachable      = errors.New("agent: MCP service unreachable")
 )
