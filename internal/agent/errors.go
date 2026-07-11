@@ -13,4 +13,5 @@ var (
 	ErrAgentNotFound      = errors.New("agent: not found")
 	ErrInvalidFrontMatter = errors.New("agent: invalid front matter")
 	ErrNoFrontMatter      = errors.New("agent: no front matter found")
+	ErrContextLoad        = errors.New("agent: failed to load context")
 )

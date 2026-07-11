@@ -211,3 +211,24 @@ func (ms *MessageStore) RestoreByConversation(ctx context.Context, convID string
 	}
 	return result.RowsAffected, nil
 }
+
+// ListRecentByConversation returns the most recent messages for a conversation,
+// ordered by MessageID descending (newest first), limited to at most limit rows.
+// Soft-deleted messages are excluded automatically by GORM's soft-delete plugin.
+// This is used by the Agent context manager to load conversation history.
+func (ms *MessageStore) ListRecentByConversation(ctx context.Context, convID string, limit int) ([]*model.Message, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+
+	var msgs []*model.Message
+	err := ms.db.WithContext(ctx).
+		Where("conversation_id = ?", convID).
+		Order("message_id DESC").
+		Limit(limit).
+		Find(&msgs).Error
+	if err != nil {
+		return nil, classifyError(fmt.Errorf("store: list recent messages by conversation: %w", err))
+	}
+	return msgs, nil
+}

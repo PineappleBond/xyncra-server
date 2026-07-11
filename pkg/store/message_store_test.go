@@ -446,3 +446,82 @@ func TestMessageStore_CountUnread_ExcludesSoftDeleted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), count)
 }
+
+// ---------------------------------------------------------------------------
+// ListRecentByConversation
+// ---------------------------------------------------------------------------
+
+func TestMessageStore_ListRecentByConversation_DescOrder(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	convID := uid()
+	require.NoError(t, db.Conversations.Create(ctx, newTestConv(convID, uid(), uid(), "direct", "Test")))
+
+	for i := uint32(1); i <= 5; i++ {
+		msg := newTestMsg(uid(), uid(), convID, i, "sender", "content")
+		require.NoError(t, db.Messages.Create(ctx, msg))
+	}
+
+	msgs, err := db.Messages.ListRecentByConversation(ctx, convID, 10)
+	require.NoError(t, err)
+	require.Len(t, msgs, 5)
+
+	// Verify MessageID DESC ordering.
+	for i := range msgs {
+		assert.Equal(t, uint32(5-i), msgs[i].MessageID)
+	}
+}
+
+func TestMessageStore_ListRecentByConversation_Limit(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	convID := uid()
+	require.NoError(t, db.Conversations.Create(ctx, newTestConv(convID, uid(), uid(), "direct", "Test")))
+
+	for i := uint32(1); i <= 10; i++ {
+		msg := newTestMsg(uid(), uid(), convID, i, "sender", "content")
+		require.NoError(t, db.Messages.Create(ctx, msg))
+	}
+
+	msgs, err := db.Messages.ListRecentByConversation(ctx, convID, 3)
+	require.NoError(t, err)
+	require.Len(t, msgs, 3)
+	assert.Equal(t, uint32(10), msgs[0].MessageID)
+	assert.Equal(t, uint32(8), msgs[2].MessageID)
+}
+
+func TestMessageStore_ListRecentByConversation_InvalidLimit(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	convID := uid()
+	require.NoError(t, db.Conversations.Create(ctx, newTestConv(convID, uid(), uid(), "direct", "Test")))
+
+	for i := uint32(1); i <= 5; i++ {
+		msg := newTestMsg(uid(), uid(), convID, i, "sender", "content")
+		require.NoError(t, db.Messages.Create(ctx, msg))
+	}
+
+	// limit=0 should fallback to 50.
+	msgs, err := db.Messages.ListRecentByConversation(ctx, convID, 0)
+	require.NoError(t, err)
+	assert.Len(t, msgs, 5)
+}
+
+func TestMessageStore_ListRecentByConversation_Empty(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	convID := uid()
+	require.NoError(t, db.Conversations.Create(ctx, newTestConv(convID, uid(), uid(), "direct", "Test")))
+
+	msgs, err := db.Messages.ListRecentByConversation(ctx, convID, 10)
+	require.NoError(t, err)
+	assert.Empty(t, msgs)
+}

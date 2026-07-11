@@ -804,3 +804,104 @@ func TestMessageStore_GetByClientMessageID_NotFound(t *testing.T) {
 		assert.Nil(t, got, "message should be nil when not found")
 	})
 }
+
+// ---------------------------------------------------------------------------
+// ListRecentByConversation
+// ---------------------------------------------------------------------------
+
+// TestMessageStore_ListRecentByConversation_DescOrder verifies that
+// ListRecentByConversation returns messages ordered by MessageID descending.
+func TestMessageStore_ListRecentByConversation_DescOrder(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		require.NoError(t, s.Conversations.Create(ctx, newTestConv("conv-lr", "alice", "bob", "1-on-1", "Test")))
+		createTestMessages(t, s, ctx, "conv-lr", "msg", 5)
+
+		msgs, err := s.Messages.ListRecentByConversation(ctx, "conv-lr", 10)
+		require.NoError(t, err, "ListRecentByConversation should succeed")
+		require.Len(t, msgs, 5, "should return all 5 messages")
+
+		// Verify MessageID DESC ordering.
+		for i := 0; i < len(msgs); i++ {
+			assert.Equal(t, uint32(5-i), msgs[i].MessageID, "messages should be in MessageID DESC order")
+		}
+	})
+}
+
+// TestMessageStore_ListRecentByConversation_Limit verifies that limit is respected.
+func TestMessageStore_ListRecentByConversation_Limit(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		require.NoError(t, s.Conversations.Create(ctx, newTestConv("conv-lr2", "alice", "bob", "1-on-1", "Test")))
+		createTestMessages(t, s, ctx, "conv-lr2", "msg", 10)
+
+		msgs, err := s.Messages.ListRecentByConversation(ctx, "conv-lr2", 3)
+		require.NoError(t, err)
+		require.Len(t, msgs, 3, "should return exactly 3 messages")
+		assert.Equal(t, uint32(10), msgs[0].MessageID, "first message should be newest")
+		assert.Equal(t, uint32(8), msgs[2].MessageID, "last message should be 3rd newest")
+	})
+}
+
+// TestMessageStore_ListRecentByConversation_InvalidLimit verifies fallback to default.
+func TestMessageStore_ListRecentByConversation_InvalidLimit(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		require.NoError(t, s.Conversations.Create(ctx, newTestConv("conv-lr3", "alice", "bob", "1-on-1", "Test")))
+		createTestMessages(t, s, ctx, "conv-lr3", "msg", 5)
+
+		// limit=0 should fallback to 50, which returns all 5.
+		msgs, err := s.Messages.ListRecentByConversation(ctx, "conv-lr3", 0)
+		require.NoError(t, err)
+		assert.Len(t, msgs, 5, "limit=0 should fallback to 50, returning all 5 messages")
+
+		// limit=-1 should also fallback.
+		msgs, err = s.Messages.ListRecentByConversation(ctx, "conv-lr3", -1)
+		require.NoError(t, err)
+		assert.Len(t, msgs, 5)
+	})
+}
+
+// TestMessageStore_ListRecentByConversation_Empty verifies empty conversation.
+func TestMessageStore_ListRecentByConversation_Empty(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		require.NoError(t, s.Conversations.Create(ctx, newTestConv("conv-lr4", "alice", "bob", "1-on-1", "Test")))
+
+		msgs, err := s.Messages.ListRecentByConversation(ctx, "conv-lr4", 10)
+		require.NoError(t, err)
+		assert.Empty(t, msgs, "empty conversation should return empty slice")
+	})
+}
+
+// TestMessageStore_ListRecentByConversation_ExcludesSoftDeleted verifies
+// that soft-deleted messages are excluded.
+func TestMessageStore_ListRecentByConversation_ExcludesSoftDeleted(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		require.NoError(t, s.Conversations.Create(ctx, newTestConv("conv-lr5", "alice", "bob", "1-on-1", "Test")))
+		createTestMessages(t, s, ctx, "conv-lr5", "msg", 5)
+
+		// Soft-delete message 3.
+		require.NoError(t, s.Messages.Delete(ctx, "msg-3"))
+
+		msgs, err := s.Messages.ListRecentByConversation(ctx, "conv-lr5", 10)
+		require.NoError(t, err)
+		assert.Len(t, msgs, 4, "should exclude soft-deleted message")
+
+		// Verify message 3 is not present.
+		for _, msg := range msgs {
+			assert.NotEqual(t, "msg-3", msg.ID, "soft-deleted message should not be present")
+		}
+	})
+}

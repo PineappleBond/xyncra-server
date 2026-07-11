@@ -5,4 +5,10 @@
 // the agent's system prompt.
 //
 // Agent userIDs follow the format "agent/{id}" (D-054).
+//
+// # Context Management
+//
+// The ContextManager interface provides conversation history loading with
+// token-based trimming and in-memory caching. DBContextManager is the
+// default implementation, backed by the MessageStore with sync.Map caching.
 package agent
