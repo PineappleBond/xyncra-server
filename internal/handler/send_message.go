@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/PineappleBond/xyncra-server/internal/agent"
 	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
@@ -50,6 +52,15 @@ type sendMessageRecipient struct {
 	Updates []protocol.PackageDataUpdate `json:"updates"`
 }
 
+// agentProcessPayload is the MQ task payload used to trigger agent processing
+// when a message is sent to an agent user.
+type agentProcessPayload struct {
+	MessageID      string `json:"message_id"`
+	ConversationID string `json:"conversation_id"`
+	AgentID        string `json:"agent_id"` // full "agent/xxx" userID
+	SenderID       string `json:"sender_id"`
+}
+
 // --------------------------------------------------------------------------
 // Handler
 // --------------------------------------------------------------------------
@@ -58,15 +69,17 @@ type sendMessageRecipient struct {
 // It is stateless (only holds immutable dependency references) and therefore
 // safe for concurrent use.
 type sendMessageHandler struct {
-	store  store.StoreAPI
-	broker mq.Broker
+	store         store.StoreAPI
+	broker        mq.Broker
+	agentRegistry *agent.AgentRegistry // nil = agent detection disabled (D-063)
 }
 
 // NewSendMessageHandler creates a sendMessageHandler.
-func NewSendMessageHandler(store store.StoreAPI, broker mq.Broker) *sendMessageHandler {
+func NewSendMessageHandler(store store.StoreAPI, broker mq.Broker, agentRegistry *agent.AgentRegistry) *sendMessageHandler {
 	return &sendMessageHandler{
-		store:  store,
-		broker: broker,
+		store:         store,
+		broker:        broker,
+		agentRegistry: agentRegistry,
 	}
 }
 
@@ -182,6 +195,33 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 		}
 	}
 
+	// 5b. If the sender is human and the peer is a registered agent, enqueue
+	// an agent processing task (fire-and-forget, D-007, D-062).
+	if h.agentRegistry != nil && !strings.HasPrefix(senderID, "agent/") {
+		peerID := peerUserID(conv, client.UserID())
+		if peerID != "" {
+			if _, ok := h.agentRegistry.IsAgent(peerID); ok {
+				agentPayload := agentProcessPayload{
+					MessageID:      sendResult.Message.ID,
+					ConversationID: conv.ID,
+					AgentID:        peerID,
+					SenderID:       senderID,
+				}
+				if payloadBytes, err := json.Marshal(agentPayload); err != nil {
+					log.Printf("send_message: failed to marshal agent MQ payload: %v", err)
+				} else {
+					agentTask := &mq.Task{
+						Type:    mq.TypeAgentProcess,
+						Payload: payloadBytes,
+					}
+					if _, err := h.broker.Enqueue(ctx, agentTask); err != nil {
+						log.Printf("send_message: agent MQ enqueue failed (fire-and-forget): %v", err)
+					}
+				}
+			}
+		}
+	}
+
 	// 6. Return success.
 	resp := sendMessageResponse{
 		Message:   sendResult.Message,
@@ -193,6 +233,17 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 // --------------------------------------------------------------------------
 // Helpers
 // --------------------------------------------------------------------------
+
+// peerUserID returns the userID of the other participant in a 1-on-1 conversation.
+func peerUserID(conv *model.Conversation, senderID string) string {
+	if conv.UserID1 == senderID {
+		return conv.UserID2
+	}
+	if conv.UserID2 == senderID {
+		return conv.UserID1
+	}
+	return ""
+}
 
 // conversationMembers returns the user IDs of a conversation's members. For a
 // 1-on-1 conversation both UserID1 and UserID2 are returned; if UserID2 is

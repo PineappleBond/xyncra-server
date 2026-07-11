@@ -240,12 +240,12 @@ func TestNewRootCommand(t *testing.T) {
 
 func TestNewRootCommand_TotalSubcommandCount(t *testing.T) {
 	cmd := NewRootCommand()
-	// 15 subcommands: listen, send, create-conversation, delete-conversation,
+	// 17 subcommands: listen, send, create-conversation, delete-conversation,
 	// restore-conversation, list-conversations, get-conversation, delete-message,
 	// mark-as-read, get-messages, search-messages, draft, sync-updates,
-	// logs, kill.
-	if got := len(cmd.Commands()); got != 15 {
-		t.Errorf("expected 15 subcommands, got %d", got)
+	// set-typing, stream-text, logs, kill.
+	if got := len(cmd.Commands()); got != 17 {
+		t.Errorf("expected 17 subcommands, got %d", got)
 	}
 }
 

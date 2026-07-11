@@ -99,7 +99,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	assert.NotNil(t, syncResult.Updates)
 
 	// 3. SendMessage handler
-	sendHandler := NewSendMessageHandler(deps.Store, deps.Broker)
+	sendHandler := NewSendMessageHandler(deps.Store, deps.Broker, nil)
 	sendReq := &protocol.PackageDataRequest{
 		ID:     "req-send",
 		Method: "send_message",
@@ -252,7 +252,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	assert.NotNil(t, restoreResult.Conversation)
 
 	// 11. DeleteMessage handler -- need a message to delete
-	sendHandler2 := NewSendMessageHandler(deps.Store, deps.Broker)
+	sendHandler2 := NewSendMessageHandler(deps.Store, deps.Broker, nil)
 	sendReq2 := &protocol.PackageDataRequest{
 		ID:     "req-send-for-delete",
 		Method: "send_message",
@@ -364,7 +364,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	require.NoError(t, err, "Store dependency should be correctly injected")
 
 	// SendMessage uses Store and Broker.
-	sendHandler := NewSendMessageHandler(deps.Store, deps.Broker)
+	sendHandler := NewSendMessageHandler(deps.Store, deps.Broker, nil)
 	sendReq := &protocol.PackageDataRequest{
 		ID:     "req-send-dep",
 		Method: "send_message",
@@ -469,7 +469,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 
 	// DeleteMessage uses Store.
 	// First send a message to delete.
-	sendHandler2 := NewSendMessageHandler(deps.Store, deps.Broker)
+	sendHandler2 := NewSendMessageHandler(deps.Store, deps.Broker, nil)
 	sendReq2 := &protocol.PackageDataRequest{
 		ID:     "req-send-for-delete-dep",
 		Method: "send_message",
@@ -656,7 +656,7 @@ func TestRegisterAll_HandlersInvokable(t *testing.T) {
 		case "sync_updates":
 			handler = NewSyncUpdatesHandler(deps.Store)
 		case "send_message":
-			handler = NewSendMessageHandler(deps.Store, deps.Broker)
+			handler = NewSendMessageHandler(deps.Store, deps.Broker, nil)
 		case "create_conversation":
 			handler = NewCreateConversationHandler(deps.Store, deps.Broker)
 		case "list_conversations":
@@ -672,10 +672,10 @@ func TestRegisterAll_HandlersInvokable(t *testing.T) {
 		case "restore_conversation":
 			handler = NewRestoreConversationHandler(deps.Store, deps.Broker)
 		case "send_message_for_delete":
-			handler = NewSendMessageHandler(deps.Store, deps.Broker)
+			handler = NewSendMessageHandler(deps.Store, deps.Broker, nil)
 		case "delete_message":
 			// Send a real message to get its ID, then delete it
-			tmpSendHandler := NewSendMessageHandler(deps.Store, deps.Broker)
+			tmpSendHandler := NewSendMessageHandler(deps.Store, deps.Broker, nil)
 			tmpReq := &protocol.PackageDataRequest{
 				ID:     "req-invoke-send-del",
 				Method: "send_message",

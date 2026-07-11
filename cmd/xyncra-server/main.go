@@ -176,10 +176,11 @@ func main() {
 	// Register method handlers after srv is created so that BroadcastFn
 	// can reference srv.BroadcastUpdates.
 	handler.RegisterAll(msgHandler, handler.Dependencies{
-		ConnStore:   connStore,
-		Store:       dataStore,
-		Broker:      broker,
-		BroadcastFn: srv.BroadcastUpdates,
+		ConnStore:     connStore,
+		Store:         dataStore,
+		Broker:        broker,
+		BroadcastFn:   srv.BroadcastUpdates,
+		AgentRegistry: agentRegistry,
 	})
 
 	// ---------------------------------------------------------------

@@ -54,6 +54,14 @@ func (r *AgentRegistry) Load(fsys fs.FS) error {
 	return nil
 }
 
+// Register adds an agent config to the registry.
+// This is primarily intended for testing; production code should use Load.
+func (r *AgentRegistry) Register(config *AgentConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.agents[config.ID] = config
+}
+
 // Get returns the AgentConfig for the given agent ID.
 func (r *AgentRegistry) Get(id string) (*AgentConfig, bool) {
 	r.mu.RLock()

@@ -76,6 +76,10 @@ const (
 
 	// TypeConversationSync is the task type for syncing conversation state.
 	TypeConversationSync = "mq:conversation_sync"
+
+	// TypeAgentProcess is the task type for triggering agent processing
+	// of a message sent to an agent user.
+	TypeAgentProcess = "mq:agent_process"
 )
 
 // --------------------------------------------------------------------------

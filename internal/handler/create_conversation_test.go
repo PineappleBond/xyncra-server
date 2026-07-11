@@ -277,7 +277,7 @@ func TestCreateConversation_DBConsistency(t *testing.T) {
 
 	// Seed a message into the conversation and verify count remains 1 after
 	// another idempotent create call.
-	sendHandler := NewSendMessageHandler(s, &mockBroker{})
+	sendHandler := NewSendMessageHandler(s, &mockBroker{}, nil)
 	msgParams := map[string]interface{}{
 		"conversation_id":   conv1.ID,
 		"client_message_id": "client-msg-db-check-1",

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/PineappleBond/xyncra-server/internal/agent"
 	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
@@ -74,7 +76,7 @@ func parseSendMessageResponse(t *testing.T, data json.RawMessage) (*model.Messag
 func TestSendMessage_HappyPath(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	convID := "conv-happy-1"
@@ -134,7 +136,7 @@ func TestSendMessage_HappyPath(t *testing.T) {
 func TestSendMessage_IdempotentDuplicate(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	convID := "conv-idempotent-1"
@@ -197,7 +199,7 @@ func TestSendMessage_IdempotentDuplicate(t *testing.T) {
 func TestSendMessage_ConversationNotFound(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -224,7 +226,7 @@ func TestSendMessage_ConversationNotFound(t *testing.T) {
 func TestSendMessage_SenderNotMember(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	convID := "conv-member-1"
@@ -254,7 +256,7 @@ func TestSendMessage_SenderNotMember(t *testing.T) {
 func TestSendMessage_InvalidParams(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -310,7 +312,7 @@ func TestSendMessage_InvalidParams(t *testing.T) {
 func TestSendMessage_MessageIDIncrement(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	convID := "conv-msgid-1"
@@ -355,7 +357,7 @@ func TestSendMessage_MessageIDIncrement(t *testing.T) {
 func TestSendMessage_UserUpdateSeqIncrement(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	convID := "conv-seq-1"
@@ -419,7 +421,7 @@ func TestSendMessage_UserUpdateSeqIncrement(t *testing.T) {
 func TestSendMessage_EnqueueError(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &failingBroker{} // always fails
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	convID := "conv-enqueue-err-1"
@@ -456,7 +458,7 @@ func TestSendMessage_EnqueueError(t *testing.T) {
 func TestSendMessage_WithReplyTo(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	convID := "conv-reply-1"
@@ -499,7 +501,7 @@ func TestSendMessage_WithReplyTo(t *testing.T) {
 func TestSendMessage_MultipleMessages(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	convID := "conv-multi-1"
@@ -569,7 +571,7 @@ func TestSendMessage_MultipleMessages(t *testing.T) {
 func TestSendMessage_ConcurrentIdempotency(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	convID := "conv-concurrent-1"
@@ -637,7 +639,7 @@ func TestSendMessage_ConcurrentIdempotency(t *testing.T) {
 func TestSendMessage_EnqueueError_DuplicateNotAffected(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &failingBroker{} // always fails
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	convID := "conv-dup-fail-1"
@@ -672,4 +674,408 @@ func TestSendMessage_EnqueueError_DuplicateNotAffected(t *testing.T) {
 	assert.True(t, dup2, "second send should return duplicate=true")
 	assert.Equal(t, msg1.ID, msg2.ID, "duplicate should return same message ID")
 	assert.Equal(t, "First send", msg2.Content, "duplicate should return original content")
+}
+
+// ---------------------------------------------------------------------------
+// Agent routing test mocks
+// ---------------------------------------------------------------------------
+
+// recordingBroker is a mock broker that records all Enqueue calls for test assertions.
+type recordingBroker struct {
+	mq.Broker // embed to satisfy the full interface; only Enqueue is overridden
+	mu        sync.Mutex
+	tasks     []*mq.Task
+}
+
+func (b *recordingBroker) Enqueue(ctx context.Context, task *mq.Task, opts ...mq.EnqueueOption) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.tasks = append(b.tasks, task)
+	return fmt.Sprintf("task-%d", len(b.tasks)), nil
+}
+
+func (b *recordingBroker) callCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.tasks)
+}
+
+func (b *recordingBroker) taskAt(index int) *mq.Task {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.tasks[index]
+}
+
+// nthFailBroker fails on the Nth Enqueue call, succeeding on all others.
+type nthFailBroker struct {
+	mq.Broker
+	mu         sync.Mutex
+	failOnCall int
+	callCount  int
+}
+
+func (b *nthFailBroker) Enqueue(ctx context.Context, task *mq.Task, opts ...mq.EnqueueOption) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.callCount++
+	if b.callCount == b.failOnCall {
+		return "", fmt.Errorf("simulated enqueue failure on call %d", b.failOnCall)
+	}
+	return fmt.Sprintf("task-%d", b.callCount), nil
+}
+
+// ---------------------------------------------------------------------------
+// HP-01: Non-agent peer unchanged — only 1 Enqueue (TypeSendMessage)
+// ---------------------------------------------------------------------------
+
+func TestSendMessage_AgentDetection_NonAgentUnchanged(t *testing.T) {
+	s := setupTestSQLite(t)
+	broker := &recordingBroker{}
+	handler := NewSendMessageHandler(s, broker, nil)
+	ctx := context.Background()
+
+	convID := "conv-nonagent-1"
+	createTestConversation(t, s, convID, "alice", "bob")
+
+	params := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": uuid.New().String(),
+		"content":           "Hello Bob",
+	}
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-hp01", "send_message", params)
+
+	data, err := handler.HandleRequest(ctx, client, req)
+	require.NoError(t, err)
+
+	msg, dup := parseSendMessageResponse(t, data)
+	assert.False(t, dup)
+	assert.NotNil(t, msg)
+
+	// Only 1 Enqueue call (TypeSendMessage) because peer "bob" is not an agent.
+	assert.Equal(t, 1, broker.callCount(), "expected exactly 1 Enqueue call for non-agent peer")
+	assert.Equal(t, mq.TypeSendMessage, broker.taskAt(0).Type)
+}
+
+// ---------------------------------------------------------------------------
+// HP-02: Registered agent peer — 2 Enqueues (TypeSendMessage + TypeAgentProcess)
+// ---------------------------------------------------------------------------
+
+func TestSendMessage_AgentDetection_EnqueuesAgentTask(t *testing.T) {
+	s := setupTestSQLite(t)
+	broker := &recordingBroker{}
+	registry := agent.NewRegistry()
+	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
+	handler := NewSendMessageHandler(s, broker, registry)
+	ctx := context.Background()
+
+	convID := "conv-agent-1"
+	createTestConversation(t, s, convID, "alice", "agent/assistant")
+
+	params := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": uuid.New().String(),
+		"content":           "Hello Agent",
+	}
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-hp02", "send_message", params)
+
+	data, err := handler.HandleRequest(ctx, client, req)
+	require.NoError(t, err)
+
+	msg, dup := parseSendMessageResponse(t, data)
+	assert.False(t, dup)
+	assert.NotNil(t, msg)
+
+	// 2 Enqueue calls: TypeSendMessage + TypeAgentProcess
+	assert.Equal(t, 2, broker.callCount(), "expected 2 Enqueue calls for registered agent peer")
+	assert.Equal(t, mq.TypeSendMessage, broker.taskAt(0).Type)
+	assert.Equal(t, mq.TypeAgentProcess, broker.taskAt(1).Type)
+}
+
+// ---------------------------------------------------------------------------
+// HP-03: Agent process payload correctness
+// ---------------------------------------------------------------------------
+
+func TestSendMessage_AgentDetection_PayloadCorrectness(t *testing.T) {
+	s := setupTestSQLite(t)
+	broker := &recordingBroker{}
+	registry := agent.NewRegistry()
+	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
+	handler := NewSendMessageHandler(s, broker, registry)
+	ctx := context.Background()
+
+	convID := "conv-agent-payload-1"
+	createTestConversation(t, s, convID, "alice", "agent/assistant")
+
+	params := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": uuid.New().String(),
+		"content":           "Hello Agent",
+	}
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-hp03", "send_message", params)
+
+	data, err := handler.HandleRequest(ctx, client, req)
+	require.NoError(t, err)
+
+	msg, _ := parseSendMessageResponse(t, data)
+	require.Equal(t, 2, broker.callCount())
+
+	// Unmarshal the second Enqueue payload as agentProcessPayload.
+	var payload agentProcessPayload
+	require.NoError(t, json.Unmarshal(broker.taskAt(1).Payload, &payload))
+
+	assert.Equal(t, msg.ID, payload.MessageID, "payload message_id should match persisted message")
+	assert.Equal(t, convID, payload.ConversationID, "payload conversation_id should match conversation")
+	assert.Equal(t, "agent/assistant", payload.AgentID, "payload agent_id should be full agent userID")
+	assert.Equal(t, "alice", payload.SenderID, "payload sender_id should be the human sender")
+}
+
+// ---------------------------------------------------------------------------
+// EC-01: peerUserID helper function
+// ---------------------------------------------------------------------------
+
+func TestSendMessage_PeerUserID(t *testing.T) {
+	conv := &model.Conversation{UserID1: "alice", UserID2: "bob"}
+
+	assert.Equal(t, "bob", peerUserID(conv, "alice"), "sender=UserID1 should return UserID2")
+	assert.Equal(t, "alice", peerUserID(conv, "bob"), "sender=UserID2 should return UserID1")
+	assert.Equal(t, "", peerUserID(conv, "charlie"), "sender not in conversation should return empty string")
+}
+
+// ---------------------------------------------------------------------------
+// EC-03: Nil registry — no panic, only 1 Enqueue (D-063)
+// ---------------------------------------------------------------------------
+
+func TestSendMessage_AgentDetection_NilRegistry(t *testing.T) {
+	s := setupTestSQLite(t)
+	broker := &recordingBroker{}
+	// Pass nil registry: agent detection disabled (D-063).
+	handler := NewSendMessageHandler(s, broker, nil)
+	ctx := context.Background()
+
+	convID := "conv-nilreg-1"
+	createTestConversation(t, s, convID, "alice", "agent/assistant")
+
+	params := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": uuid.New().String(),
+		"content":           "Hello Agent",
+	}
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-ec03", "send_message", params)
+
+	data, err := handler.HandleRequest(ctx, client, req)
+	require.NoError(t, err)
+
+	msg, dup := parseSendMessageResponse(t, data)
+	assert.False(t, dup)
+	assert.NotNil(t, msg)
+
+	// With nil registry, only 1 Enqueue (TypeSendMessage), no agent task.
+	assert.Equal(t, 1, broker.callCount(), "nil registry should result in only 1 Enqueue call")
+	assert.Equal(t, mq.TypeSendMessage, broker.taskAt(0).Type)
+}
+
+// ---------------------------------------------------------------------------
+// EC-04: Empty agent ID — peerID = "agent/" (no ID suffix)
+// ---------------------------------------------------------------------------
+
+func TestSendMessage_AgentDetection_EmptyAgentID(t *testing.T) {
+	s := setupTestSQLite(t)
+	broker := &recordingBroker{}
+	registry := agent.NewRegistry()
+	// Do NOT register any agent with empty ID.
+	handler := NewSendMessageHandler(s, broker, registry)
+	ctx := context.Background()
+
+	convID := "conv-emptyid-1"
+	// peerID will be "agent/" — IsAgent returns false for empty ID suffix.
+	createTestConversation(t, s, convID, "alice", "agent/")
+
+	params := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": uuid.New().String(),
+		"content":           "Hello",
+	}
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-ec04", "send_message", params)
+
+	data, err := handler.HandleRequest(ctx, client, req)
+	require.NoError(t, err)
+
+	msg, dup := parseSendMessageResponse(t, data)
+	assert.False(t, dup)
+	assert.NotNil(t, msg)
+
+	// "agent/" has no ID suffix, so IsAgent returns false; only 1 Enqueue.
+	assert.Equal(t, 1, broker.callCount(), "empty agent ID should result in only 1 Enqueue call")
+}
+
+// ---------------------------------------------------------------------------
+// EC-05: Unregistered agent peer — only 1 Enqueue
+// ---------------------------------------------------------------------------
+
+func TestSendMessage_AgentDetection_UnregisteredAgent(t *testing.T) {
+	s := setupTestSQLite(t)
+	broker := &recordingBroker{}
+	registry := agent.NewRegistry()
+	// Registry exists but "nonexistent" is NOT registered.
+	handler := NewSendMessageHandler(s, broker, registry)
+	ctx := context.Background()
+
+	convID := "conv-unreg-1"
+	createTestConversation(t, s, convID, "alice", "agent/nonexistent")
+
+	params := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": uuid.New().String(),
+		"content":           "Hello",
+	}
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-ec05", "send_message", params)
+
+	data, err := handler.HandleRequest(ctx, client, req)
+	require.NoError(t, err)
+
+	msg, dup := parseSendMessageResponse(t, data)
+	assert.False(t, dup)
+	assert.NotNil(t, msg)
+
+	// Agent "nonexistent" is not registered; only 1 Enqueue.
+	assert.Equal(t, 1, broker.callCount(), "unregistered agent should result in only 1 Enqueue call")
+}
+
+// ---------------------------------------------------------------------------
+// EC-06: Agent sender — anti-recursion guard (D-062)
+// ---------------------------------------------------------------------------
+
+func TestSendMessage_AgentDetection_AgentSenderNoRecursion(t *testing.T) {
+	s := setupTestSQLite(t)
+	broker := &recordingBroker{}
+	registry := agent.NewRegistry()
+	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
+	handler := NewSendMessageHandler(s, broker, registry)
+	ctx := context.Background()
+
+	convID := "conv-recursion-1"
+	createTestConversation(t, s, convID, "agent/assistant", "alice")
+
+	// Agent is the sender; anti-recursion guard must prevent agent task enqueue.
+	params := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": uuid.New().String(),
+		"content":           "Agent reply",
+	}
+	client := server.NewTestClient("agent/assistant")
+	req := newTestRequest("req-ec06", "send_message", params)
+
+	data, err := handler.HandleRequest(ctx, client, req)
+	require.NoError(t, err)
+
+	msg, dup := parseSendMessageResponse(t, data)
+	assert.False(t, dup)
+	assert.NotNil(t, msg)
+
+	// Sender has "agent/" prefix; anti-recursion guard fires, only 1 Enqueue.
+	assert.Equal(t, 1, broker.callCount(), "agent sender should not trigger agent task (anti-recursion)")
+	assert.Equal(t, mq.TypeSendMessage, broker.taskAt(0).Type)
+}
+
+// ---------------------------------------------------------------------------
+// EC-07: Second Enqueue (agent task) fails — handler still succeeds (D-007)
+// ---------------------------------------------------------------------------
+
+func TestSendMessage_AgentDetection_EnqueueAgentFails(t *testing.T) {
+	s := setupTestSQLite(t)
+	// Fail on call 2 (the agent task enqueue); call 1 (send_message) succeeds.
+	broker := &nthFailBroker{failOnCall: 2}
+	registry := agent.NewRegistry()
+	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
+	handler := NewSendMessageHandler(s, broker, registry)
+	ctx := context.Background()
+
+	convID := "conv-enqfail-1"
+	createTestConversation(t, s, convID, "alice", "agent/assistant")
+
+	params := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": uuid.New().String(),
+		"content":           "Hello Agent",
+	}
+	client := server.NewTestClient("alice")
+	req := newTestRequest("req-ec07", "send_message", params)
+
+	// Handler must succeed despite agent enqueue failure (fire-and-forget, D-007).
+	data, err := handler.HandleRequest(ctx, client, req)
+	require.NoError(t, err, "handler should succeed even when agent enqueue fails")
+
+	msg, dup := parseSendMessageResponse(t, data)
+	assert.False(t, dup)
+	assert.NotNil(t, msg)
+	assert.Equal(t, "Hello Agent", msg.Content)
+
+	// Verify message was persisted.
+	persisted, err := s.MessageStore().Get(ctx, msg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, msg.ID, persisted.ID)
+}
+
+// ---------------------------------------------------------------------------
+// EP-01: Persist fails — 0 additional Enqueues (agent detection is after persist)
+//
+// Strategy: send the same message twice. The second send triggers the
+// idempotent duplicate path (ErrDuplicateKey catch in handler), which returns
+// before reaching step 5b (agent detection). This proves agent detection is
+// placed after persist: the duplicate path short-circuits before it.
+// ---------------------------------------------------------------------------
+
+func TestSendMessage_AgentDetection_PersistFailsNoEnqueue(t *testing.T) {
+	s := setupTestSQLite(t)
+	broker := &recordingBroker{}
+	registry := agent.NewRegistry()
+	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
+	handler := NewSendMessageHandler(s, broker, registry)
+	ctx := context.Background()
+
+	convID := "conv-persistfail-1"
+	createTestConversation(t, s, convID, "alice", "agent/assistant")
+
+	clientMsgID := uuid.New().String()
+	params := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": clientMsgID,
+		"content":           "Hello Agent",
+	}
+	client := server.NewTestClient("alice")
+
+	// First send: succeeds normally.
+	req1 := newTestRequest("req-ep01-1", "send_message", params)
+	data1, err1 := handler.HandleRequest(ctx, client, req1)
+	require.NoError(t, err1)
+	msg1, dup1 := parseSendMessageResponse(t, data1)
+	assert.False(t, dup1)
+	assert.NotNil(t, msg1)
+
+	countAfterFirst := broker.callCount()
+	assert.Equal(t, 2, countAfterFirst, "first send should produce 2 Enqueue calls")
+
+	// Second send with same client_message_id: duplicate detected via ErrDuplicateKey.
+	// The handler returns the existing message before reaching agent detection (step 5b).
+	params2 := map[string]interface{}{
+		"conversation_id":   convID,
+		"client_message_id": clientMsgID,
+		"content":           "Hello Agent again",
+	}
+	req2 := newTestRequest("req-ep01-2", "send_message", params2)
+	data2, err2 := handler.HandleRequest(ctx, client, req2)
+	require.NoError(t, err2)
+	msg2, dup2 := parseSendMessageResponse(t, data2)
+	assert.True(t, dup2, "second send should return duplicate=true")
+	assert.Equal(t, msg1.ID, msg2.ID, "duplicate should return same message ID")
+
+	// No additional Enqueue calls on the duplicate path (agent detection is after persist).
+	assert.Equal(t, countAfterFirst, broker.callCount(),
+		"duplicate send should not trigger any additional Enqueue calls (agent detection is after persist)")
 }

@@ -38,7 +38,7 @@ func BenchmarkSendMessage(b *testing.B) {
 
 	s := benchStore(b)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker)
+	handler := NewSendMessageHandler(s, broker, nil)
 	ctx := context.Background()
 
 	// Pre-create a conversation between two users.

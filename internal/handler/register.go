@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"github.com/PineappleBond/xyncra-server/internal/agent"
 	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
@@ -13,6 +14,9 @@ type Dependencies struct {
 	Store       store.StoreAPI
 	Broker      mq.Broker
 	BroadcastFn func(userID string, updates *protocol.PackageDataUpdates) error
+	// AgentRegistry is the optional agent configuration registry.
+	// When nil, agent detection is skipped (D-063).
+	AgentRegistry *agent.AgentRegistry
 }
 
 // RegisterAll registers all method handlers on the given DefaultMessageHandler.
@@ -36,7 +40,7 @@ type Dependencies struct {
 // method handler (invoked by client RPC), and is therefore not registered here.
 func RegisterAll(h *server.DefaultMessageHandler, deps Dependencies) {
 	h.RegisterMethod("heartbeat", NewHeartbeatHandler(deps.ConnStore))
-	h.RegisterMethod("send_message", NewSendMessageHandler(deps.Store, deps.Broker))
+	h.RegisterMethod("send_message", NewSendMessageHandler(deps.Store, deps.Broker, deps.AgentRegistry))
 	h.RegisterMethod("sync_updates", NewSyncUpdatesHandler(deps.Store))
 	h.RegisterMethod("create_conversation", NewCreateConversationHandler(deps.Store, deps.Broker))
 	h.RegisterMethod("list_conversations", NewListConversationsHandler(deps.Store))
