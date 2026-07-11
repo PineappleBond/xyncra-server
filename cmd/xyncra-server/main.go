@@ -184,6 +184,36 @@ func main() {
 	})
 
 	// ---------------------------------------------------------------
+	// Agent Execution Pipeline
+	// ---------------------------------------------------------------
+
+	llmFactory := agent.NewLLMClientFactory()
+	agentBuilder := agent.NewAgentBuilder(llmFactory)
+	streamBridge := agent.NewStreamBridge()
+	broadcastHelper := agent.NewBroadcastHelper(srv)
+	contextManager := agent.NewDBContextManager(dataStore.MessageStore())
+
+	agentExecutor := agent.NewAgentExecutor(
+		agentRegistry,
+		contextManager,
+		agentBuilder,
+		streamBridge,
+		broadcastHelper,
+		dataStore,
+		10, // maxConcurrent: limit parallel LLM calls
+	)
+
+	// Idempotency store for agent task deduplication (D-Phase5-2).
+	// Uses a dedicated redis.Client (D-Phase5-5).
+	redisIdempotencyClient := redis.NewClient(&redis.Options{
+		Addr:     *redisAddr,
+		Password: *redisPassword,
+		DB:       *redisDB,
+	})
+	defer redisIdempotencyClient.Close()
+	idempotencyStore := agent.NewRedisIdempotencyStore(redisIdempotencyClient)
+
+	// ---------------------------------------------------------------
 	// Context & signal handling
 	// ---------------------------------------------------------------
 
@@ -203,6 +233,12 @@ func main() {
 	taskHandler := mq.NewTaskHandler()
 	taskHandler.Register(mq.TypeSendMessage,
 		handler.NewSendMessageTaskHandler(srv.BroadcastUpdates, srv.Logger()))
+
+	// Register agent task handler (Phase 5).
+	agentTaskLogger := log.New(os.Stderr, "[agent-task] ", log.LstdFlags)
+	agentTaskHandler := agent.NewAgentTaskHandler(agentExecutor, idempotencyStore, agentTaskLogger)
+	taskHandler.Register(mq.TypeAgentProcess, agentTaskHandler)
+
 	go func() {
 		if err := broker.Start(ctx, taskHandler); err != nil {
 			log.Printf("broker error: %v", err)

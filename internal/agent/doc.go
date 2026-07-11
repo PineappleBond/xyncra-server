@@ -54,4 +54,42 @@
 // chunks, send is_done=true, and persist the final message. ExecuteWithErrorMessage
 // wraps Execute and sends a user-friendly Chinese error message on failure
 // (D-067), classifying sentinel errors into appropriate responses.
+//
+// # Phase 5: MQ Integration and Idempotency
+//
+// AgentTaskHandler (task_handler.go): AgentTaskHandler is the MQ task handler
+// adapter layer that converts MQ tasks to ExecutePayload. It unmarshals the
+// AgentProcessPayload, validates required fields, checks idempotency via Redis
+// SETNX (24h TTL, fail-open on Redis errors), and calls
+// AgentExecutor.ExecuteWithErrorMessage. The handler always returns nil to MQ
+// (D-067: errors are persisted as user-friendly messages, so retry won't help).
+//
+// RedisIdempotencyStore: Redis-based deduplication using SETNX with TTL. The
+// IdempotencyStore interface provides atomic check-and-set semantics. The key
+// format is "agent:processed:{messageID}" with a 24-hour TTL. SetNX returns
+// true if the key was set (first time), false if it already existed (duplicate).
+// Fail-open: if Redis is unavailable, processing continues (logged but not blocked).
+//
+// # Phase 5: main.go Wiring
+//
+// The complete agent pipeline is wired in main.go after handler.RegisterAll:
+//
+//	LLMClientFactory → AgentBuilder → AgentExecutor
+//	StreamBridge + BroadcastHelper + DBContextManager → AgentExecutor
+//	AgentExecutor + IdempotencyStore → AgentTaskHandler → MQ registration
+//
+// A dedicated redis.Client is created for the idempotency store (D-Phase5-5),
+// separate from the node broadcaster client. The AgentExecutor is configured
+// with maxConcurrent=10 to limit parallel LLM calls.
+//
+// # Phase 5: Data Flow
+//
+// The end-to-end data flow for agent message processing:
+//
+//	MQ task → AgentTaskHandler → idempotency check (Redis SETNX)
+//	→ AgentExecutor.ExecuteWithErrorMessage → typing=true broadcast
+//	→ context loading (DBContextManager) → agent building (AgentBuilder)
+//	→ LLM streaming (Eino Runner) → stream bridge (cumulative snapshots)
+//	→ broadcast chunks (BroadcastHelper) → is_done=true broadcast
+//	→ persist message → return nil to MQ (D-067)
 package agent
