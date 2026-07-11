@@ -203,6 +203,77 @@ func TestSendTyping_BroadcastError_NoPanic(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 8B: Agent ephemeral broadcast tests (D-087)
+// ---------------------------------------------------------------------------
+
+func TestSendAgentStatus_BroadcastsToHumanUser(t *testing.T) {
+	mock := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mock, noopLogger{})
+
+	bh.SendAgentStatus(context.Background(), "user/alice", "agent/bot1", "conv-1", "thinking")
+
+	require.Len(t, mock.calls, 1)
+	assert.Equal(t, "user/alice", mock.calls[0].userID)
+	require.Len(t, mock.calls[0].updates.Updates, 1)
+	assert.Equal(t, protocol.UpdateTypeAgentStatus, mock.calls[0].updates.Updates[0].Type)
+	assert.Equal(t, uint32(0), mock.calls[0].updates.Updates[0].Seq, "must be ephemeral (D-050)")
+}
+
+func TestSendAgentQuestion_IncludesCheckpointAndInterruptID(t *testing.T) {
+	mock := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mock, noopLogger{})
+
+	bh.SendAgentQuestion(context.Background(), "user/alice", "agent/bot1", "conv-1",
+		"What color?", "cp-123", "int-456")
+
+	require.Len(t, mock.calls, 1)
+	assert.Equal(t, protocol.UpdateTypeAgentQuestion, mock.calls[0].updates.Updates[0].Type)
+
+	var payload AgentQuestionPayload
+	err := json.Unmarshal(mock.calls[0].updates.Updates[0].Payload, &payload)
+	require.NoError(t, err)
+	assert.Equal(t, "agent/bot1", payload.UserID)
+	assert.Equal(t, "conv-1", payload.ConversationID)
+	assert.Equal(t, "What color?", payload.Question)
+	assert.Equal(t, "cp-123", payload.CheckpointID)
+	assert.Equal(t, "int-456", payload.InterruptID)
+}
+
+func TestSendAgentCheckpointCreated(t *testing.T) {
+	mock := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mock, noopLogger{})
+
+	bh.SendAgentCheckpointCreated(context.Background(), "user/alice", "agent/bot1", "conv-1", "cp-789")
+
+	require.Len(t, mock.calls, 1)
+	assert.Equal(t, protocol.UpdateTypeAgentCheckpointCreated, mock.calls[0].updates.Updates[0].Type)
+	assert.Equal(t, uint32(0), mock.calls[0].updates.Updates[0].Seq)
+}
+
+func TestSendAgentTimeout(t *testing.T) {
+	mock := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mock, noopLogger{})
+
+	bh.SendAgentTimeout(context.Background(), "user/alice", "agent/bot1", "conv-1", "LLM timeout")
+
+	require.Len(t, mock.calls, 1)
+	assert.Equal(t, protocol.UpdateTypeAgentTimeout, mock.calls[0].updates.Updates[0].Type)
+
+	var payload AgentTimeoutPayload
+	err := json.Unmarshal(mock.calls[0].updates.Updates[0].Payload, &payload)
+	require.NoError(t, err)
+	assert.Equal(t, "LLM timeout", payload.Reason)
+}
+
+func TestSendAgentStatus_ServerError(t *testing.T) {
+	mock := &mockBroadcastServer{err: fmt.Errorf("connection closed")}
+	bh := NewBroadcastHelper(mock, noopLogger{})
+
+	// Should not panic.
+	bh.SendAgentStatus(context.Background(), "user/alice", "agent/bot1", "conv-1", "thinking")
+}
+
+// ---------------------------------------------------------------------------
 // NewBroadcastHelper
 // ---------------------------------------------------------------------------
 

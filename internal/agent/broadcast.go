@@ -31,6 +31,41 @@ type TypingPayload struct {
 	Timestamp      int64  `json:"timestamp"`
 }
 
+// AgentStatusPayload is the JSON payload for UpdateTypeAgentStatus (D-087).
+type AgentStatusPayload struct {
+	UserID         string `json:"user_id"` // agent userID
+	ConversationID string `json:"conversation_id"`
+	Status         string `json:"status"` // thinking/tool_calling/generating/idle/asking_user
+	Timestamp      int64  `json:"timestamp"`
+}
+
+// AgentQuestionPayload is the JSON payload for UpdateTypeAgentQuestion (D-087).
+type AgentQuestionPayload struct {
+	UserID         string `json:"user_id"` // agent userID
+	ConversationID string `json:"conversation_id"`
+	Question       string `json:"question"`
+	CheckpointID   string `json:"checkpoint_id"`
+	InterruptID    string `json:"interrupt_id"`
+	Timestamp      int64  `json:"timestamp"`
+}
+
+// AgentCheckpointCreatedPayload is the JSON payload for
+// UpdateTypeAgentCheckpointCreated (D-087).
+type AgentCheckpointCreatedPayload struct {
+	UserID         string `json:"user_id"` // agent userID
+	ConversationID string `json:"conversation_id"`
+	CheckpointID   string `json:"checkpoint_id"`
+	Timestamp      int64  `json:"timestamp"`
+}
+
+// AgentTimeoutPayload is the JSON payload for UpdateTypeAgentTimeout (D-087).
+type AgentTimeoutPayload struct {
+	UserID         string `json:"user_id"` // agent userID
+	ConversationID string `json:"conversation_id"`
+	Reason         string `json:"reason"`
+	Timestamp      int64  `json:"timestamp"`
+}
+
 // BroadcastHelper sends streaming and typing updates to users via WebSocket
 // (C7). All broadcasts are fire-and-forget (D-007): errors are logged but not
 // returned to the caller.
@@ -117,5 +152,92 @@ func (bh *BroadcastHelper) SendTyping(ctx context.Context, agentUserID, targetUs
 
 	if err := bh.wsServer.BroadcastUpdates(targetUserID, updates); err != nil {
 		bh.logger.Error("broadcast: typing update failed", "user_id", targetUserID, "error", err)
+	}
+}
+
+// SendAgentStatus broadcasts an ephemeral agent status update (Seq=0, D-050 /
+// D-087) to the human user. status is one of: thinking, tool_calling,
+// generating, idle, asking_user.
+func (bh *BroadcastHelper) SendAgentStatus(ctx context.Context, humanUserID, agentUserID, conversationID, status string) {
+	_ = ctx
+	payload, err := json.Marshal(AgentStatusPayload{
+		UserID:         agentUserID,
+		ConversationID: conversationID,
+		Status:         status,
+		Timestamp:      time.Now().Unix(),
+	})
+	if err != nil {
+		bh.logger.Error("broadcast: marshal agent_status payload failed", "error", err)
+		return
+	}
+	bh.broadcastEphemeral(humanUserID, protocol.UpdateTypeAgentStatus, payload)
+}
+
+// SendAgentQuestion broadcasts an ephemeral agent question update (Seq=0,
+// D-050 / D-087) to the human user during HITL interruption.
+func (bh *BroadcastHelper) SendAgentQuestion(ctx context.Context, humanUserID, agentUserID, conversationID, question, checkpointID, interruptID string) {
+	_ = ctx
+	payload, err := json.Marshal(AgentQuestionPayload{
+		UserID:         agentUserID,
+		ConversationID: conversationID,
+		Question:       question,
+		CheckpointID:   checkpointID,
+		InterruptID:    interruptID,
+		Timestamp:      time.Now().Unix(),
+	})
+	if err != nil {
+		bh.logger.Error("broadcast: marshal agent_question payload failed", "error", err)
+		return
+	}
+	bh.broadcastEphemeral(humanUserID, protocol.UpdateTypeAgentQuestion, payload)
+}
+
+// SendAgentCheckpointCreated broadcasts an ephemeral checkpoint-created update
+// (Seq=0, D-050 / D-087) to the human user.
+func (bh *BroadcastHelper) SendAgentCheckpointCreated(ctx context.Context, humanUserID, agentUserID, conversationID, checkpointID string) {
+	_ = ctx
+	payload, err := json.Marshal(AgentCheckpointCreatedPayload{
+		UserID:         agentUserID,
+		ConversationID: conversationID,
+		CheckpointID:   checkpointID,
+		Timestamp:      time.Now().Unix(),
+	})
+	if err != nil {
+		bh.logger.Error("broadcast: marshal agent_checkpoint_created payload failed", "error", err)
+		return
+	}
+	bh.broadcastEphemeral(humanUserID, protocol.UpdateTypeAgentCheckpointCreated, payload)
+}
+
+// SendAgentTimeout broadcasts an ephemeral agent timeout update (Seq=0,
+// D-050 / D-087) to the human user.
+func (bh *BroadcastHelper) SendAgentTimeout(ctx context.Context, humanUserID, agentUserID, conversationID, reason string) {
+	_ = ctx
+	payload, err := json.Marshal(AgentTimeoutPayload{
+		UserID:         agentUserID,
+		ConversationID: conversationID,
+		Reason:         reason,
+		Timestamp:      time.Now().Unix(),
+	})
+	if err != nil {
+		bh.logger.Error("broadcast: marshal agent_timeout payload failed", "error", err)
+		return
+	}
+	bh.broadcastEphemeral(humanUserID, protocol.UpdateTypeAgentTimeout, payload)
+}
+
+// broadcastEphemeral sends a single ephemeral update (Seq=0) to one user.
+func (bh *BroadcastHelper) broadcastEphemeral(targetUserID, updateType string, payload json.RawMessage) {
+	updates := &protocol.PackageDataUpdates{
+		Updates: []protocol.PackageDataUpdate{
+			{
+				Seq:     0, // ephemeral
+				Type:    updateType,
+				Payload: payload,
+			},
+		},
+	}
+	if err := bh.wsServer.BroadcastUpdates(targetUserID, updates); err != nil {
+		bh.logger.Error("broadcast: ephemeral update failed", "user_id", targetUserID, "type", updateType, "error", err)
 	}
 }

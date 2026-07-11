@@ -20,6 +20,14 @@ type StreamChunk struct {
 	Err     error  // Non-nil if stream ended with error
 }
 
+// InterruptInfo carries HITL interrupt details extracted from an AgentEvent
+// whose Action.Interrupted is non-nil.
+type InterruptInfo struct {
+	// Question is the human-readable question the agent is asking.
+	// Derived from InterruptInfo.Data when the interrupt data is a string.
+	Question string
+}
+
 // StreamBridge converts Eino's streaming output into Xyncra StreamChunks,
 // applying a 50ms throttle for ~20fps streaming (D-051).
 type StreamBridge struct {
@@ -125,6 +133,143 @@ func (sb *StreamBridge) Bridge(ctx context.Context, iter *adk.AsyncIterator[*adk
 					outCh <- StreamChunk{Content: buffer.String()}
 				}
 				outCh <- StreamChunk{IsDone: true}
+				return
+			}
+			if te.err != nil {
+				if buffer.Len() > 0 {
+					outCh <- StreamChunk{Content: buffer.String()}
+				}
+				outCh <- StreamChunk{Err: te.err}
+				return
+			}
+			if te.done {
+				if buffer.Len() > 0 {
+					outCh <- StreamChunk{Content: buffer.String()}
+				}
+				outCh <- StreamChunk{IsDone: true}
+				return
+			}
+			buffer.WriteString(te.text)
+		case <-ticker.C:
+			if buffer.Len() > 0 {
+				outCh <- StreamChunk{Content: buffer.String()}
+			}
+		}
+	}
+}
+
+// BridgeWithInterrupt is like Bridge but also detects HITL interrupt events.
+// When an event with Action.Interrupted is received, the interrupt info is
+// sent to interruptCh and the stream stops (outCh is closed normally).
+//
+// If no interrupt occurs the method behaves identically to Bridge.
+// interruptCh is always closed on return.
+func (sb *StreamBridge) BridgeWithInterrupt(
+	ctx context.Context,
+	iter *adk.AsyncIterator[*adk.AgentEvent],
+	outCh chan<- StreamChunk,
+	interruptCh chan<- *InterruptInfo,
+) {
+	defer close(outCh)
+	defer close(interruptCh)
+
+	var buffer strings.Builder
+	ticker := time.NewTicker(sb.throttleInterval)
+	defer ticker.Stop()
+
+	type textEvent struct {
+		text      string
+		done      bool
+		err       error
+		interrupt *InterruptInfo
+	}
+	textCh := make(chan textEvent, 64)
+
+	go func() {
+		defer close(textCh)
+		for {
+			type iterResult struct {
+				event *adk.AgentEvent
+				ok    bool
+			}
+			ch := make(chan iterResult, 1)
+			go func() {
+				e, ok := iter.Next()
+				ch <- iterResult{e, ok}
+			}()
+			select {
+			case <-ctx.Done():
+				return
+			case r := <-ch:
+				if !r.ok {
+					textCh <- textEvent{done: true}
+					return
+				}
+				if r.event.Err != nil {
+					textCh <- textEvent{err: r.event.Err}
+					return
+				}
+
+				// Check for HITL interrupt (D-084).
+				if r.event.Action != nil && r.event.Action.Interrupted != nil {
+					info := &InterruptInfo{}
+					ii := r.event.Action.Interrupted
+					if ii.Data != nil {
+						if s, ok := ii.Data.(string); ok {
+							info.Question = s
+						}
+					}
+					textCh <- textEvent{interrupt: info}
+					return
+				}
+
+				if r.event.Output != nil && r.event.Output.MessageOutput != nil {
+					mv := r.event.Output.MessageOutput
+					if mv.IsStreaming {
+						for {
+							chunk, recvErr := mv.MessageStream.Recv()
+							if errors.Is(recvErr, io.EOF) {
+								break
+							}
+							if recvErr != nil {
+								textCh <- textEvent{err: recvErr}
+								return
+							}
+							if chunk != nil && chunk.Content != "" {
+								textCh <- textEvent{text: chunk.Content}
+							}
+						}
+					} else {
+						if mv.Message != nil && mv.Message.Content != "" {
+							textCh <- textEvent{text: mv.Message.Content}
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			if buffer.Len() > 0 {
+				outCh <- StreamChunk{Content: buffer.String()}
+			}
+			return
+		case te, ok := <-textCh:
+			if !ok {
+				if buffer.Len() > 0 {
+					outCh <- StreamChunk{Content: buffer.String()}
+				}
+				outCh <- StreamChunk{IsDone: true}
+				return
+			}
+			if te.interrupt != nil {
+				// Flush buffer before signalling interrupt.
+				if buffer.Len() > 0 {
+					outCh <- StreamChunk{Content: buffer.String()}
+				}
+				interruptCh <- te.interrupt
 				return
 			}
 			if te.err != nil {

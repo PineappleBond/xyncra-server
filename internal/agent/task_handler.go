@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -63,6 +64,10 @@ func (s *RedisIdempotencyStore) MarkProcessed(ctx context.Context, key string, t
 //  4. Calls AgentExecutor.ExecuteWithErrorMessage
 //  5. Always returns nil to MQ (errors are persisted as user-friendly messages, D-067)
 //
+// HITL interrupts (D-084): when the executor returns ErrHITLInterrupted the
+// conversation lock is intentionally NOT released so that no new task can
+// conflict while the agent is paused. The lock expires naturally.
+//
 // lock may be nil to disable conversation-level serialization (backward compatible).
 func NewAgentTaskHandler(
 	executor *AgentExecutor,
@@ -100,6 +105,8 @@ func NewAgentTaskHandler(
 		}
 
 		// 4. Acquire per-conversation lock (D-075).
+		// For HITL interrupts (D-084) the lock is NOT released on pause.
+		lockHeld := false
 		if lock != nil {
 			acquired, err := lock.Acquire(ctx, payload.ConversationID, 130*time.Second)
 			if err != nil {
@@ -111,12 +118,17 @@ func NewAgentTaskHandler(
 					"conversation_id", payload.ConversationID)
 				return nil // D-073: another task is processing this conversation
 			} else {
-				defer func() {
-					if err := lock.Release(ctx, payload.ConversationID); err != nil {
-						logger.Error("conversation lock: release failed",
-							"conversation_id", payload.ConversationID, "error", err)
-					}
-				}()
+				lockHeld = true
+			}
+		}
+
+		// Helper to release the lock when appropriate.
+		releaseLock := func() {
+			if lockHeld && lock != nil {
+				if err := lock.Release(ctx, payload.ConversationID); err != nil {
+					logger.Error("conversation lock: release failed",
+						"conversation_id", payload.ConversationID, "error", err)
+				}
 			}
 		}
 
@@ -128,6 +140,7 @@ func NewAgentTaskHandler(
 				// Continue processing — fail-open for idempotency.
 			} else if dup {
 				logger.Debug("agent task: skipping duplicate", "message_id", payload.MessageID)
+				releaseLock()
 				return nil
 			}
 		}
@@ -139,12 +152,29 @@ func NewAgentTaskHandler(
 			AgentID:        payload.AgentID,
 			SenderID:       payload.SenderID,
 		}
-		if err := executor.ExecuteWithErrorMessage(ctx, execPayload); err != nil {
+		execErr := executor.ExecuteWithErrorMessage(ctx, execPayload)
+
+		// 7. HITL interrupt: do NOT release the lock (D-084).
+		if execErr != nil && isHITLInterrupt(execErr) {
+			logger.Info("agent task: HITL interrupted, holding conversation lock",
+				"conversation_id", payload.ConversationID)
+			return nil // D-073: always return nil to MQ
+		}
+
+		// Normal path: release the lock.
+		releaseLock()
+
+		if execErr != nil {
 			// Error already persisted as user-friendly message (D-067).
 			// Return nil to prevent MQ retry — the error is terminal.
-			logger.Error("agent task: execution failed", "error", err)
+			logger.Error("agent task: execution failed", "error", execErr)
 		}
 
 		return nil
 	}
+}
+
+// isHITLInterrupt reports whether err wraps ErrHITLInterrupted.
+func isHITLInterrupt(err error) bool {
+	return errors.Is(err, ErrHITLInterrupted)
 }

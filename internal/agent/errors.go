@@ -24,4 +24,9 @@ var (
 	// Agent execution errors
 	ErrAgentBuild = errors.New("agent: failed to build agent")
 	ErrAgentRun   = errors.New("agent: agent execution failed")
+
+	// HITL errors (Phase 8B)
+	ErrHITLInterrupted    = errors.New("agent: HITL interrupted, awaiting user input")
+	ErrCheckpointStoreSet = errors.New("agent: checkpoint store failed to persist")
+	ErrCheckpointNotFound = errors.New("agent: checkpoint not found or expired")
 )

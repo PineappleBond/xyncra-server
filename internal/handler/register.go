@@ -36,6 +36,7 @@ type Dependencies struct {
 //   - "set_typing": ephemeral typing indicator broadcast (Seq=0, no persistence)
 //   - "stream_text": ephemeral streaming text broadcast (Seq=0, no persistence)
 //   - "reload_agents": reload agent configs from disk directory (D-076)
+//   - "agent_resume": resume a paused agent after HITL interrupt (Phase 8B / D-085)
 //
 // Note: mq_send_message is a task handler (processed by the MQ worker), not a
 // method handler (invoked by client RPC), and is therefore not registered here.
@@ -55,4 +56,5 @@ func RegisterAll(h *server.DefaultMessageHandler, deps Dependencies) {
 	h.RegisterMethod("set_typing", NewSetTypingHandler(deps.Store, deps.BroadcastFn))
 	h.RegisterMethod("stream_text", NewStreamTextHandler(deps.Store, deps.BroadcastFn))
 	h.RegisterMethod("reload_agents", NewReloadAgentsHandler(deps.AgentRegistry))
+	h.RegisterMethod("agent_resume", NewAgentResumeHandler(deps.Broker))
 }

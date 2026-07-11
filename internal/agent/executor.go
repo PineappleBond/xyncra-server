@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/cloudwego/eino/adk"
+
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
 )
@@ -220,15 +222,17 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 	// 8. Convert messages to Eino schema.
 	schemaMessages := convertMessages(messages)
 
-	// 9. Generate stream_id for this execution.
+	// 9. Generate stream_id and checkpoint_id for this execution.
 	streamID := uuid.New().String()
+	checkpointID := uuid.New().String()
 
-	// 10. Run agent: returns an AsyncIterator over AgentEvents.
-	iter := builtAgent.Runner.Run(ctx, schemaMessages)
+	// 10. Run agent with checkpoint ID for HITL support (D-083/D-084).
+	iter := builtAgent.Runner.Run(ctx, schemaMessages, adk.WithCheckPointID(checkpointID))
 
-	// 11. Bridge stream: convert Eino events into StreamChunks.
+	// 11. Bridge stream with interrupt detection (Phase 8B).
 	chunkCh := make(chan StreamChunk, 64)
-	go e.streamBridge.Bridge(ctx, iter, chunkCh)
+	interruptCh := make(chan *InterruptInfo, 1)
+	go e.streamBridge.BridgeWithInterrupt(ctx, iter, chunkCh, interruptCh)
 
 	// 12. Consume chunks and broadcast to the human user.
 	var fullResponse strings.Builder
@@ -285,6 +289,33 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 		}
 	}
 
+	// 12b. Check for HITL interrupt (Phase 8B).
+	// BridgeWithInterrupt closes both channels when done. The interruptCh
+	// receives at most one value. A non-blocking select detects whether the
+	// agent paused for user input.
+	if info, ok := <-interruptCh; ok && info != nil {
+		e.logger.Info("agent executor: HITL interrupt",
+			"agent_id", payload.AgentID,
+			"conversation_id", payload.ConversationID,
+			"checkpoint_id", checkpointID,
+		)
+		// Close the stream (D-052) so clients exit the streaming state.
+		partialText := fullResponse.String()
+		e.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, partialText, true)
+		// Broadcast agent status → asking_user.
+		e.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")
+		// Broadcast the question to the human user.
+		e.broadcaster.SendAgentQuestion(ctx, payload.SenderID, payload.AgentID, payload.ConversationID,
+			info.Question, checkpointID, "")
+		// Broadcast checkpoint created.
+		e.broadcaster.SendAgentCheckpointCreated(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, checkpointID)
+		// Do NOT persist a message — the agent is paused, not done.
+		// Do NOT return an error — this is a controlled pause.
+		// The conversation lock is held by the task handler; for HITL it
+		// will NOT be released (D-084). We signal this via ErrHITLInterrupted.
+		return fmt.Errorf("execute agent: %w", ErrHITLInterrupted)
+	}
+
 	// 13. Send is_done=true broadcast (D-052 step 1).
 	finalText := fullResponse.String()
 	e.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, finalText, true)
@@ -322,9 +353,15 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 
 // ExecuteWithErrorMessage wraps Execute and sends a user-friendly error message
 // on failure (D-067). The original error is always returned to the caller.
+// HITL interrupts (ErrHITLInterrupted) are NOT treated as errors — no error
+// message is persisted.
 func (e *AgentExecutor) ExecuteWithErrorMessage(ctx context.Context, payload ExecutePayload) error {
 	err := e.Execute(ctx, payload)
 	if err != nil {
+		// HITL interrupt is not an error — skip error message.
+		if errors.Is(err, ErrHITLInterrupted) {
+			return err
+		}
 		e.logger.Error("agent executor: execution failed",
 			"agent_id", payload.AgentID,
 			"conversation_id", payload.ConversationID,
@@ -337,7 +374,7 @@ func (e *AgentExecutor) ExecuteWithErrorMessage(ctx context.Context, payload Exe
 	return nil
 }
 
-// classifyError maps sentinel errors to user-friendly Chinese error messages (D-067).
+// classifyError maps sentinel errors to user-friendly Chinese error messages (D-067/D-082).
 func (e *AgentExecutor) classifyError(err error) string {
 	switch {
 	case errors.Is(err, ErrAPIKeyMissing), errors.Is(err, ErrUnsupportedModel):
@@ -346,6 +383,8 @@ func (e *AgentExecutor) classifyError(err error) string {
 		return "抱歉，我暂时无法回复，请稍后重试。"
 	case errors.Is(err, ErrContextLoad):
 		return "抱歉，我无法读取对话历史，请重新发送消息。"
+	case errors.Is(err, ErrCheckpointStoreSet):
+		return "抱歉，等待时间过长，请重新发送消息。"
 	default:
 		return "抱歉，处理遇到问题，请稍后重试。"
 	}

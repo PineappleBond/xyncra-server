@@ -199,6 +199,8 @@ func main() {
 	// Wire the default tool registry (D-078). Built-in tools are registered
 	// via init() in the tools package; custom tools can be added here.
 	agentBuilder.SetToolRegistry(agenttools.DefaultRegistry)
+	// Wire the agent registry for sub-agent resolution (D-081).
+	agentBuilder.SetRegistry(agentRegistry)
 	streamBridge := agent.NewStreamBridge()
 	broadcastHelper := agent.NewBroadcastHelper(srv, srv.Logger())
 	contextManager := agent.NewDBContextManager(dataStore.MessageStore())
@@ -230,6 +232,11 @@ func main() {
 	// Reuses the same dedicated redis.Client as idempotency (D-074).
 	conversationLock := agent.NewRedisConversationLock(redisIdempotencyClient)
 
+	// Checkpoint store for HITL support (D-083).
+	// Reuses the same dedicated redis.Client as idempotency.
+	checkpointStore := agent.NewRedisCheckPointStore(redisIdempotencyClient, "", 0) // defaults: prefix="agent:checkpoint:", ttl=24h
+	agentBuilder.SetCheckPointStore(checkpointStore)
+
 	// ---------------------------------------------------------------
 	// Context & signal handling
 	// ---------------------------------------------------------------
@@ -254,6 +261,10 @@ func main() {
 	// Register agent task handler (Phase 5).
 	agentTaskHandler := agent.NewAgentTaskHandler(agentExecutor, idempotencyStore, conversationLock, srv.Logger())
 	taskHandler.Register(mq.TypeAgentProcess, agentTaskHandler)
+
+	// Register agent resume handler (Phase 8B / D-085).
+	agentResumeHandler := agent.NewAgentResumeHandler(agentExecutor, agentRegistry, conversationLock, srv.Logger())
+	taskHandler.Register(mq.TypeAgentResume, agentResumeHandler)
 
 	go func() {
 		if err := broker.Start(ctx, taskHandler); err != nil {

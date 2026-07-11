@@ -285,8 +285,10 @@ func detectProvider(modelName, baseURL string) string {
 
 // AgentBuilder constructs runnable agents from AgentConfig using the Eino ADK.
 type AgentBuilder struct {
-	llmFactory   *LLMClientFactory
-	toolRegistry *agenttools.Registry
+	llmFactory      *LLMClientFactory
+	toolRegistry    *agenttools.Registry
+	registry        *AgentRegistry          // for sub-agent resolution (D-081)
+	checkpointStore compose.CheckPointStore // for HITL checkpoint persistence (D-083)
 }
 
 // NewAgentBuilder creates an AgentBuilder backed by the given LLM factory.
@@ -300,10 +302,24 @@ func (b *AgentBuilder) SetToolRegistry(registry *agenttools.Registry) {
 	b.toolRegistry = registry
 }
 
+// SetRegistry sets the agent registry used for sub-agent resolution (D-081).
+// If not set, sub-agents are not resolved.
+func (b *AgentBuilder) SetRegistry(registry *AgentRegistry) {
+	b.registry = registry
+}
+
+// SetCheckPointStore sets the checkpoint store for HITL support (D-083).
+// If not set, checkpoint persistence is disabled and HITL is not available.
+func (b *AgentBuilder) SetCheckPointStore(store compose.CheckPointStore) {
+	b.checkpointStore = store
+}
+
 // BuiltAgent wraps an Eino Runner together with the config it was built from.
+// The Agent field holds the underlying agent for sub-agent wrapping (D-081).
 type BuiltAgent struct {
 	Runner *adk.Runner
 	Config *AgentConfig
+	Agent  adk.Agent // underlying agent, used by NewAgentTool for sub-agents
 }
 
 // Build creates a fully configured agent ready for execution.
@@ -311,9 +327,10 @@ type BuiltAgent struct {
 // The method performs these steps:
 //  1. Creates a ChatModel via the LLMClientFactory.
 //  2. Creates tools from the tool registry if configured (D-078).
-//  3. Builds the middleware chain (D-079).
-//  4. Wraps everything in a ChatModelAgent with the agent's system prompt as instruction.
-//  5. Creates a Runner with streaming enabled.
+//  3. Resolves sub-agents and appends them as tools (D-081).
+//  4. Builds the middleware chain (D-079).
+//  5. Wraps everything in a ChatModelAgent with the agent's system prompt as instruction.
+//  6. Creates a Runner with streaming enabled and optional CheckPointStore (D-083).
 func (b *AgentBuilder) Build(ctx context.Context, config *AgentConfig) (*BuiltAgent, error) {
 	chatModel, err := b.llmFactory.Create(ctx, config)
 	if err != nil {
@@ -328,6 +345,15 @@ func (b *AgentBuilder) Build(ctx context.Context, config *AgentConfig) (*BuiltAg
 			log.Default().Printf("agent %s: some tools failed to create: %v", config.ID, err)
 		}
 		einoTools = created
+	}
+
+	// Resolve sub-agents and wrap them as tools (D-081).
+	if b.registry != nil && len(config.SubAgents) > 0 {
+		subTools, err := b.resolveSubAgents(ctx, config)
+		if err != nil {
+			log.Default().Printf("agent %s: sub-agent resolution had errors: %v", config.ID, err)
+		}
+		einoTools = append(einoTools, subTools...)
 	}
 
 	// Build middleware chain (D-079).
@@ -357,14 +383,21 @@ func (b *AgentBuilder) Build(ctx context.Context, config *AgentConfig) (*BuiltAg
 		return nil, fmt.Errorf("%w: %w", ErrAgentBuild, err)
 	}
 
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+	runnerCfg := adk.RunnerConfig{
 		Agent:           agent,
 		EnableStreaming: true,
-	})
+	}
+	// Wire CheckPointStore for HITL support (D-083).
+	if b.checkpointStore != nil {
+		runnerCfg.CheckPointStore = b.checkpointStore
+	}
+
+	runner := adk.NewRunner(ctx, runnerCfg)
 
 	return &BuiltAgent{
 		Runner: runner,
 		Config: config,
+		Agent:  agent,
 	}, nil
 }
 

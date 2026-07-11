@@ -80,6 +80,10 @@ const (
 	// TypeAgentProcess is the task type for triggering agent processing
 	// of a message sent to an agent user.
 	TypeAgentProcess = "mq:agent_process"
+
+	// TypeAgentResume is the task type for resuming a paused agent after
+	// HITL interrupt (Phase 8B / D-085).
+	TypeAgentResume = "mq:agent_resume"
 )
 
 // --------------------------------------------------------------------------
