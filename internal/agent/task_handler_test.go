@@ -240,11 +240,8 @@ func TestNewAgentTaskHandler_NilIdempotency(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewAgentTaskHandler_ExecutorSuccess(t *testing.T) {
-	// Executor will fail with ErrAgentNotFound because we don't register
-	// the agent. But the handler always returns nil. We test the "success"
-	// path by verifying that the handler returns nil even when the executor
-	// returns an error. For a true success, we'd need full LLM mocking.
-	// Here we verify the handler's contract: always returns nil.
+	// The mockContextManager returns ErrContextLoad, so the executor fails
+	// at context loading. The handler still returns nil (its contract).
 	handler, _, _ := newTestHandler(nil)
 
 	payload := AgentProcessPayload{
@@ -267,7 +264,8 @@ func TestNewAgentTaskHandler_ExecutorSuccess(t *testing.T) {
 func TestNewAgentTaskHandler_ExecutorError(t *testing.T) {
 	handler, mockStore, _ := newTestHandler(nil)
 
-	// Use a nonexistent agent to force ErrAgentNotFound.
+	// The mockContextManager returns ErrContextLoad, triggering
+	// ExecuteWithErrorMessage which persists the error message (D-067).
 	payload := AgentProcessPayload{
 		MessageID:      "msg-1",
 		ConversationID: "conv-1",
@@ -291,9 +289,10 @@ func TestNewAgentTaskHandler_ExecutorError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewAgentTaskHandler_CorrectPayloadMapping(t *testing.T) {
-	// Use a registered agent so the executor proceeds past registry lookup.
-	// The executor will fail at context load or agent build (nil agentBuilder),
-	// but the error message persistence confirms the payload was mapped correctly.
+	// The executor proceeds past registry lookup (test-agent is registered),
+	// then fails at context loading (mockContextManager returns ErrContextLoad).
+	// ExecuteWithErrorMessage persists the error message, confirming the
+	// payload mapping was correct.
 	handler, mockStore, _ := newTestHandler(nil)
 
 	payload := AgentProcessPayload{
@@ -308,13 +307,10 @@ func TestNewAgentTaskHandler_CorrectPayloadMapping(t *testing.T) {
 	err := handler(context.Background(), task)
 	assert.NoError(t, err)
 
-	// The executor should have been invoked. Even though it fails (nil agentBuilder),
-	// we can verify the mapping was correct through the idempotency key and broadcast calls.
-	// The typing broadcast is the first thing the executor does, so if we see broadcasts,
-	// the payload was mapped correctly.
-	// Note: newTestHandler registers "test-agent", so the executor will proceed.
-	// It will fail at agentBuilder.Build (nil agentBuilder), triggering error persistence.
-	// The persisted error message uses the AgentID from the payload.
+	// The executor should have been invoked. The mockContextManager returns
+	// ErrContextLoad, triggering ExecuteWithErrorMessage which persists the
+	// error message. The persisted error message uses the AgentID from the
+	// payload, confirming the payload mapping was correct.
 	require.GreaterOrEqual(t, len(mockStore.sendMessageCalls), 1)
 	assert.Equal(t, "conv-456", mockStore.sendMessageCalls[0].msg.ConversationID)
 	assert.Equal(t, "agent/test-agent", mockStore.sendMessageCalls[0].msg.SenderID)
@@ -400,4 +396,78 @@ func TestRedisIdempotencyStore_MarkProcessed_RedisError(t *testing.T) {
 
 	_, err := store.MarkProcessed(context.Background(), "test:key4", time.Hour)
 	assert.Error(t, err, "should return error when Redis is unreachable")
+}
+
+// ---------------------------------------------------------------------------
+// 14. Empty payload → return nil, no panic
+// ---------------------------------------------------------------------------
+
+func TestNewAgentTaskHandler_EmptyPayload(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload json.RawMessage
+	}{
+		{"empty string", json.RawMessage("")},
+		{"nil", nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, mockStore, _ := newTestHandler(nil)
+			task := &mq.Task{Type: mq.TypeAgentProcess, Payload: tc.payload}
+
+			assert.NotPanics(t, func() {
+				err := handler(context.Background(), task)
+				assert.NoError(t, err, "handler returns nil for empty payload")
+			})
+			// Executor should NOT have been called.
+			assert.Empty(t, mockStore.sendMessageCalls)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 15. Null JSON payload → unmarshals to zero-value struct, validation fails
+// ---------------------------------------------------------------------------
+
+func TestNewAgentTaskHandler_NullJSONPayload(t *testing.T) {
+	handler, mockStore, _ := newTestHandler(nil)
+	task := &mq.Task{
+		Type:    mq.TypeAgentProcess,
+		Payload: json.RawMessage("null"),
+	}
+
+	err := handler(context.Background(), task)
+	assert.NoError(t, err, "handler returns nil for null JSON payload")
+	// null unmarshals to zero-value AgentProcessPayload (all fields empty),
+	// which fails validation → executor NOT called.
+	assert.Empty(t, mockStore.sendMessageCalls)
+}
+
+// ---------------------------------------------------------------------------
+// 16. Idempotency TTL is exactly 24 hours
+// ---------------------------------------------------------------------------
+
+func TestNewAgentTaskHandler_IdempotencyTTLValue(t *testing.T) {
+	var capturedTTL time.Duration
+	idem := &mockIdempotencyStore{
+		markProcessedFn: func(_ context.Context, _ string, ttl time.Duration) (bool, error) {
+			capturedTTL = ttl
+			return false, nil // first time, not duplicate
+		},
+	}
+	handler, _, _ := newTestHandler(idem)
+
+	payload := AgentProcessPayload{
+		MessageID:      "msg-ttl",
+		ConversationID: "conv-ttl",
+		AgentID:        "agent/test-agent",
+		SenderID:       "user/alice",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
+
+	err := handler(context.Background(), task)
+	assert.NoError(t, err)
+	assert.Equal(t, 24*time.Hour, capturedTTL, "idempotency TTL must be 24 hours")
 }

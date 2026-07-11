@@ -76,11 +76,14 @@ func NewAgentTaskHandler(
 		// 2. Unmarshal payload.
 		var payload AgentProcessPayload
 		if err := json.Unmarshal(task.Payload, &payload); err != nil {
-			logger.Printf("agent task: unmarshal: %v", err)
+			logger.Printf("agent task: unmarshal: %v (payload: %.200s)", err, task.Payload)
 			return nil // bad data, retry won't help
 		}
 
 		// 3. Validate required fields.
+		// SenderID is intentionally not validated: the executor tolerates an empty
+		// SenderID (broadcasts to an empty user are no-ops). The producer
+		// (send_message.go) always populates it.
 		if payload.MessageID == "" || payload.ConversationID == "" || payload.AgentID == "" {
 			logger.Printf("agent task: missing required fields: %+v", payload)
 			return nil
