@@ -265,6 +265,9 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 				streamErr = fmt.Errorf("%w: %v", ErrLLMTimeout, streamErr)
 			} else if strings.Contains(streamErr.Error(), "rate") || strings.Contains(streamErr.Error(), "429") {
 				streamErr = fmt.Errorf("%w: %v", ErrLLMRateLimited, streamErr)
+			} else if strings.Contains(streamErr.Error(), "500") || strings.Contains(streamErr.Error(), "502") || strings.Contains(streamErr.Error(), "503") {
+				// HTTP 5xx errors from the LLM provider are transient.
+				streamErr = fmt.Errorf("%w: %v", ErrLLMTimeout, streamErr)
 			}
 			return fmt.Errorf("execute agent: stream: %w", streamErr)
 		}
@@ -349,6 +352,11 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 	)
 
 	return nil
+}
+
+// SetContextManager replaces the context manager. Exported for testing only.
+func (e *AgentExecutor) SetContextManager(cm ContextManager) {
+	e.contextManager = cm
 }
 
 // ExecuteWithErrorMessage wraps Execute and sends a user-friendly error message

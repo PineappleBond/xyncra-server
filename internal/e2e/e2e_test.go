@@ -59,14 +59,16 @@ const (
 // receives its own isolated environment (independent SQLite DB, independent
 // Redis key namespace).
 type e2eEnv struct {
-	db        *store.Database
-	store     *store.Store
-	connStore *server.RedisConnectionStore
-	broker    *mq.AsynqBroker
-	srv       *server.WebSocketServer
-	addr      string
-	cancel    context.CancelFunc
-	redisKey  string // key prefix for TTL verification
+	db          *store.Database
+	store       *store.Store
+	connStore   *server.RedisConnectionStore
+	broker      *mq.AsynqBroker
+	srv         *server.WebSocketServer
+	addr        string
+	cancel      context.CancelFunc
+	redisKey    string                        // key prefix for TTL verification
+	taskHandler *mq.TaskHandler               // exposed for agent E2E handler registration
+	msgHandler  *server.DefaultMessageHandler // exposed for agent E2E RPC registration
 }
 
 // ---------------------------------------------------------------------------
@@ -216,14 +218,16 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 	})
 
 	return &e2eEnv{
-		db:        db,
-		store:     dataStore,
-		connStore: connStore,
-		broker:    broker,
-		srv:       srv,
-		addr:      addr,
-		cancel:    cancel,
-		redisKey:  keyPrefix,
+		db:          db,
+		store:       dataStore,
+		connStore:   connStore,
+		broker:      broker,
+		srv:         srv,
+		addr:        addr,
+		cancel:      cancel,
+		redisKey:    keyPrefix,
+		taskHandler: taskHandler,
+		msgHandler:  msgHandler,
 	}
 }
 
