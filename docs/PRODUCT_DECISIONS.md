@@ -69,6 +69,9 @@
 | D-085 | agent_resume RPC 规范 | 新 RPC + MQ task type，复用现有锁和幂等机制 |
 | D-086 | MCP Server 配置格式 | YAML `mcp_servers` 段，支持 SSE 和 stdio 传输 |
 | D-087 | Agent Ephemeral Update 类型扩展 | 新增 agent_status/agent_question/agent_checkpoint_created/agent_timeout（Seq=0） |
+| D-088 | 真实 LLM 测试分离 | 构建标签 `real_llm` + 环境变量双重门控，mock 测试与真实 LLM 测试分离 |
+| D-089 | 真实 LLM 测试环境变量 | `XYNCRA_TEST_` 前缀，`.env.test` 存储，配置模板可提交 |
+| D-090 | 真实 LLM 测试成本控制 | 14 个核心场景、最便宜模型、短对话、构建标签防意外运行 |
 
 ---
 
@@ -2023,10 +2026,115 @@ UpdateTypeAgentTimeout           = "agent_timeout"             // ephemeral: Seq
 
 ---
 
+## D-088: 真实 LLM 测试分离（Real LLM Test Separation）
+
+### 决策
+
+真实 LLM 测试使用构建标签 `//go:build real_llm` 与 mock 测试分离。两种运行模式：
+
+- **Quick 模式（默认）**：`go test ./internal/e2e/ -run TestAgent` — 59 个 mock 测试，~60 秒，零成本，零外部依赖
+- **Full 模式（opt-in）**：`go test -tags real_llm ./internal/e2e/ -run TestAgentRealLLM` — 14 个真实 LLM 测试，~5-10 分钟，需要 API 密钥
+
+### 原因
+
+1. **Mock 测试用于日常开发和 CI**：快速反馈，零外部依赖，与 D-001（开箱即用）一致
+2. **真实 LLM 测试用于集成验证**：确保系统实际调用外部 API 并处理真实响应
+3. **构建标签是 Go 惯例**：`go test ./...` 默认不包含 `real_llm` 标签，不会意外运行
+4. **环境变量作为第二道防线**：防止有人手动加了 `-tags real_llm` 但没配 API key 时运行
+5. **双重保护**：构建标签 + 环境变量，任一缺失则跳过
+
+### 实现
+
+```go
+// internal/e2e/agent_real_llm_test.go
+//go:build real_llm
+
+func TestAgentRealLLM_BasicChat(t *testing.T) {
+    if os.Getenv("XYNCRA_TEST_REAL_LLM_ENABLED") != "true" {
+        t.Skip("XYNCRA_TEST_REAL_LLM_ENABLED != true, skipping real LLM test")
+    }
+    // ... 真实 LLM 测试逻辑
+}
+```
+
+### 约束
+
+- `go test ./...` 默认只运行 mock 测试（59 个），不包含真实 LLM 测试
+- 真实 LLM 测试需要同时满足两个条件：`-tags real_llm` 和环境变量 `XYNCRA_TEST_REAL_LLM_ENABLED=true`
+- 真实 LLM 测试不测试工具调用（非确定性太高，由 mock 测试覆盖）
+
+---
+
+## D-089: 真实 LLM 测试环境变量（Real LLM Test Environment Variables）
+
+### 决策
+
+真实 LLM 测试使用以下环境变量配置：
+
+| 变量 | 用途 | 必需 |
+|------|------|------|
+| `XYNCRA_TEST_LLM_API_KEY` | LLM API 密钥（同时作为运行时门控） | 是 |
+| `XYNCRA_TEST_REAL_LLM_ENABLED` | 显式启用开关（`true`/其他值跳过） | 是 |
+| `XYNCRA_TEST_REAL_API_KEY` | 运行时 API Key 环境变量（由 `setupAgentE2E` 自动从 `XYNCRA_TEST_LLM_API_KEY` 复制设置，Agent 配置通过 `api_key_env: XYNCRA_TEST_REAL_API_KEY` 读取） | 否（内部自动设置） |
+| `XYNCRA_TEST_LLM_BASE_URL` | LLM API 端点 | 否（默认 `https://dashscope.aliyuncs.com/compatible-mode/v1`） |
+| `XYNCRA_TEST_LLM_MODEL` | 模型名称 | 否（默认 `qwen3.7-plus`） |
+| `XYNCRA_TEST_LLM_PROVIDER` | 提供商名称 | 否（默认 `qwen`） |
+| `XYNCRA_TEST_REAL_LLM_TIMEOUT` | 单次请求超时（覆盖 `testTimeout` 的默认缩放值） | 否（默认按 base*6 缩放） |
+| `XYNCRA_TEST_REAL_LLM_MAX_TOKENS` | 最大 token 数（覆盖 `realLLMAgentConfig` 的默认值） | 否（默认 `500`） |
+
+所有变量使用 `XYNCRA_TEST_` 前缀（符合 D-048）。存储于 `.env.test`（gitignored，不提交）。配置模板 `.env.test.example` 可提交到 git。
+
+### 原因
+
+1. **与 D-048 一致**：测试环境变量统一使用 `XYNCRA_TEST_` 前缀
+2. **双重门控**：`XYNCRA_TEST_LLM_API_KEY` 和 `XYNCRA_TEST_REAL_LLM_ENABLED` 同时要求，防止意外运行
+3. **合理默认值**：默认模型、端点、超时等使用最经济实用的配置，与 D-090（成本控制）一致
+4. **安全存储**：`.env.test` 包含 API 密钥，必须 gitignored；`.env.test.example` 不含敏感信息，可提交
+
+### 约束
+
+- `.env.test` 不得提交到 git（已在 `.gitignore` 中）
+- `.env.test.example` 作为模板可提交，开发者复制后填入自己的 API 密钥
+- 环境变量缺失时测试自动跳过（`t.Skip`），不报错
+
+---
+
+## D-090: 真实 LLM 测试成本控制（Real LLM Test Cost Control）
+
+### 决策
+
+真实 LLM 测试采用以下成本控制策略：
+
+- 限制 14 个测试场景（从 59 个 mock 场景中选择核心子集，跳过工具调用测试）
+- 默认使用最便宜的模型（`qwen3.7-plus`）
+- `max_tokens` 限制为 500
+- `context.max_messages` 限制为 5（短对话）
+- `temperature` 设为 0.3（更确定性的输出）
+- 构建标签 + 环境变量双重门控防止意外运行（D-088）
+- 每个测试最多重试 2 次（处理 API 超时/限流）
+- 不测试工具调用（真实 LLM 的工具调用非确定性太高，由 mock 测试覆盖）
+
+### 原因
+
+1. **成本可控**：14 个场景 x 500 tokens x 低成本模型，单次 Full 运行成本极低
+2. **与 D-088 互补**：双重门控确保只有有意运行时才产生费用
+3. **确定性优先**：`temperature=0.3` 减少输出随机性，提高测试稳定性
+4. **短对话限制**：`max_messages=5` 避免长上下文带来的 token 成本增长
+5. **工具调用排除**：真实 LLM 的工具调用格式不保证一致，mock 测试已充分覆盖此场景
+
+### 约束
+
+- 测试场景选择应覆盖核心功能：基础对话、多轮对话、上下文管理、错误处理等
+- 不覆盖工具调用、MCP、子 Agent 等高级功能（由 mock 测试负责）
+- 重试次数限制为 2 次，避免 API 限流导致测试长时间挂起
+
+---
+
 ## 版本历史
 
 | 日期       | 版本 | 变更                                                                                                 |
 | ---------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| 2026-07-12 | v3.7 | 新增 D-088..D-090（真实 LLM 端到端测试：分离策略、环境变量、成本控制）                               |
 | 2026-07-11 | v3.6 | 新增 D-078..D-087（Phase 8: 高级功能产品决策）                                                      |
 | 2026-07-11 | v3.4 | 新增 D-070..D-074（Phase 5: AgentTaskHandler 产品决策）                                               |
 | 2026-07-11 | v3.3 | 新增 D-064（LLM 默认 BaseURL）、D-065（Agent 思考状态）、D-066（LLMProvider 接口）、D-067（Agent 错误消息） |

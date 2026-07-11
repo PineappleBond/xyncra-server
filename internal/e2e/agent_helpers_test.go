@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -50,22 +51,32 @@ func (testLogger) Info(string, ...any)  {}
 func (testLogger) Error(string, ...any) {}
 func (testLogger) Debug(string, ...any) {}
 
-// setupAgentE2E creates a complete agent E2E test environment. It:
+// setupAgentE2E creates a complete agent E2E test environment. It supports
+// two LLM modes:
+//
+//   - Mock mode (default): Creates a mock LLM server and registers two agents
+//     ("test-bot" and "tool-bot") for fast, deterministic testing.
+//   - Real LLM mode (gated by XYNCRA_TEST_REAL_LLM_ENABLED + XYNCRA_TEST_LLM_API_KEY):
+//     Skips the mock server and registers a single "real-test-bot" that
+//     connects to a real LLM provider.
+//
+// Steps:
 //
 //  1. Calls setupE2ETest to initialize the base infrastructure (DB, Redis,
 //     broker, WebSocket server, message handlers).
-//  2. Creates a mock LLM server and sets the mock API key env var.
-//  3. Creates a temp agents directory with two pre-configured agents:
-//     "test-bot" (no tools) and "tool-bot" (with weather + time tools).
-//  4. Creates the full agent pipeline: LLMClientFactory → AgentBuilder →
+//  2. Creates a temp agents directory.
+//  3. Depending on realLLMMode(), either starts a mock LLM server with two
+//     agents, or writes a real LLM agent config.
+//  4. Loads agent configs from the temp directory into the registry.
+//  5. Creates the full agent pipeline: LLMClientFactory → AgentBuilder →
 //     AgentExecutor → BroadcastHelper → ContextManager.
-//  5. Creates Redis-backed stores for idempotency, conversation locks, and
+//  6. Creates Redis-backed stores for idempotency, conversation locks, and
 //     HITL checkpoints.
-//  6. Registers agent task handlers (TypeAgentProcess, TypeAgentResume) on
+//  7. Registers agent task handlers (TypeAgentProcess, TypeAgentResume) on
 //     the existing broker's task handler.
-//  7. Registers agent RPC handlers (reload_agents, agent_resume) on the
+//  8. Registers agent RPC handlers (reload_agents, agent_resume) on the
 //     existing message handler.
-//  8. Registers t.Cleanup for all resources.
+//  9. Registers t.Cleanup for all resources.
 //
 // The returned agentE2EEnv can be used directly in test functions to send
 // messages to agents and wait for replies.
@@ -75,30 +86,37 @@ func setupAgentE2E(t *testing.T) *agentE2EEnv {
 	// 1. Base E2E environment (Redis, SQLite, broker, WS server).
 	base := setupE2ETest(t)
 
-	// 2. Set mock API key env var. The agent config references this env var
-	// in api_key_env; the LLMClientFactory reads it at Build time.
-	t.Setenv("XYNCRA_TEST_MOCK_API_KEY", "mock-test-key-for-e2e")
-
-	// 3. Mock LLM server.
-	mockLLM := newMockLLMServer()
-	t.Cleanup(func() { mockLLM.Close() })
-
-	// 4. Create agents directory with default test agent configs.
+	// 2. Create agents directory.
 	agentsDir := t.TempDir()
-	writeAgentConfig(t, agentsDir, basicAgentConfig(mockLLM.URL()))
-	writeAgentConfig(t, agentsDir, toolAgentConfig(mockLLM.URL()))
 
-	// 5. Agent registry — load configs from the temp directory.
+	// 3. LLM mode: mock (default) or real LLM.
+	var mockLLM *mockLLMServer
+	if realLLMMode() {
+		// Real LLM mode: skip mock server, write real LLM agent config.
+		cfg := realLLMConfig()
+		t.Setenv("XYNCRA_TEST_REAL_API_KEY", cfg.APIKey)
+		realCfg := realLLMAgentConfig(cfg)
+		writeAgentConfig(t, agentsDir, realCfg)
+	} else {
+		// Mock LLM mode (default): set mock API key and start mock server.
+		t.Setenv("XYNCRA_TEST_MOCK_API_KEY", "mock-test-key-for-e2e")
+		mockLLM = newMockLLMServer()
+		t.Cleanup(func() { mockLLM.Close() })
+		writeAgentConfig(t, agentsDir, basicAgentConfig(mockLLM.URL()))
+		writeAgentConfig(t, agentsDir, toolAgentConfig(mockLLM.URL()))
+	}
+
+	// 4. Agent registry — load configs from the temp directory.
 	agentRegistry := agent.NewRegistry()
 	require.NoError(t, agentRegistry.Load(agentsDir))
 
-	// 6. LLM client factory + agent builder.
+	// 5. LLM client factory + agent builder.
 	llmFactory := agent.NewLLMClientFactory()
 	agentBuilder := agent.NewAgentBuilder(llmFactory)
 	agentBuilder.SetToolRegistry(agenttools.DefaultRegistry)
 	agentBuilder.SetRegistry(agentRegistry)
 
-	// 7. Redis client for idempotency, conversation lock, and checkpoints.
+	// 6. Redis client for idempotency, conversation lock, and checkpoints.
 	//    Uses a dedicated client (same pattern as production main.go, D-074).
 	redisAgentClient := redis.NewClient(&redis.Options{
 		Addr: e2eRedisAddr,
@@ -106,20 +124,20 @@ func setupAgentE2E(t *testing.T) *agentE2EEnv {
 	})
 	t.Cleanup(func() { _ = redisAgentClient.Close() })
 
-	// 8. Checkpoint store for HITL support (D-083).
+	// 7. Checkpoint store for HITL support (D-083).
 	checkpointStore := agent.NewRedisCheckPointStore(redisAgentClient, "", 0)
 	agentBuilder.SetCheckPointStore(checkpointStore)
 
-	// 9. Stream bridge (50ms throttle, D-051).
+	// 8. Stream bridge (50ms throttle, D-051).
 	streamBridge := agent.NewStreamBridge()
 
-	// 10. Broadcast helper — wires agent broadcasts to the WebSocket server.
+	// 9. Broadcast helper — wires agent broadcasts to the WebSocket server.
 	broadcastHelper := agent.NewBroadcastHelper(base.srv, base.srv.Logger())
 
-	// 11. Context manager — loads conversation history from the DB.
+	// 10. Context manager — loads conversation history from the DB.
 	contextManager := agent.NewDBContextManager(base.store.MessageStore())
 
-	// 12. Agent executor — orchestrates the full pipeline.
+	// 11. Agent executor — orchestrates the full pipeline.
 	agentExecutor := agent.NewAgentExecutor(
 		agentRegistry,
 		contextManager,
@@ -131,20 +149,20 @@ func setupAgentE2E(t *testing.T) *agentE2EEnv {
 		testLogger{},
 	)
 
-	// 13. Idempotency store (Redis SETNX).
+	// 12. Idempotency store (Redis SETNX).
 	idempotencyStore := agent.NewRedisIdempotencyStore(redisAgentClient)
 
-	// 14. Conversation lock (Redis SETNX + Lua release).
+	// 13. Conversation lock (Redis SETNX + Lua release).
 	conversationLock := agent.NewRedisConversationLock(redisAgentClient)
 
-	// 15. Register agent task handlers on the existing task handler.
+	// 14. Register agent task handlers on the existing task handler.
 	agentTaskHandler := agent.NewAgentTaskHandler(agentExecutor, idempotencyStore, conversationLock, testLogger{})
 	base.taskHandler.Register("mq:agent_process", agentTaskHandler)
 
 	agentResumeHandler := agent.NewAgentResumeHandler(agentExecutor, agentRegistry, conversationLock, testLogger{})
 	base.taskHandler.Register("mq:agent_resume", agentResumeHandler)
 
-	// 16. Register agent RPC handlers on the existing message handler.
+	// 15. Register agent RPC handlers on the existing message handler.
 	//     RegisterAll replaces previously-registered methods, which is fine
 	//     because handler.RegisterAll re-registers ALL standard methods plus
 	//     the agent-specific ones (reload_agents, agent_resume).
@@ -500,4 +518,100 @@ func configureMockForGreeting(m *mockLLMServer) {
 func configureMockForError(m *mockLLMServer) {
 	// Default behavior already handles "error_trigger" → HTTP 500.
 	// This function exists for explicit test setup clarity.
+}
+
+// ---------------------------------------------------------------------------
+// Real LLM mode detection and helpers
+// ---------------------------------------------------------------------------
+
+// realLLMMode returns true if real LLM tests should run.
+// Gated by both XYNCRA_TEST_REAL_LLM_ENABLED and XYNCRA_TEST_LLM_API_KEY.
+func realLLMMode() bool {
+	return os.Getenv("XYNCRA_TEST_REAL_LLM_ENABLED") == "true" &&
+		os.Getenv("XYNCRA_TEST_LLM_API_KEY") != "" &&
+		os.Getenv("XYNCRA_TEST_LLM_API_KEY") != "your-api-key-here"
+}
+
+// realLLMConfig returns the real LLM configuration from env vars.
+// BaseURL defaults to the Qwen/DashScope endpoint if not set (D-064, D-089).
+func realLLMConfig() struct{ APIKey, BaseURL, Model, Provider string } {
+	return struct{ APIKey, BaseURL, Model, Provider string }{
+		APIKey:   os.Getenv("XYNCRA_TEST_LLM_API_KEY"),
+		BaseURL:  envOrDefault("XYNCRA_TEST_LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+		Model:    envOrDefault("XYNCRA_TEST_LLM_MODEL", "qwen3.7-plus"),
+		Provider: envOrDefault("XYNCRA_TEST_LLM_PROVIDER", "qwen"),
+	}
+}
+
+// testTimeout scales a base timeout for real LLM mode.
+// In real LLM mode, XYNCRA_TEST_REAL_LLM_TIMEOUT env var can override the
+// scaled timeout (D-089).
+func testTimeout(base time.Duration) time.Duration {
+	if realLLMMode() {
+		if timeoutStr := os.Getenv("XYNCRA_TEST_REAL_LLM_TIMEOUT"); timeoutStr != "" {
+			if d, err := time.ParseDuration(timeoutStr); err == nil {
+				return d
+			}
+		}
+		return base * 6 // 10s → 60s, 5s → 30s
+	}
+	return base
+}
+
+// retryRealLLM retries a test function up to maxRetries times.
+// Real LLM APIs may timeout or rate-limit; this handles transient failures.
+// fn must return nil on success or an error on failure. Unlike t.Run-based
+// approaches, this does not mark the parent test as failed on intermediate
+// attempts — only a final failure after all retries are exhausted does.
+func retryRealLLM(t *testing.T, maxRetries int, fn func(t *testing.T) error) {
+	t.Helper()
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		lastErr = fn(t)
+		if lastErr == nil {
+			return // success
+		}
+		if attempt < maxRetries {
+			t.Logf("attempt %d failed: %v, retrying...", attempt, lastErr)
+			time.Sleep(2 * time.Second) // backoff
+		}
+	}
+	t.Fatalf("all %d attempts failed, last error: %v", maxRetries, lastErr)
+}
+
+// envOrDefault returns the env var value or a default.
+func envOrDefault(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
+}
+
+// realLLMAgentConfig returns an AgentConfig for real LLM testing.
+// Uses lower temperature (0.3) for more deterministic responses.
+// MaxTokens can be overridden via XYNCRA_TEST_REAL_LLM_MAX_TOKENS env var (D-089).
+func realLLMAgentConfig(cfg struct{ APIKey, BaseURL, Model, Provider string }) *agent.AgentConfig {
+	maxTokens := 500
+	if mtStr := os.Getenv("XYNCRA_TEST_REAL_LLM_MAX_TOKENS"); mtStr != "" {
+		if mt, err := strconv.Atoi(mtStr); err == nil {
+			maxTokens = mt
+		}
+	}
+	return &agent.AgentConfig{
+		ID:          "real-test-bot",
+		Name:        "Real Test Bot",
+		Description: "Real LLM e2e test agent",
+		Model:       cfg.Model,
+		APIKeyEnv:   "XYNCRA_TEST_REAL_API_KEY",
+		BaseURL:     cfg.BaseURL,
+		Parameters: agent.AgentParameters{
+			Temperature: 0.3,       // lower = more deterministic
+			MaxTokens:   maxTokens, // limit cost/latency
+		},
+		Context: agent.AgentContext{
+			MaxTokens:   4000,
+			MaxMessages: 5, // short conversations to limit cost
+		},
+		SystemPrompt: "You are a test assistant. Always respond in English. Keep replies under 2 sentences.",
+	}
 }
