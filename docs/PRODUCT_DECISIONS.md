@@ -56,6 +56,9 @@
 | D-072 | Agent 幂等性 fail-open 策略 | Redis 不可用时跳过检查继续执行 |
 | D-073 | AgentTaskHandler 总是返回 nil 给 MQ | ExecuteWithErrorMessage 已处理所有错误，MQ 重试无意义 |
 | D-074 | Agent 幂等性使用独立 redis.Client | Pub/Sub 连接不能共享，独立客户端允许独立配置 |
+| D-075 | Agent 会话级并发锁（Per-Conversation Lock） | Redis SETNX 分布式锁，保证同一会话串行处理 |
+| D-076 | reload_agents RPC 管理接口 | 无鉴权热更新 Agent 配置，内网部署模型 |
+| D-077 | Agent 配置从磁盘目录加载 | 删除 go:embed，支持运行时热更新和 Docker 目录映射 |
 
 ---
 
@@ -811,6 +814,7 @@ CLI 命令（如 send）优先通过 Unix Socket IPC 连接到运行中的 liste
 - `XYNCRA_DB_PATH` → `--db-path`
 - `XYNCRA_LOG_DIR` → `--log-dir`（Phase 2 预留，当前 cliLogger 仅写 stderr）
 - `XYNCRA_DEBUG` → 启用 debug 日志（值为 `"1"` 或 `"true"` 时启用）
+- `XYNCRA_AGENTS_DIR` → `--agents-dir`（Agent 配置目录路径，默认 `"agents"`）
 
 ### 原因
 
@@ -1282,7 +1286,7 @@ Agent 的消息与普通用户消息格式完全相同。不新增 Message.Type 
 
 ### 决策
 
-Agent 通过 Markdown 文件定义，采用 YAML Front Matter + Markdown body 的单文件格式。YAML 部分定义元数据（id、name、description、model、api_key_env、base_url、parameters、context、tools），Markdown body 作为 system prompt。配置文件存放于 `internal/agent/agents/` 目录，server 启动时通过 `go:embed` 嵌入二进制。
+Agent 通过 Markdown 文件定义，采用 YAML Front Matter + Markdown body 的单文件格式。YAML 部分定义元数据（id、name、description、model、api_key_env、base_url、parameters、context、tools），Markdown body 作为 system prompt。配置文件存放于 `agents/` 目录（可通过 `--agents-dir` 覆盖），server 启动时从磁盘扫描加载，支持运行时通过 `reload_agents` RPC 热更新（D-076）。
 
 配置文件示例：
 
@@ -1313,8 +1317,13 @@ tools:
 
 1. **单文件格式简洁**：所有配置集中在一个文件，易于管理和版本控制
 2. **Markdown body 天然适合 system prompt**：Markdown 格式人类可读，易于编写和维护
-3. **go:embed 零配置部署**：编译时嵌入二进制，运行时无需外部配置文件（与 D-001 一致）
-4. **可扩展**：新增 Agent 只需添加新的 Markdown 文件，无需修改代码
+3. **磁盘加载支持热更新**：运行时修改配置文件后，通过 `reload_agents` RPC 即可生效，无需重新编译（D-076）
+4. **Docker 部署友好**：Docker 部署时可通过 volume 映射 `agents/` 目录，方便管理
+5. **可扩展**：新增 Agent 只需添加新的 Markdown 文件，无需修改代码
+
+### 变更历史
+
+- **2026-07-11**: 从 `go:embed` 改为磁盘目录加载（D-077），支持运行时热更新
 
 ---
 
@@ -1728,10 +1737,80 @@ idempotencyStore := agent.NewRedisIdempotencyStore(agentRedisClient)
 
 ---
 
+## D-075: Agent 会话级并发锁（Per-Conversation Lock）
+
+### 决策
+
+Agent 执行使用 Redis `SETNX` 分布式锁，key 格式 `agent:lock:{conversationID}`，TTL 130s（略高于 120s 总超时）。同一会话同一时间只允许一个 Agent 任务执行。如果锁已被占用，新任务直接跳过（不重试），因为已运行的任务会处理最新上下文。Fail-open 策略：Redis 不可用时跳过锁检查继续执行（与 D-072 一致）。使用 Lua 脚本确保只释放自己持有的锁，防止误删其他实例的锁。
+
+### 原因
+
+1. **上下文一致性**：同一对话的多个消息并行执行可能导致上下文加载不一致、重复响应
+2. **分布式安全**：Redis 锁跨节点生效，支持多实例部署（与 D-018 多节点路由一致）
+3. **与 D-072 一致**：fail-open 策略保证可用性优先
+4. **与 D-071 互补**：D-071 的幂等性防止重复执行，D-075 的锁防止并发执行
+5. **复用 D-074 的独立 redis.Client**：不引入额外 Redis 连接
+
+### 约束
+
+- 锁 TTL 130s 覆盖了总超时 120s + 10s buffer
+- Lua 脚本检查锁值（unique token）后才删除，防止释放他人的锁
+- 锁获取失败时记录日志但不阻塞执行（fail-open）
+
+---
+
+## D-076: reload_agents RPC 管理接口
+
+### 决策
+
+新增 `reload_agents` RPC 方法，调用 `AgentRegistry.Reload()` 重新扫描磁盘 `agents/` 目录并加载配置。无鉴权（与 D-002 一致）。响应格式：`{"count": N}`，N 为重新加载后的 Agent 数量。解析失败的配置文件被跳过并记录日志（与启动行为一致）。
+
+### 原因
+
+1. **热更新能力**：修改 Agent 配置后无需重启服务器
+2. **与 D-002 一致**：内网部署模型下，能访问此 RPC 的只有内网服务或反向代理后的管理员
+3. **与 D-077 配合**：磁盘加载模式使得 reload 有实际意义
+4. **最坏情况可接受**：误触发 reload 的后果仅为短暂延迟，不会造成数据损坏
+
+### 约束
+
+- reload 期间，正在执行的 Agent 任务不受影响（它们持有旧 AgentConfig 指针的引用）
+- reload 使用 `sync.RWMutex` 保护，与 `Get`/`IsAgent` 等读操作并发安全
+- 解析失败的配置文件不阻止其他有效配置的加载
+
+---
+
+## D-077: Agent 配置从磁盘目录加载
+
+### 决策
+
+Agent 配置文件从磁盘目录加载（默认 `agents/`），替代原来的 `go:embed` 方案。通过 `--agents-dir` 命令行 flag 可覆盖默认路径。`AgentRegistry` 启动时扫描目录加载所有 `.md` 文件，`Reload()` 方法重新扫描同一目录。
+
+### 原因
+
+1. **热更新前提**：`go:embed` 将文件嵌入二进制，运行时内容不可变，reload 无实际意义
+2. **Docker 部署友好**：Docker 部署时可通过 volume 映射 `agents/` 目录，运维人员可直接修改配置
+3. **开发效率**：修改 Agent prompt 后无需重新编译，reload 即可生效
+4. **与 D-001 兼容**：默认 `agents/` 目录开箱即用，无需额外配置
+
+### 变更历史
+
+- **2026-07-11**: 从 `go:embed` 改为磁盘目录加载。删除 `internal/agent/embed.go`，修改 `AgentRegistry.Load()` 接受目录路径参数
+
+### 约束
+
+- 默认路径 `agents/` 相对于工作目录
+- 目录不存在时记录警告但不报错（Agent 功能为可选模块，D-063）
+- `.md` 文件以外的文件被忽略
+- 配置文件变更不会自动触发 reload，需要显式调用 `reload_agents` RPC
+
+---
+
 ## 版本历史
 
 | 日期       | 版本 | 变更                                                                                                 |
 | ---------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| 2026-07-11 | v3.5 | 新增 D-075..D-077（Phase 7: 生产化加固），更新 D-058（Agent 配置从磁盘加载）                          |
 | 2026-07-11 | v3.4 | 新增 D-070..D-074（Phase 5: AgentTaskHandler 产品决策）                                               |
 | 2026-07-11 | v3.3 | 新增 D-064（LLM 默认 BaseURL）、D-065（Agent 思考状态）、D-066（LLMProvider 接口）、D-067（Agent 错误消息） |
 | 2026-07-11 | v3.2 | 新增 D-062（Agent 消息路由触发模型）、D-063（AgentRegistry 可选注入）                                |

@@ -3,8 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"log"
-	"os"
 	"time"
 
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
@@ -38,15 +36,18 @@ type TypingPayload struct {
 // returned to the caller.
 type BroadcastHelper struct {
 	wsServer BroadcastServer
-	logger   *log.Logger
+	logger   Logger
 }
 
 // NewBroadcastHelper creates a BroadcastHelper backed by the given WebSocket
 // broadcast server.
-func NewBroadcastHelper(wsServer BroadcastServer) *BroadcastHelper {
+func NewBroadcastHelper(wsServer BroadcastServer, logger Logger) *BroadcastHelper {
+	if logger == nil {
+		logger = noopLogger{}
+	}
 	return &BroadcastHelper{
 		wsServer: wsServer,
-		logger:   log.New(os.Stderr, "[agent-broadcast] ", log.LstdFlags),
+		logger:   logger,
 	}
 }
 
@@ -65,7 +66,7 @@ func (bh *BroadcastHelper) SendStreamUpdate(ctx context.Context, humanUserID, ag
 		Timestamp:      time.Now().Unix(),
 	})
 	if err != nil {
-		bh.logger.Printf("SendStreamUpdate: marshal payload: %v", err)
+		bh.logger.Error("broadcast: marshal stream payload failed", "error", err)
 		return
 	}
 
@@ -82,7 +83,7 @@ func (bh *BroadcastHelper) SendStreamUpdate(ctx context.Context, humanUserID, ag
 	// Broadcast to both the human user and the agent user (C7).
 	for _, userID := range []string{humanUserID, agentUserID} {
 		if err := bh.wsServer.BroadcastUpdates(userID, updates); err != nil {
-			bh.logger.Printf("SendStreamUpdate: broadcast to user %s failed (fire-and-forget): %v", userID, err)
+			bh.logger.Error("broadcast: stream update failed", "user_id", userID, "error", err)
 		}
 	}
 }
@@ -100,7 +101,7 @@ func (bh *BroadcastHelper) SendTyping(ctx context.Context, agentUserID, targetUs
 		Timestamp:      time.Now().Unix(),
 	})
 	if err != nil {
-		bh.logger.Printf("SendTyping: marshal payload: %v", err)
+		bh.logger.Error("broadcast: marshal typing payload failed", "error", err)
 		return
 	}
 
@@ -115,6 +116,6 @@ func (bh *BroadcastHelper) SendTyping(ctx context.Context, agentUserID, targetUs
 	}
 
 	if err := bh.wsServer.BroadcastUpdates(targetUserID, updates); err != nil {
-		bh.logger.Printf("SendTyping: broadcast to user %s failed (fire-and-forget): %v", targetUserID, err)
+		bh.logger.Error("broadcast: typing update failed", "user_id", targetUserID, "error", err)
 	}
 }

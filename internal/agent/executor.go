@@ -46,7 +46,7 @@ type AgentExecutor struct {
 	streamBridge   *StreamBridge
 	broadcaster    *BroadcastHelper
 	store          store.StoreAPI
-	sem            *Semaphore    // concurrency semaphore (optional)
+	sem            *Semaphore // concurrency semaphore (optional)
 	logger         Logger
 	totalTimeout   time.Duration // default 120s
 	typingTimeout  time.Duration // default 60s

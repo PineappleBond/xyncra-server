@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -59,14 +58,21 @@ func (s *RedisIdempotencyStore) MarkProcessed(ctx context.Context, key string, t
 //
 // The handler:
 //  1. Unmarshals the task payload into AgentProcessPayload
-//  2. Checks idempotency (skip if already processed)
-//  3. Calls AgentExecutor.ExecuteWithErrorMessage
-//  4. Always returns nil to MQ (errors are persisted as user-friendly messages, D-067)
+//  2. Acquires a per-conversation lock (if lock is non-nil)
+//  3. Checks idempotency (skip if already processed)
+//  4. Calls AgentExecutor.ExecuteWithErrorMessage
+//  5. Always returns nil to MQ (errors are persisted as user-friendly messages, D-067)
+//
+// lock may be nil to disable conversation-level serialization (backward compatible).
 func NewAgentTaskHandler(
 	executor *AgentExecutor,
 	idempotency IdempotencyStore,
-	logger *log.Logger,
+	lock ConversationLock,
+	logger Logger,
 ) func(ctx context.Context, task *mq.Task) error {
+	if logger == nil {
+		logger = noopLogger{}
+	}
 	return func(ctx context.Context, task *mq.Task) error {
 		// 1. Nil guard.
 		if task == nil {
@@ -76,7 +82,7 @@ func NewAgentTaskHandler(
 		// 2. Unmarshal payload.
 		var payload AgentProcessPayload
 		if err := json.Unmarshal(task.Payload, &payload); err != nil {
-			logger.Printf("agent task: unmarshal: %v (payload: %.200s)", err, task.Payload)
+			logger.Error("agent task: unmarshal failed", "error", err, "payload", string(task.Payload))
 			return nil // bad data, retry won't help
 		}
 
@@ -85,23 +91,48 @@ func NewAgentTaskHandler(
 		// SenderID (broadcasts to an empty user are no-ops). The producer
 		// (send_message.go) always populates it.
 		if payload.MessageID == "" || payload.ConversationID == "" || payload.AgentID == "" {
-			logger.Printf("agent task: missing required fields: %+v", payload)
+			logger.Error("agent task: missing required fields",
+				"message_id", payload.MessageID,
+				"conversation_id", payload.ConversationID,
+				"agent_id", payload.AgentID,
+			)
 			return nil
 		}
 
-		// 4. Idempotency check (Redis SETNX, 24h TTL).
+		// 4. Acquire per-conversation lock (D-075).
+		if lock != nil {
+			acquired, err := lock.Acquire(ctx, payload.ConversationID, 130*time.Second)
+			if err != nil {
+				logger.Error("conversation lock: acquire failed, proceeding without lock",
+					"conversation_id", payload.ConversationID, "error", err)
+				// fail-open (D-072 pattern)
+			} else if !acquired {
+				logger.Info("conversation lock: already held, skipping",
+					"conversation_id", payload.ConversationID)
+				return nil // D-073: another task is processing this conversation
+			} else {
+				defer func() {
+					if err := lock.Release(ctx, payload.ConversationID); err != nil {
+						logger.Error("conversation lock: release failed",
+							"conversation_id", payload.ConversationID, "error", err)
+					}
+				}()
+			}
+		}
+
+		// 5. Idempotency check (Redis SETNX, 24h TTL).
 		if idempotency != nil {
 			dup, err := idempotency.MarkProcessed(ctx, "agent:processed:"+payload.MessageID, 24*time.Hour)
 			if err != nil {
-				logger.Printf("agent task: idempotency check: %v", err)
+				logger.Error("agent task: idempotency check failed", "error", err)
 				// Continue processing — fail-open for idempotency.
 			} else if dup {
-				logger.Printf("agent task: skipping duplicate message_id=%s", payload.MessageID)
+				logger.Debug("agent task: skipping duplicate", "message_id", payload.MessageID)
 				return nil
 			}
 		}
 
-		// 5. Execute.
+		// 6. Execute.
 		execPayload := ExecutePayload{
 			MessageID:      payload.MessageID,
 			ConversationID: payload.ConversationID,
@@ -111,7 +142,7 @@ func NewAgentTaskHandler(
 		if err := executor.ExecuteWithErrorMessage(ctx, execPayload); err != nil {
 			// Error already persisted as user-friendly message (D-067).
 			// Return nil to prevent MQ retry — the error is terminal.
-			logger.Printf("agent task: execution failed: %v", err)
+			logger.Error("agent task: execution failed", "error", err)
 		}
 
 		return nil

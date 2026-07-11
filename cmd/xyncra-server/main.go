@@ -176,6 +176,9 @@ func main() {
 		log.Fatalf("failed to create websocket server: %v", err)
 	}
 
+	// Wire structured logger into agent registry (Phase 7 review).
+	agentRegistry.SetLogger(srv.Logger())
+
 	// Register method handlers after srv is created so that BroadcastFn
 	// can reference srv.BroadcastUpdates.
 	handler.RegisterAll(msgHandler, handler.Dependencies{

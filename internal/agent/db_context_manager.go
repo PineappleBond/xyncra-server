@@ -122,6 +122,53 @@ func (cm *DBContextManager) InvalidateCache(conversationID string) {
 	cm.cache.Delete(conversationID)
 }
 
+// StartCleanup begins a background goroutine that removes expired cache entries
+// at the given interval. It blocks until ctx is cancelled.
+// If interval <= 0, defaults to 5 minutes.
+//
+// Callers should launch this with: go cm.StartCleanup(ctx, interval)
+func (cm *DBContextManager) StartCleanup(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cm.cleanupExpired()
+		}
+	}
+}
+
+// cleanupExpired removes all expired entries from the cache.
+// It recovers from panics to ensure the background goroutine
+// (see StartCleanup) is not terminated by a single failure.
+func (cm *DBContextManager) cleanupExpired() {
+	defer func() {
+		if r := recover(); r != nil {
+			// Log panic but don't crash the goroutine.
+			// If we had a logger reference, we'd log it here.
+			// For now, silently continue.
+		}
+	}()
+	now := time.Now()
+	cm.cache.Range(func(key, value any) bool {
+		cc, ok := value.(*cachedContext)
+		if !ok {
+			// Corrupted entry, remove it
+			cm.cache.Delete(key)
+			return true
+		}
+		if now.Sub(cc.fetchedAt) >= cm.ttl {
+			cm.cache.Delete(key)
+		}
+		return true
+	})
+}
+
 // trimByTokens removes the oldest messages until total token count is within
 // maxTokens. Messages are processed from newest to oldest. The returned slice
 // preserves chronological order (oldest first). At least one message is always

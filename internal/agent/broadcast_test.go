@@ -36,7 +36,7 @@ func (m *mockBroadcastServer) BroadcastUpdates(userID string, updates *protocol.
 
 func TestSendStreamUpdate_BroadcastsToBothUsers(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	bh.SendStreamUpdate(context.Background(), "user/alice", "agent/bot1", "conv-1", "stream-1", "hello", false)
 
@@ -47,7 +47,7 @@ func TestSendStreamUpdate_BroadcastsToBothUsers(t *testing.T) {
 
 func TestSendStreamUpdate_SeqIsZero(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	bh.SendStreamUpdate(context.Background(), "user/alice", "agent/bot1", "conv-1", "stream-1", "hello", false)
 
@@ -59,7 +59,7 @@ func TestSendStreamUpdate_SeqIsZero(t *testing.T) {
 
 func TestSendStreamUpdate_TypeIsStreaming(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	bh.SendStreamUpdate(context.Background(), "user/alice", "agent/bot1", "conv-1", "stream-1", "hello", false)
 
@@ -70,7 +70,7 @@ func TestSendStreamUpdate_TypeIsStreaming(t *testing.T) {
 
 func TestSendStreamUpdate_PayloadContainsCorrectFields(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	bh.SendStreamUpdate(context.Background(), "user/alice", "agent/bot1", "conv-123", "stream-456", "hello world", true)
 
@@ -90,7 +90,7 @@ func TestSendStreamUpdate_PayloadContainsCorrectFields(t *testing.T) {
 
 func TestSendStreamUpdate_BroadcastError_NoPanic(t *testing.T) {
 	mock := &mockBroadcastServer{err: fmt.Errorf("broadcast failed")}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	// Should not panic even when broadcast fails.
 	assert.NotPanics(t, func() {
@@ -103,7 +103,7 @@ func TestSendStreamUpdate_BroadcastError_NoPanic(t *testing.T) {
 
 func TestSendStreamUpdate_EmptyUserIDs(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	// Call with empty user IDs — should still broadcast to both (empty string) slots.
 	bh.SendStreamUpdate(context.Background(), "", "", "conv-1", "stream-1", "hello", false)
@@ -115,7 +115,7 @@ func TestSendStreamUpdate_EmptyUserIDs(t *testing.T) {
 
 func TestSendStreamUpdate_IsDoneFalse(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	bh.SendStreamUpdate(context.Background(), "user/alice", "agent/bot1", "conv-1", "stream-1", "partial text", false)
 
@@ -133,7 +133,7 @@ func TestSendStreamUpdate_IsDoneFalse(t *testing.T) {
 
 func TestSendTyping_BroadcastsToTargetUser(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-1", true)
 
@@ -143,7 +143,7 @@ func TestSendTyping_BroadcastsToTargetUser(t *testing.T) {
 
 func TestSendTyping_SeqIsZero(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-1", true)
 
@@ -154,7 +154,7 @@ func TestSendTyping_SeqIsZero(t *testing.T) {
 
 func TestSendTyping_TypeIsTyping(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-1", true)
 
@@ -174,7 +174,7 @@ func TestSendTyping_IsTypingPayload(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			mock := &mockBroadcastServer{}
-			bh := NewBroadcastHelper(mock)
+			bh := NewBroadcastHelper(mock, noopLogger{})
 
 			bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-42", tc.isTyping)
 
@@ -193,7 +193,7 @@ func TestSendTyping_IsTypingPayload(t *testing.T) {
 
 func TestSendTyping_BroadcastError_NoPanic(t *testing.T) {
 	mock := &mockBroadcastServer{err: fmt.Errorf("broadcast failed")}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	assert.NotPanics(t, func() {
 		bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-1", true)
@@ -208,7 +208,7 @@ func TestSendTyping_BroadcastError_NoPanic(t *testing.T) {
 
 func TestNewBroadcastHelper(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	assert.NotNil(t, bh)
 	assert.NotNil(t, bh.logger)
@@ -221,7 +221,7 @@ func TestNewBroadcastHelper(t *testing.T) {
 
 func TestSendStreamUpdate_PayloadIncludesUserIDAndTimestamp(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	bh.SendStreamUpdate(context.Background(), "user/alice", "agent/bot1", "conv-1", "stream-1", "hello", false)
 
@@ -240,7 +240,7 @@ func TestSendStreamUpdate_PayloadIncludesUserIDAndTimestamp(t *testing.T) {
 
 func TestSendTyping_PayloadIncludesUserIDAndTimestamp(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-1", true)
 
@@ -259,7 +259,7 @@ func TestSendTyping_PayloadIncludesUserIDAndTimestamp(t *testing.T) {
 func TestSendStreamUpdate_JSONFieldNames(t *testing.T) {
 	// Verify JSON field names match client expectations (pkg/client/sync.go streamingUpdatePayload).
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	bh.SendStreamUpdate(context.Background(), "user/alice", "agent/bot1", "conv-1", "stream-1", "text", true)
 
@@ -281,7 +281,7 @@ func TestSendStreamUpdate_JSONFieldNames(t *testing.T) {
 func TestSendTyping_JSONFieldNames(t *testing.T) {
 	// Verify JSON field names match client expectations (pkg/client/sync.go typingUpdatePayload).
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-1", true)
 
@@ -304,7 +304,7 @@ func TestSendTyping_JSONFieldNames(t *testing.T) {
 // characters survive JSON round-tripping without corruption.
 func TestSendStreamUpdate_UnicodeAndSpecialChars(t *testing.T) {
 	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock)
+	bh := NewBroadcastHelper(mock, noopLogger{})
 
 	text := "Hello 世界 🌍 \"quoted\" \\backslash \n\tnewline"
 	bh.SendStreamUpdate(context.Background(), "user/a", "agent/b", "conv", "s", text, false)

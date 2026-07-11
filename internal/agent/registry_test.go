@@ -1,9 +1,10 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
-	"testing/fstest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,6 +67,12 @@ api_key_env: KEY
 body
 `
 
+// writeAgentFile writes content to a .md file in dir.
+func writeAgentFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0644))
+}
+
 func TestNewRegistry(t *testing.T) {
 	r := NewRegistry()
 	assert.Equal(t, 0, r.Count())
@@ -73,13 +80,12 @@ func TestNewRegistry(t *testing.T) {
 }
 
 func TestRegistry_Load_ValidConfigs(t *testing.T) {
-	fsys := fstest.MapFS{
-		"bot1.md": &fstest.MapFile{Data: []byte(validFullContent)},
-		"bot2.md": &fstest.MapFile{Data: []byte(validMinimalContent)},
-	}
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "bot1.md", validFullContent)
+	writeAgentFile(t, dir, "bot2.md", validMinimalContent)
 
 	r := NewRegistry()
-	err := r.Load(fsys)
+	err := r.Load(dir)
 	require.NoError(t, err)
 	assert.Equal(t, 2, r.Count())
 
@@ -94,15 +100,14 @@ func TestRegistry_Load_ValidConfigs(t *testing.T) {
 }
 
 func TestRegistry_Load_SkipsInvalid(t *testing.T) {
-	fsys := fstest.MapFS{
-		"valid.md":  &fstest.MapFile{Data: []byte(validFullContent)},
-		"broken.md": &fstest.MapFile{Data: []byte(invalidYAMLContent)},
-		"noid.md":   &fstest.MapFile{Data: []byte(missingIDContent)},
-		"valid2.md": &fstest.MapFile{Data: []byte(validMinimalContent)},
-	}
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "valid.md", validFullContent)
+	writeAgentFile(t, dir, "broken.md", invalidYAMLContent)
+	writeAgentFile(t, dir, "noid.md", missingIDContent)
+	writeAgentFile(t, dir, "valid2.md", validMinimalContent)
 
 	r := NewRegistry()
-	err := r.Load(fsys)
+	err := r.Load(dir)
 	require.NoError(t, err)
 
 	// Only the two valid configs should be loaded.
@@ -131,29 +136,46 @@ api_key_env: KEY
 ---
 second
 `
-	fsys := fstest.MapFS{
-		"a.md": &fstest.MapFile{Data: []byte(first)},
-		"b.md": &fstest.MapFile{Data: []byte(second)},
-	}
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "a.md", first)
+	writeAgentFile(t, dir, "b.md", second)
 
 	r := NewRegistry()
-	err := r.Load(fsys)
+	err := r.Load(dir)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, r.Count())
 	cfg, ok := r.Get("dup-bot")
 	require.True(t, ok)
-	// fstest.MapFS sorts by filename, so a.md loads before b.md.
+	// os.ReadDir sorts by filename, so a.md loads before b.md.
 	// Therefore "First" (from a.md) should win.
 	assert.Equal(t, "First", cfg.Name)
 }
 
-func TestRegistry_Get_Exists(t *testing.T) {
-	fsys := fstest.MapFS{
-		"bot.md": &fstest.MapFile{Data: []byte(validFullContent)},
-	}
+func TestRegistry_Load_NonExistentDir(t *testing.T) {
 	r := NewRegistry()
-	require.NoError(t, r.Load(fsys))
+	err := r.Load("/nonexistent/path/to/agents")
+	assert.NoError(t, err, "Load should return nil for non-existent directory (D-063)")
+	assert.Equal(t, 0, r.Count())
+}
+
+func TestRegistry_Load_SkipsNonMdFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "bot.md", validMinimalContent)
+	// Write a non-.md file that should be ignored.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("ignore me"), 0644))
+
+	r := NewRegistry()
+	err := r.Load(dir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, r.Count())
+}
+
+func TestRegistry_Get_Exists(t *testing.T) {
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "bot.md", validFullContent)
+	r := NewRegistry()
+	require.NoError(t, r.Load(dir))
 
 	cfg, ok := r.Get("test-bot")
 	assert.True(t, ok)
@@ -169,11 +191,10 @@ func TestRegistry_Get_NotExists(t *testing.T) {
 }
 
 func TestRegistry_IsAgent_ValidAgent(t *testing.T) {
-	fsys := fstest.MapFS{
-		"weather.md": &fstest.MapFile{Data: []byte(validSecondContent)},
-	}
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "weather.md", validSecondContent)
 	r := NewRegistry()
-	require.NoError(t, r.Load(fsys))
+	require.NoError(t, r.Load(dir))
 
 	cfg, ok := r.IsAgent("agent/weather-bot")
 	assert.True(t, ok)
@@ -189,11 +210,10 @@ func TestRegistry_IsAgent_NormalUser(t *testing.T) {
 }
 
 func TestRegistry_IsAgent_UnknownAgent(t *testing.T) {
-	fsys := fstest.MapFS{
-		"bot.md": &fstest.MapFile{Data: []byte(validFullContent)},
-	}
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "bot.md", validFullContent)
 	r := NewRegistry()
-	require.NoError(t, r.Load(fsys))
+	require.NoError(t, r.Load(dir))
 
 	cfg, ok := r.IsAgent("agent/unknown")
 	assert.False(t, ok)
@@ -215,11 +235,10 @@ func TestRegistry_IsAgent_PrefixOnly(t *testing.T) {
 }
 
 func TestRegistry_ListAll_ReturnsCopy(t *testing.T) {
-	fsys := fstest.MapFS{
-		"bot.md": &fstest.MapFile{Data: []byte(validFullContent)},
-	}
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "bot.md", validFullContent)
 	r := NewRegistry()
-	require.NoError(t, r.Load(fsys))
+	require.NoError(t, r.Load(dir))
 
 	list := r.ListAll()
 	require.Len(t, list, 1)
@@ -234,14 +253,76 @@ func TestRegistry_ListAll_ReturnsCopy(t *testing.T) {
 	assert.NotNil(t, cfg)
 }
 
-func TestRegistry_ConcurrentReads(t *testing.T) {
-	fsys := fstest.MapFS{
-		"bot1.md": &fstest.MapFile{Data: []byte(validFullContent)},
-		"bot2.md": &fstest.MapFile{Data: []byte(validMinimalContent)},
-		"bot3.md": &fstest.MapFile{Data: []byte(validSecondContent)},
-	}
+func TestRegistry_Reload(t *testing.T) {
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "bot1.md", validFullContent)
+
 	r := NewRegistry()
-	require.NoError(t, r.Load(fsys))
+	require.NoError(t, r.Load(dir))
+	assert.Equal(t, 1, r.Count())
+
+	// Add a new config file and reload.
+	writeAgentFile(t, dir, "bot2.md", validMinimalContent)
+	require.NoError(t, r.Reload())
+	assert.Equal(t, 2, r.Count())
+
+	_, ok := r.Get("test-bot")
+	assert.True(t, ok)
+	_, ok = r.Get("minimal-bot")
+	assert.True(t, ok)
+}
+
+func TestRegistry_Reload_PreservesDir(t *testing.T) {
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "bot.md", validFullContent)
+
+	r := NewRegistry()
+	require.NoError(t, r.Load(dir))
+	assert.Equal(t, 1, r.Count())
+
+	// Reload should use the same directory that was set by Load.
+	require.NoError(t, r.Reload())
+	assert.Equal(t, 1, r.Count())
+	_, ok := r.Get("test-bot")
+	assert.True(t, ok)
+}
+
+func TestRegistry_Reload_BeforeLoad(t *testing.T) {
+	registry := NewRegistry()
+	// Reload before Load should not panic and should return nil
+	// (empty dir string, os.IsNotExist returns nil).
+	err := registry.Reload()
+	assert.NoError(t, err)
+	assert.Equal(t, 0, registry.Count())
+}
+
+func TestRegistry_Reload_RemovesDeletedConfigs(t *testing.T) {
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "bot1.md", validFullContent)
+	writeAgentFile(t, dir, "bot2.md", validMinimalContent)
+
+	r := NewRegistry()
+	require.NoError(t, r.Load(dir))
+	assert.Equal(t, 2, r.Count())
+
+	// Remove one config file and reload.
+	require.NoError(t, os.Remove(filepath.Join(dir, "bot2.md")))
+	require.NoError(t, r.Reload())
+	assert.Equal(t, 1, r.Count())
+
+	_, ok := r.Get("test-bot")
+	assert.True(t, ok)
+	_, ok = r.Get("minimal-bot")
+	assert.False(t, ok)
+}
+
+func TestRegistry_ConcurrentReads(t *testing.T) {
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "bot1.md", validFullContent)
+	writeAgentFile(t, dir, "bot2.md", validMinimalContent)
+	writeAgentFile(t, dir, "bot3.md", validSecondContent)
+	r := NewRegistry()
+	require.NoError(t, r.Load(dir))
 
 	const goroutines = 50
 	const iterations = 100
@@ -268,13 +349,11 @@ func TestRegistry_ConcurrentReads(t *testing.T) {
 }
 
 func TestRegistry_ConcurrentLoadAndGet(t *testing.T) {
-	// Pre-load a registry so Get/IsAgent/ListAll/Count have data to read.
-	fsys := fstest.MapFS{
-		"bot1.md": &fstest.MapFile{Data: []byte(validFullContent)},
-		"bot2.md": &fstest.MapFile{Data: []byte(validMinimalContent)},
-	}
+	dir := t.TempDir()
+	writeAgentFile(t, dir, "bot1.md", validFullContent)
+	writeAgentFile(t, dir, "bot2.md", validMinimalContent)
 	r := NewRegistry()
-	require.NoError(t, r.Load(fsys))
+	require.NoError(t, r.Load(dir))
 
 	const goroutines = 50
 	const iterations = 100
@@ -308,7 +387,7 @@ func TestRegistry_ConcurrentLoadAndGet(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range iterations {
-				_ = r.Load(fsys)
+				_ = r.Load(dir)
 			}
 		}()
 	}

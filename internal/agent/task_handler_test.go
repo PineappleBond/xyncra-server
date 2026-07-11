@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log"
 	"testing"
 	"time"
 
@@ -35,8 +33,10 @@ func (m *mockIdempotencyStore) MarkProcessed(ctx context.Context, key string, tt
 
 // newTestHandler creates an AgentExecutor (with mocks) and a task handler for testing.
 // The executor uses a mockStoreAPI and mockBroadcastServer so we can observe calls.
+// lock may be nil to disable conversation-level locking in tests.
 func newTestHandler(
 	idempotency IdempotencyStore,
+	lock ConversationLock,
 ) (
 	handler func(ctx context.Context, task *mq.Task) error,
 	mockStore *mockStoreAPI,
@@ -57,13 +57,13 @@ func newTestHandler(
 	// verify executor invocation via typing broadcasts and error message
 	// persistence without needing a full LLM mock stack.
 	mockCtxMgr := &mockContextManager{err: ErrContextLoad}
-	bh := NewBroadcastHelper(mockBS)
+	bh := NewBroadcastHelper(mockBS, testLogger{})
 	sb := NewStreamBridge()
 
-	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0)
-	logger := log.New(io.Discard, "", 0)
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{})
+	logger := testLogger{}
 
-	handler = NewAgentTaskHandler(executor, idempotency, logger)
+	handler = NewAgentTaskHandler(executor, idempotency, lock, logger)
 	return handler, mockStore, mockBS
 }
 
@@ -72,7 +72,7 @@ func newTestHandler(
 // ---------------------------------------------------------------------------
 
 func TestNewAgentTaskHandler_NilTask(t *testing.T) {
-	handler, _, _ := newTestHandler(nil)
+	handler, _, _ := newTestHandler(nil, nil)
 	assert.NotPanics(t, func() {
 		err := handler(context.Background(), nil)
 		assert.NoError(t, err)
@@ -84,7 +84,7 @@ func TestNewAgentTaskHandler_NilTask(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewAgentTaskHandler_InvalidPayload(t *testing.T) {
-	handler, _, _ := newTestHandler(nil)
+	handler, _, _ := newTestHandler(nil, nil)
 	task := &mq.Task{
 		Type:    mq.TypeAgentProcess,
 		Payload: json.RawMessage(`{invalid json`),
@@ -110,7 +110,7 @@ func TestNewAgentTaskHandler_MissingFields(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			handler, mockStore, _ := newTestHandler(nil)
+			handler, mockStore, _ := newTestHandler(nil, nil)
 			payloadBytes, _ := json.Marshal(tc.payload)
 			task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
 
@@ -132,7 +132,7 @@ func TestNewAgentTaskHandler_IdempotencyDuplicate(t *testing.T) {
 			return true, nil // duplicate
 		},
 	}
-	handler, mockStore, mockBS := newTestHandler(idem)
+	handler, mockStore, mockBS := newTestHandler(idem, nil)
 
 	payload := AgentProcessPayload{
 		MessageID:      "msg-1",
@@ -163,7 +163,7 @@ func TestNewAgentTaskHandler_IdempotencyFirstTime(t *testing.T) {
 			return false, nil // first time
 		},
 	}
-	handler, _, mockBS := newTestHandler(idem)
+	handler, _, mockBS := newTestHandler(idem, nil)
 
 	payload := AgentProcessPayload{
 		MessageID:      "msg-1",
@@ -194,7 +194,7 @@ func TestNewAgentTaskHandler_IdempotencyError_FailOpen(t *testing.T) {
 			return false, fmt.Errorf("redis connection refused")
 		},
 	}
-	handler, _, mockBS := newTestHandler(idem)
+	handler, _, mockBS := newTestHandler(idem, nil)
 
 	payload := AgentProcessPayload{
 		MessageID:      "msg-1",
@@ -217,7 +217,7 @@ func TestNewAgentTaskHandler_IdempotencyError_FailOpen(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewAgentTaskHandler_NilIdempotency(t *testing.T) {
-	handler, _, mockBS := newTestHandler(nil)
+	handler, _, mockBS := newTestHandler(nil, nil)
 
 	payload := AgentProcessPayload{
 		MessageID:      "msg-1",
@@ -242,7 +242,7 @@ func TestNewAgentTaskHandler_NilIdempotency(t *testing.T) {
 func TestNewAgentTaskHandler_ExecutorSuccess(t *testing.T) {
 	// The mockContextManager returns ErrContextLoad, so the executor fails
 	// at context loading. The handler still returns nil (its contract).
-	handler, _, _ := newTestHandler(nil)
+	handler, _, _ := newTestHandler(nil, nil)
 
 	payload := AgentProcessPayload{
 		MessageID:      "msg-1",
@@ -262,7 +262,7 @@ func TestNewAgentTaskHandler_ExecutorSuccess(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewAgentTaskHandler_ExecutorError(t *testing.T) {
-	handler, mockStore, _ := newTestHandler(nil)
+	handler, mockStore, _ := newTestHandler(nil, nil)
 
 	// The mockContextManager returns ErrContextLoad, triggering
 	// ExecuteWithErrorMessage which persists the error message (D-067).
@@ -293,7 +293,7 @@ func TestNewAgentTaskHandler_CorrectPayloadMapping(t *testing.T) {
 	// then fails at context loading (mockContextManager returns ErrContextLoad).
 	// ExecuteWithErrorMessage persists the error message, confirming the
 	// payload mapping was correct.
-	handler, mockStore, _ := newTestHandler(nil)
+	handler, mockStore, _ := newTestHandler(nil, nil)
 
 	payload := AgentProcessPayload{
 		MessageID:      "msg-unique-123",
@@ -413,7 +413,7 @@ func TestNewAgentTaskHandler_EmptyPayload(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			handler, mockStore, _ := newTestHandler(nil)
+			handler, mockStore, _ := newTestHandler(nil, nil)
 			task := &mq.Task{Type: mq.TypeAgentProcess, Payload: tc.payload}
 
 			assert.NotPanics(t, func() {
@@ -431,7 +431,7 @@ func TestNewAgentTaskHandler_EmptyPayload(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewAgentTaskHandler_NullJSONPayload(t *testing.T) {
-	handler, mockStore, _ := newTestHandler(nil)
+	handler, mockStore, _ := newTestHandler(nil, nil)
 	task := &mq.Task{
 		Type:    mq.TypeAgentProcess,
 		Payload: json.RawMessage("null"),
@@ -456,7 +456,7 @@ func TestNewAgentTaskHandler_IdempotencyTTLValue(t *testing.T) {
 			return false, nil // first time, not duplicate
 		},
 	}
-	handler, _, _ := newTestHandler(idem)
+	handler, _, _ := newTestHandler(idem, nil)
 
 	payload := AgentProcessPayload{
 		MessageID:      "msg-ttl",
@@ -470,4 +470,149 @@ func TestNewAgentTaskHandler_IdempotencyTTLValue(t *testing.T) {
 	err := handler(context.Background(), task)
 	assert.NoError(t, err)
 	assert.Equal(t, 24*time.Hour, capturedTTL, "idempotency TTL must be 24 hours")
+}
+
+// ---------------------------------------------------------------------------
+// Mock ConversationLock
+// ---------------------------------------------------------------------------
+
+type mockConversationLock struct {
+	acquireResult bool
+	acquireErr    error
+	released      bool
+	releaseErr    error
+}
+
+func (m *mockConversationLock) Acquire(ctx context.Context, conversationID string, ttl time.Duration) (bool, error) {
+	return m.acquireResult, m.acquireErr
+}
+
+func (m *mockConversationLock) Release(ctx context.Context, conversationID string) error {
+	m.released = true
+	return m.releaseErr
+}
+
+// ---------------------------------------------------------------------------
+// 17. Conversation lock acquired → normal execution
+// ---------------------------------------------------------------------------
+
+func TestNewAgentTaskHandler_ConversationLock_Acquired(t *testing.T) {
+	lock := &mockConversationLock{acquireResult: true}
+	handler, _, mockBS := newTestHandler(nil, lock)
+
+	payload := AgentProcessPayload{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "user/alice",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
+
+	err := handler(context.Background(), task)
+	assert.NoError(t, err)
+
+	// Executor SHOULD have been called.
+	assert.NotEmpty(t, mockBS.calls, "executor should have been called when lock is acquired")
+	// Lock SHOULD have been released.
+	assert.True(t, lock.released, "lock should be released after execution")
+}
+
+// ---------------------------------------------------------------------------
+// 18. Conversation lock already held → skip execution
+// ---------------------------------------------------------------------------
+
+func TestNewAgentTaskHandler_ConversationLock_AlreadyHeld(t *testing.T) {
+	lock := &mockConversationLock{acquireResult: false}
+	handler, mockStore, mockBS := newTestHandler(nil, lock)
+
+	payload := AgentProcessPayload{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "user/alice",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
+
+	err := handler(context.Background(), task)
+	assert.NoError(t, err)
+
+	// Executor should NOT have been called.
+	assert.Empty(t, mockBS.calls, "executor should not be called when lock is already held")
+	assert.Empty(t, mockStore.sendMessageCalls, "no error message should be persisted")
+	// Lock should NOT have been released (we didn't acquire it).
+	assert.False(t, lock.released, "lock should not be released when it was not acquired")
+}
+
+// ---------------------------------------------------------------------------
+// 19. Conversation lock Redis error → fail-open, executor called
+// ---------------------------------------------------------------------------
+
+func TestNewAgentTaskHandler_ConversationLock_RedisError(t *testing.T) {
+	lock := &mockConversationLock{acquireErr: fmt.Errorf("redis connection refused")}
+	handler, _, mockBS := newTestHandler(nil, lock)
+
+	payload := AgentProcessPayload{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "user/alice",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
+
+	err := handler(context.Background(), task)
+	assert.NoError(t, err)
+
+	// Executor SHOULD have been called despite lock error (fail-open).
+	assert.NotEmpty(t, mockBS.calls, "executor should be called when lock acquire fails (fail-open)")
+	// Lock should NOT have been released (we didn't acquire it).
+	assert.False(t, lock.released, "lock should not be released when acquire failed")
+}
+
+// ---------------------------------------------------------------------------
+// 20. Nil lock → works normally (backward compatible)
+// ---------------------------------------------------------------------------
+
+func TestNewAgentTaskHandler_ConversationLock_NilLock(t *testing.T) {
+	handler, _, mockBS := newTestHandler(nil, nil)
+
+	payload := AgentProcessPayload{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "user/alice",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
+
+	err := handler(context.Background(), task)
+	assert.NoError(t, err)
+
+	// Executor SHOULD have been called (no lock to block it).
+	assert.NotEmpty(t, mockBS.calls, "executor should be called when lock is nil")
+}
+
+// ---------------------------------------------------------------------------
+// 21. Release error → no panic
+// ---------------------------------------------------------------------------
+
+func TestNewAgentTaskHandler_ConversationLock_ReleaseError(t *testing.T) {
+	lock := &mockConversationLock{acquireResult: true, releaseErr: fmt.Errorf("redis write error")}
+	handler, _, _ := newTestHandler(nil, lock)
+
+	payload := AgentProcessPayload{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "user/alice",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
+
+	assert.NotPanics(t, func() {
+		err := handler(context.Background(), task)
+		assert.NoError(t, err, "handler returns nil even if lock release fails")
+	})
 }

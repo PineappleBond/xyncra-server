@@ -93,4 +93,54 @@
 //	→ LLM streaming (Eino Runner) → stream bridge (cumulative snapshots)
 //	→ broadcast chunks (BroadcastHelper) → is_done=true broadcast
 //	→ persist message → return nil to MQ (D-067)
+//
+// # Phase 7: Production Hardening
+//
+// Semaphore (semaphore.go): Semaphore limits concurrent agent executions using
+// a channel-based counter. Capacity > 0 creates a bounded semaphore; capacity
+// <= 0 returns an unlimited semaphore where Acquire always succeeds. Tracks
+// active count, peak usage, and total acquisitions via Stats(). When the
+// executor is created with maxConcurrent > 0, a Semaphore is attached to
+// bound parallel LLM calls.
+//
+// ConversationLock (conversation_lock.go, D-075): ConversationLock is the
+// interface for per-conversation distributed locking. RedisConversationLock
+// implements it via Redis SETNX with a configurable TTL (default 130s, covering
+// the 120s total timeout plus buffer). Release uses a Lua script that verifies
+// the lock value before deletion, preventing one owner from releasing another's
+// lock. Fail-open: Redis errors are logged but do not block execution. The
+// lock reuses the same dedicated redis.Client as the idempotency store (D-074).
+//
+// LLMMetrics (monitoring.go): LLMMetrics is the interface for recording LLM
+// call metrics (agent ID, model, duration, token counts, error). LogMetrics
+// is the default implementation that logs each call event via the structured
+// Logger. The executor records a metrics event around every agent Build step
+// when WithLLMMetrics is configured.
+//
+// StartCleanup (db_context_manager.go): DBContextManager.StartCleanup begins a
+// background goroutine that periodically evicts expired entries from the
+// in-memory conversation context cache (sync.Map). It runs until the parent
+// context is cancelled. Cache cleanup is independent of server lifecycle and
+// ensures stale contexts do not accumulate memory indefinitely.
+//
+// Reload (registry.go, D-076, D-077): AgentRegistry.Reload re-scans the
+// directory previously passed to Load and replaces all agent configurations
+// atomically. The reload_agents RPC handler (D-076) invokes Reload to support
+// runtime hot-reloading of agent configs without server restart. AgentRegistry
+// also exposes a Dir() method returning the directory path (used by the reload
+// handler for error messages) and a SetLogger method to wire in the server's
+// structured logger (Phase 7 review).
+//
+// Structured Logger (executor.go): Logger is a structured logging interface
+// (Info, Error, Debug) compatible with server.Logger. All agent components
+// (AgentExecutor, AgentRegistry, BroadcastHelper, AgentTaskHandler) accept a
+// Logger and default to noopLogger when nil is provided. This replaces
+// ad-hoc *log.Logger usage and provides consistent key-value log output.
+//
+// Functional Options (executor.go): ExecutorOption is the functional options
+// pattern for AgentExecutor configuration. WithTotalTimeout overrides the
+// default 120s total execution timeout. WithTypingTimeout overrides the default
+// 60s wait for the first LLM token. WithLLMMetrics attaches an LLMMetrics
+// recorder. All options ignore non-positive durations (zero/negative) to
+// preserve safe defaults.
 package agent

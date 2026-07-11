@@ -2,7 +2,6 @@ package agent
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,13 +14,33 @@ type AgentRegistry struct {
 	mu     sync.RWMutex
 	agents map[string]*AgentConfig
 	dir    string // directory path from which configs were loaded (D-077)
+	logger Logger // structured logger; defaults to noopLogger{}
 }
 
 // NewRegistry creates an empty AgentRegistry.
 func NewRegistry() *AgentRegistry {
 	return &AgentRegistry{
 		agents: make(map[string]*AgentConfig),
+		logger: noopLogger{},
 	}
+}
+
+// SetLogger sets the structured logger for registry operations.
+// If logger is nil, the call is ignored (the existing logger is kept).
+func (r *AgentRegistry) SetLogger(logger Logger) {
+	if logger == nil {
+		return
+	}
+	r.mu.Lock()
+	r.logger = logger
+	r.mu.Unlock()
+}
+
+// Dir returns the directory path from which agents were last loaded.
+func (r *AgentRegistry) Dir() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.dir
 }
 
 // Load scans the given directory for .md agent config files and loads them.
@@ -46,16 +65,19 @@ func (r *AgentRegistry) Load(dir string) error {
 		}
 		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
-			log.Printf("[WARN] agent: failed to read %s: %v", entry.Name(), err)
+			r.logger.Info("agent: failed to read config file, skipping",
+				"file", entry.Name(), "error", err)
 			continue
 		}
 		config, err := ParseFrontMatter(data)
 		if err != nil {
-			log.Printf("[WARN] agent: skipping %s: %v", entry.Name(), err)
+			r.logger.Info("agent: skipping invalid config",
+				"file", entry.Name(), "error", err)
 			continue
 		}
 		if _, exists := r.agents[config.ID]; exists {
-			log.Printf("[WARN] agent: duplicate ID %q in %s, skipping", config.ID, entry.Name())
+			r.logger.Info("agent: duplicate ID, skipping",
+				"id", config.ID, "file", entry.Name())
 			continue
 		}
 		r.agents[config.ID] = config

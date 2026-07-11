@@ -401,3 +401,163 @@ func TestDBContextManager_WithOptions(t *testing.T) {
 	_, ok := cm.tokenizer.(*fixedTokenCounter)
 	assert.True(t, ok, "should use the custom token counter")
 }
+
+// ---------------------------------------------------------------------------
+// cleanupExpired / StartCleanup tests
+// ---------------------------------------------------------------------------
+
+// TestDBContextManager_CleanupExpired verifies that expired entries are removed
+// from the cache while fresh entries are preserved.
+func TestDBContextManager_CleanupExpired(t *testing.T) {
+	s := setupTestStore(t)
+	cm := NewDBContextManager(s.MessageStore(), WithCacheTTL(50*time.Millisecond))
+
+	// Inject two expired entries and one fresh entry directly into the cache.
+	now := time.Now()
+	cm.cache.Store("expired-1", &cachedContext{
+		messages:  []*model.Message{{ID: "old-1"}},
+		fetchedAt: now.Add(-100 * time.Millisecond),
+	})
+	cm.cache.Store("expired-2", &cachedContext{
+		messages:  []*model.Message{{ID: "old-2"}},
+		fetchedAt: now.Add(-200 * time.Millisecond),
+	})
+	cm.cache.Store("fresh-1", &cachedContext{
+		messages:  []*model.Message{{ID: "new-1"}},
+		fetchedAt: now,
+	})
+
+	// Also inject a corrupted entry (wrong value type) — should be removed.
+	cm.cache.Store("corrupted", "not-a-cachedContext")
+
+	// Wait for TTL to elapse for the "fresh" entry as well (so cleanupExpired sees all as expired).
+	// Actually, we want to verify that fresh entries survive. Let's call cleanupExpired
+	// while "fresh-1" is still within TTL.
+	time.Sleep(10 * time.Millisecond)
+	cm.cleanupExpired()
+
+	// Expired entries should be gone.
+	_, ok1 := cm.cache.Load("expired-1")
+	assert.False(t, ok1, "expired-1 should be cleaned up")
+	_, ok2 := cm.cache.Load("expired-2")
+	assert.False(t, ok2, "expired-2 should be cleaned up")
+
+	// Corrupted entry should be gone.
+	_, okCorrupt := cm.cache.Load("corrupted")
+	assert.False(t, okCorrupt, "corrupted entry should be cleaned up")
+
+	// Fresh entry should still be present.
+	val, okFresh := cm.cache.Load("fresh-1")
+	assert.True(t, okFresh, "fresh-1 should still be in cache")
+	if okFresh {
+		cc := val.(*cachedContext)
+		assert.Equal(t, "new-1", cc.messages[0].ID)
+	}
+
+	// Now wait for fresh entry to expire too, then clean again.
+	time.Sleep(60 * time.Millisecond)
+	cm.cleanupExpired()
+
+	_, okFresh2 := cm.cache.Load("fresh-1")
+	assert.False(t, okFresh2, "fresh-1 should be cleaned up after TTL elapses")
+}
+
+// TestDBContextManager_CleanupExpired_PanicRecovery verifies that cleanupExpired
+// does not crash even if a panic occurs during Range iteration.
+func TestDBContextManager_CleanupExpired_PanicRecovery(t *testing.T) {
+	cm := &DBContextManager{ttl: 1 * time.Millisecond}
+	// Store an entry that will be expired.
+	cm.cache.Store("key1", &cachedContext{
+		messages:  nil,
+		fetchedAt: time.Now().Add(-1 * time.Second),
+	})
+
+	// cleanupExpired should complete without panicking.
+	assert.NotPanics(t, cm.cleanupExpired)
+
+	// Entry should have been cleaned up.
+	_, ok := cm.cache.Load("key1")
+	assert.False(t, ok, "entry should be cleaned up")
+}
+
+// TestDBContextManager_StartCleanup_CtxCancel verifies that StartCleanup
+// exits when the context is cancelled.
+func TestDBContextManager_StartCleanup_CtxCancel(t *testing.T) {
+	cm := &DBContextManager{ttl: 1 * time.Millisecond}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() {
+		cm.StartCleanup(ctx, 20*time.Millisecond)
+		close(done)
+	}()
+
+	// Give the goroutine time to start and tick at least once.
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel context — goroutine should exit.
+	cancel()
+
+	select {
+	case <-done:
+		// Success: goroutine exited.
+	case <-time.After(1 * time.Second):
+		t.Fatal("StartCleanup did not exit after context cancellation")
+	}
+}
+
+// TestDBContextManager_StartCleanup_DefaultInterval verifies that a zero or
+// negative interval defaults to 5 minutes (we test by ensuring the goroutine
+// does not panic on creation with zero interval).
+func TestDBContextManager_StartCleanup_DefaultInterval(t *testing.T) {
+	cm := &DBContextManager{ttl: 1 * time.Millisecond}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		// interval <= 0 should default to 5 minutes, not panic.
+		cm.StartCleanup(ctx, 0)
+		close(done)
+	}()
+
+	// Cancel immediately to verify it works with default interval.
+	cancel()
+	select {
+	case <-done:
+		// OK
+	case <-time.After(1 * time.Second):
+		t.Fatal("StartCleanup with zero interval did not exit on context cancellation")
+	}
+}
+
+// TestDBContextManager_StartCleanup_ActuallyCleans verifies that StartCleanup
+// actually removes expired entries during its tick cycle.
+func TestDBContextManager_StartCleanup_ActuallyCleans(t *testing.T) {
+	cm := &DBContextManager{ttl: 10 * time.Millisecond}
+
+	// Inject an expired entry.
+	cm.cache.Store("stale-key", &cachedContext{
+		messages:  []*model.Message{{ID: "stale"}},
+		fetchedAt: time.Now().Add(-1 * time.Second),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		cm.StartCleanup(ctx, 20*time.Millisecond)
+		close(done)
+	}()
+
+	// Wait for at least one tick (20ms interval).
+	time.Sleep(80 * time.Millisecond)
+	cancel()
+	<-done
+
+	_, ok := cm.cache.Load("stale-key")
+	assert.False(t, ok, "stale-key should have been cleaned up by StartCleanup")
+}

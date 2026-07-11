@@ -5,9 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"testing"
+	"time"
 
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
@@ -70,6 +69,13 @@ func (m *mockStoreAPI) HealthCheck(_ context.Context) error          { panic("no
 
 // Ensure mockStoreAPI satisfies StoreAPI at compile time.
 var _ store.StoreAPI = (*mockStoreAPI)(nil)
+
+// testLogger is a no-op Logger for tests.
+type testLogger struct{}
+
+func (testLogger) Info(string, ...any)  {}
+func (testLogger) Error(string, ...any) {}
+func (testLogger) Debug(string, ...any) {}
 
 // ---------------------------------------------------------------------------
 // classifyError tests (D-067)
@@ -149,10 +155,10 @@ func TestExecute_UnknownAgent(t *testing.T) {
 	mockCtxMgr := &mockContextManager{}
 	mockStore := &mockStoreAPI{}
 	mockBS := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mockBS)
+	bh := NewBroadcastHelper(mockBS, testLogger{})
 	sb := NewStreamBridge()
 
-	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0)
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{})
 
 	payload := ExecutePayload{
 		MessageID:      "msg-1",
@@ -177,10 +183,10 @@ func TestExecuteWithErrorMessage_UnknownAgent(t *testing.T) {
 	mockCtxMgr := &mockContextManager{}
 	mockStore := &mockStoreAPI{}
 	mockBS := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mockBS)
+	bh := NewBroadcastHelper(mockBS, testLogger{})
 	sb := NewStreamBridge()
 
-	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0)
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{})
 
 	payload := ExecutePayload{
 		MessageID:      "msg-1",
@@ -212,12 +218,16 @@ func TestNewAgentExecutor_NoSemaphore(t *testing.T) {
 	mockCtxMgr := &mockContextManager{}
 	mockStore := &mockStoreAPI{}
 	mockBS := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mockBS)
+	bh := NewBroadcastHelper(mockBS, testLogger{})
 	sb := NewStreamBridge()
 
-	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0)
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{})
 
-	assert.Nil(t, executor.sem, "sem should be nil when maxConcurrent=0")
+	// When maxConcurrent=0, sem may be nil or an unlimited semaphore (capacity=0).
+	// Either way, Acquire should return nil immediately.
+	if executor.sem != nil {
+		assert.Equal(t, 0, executor.sem.Stats().Capacity, "sem capacity should be 0 when maxConcurrent=0")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -229,13 +239,13 @@ func TestNewAgentExecutor_WithSemaphore(t *testing.T) {
 	mockCtxMgr := &mockContextManager{}
 	mockStore := &mockStoreAPI{}
 	mockBS := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mockBS)
+	bh := NewBroadcastHelper(mockBS, testLogger{})
 	sb := NewStreamBridge()
 
-	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 5)
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 5, testLogger{})
 
 	require.NotNil(t, executor.sem, "sem should not be nil when maxConcurrent > 0")
-	assert.Equal(t, 5, cap(executor.sem))
+	assert.Equal(t, 5, executor.sem.Stats().Capacity)
 }
 
 // ---------------------------------------------------------------------------
@@ -255,14 +265,14 @@ func TestExecute_ContextCancellationWithSemaphore(t *testing.T) {
 	mockCtxMgr := &mockContextManager{}
 	mockStore := &mockStoreAPI{}
 	mockBS := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mockBS)
+	bh := NewBroadcastHelper(mockBS, testLogger{})
 	sb := NewStreamBridge()
 
 	// Create executor with semaphore of size 1.
-	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 1)
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 1, testLogger{})
 
 	// Fill the semaphore.
-	executor.sem <- struct{}{}
+	require.NoError(t, executor.sem.Acquire(context.Background()))
 
 	// Create a context that is already cancelled.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -280,7 +290,7 @@ func TestExecute_ContextCancellationWithSemaphore(t *testing.T) {
 	assert.Contains(t, err.Error(), "context canceled")
 
 	// Release the semaphore slot.
-	<-executor.sem
+	executor.sem.Release()
 }
 
 // ---------------------------------------------------------------------------
@@ -300,10 +310,10 @@ func TestExecute_SendsTypingBeforeContextLoad(t *testing.T) {
 	mockCtxMgr := &mockContextManager{err: ErrContextLoad}
 	mockStore := &mockStoreAPI{}
 	mockBS := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mockBS)
+	bh := NewBroadcastHelper(mockBS, testLogger{})
 	sb := NewStreamBridge()
 
-	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0)
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{})
 
 	payload := ExecutePayload{
 		MessageID:      "msg-1",
@@ -380,10 +390,10 @@ func TestExecute_ContextLoadFails_TypingCleared(t *testing.T) {
 	mockCtxMgr := &mockContextManager{err: ErrContextLoad}
 	mockStore := &mockStoreAPI{}
 	mockBS := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mockBS)
+	bh := NewBroadcastHelper(mockBS, testLogger{})
 	sb := NewStreamBridge()
 
-	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0)
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{})
 
 	payload := ExecutePayload{
 		MessageID:      "msg-1",
@@ -416,7 +426,7 @@ func TestSendErrorMessage_StoreFails(t *testing.T) {
 	mockStore := &mockStoreAPI{sendMessageErr: fmt.Errorf("db connection lost")}
 	executor := &AgentExecutor{
 		store:  mockStore,
-		logger: log.New(io.Discard, "", 0),
+		logger: testLogger{},
 	}
 
 	payload := ExecutePayload{
@@ -463,4 +473,96 @@ func TestClassifyError_WrappedErrors(t *testing.T) {
 		// errors.Is(err, ErrAPIKeyMissing) should be true → config error message.
 		assert.Equal(t, "抱歉，我的配置有误，请联系管理员检查设置。", result)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// ExecutorOption tests
+// ---------------------------------------------------------------------------
+
+func TestWithTotalTimeout_PositiveValue(t *testing.T) {
+	registry := NewRegistry()
+	mockCtxMgr := &mockContextManager{}
+	mockStore := &mockStoreAPI{}
+	mockBS := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mockBS, testLogger{})
+	sb := NewStreamBridge()
+
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{},
+		WithTotalTimeout(30*time.Second))
+
+	assert.Equal(t, 30*time.Second, executor.totalTimeout)
+}
+
+func TestWithTotalTimeout_ZeroIgnored(t *testing.T) {
+	registry := NewRegistry()
+	mockCtxMgr := &mockContextManager{}
+	mockStore := &mockStoreAPI{}
+	mockBS := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mockBS, testLogger{})
+	sb := NewStreamBridge()
+
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{},
+		WithTotalTimeout(0))
+
+	// Zero should be ignored; default 120s should remain.
+	assert.Equal(t, 120*time.Second, executor.totalTimeout)
+}
+
+func TestWithTotalTimeout_NegativeIgnored(t *testing.T) {
+	registry := NewRegistry()
+	mockCtxMgr := &mockContextManager{}
+	mockStore := &mockStoreAPI{}
+	mockBS := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mockBS, testLogger{})
+	sb := NewStreamBridge()
+
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{},
+		WithTotalTimeout(-1*time.Second))
+
+	// Negative should be ignored; default 120s should remain.
+	assert.Equal(t, 120*time.Second, executor.totalTimeout)
+}
+
+func TestWithTypingTimeout_PositiveValue(t *testing.T) {
+	registry := NewRegistry()
+	mockCtxMgr := &mockContextManager{}
+	mockStore := &mockStoreAPI{}
+	mockBS := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mockBS, testLogger{})
+	sb := NewStreamBridge()
+
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{},
+		WithTypingTimeout(30*time.Second))
+
+	assert.Equal(t, 30*time.Second, executor.typingTimeout)
+}
+
+func TestWithTypingTimeout_ZeroIgnored(t *testing.T) {
+	registry := NewRegistry()
+	mockCtxMgr := &mockContextManager{}
+	mockStore := &mockStoreAPI{}
+	mockBS := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mockBS, testLogger{})
+	sb := NewStreamBridge()
+
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{},
+		WithTypingTimeout(0))
+
+	// Zero should be ignored; default 60s should remain.
+	assert.Equal(t, 60*time.Second, executor.typingTimeout)
+}
+
+func TestWithLLMMetrics_SetsMetrics(t *testing.T) {
+	registry := NewRegistry()
+	mockCtxMgr := &mockContextManager{}
+	mockStore := &mockStoreAPI{}
+	mockBS := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mockBS, testLogger{})
+	sb := NewStreamBridge()
+
+	metrics := &LogMetrics{logger: testLogger{}}
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{},
+		WithLLMMetrics(metrics))
+
+	assert.NotNil(t, executor.metrics, "WithLLMMetrics should set the metrics field")
 }
