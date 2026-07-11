@@ -219,6 +219,10 @@ func main() {
 	defer redisIdempotencyClient.Close()
 	idempotencyStore := agent.NewRedisIdempotencyStore(redisIdempotencyClient)
 
+	// Conversation lock for per-conversation serialization (D-075).
+	// Reuses the same dedicated redis.Client as idempotency (D-074).
+	conversationLock := agent.NewRedisConversationLock(redisIdempotencyClient)
+
 	// ---------------------------------------------------------------
 	// Context & signal handling
 	// ---------------------------------------------------------------
@@ -241,7 +245,7 @@ func main() {
 		handler.NewSendMessageTaskHandler(srv.BroadcastUpdates, srv.Logger()))
 
 	// Register agent task handler (Phase 5).
-	agentTaskHandler := agent.NewAgentTaskHandler(agentExecutor, idempotencyStore, srv.Logger())
+	agentTaskHandler := agent.NewAgentTaskHandler(agentExecutor, idempotencyStore, conversationLock, srv.Logger())
 	taskHandler.Register(mq.TypeAgentProcess, agentTaskHandler)
 
 	go func() {
@@ -249,6 +253,10 @@ func main() {
 			log.Printf("broker error: %v", err)
 		}
 	}()
+
+	// Start the context cache cleanup goroutine (D-060).
+	// Periodically removes expired in-memory conversation context cache entries.
+	go contextManager.StartCleanup(ctx, 5*time.Minute)
 
 	// Start the UserUpdate cleanup goroutine.
 	// Periodically removes expired UserUpdate records (older than 30 days).

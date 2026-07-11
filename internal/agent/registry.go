@@ -1,8 +1,10 @@
 package agent
 
 import (
-	"io/fs"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -12,6 +14,7 @@ import (
 type AgentRegistry struct {
 	mu     sync.RWMutex
 	agents map[string]*AgentConfig
+	dir    string // directory path from which configs were loaded (D-077)
 }
 
 // NewRegistry creates an empty AgentRegistry.
@@ -21,18 +24,27 @@ func NewRegistry() *AgentRegistry {
 	}
 }
 
-// Load reads agent configuration files from the embedded filesystem.
-// Invalid configs are logged and skipped (graceful degradation per D-001).
-func (r *AgentRegistry) Load(fsys fs.FS) error {
-	entries, err := fs.ReadDir(fsys, ".")
+// Load scans the given directory for .md agent config files and loads them.
+// Existing agents are cleared before loading.
+// If the directory does not exist, Load returns nil (optional module, D-063).
+func (r *AgentRegistry) Load(dir string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.agents = make(map[string]*AgentConfig)
+	r.dir = dir
+
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return err
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read agents dir: %w", err)
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
 		}
-		data, err := fs.ReadFile(fsys, entry.Name())
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
 			log.Printf("[WARN] agent: failed to read %s: %v", entry.Name(), err)
 			continue
@@ -42,16 +54,21 @@ func (r *AgentRegistry) Load(fsys fs.FS) error {
 			log.Printf("[WARN] agent: skipping %s: %v", entry.Name(), err)
 			continue
 		}
-		r.mu.Lock()
 		if _, exists := r.agents[config.ID]; exists {
 			log.Printf("[WARN] agent: duplicate ID %q in %s, skipping", config.ID, entry.Name())
-			r.mu.Unlock()
 			continue
 		}
 		r.agents[config.ID] = config
-		r.mu.Unlock()
 	}
 	return nil
+}
+
+// Reload re-scans the agents directory and reloads all configurations.
+func (r *AgentRegistry) Reload() error {
+	r.mu.RLock()
+	dir := r.dir
+	r.mu.RUnlock()
+	return r.Load(dir)
 }
 
 // Register adds an agent config to the registry.
