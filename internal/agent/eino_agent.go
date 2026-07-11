@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -12,8 +13,11 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/qwen"
 	"github.com/cloudwego/eino/adk"
 	einomodel "github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 
+	agenttools "github.com/PineappleBond/xyncra-server/internal/agent/tools"
 	xyncramodel "github.com/PineappleBond/xyncra-server/internal/store/model"
 )
 
@@ -281,12 +285,19 @@ func detectProvider(modelName, baseURL string) string {
 
 // AgentBuilder constructs runnable agents from AgentConfig using the Eino ADK.
 type AgentBuilder struct {
-	llmFactory *LLMClientFactory
+	llmFactory   *LLMClientFactory
+	toolRegistry *agenttools.Registry
 }
 
 // NewAgentBuilder creates an AgentBuilder backed by the given LLM factory.
 func NewAgentBuilder(factory *LLMClientFactory) *AgentBuilder {
 	return &AgentBuilder{llmFactory: factory}
+}
+
+// SetToolRegistry sets the tool registry used to create tools during Build.
+// If not set, no tools are created (backward compatible).
+func (b *AgentBuilder) SetToolRegistry(registry *agenttools.Registry) {
+	b.toolRegistry = registry
 }
 
 // BuiltAgent wraps an Eino Runner together with the config it was built from.
@@ -297,22 +308,51 @@ type BuiltAgent struct {
 
 // Build creates a fully configured agent ready for execution.
 //
-// The method performs three steps:
+// The method performs these steps:
 //  1. Creates a ChatModel via the LLMClientFactory.
-//  2. Wraps it in a ChatModelAgent with the agent's system prompt as instruction.
-//  3. Creates a Runner with streaming enabled.
+//  2. Creates tools from the tool registry if configured (D-078).
+//  3. Builds the middleware chain (D-079).
+//  4. Wraps everything in a ChatModelAgent with the agent's system prompt as instruction.
+//  5. Creates a Runner with streaming enabled.
 func (b *AgentBuilder) Build(ctx context.Context, config *AgentConfig) (*BuiltAgent, error) {
 	chatModel, err := b.llmFactory.Create(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrAgentBuild, err)
 	}
 
-	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+	// Create tools from registry (D-078).
+	var einoTools []tool.BaseTool
+	if b.toolRegistry != nil && len(config.Tools) > 0 {
+		created, err := b.toolRegistry.Create(ctx, config.Tools, config.ToolConfig)
+		if err != nil {
+			log.Default().Printf("agent %s: some tools failed to create: %v", config.ID, err)
+		}
+		einoTools = created
+	}
+
+	// Build middleware chain (D-079).
+	handlers := b.buildMiddleware(ctx, config, chatModel)
+
+	agentCfg := &adk.ChatModelAgentConfig{
 		Name:        config.ID,
 		Description: config.Description,
 		Instruction: config.SystemPrompt,
 		Model:       chatModel,
-	})
+	}
+
+	if len(einoTools) > 0 {
+		agentCfg.ToolsConfig = adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: einoTools,
+			},
+		}
+	}
+
+	if len(handlers) > 0 {
+		agentCfg.Handlers = handlers
+	}
+
+	agent, err := adk.NewChatModelAgent(ctx, agentCfg)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrAgentBuild, err)
 	}

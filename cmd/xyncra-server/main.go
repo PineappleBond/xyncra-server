@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/PineappleBond/xyncra-server/internal/agent"
+	agenttools "github.com/PineappleBond/xyncra-server/internal/agent/tools"
 	"github.com/PineappleBond/xyncra-server/internal/cleanup"
 	"github.com/PineappleBond/xyncra-server/internal/handler"
 	"github.com/PineappleBond/xyncra-server/internal/mq"
@@ -195,6 +196,9 @@ func main() {
 
 	llmFactory := agent.NewLLMClientFactory()
 	agentBuilder := agent.NewAgentBuilder(llmFactory)
+	// Wire the default tool registry (D-078). Built-in tools are registered
+	// via init() in the tools package; custom tools can be added here.
+	agentBuilder.SetToolRegistry(agenttools.DefaultRegistry)
 	streamBridge := agent.NewStreamBridge()
 	broadcastHelper := agent.NewBroadcastHelper(srv, srv.Logger())
 	contextManager := agent.NewDBContextManager(dataStore.MessageStore())
@@ -260,6 +264,9 @@ func main() {
 	// Start the context cache cleanup goroutine (D-060).
 	// Periodically removes expired in-memory conversation context cache entries.
 	go contextManager.StartCleanup(ctx, 5*time.Minute)
+
+	// Start cleanup of expired tool results (D-080).
+	go agenttools.DefaultToolResultStore.StartCleanup(ctx, 5*time.Minute)
 
 	// Start the UserUpdate cleanup goroutine.
 	// Periodically removes expired UserUpdate records (older than 30 days).

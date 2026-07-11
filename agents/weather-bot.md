@@ -12,7 +12,16 @@ parameters:
 context:
   max_tokens: 8000
   max_messages: 20
-tools: []
+tools:
+  - get_weather
+  - get_current_time
+  - retrieve_tool_result
+middleware:
+  enable_patch_tool_calls: true
+  enable_summarization: true
+  summarization_tokens: 160000
+  enable_tool_reduction: true
+  tool_reduction_max_chars: 50000
 ---
 
 You are a helpful weather assistant. You can provide current weather information,

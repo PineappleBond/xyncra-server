@@ -6,10 +6,13 @@ import (
 	"testing"
 
 	einomodel "github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	agenttools "github.com/PineappleBond/xyncra-server/internal/agent/tools"
 	xyncramodel "github.com/PineappleBond/xyncra-server/internal/store/model"
 )
 
@@ -336,4 +339,76 @@ func TestDetectProvider_CaseInsensitive(t *testing.T) {
 // Verify error message for ErrAPIKeyMissing is descriptive.
 func TestErrAPIKeyMissing_Message(t *testing.T) {
 	assert.True(t, strings.Contains(ErrAPIKeyMissing.Error(), "API key"))
+}
+
+// ---------------------------------------------------------------------------
+// AgentBuilder / SetToolRegistry / Build
+// ---------------------------------------------------------------------------
+
+// newTestAgentBuilder creates an AgentBuilder backed by a mock provider so that
+// Build never makes real LLM calls.
+func newTestAgentBuilder(t *testing.T) *AgentBuilder {
+	t.Helper()
+	factory := NewLLMClientFactory()
+	factory.RegisterProvider("openai", &mockLLMProvider{defaultBaseURL: "http://mock.test"})
+	return NewAgentBuilder(factory)
+}
+
+func TestAgentBuilder_SetToolRegistry(t *testing.T) {
+	builder := newTestAgentBuilder(t)
+
+	reg := agenttools.NewRegistry()
+	reg.Register("test_tool", func(ctx context.Context, _ map[string]any) (tool.BaseTool, error) {
+		// Return a minimal InvokableTool via InferTool.
+		return utils.InferTool("test_tool", "a test tool", func(ctx context.Context, input struct{}) (*struct{}, error) {
+			return &struct{}{}, nil
+		})
+	})
+	builder.SetToolRegistry(reg)
+
+	config := &AgentConfig{
+		ID:    "test-agent",
+		Name:  "Test Agent",
+		Model: "gpt-4",
+		Tools: []string{"test_tool"},
+	}
+
+	agent, err := builder.Build(context.Background(), config)
+	require.NoError(t, err)
+	assert.NotNil(t, agent)
+	assert.Equal(t, config, agent.Config)
+}
+
+func TestAgentBuilder_BuildWithNoTools(t *testing.T) {
+	builder := newTestAgentBuilder(t)
+
+	reg := agenttools.NewRegistry()
+	builder.SetToolRegistry(reg)
+
+	config := &AgentConfig{
+		ID:    "test-agent",
+		Name:  "Test Agent",
+		Model: "gpt-4",
+		Tools: []string{},
+	}
+
+	agent, err := builder.Build(context.Background(), config)
+	require.NoError(t, err)
+	assert.NotNil(t, agent)
+}
+
+func TestAgentBuilder_BuildWithToolRegistry_NilRegistry(t *testing.T) {
+	builder := newTestAgentBuilder(t)
+	// Do NOT call SetToolRegistry — backward-compatible path.
+
+	config := &AgentConfig{
+		ID:    "test-agent",
+		Name:  "Test Agent",
+		Model: "gpt-4",
+		Tools: []string{"get_weather"},
+	}
+
+	agent, err := builder.Build(context.Background(), config)
+	require.NoError(t, err)
+	assert.NotNil(t, agent)
 }

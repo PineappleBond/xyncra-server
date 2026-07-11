@@ -59,6 +59,16 @@
 | D-075 | Agent 会话级并发锁（Per-Conversation Lock） | Redis SETNX 分布式锁，保证同一会话串行处理 |
 | D-076 | reload_agents RPC 管理接口 | 无鉴权热更新 Agent 配置，内网部署模型 |
 | D-077 | Agent 配置从磁盘目录加载 | 删除 go:embed，支持运行时热更新和 Docker 目录映射 |
+| D-078 | Agent 自定义工具注册表 | 代码注册 + 配置引用，未知工具名跳过（fail-open） |
+| D-079 | Agent Middleware 配置格式 | YAML front matter 中 `middleware` 段，可选启用 |
+| D-080 | 工具结果截取存储策略 | 内存存储（sync.Map + TTL），不持久化到消息表 |
+| D-081 | Sub-agent 声明方式 | 父 Agent YAML 中 `sub_agents` 引用已注册 Agent ID |
+| D-082 | Agent 错误消息扩展分类 | 扩展 D-067 覆盖工具/MCP/子Agent/HITL/中间件失败 |
+| D-083 | HITL CheckpointStore 失败策略 | 非 fail-open：checkpoint 失败时中止 HITL 并报错 |
+| D-084 | HITL Resume 与并发锁协调 | HITL 中断期间保持会话锁，防止新任务冲突 |
+| D-085 | agent_resume RPC 规范 | 新 RPC + MQ task type，复用现有锁和幂等机制 |
+| D-086 | MCP Server 配置格式 | YAML `mcp_servers` 段，支持 SSE 和 stdio 传输 |
+| D-087 | Agent Ephemeral Update 类型扩展 | 新增 agent_status/agent_question/agent_checkpoint_created/agent_timeout（Seq=0） |
 
 ---
 
@@ -1806,11 +1816,218 @@ Agent 配置文件从磁盘目录加载（默认 `agents/`），替代原来的 
 
 ---
 
+## D-078: Agent 自定义工具注册表
+
+### 决策
+
+工具通过代码注册到 `ToolRegistry`（类似 `LLMClientFactory` 的 provider 注册表）。内置工具在启动时预注册。Agent 配置通过名称引用工具（`tools: [search, calculator]`）。配置中未注册的工具名被记录日志并跳过（fail-open，与 D-001/D-072 一致）。
+
+### 原因
+
+1. **与 D-066 模式一致**：`LLMClientFactory` 的 provider 注册表已是同样模式
+2. **零配置**：内置工具开箱即用
+3. **可扩展**：添加新工具只需实现函数 + 注册
+4. **向后兼容**：`tools: []` 是默认值
+
+### 约束
+
+- 自定义工具注册发生在 `main.go`，运行时添加需重新编译
+- 未知工具名跳过并记录警告，不阻塞 Agent 构建
+
+---
+
+## D-079: Agent Middleware 配置格式
+
+### 决策
+
+Middleware 在 Agent YAML front matter 的 `middleware` 段中配置，所有字段可选：
+
+```yaml
+middleware:
+  enable_summarization: true
+  summarization_tokens: 160000
+  enable_tool_reduction: true
+  tool_reduction_max_chars: 50000
+  enable_patch_tool_calls: true
+```
+
+当 `middleware` 段缺失时，不应用任何中间件（与 Phase 1-7 向后兼容）。中间件顺序固定为：PatchToolCalls → Summarization → ToolReduction。
+
+### 原因
+
+1. **Per-agent 控制**：不同 Agent 可有不同压缩策略
+2. **向后兼容**：无 `middleware` 段的配置行为不变
+3. **顺序固定**：避免错误配置导致的问题
+
+### 约束
+
+- Summarization 的压缩模型默认使用主模型，可选覆盖
+- 中间件创建失败时跳过（fail-open），不阻塞 Agent 构建
+
+---
+
+## D-080: 工具结果截取存储策略
+
+### 决策
+
+截取的工具结果存储在内存中（`sync.Map` + TTL），不持久化到消息表或文件系统。`retrieve_tool_result` 工具通过 ID 查找完整结果。如果结果已过期（TTL 到期），工具返回"结果已过期"消息。
+
+### 原因
+
+1. **与 D-001 一致**：文件系统存储需要路径配置、清理机制、Docker volumes
+2. **与 D-060 模式一致**：`sync.Map` 缓存是已有模式
+3. **TTL 1 小时**：足够覆盖单次 Agent 执行
+4. **与 D-055 一致**：截取元数据不持久化到 messages 表
+
+### 约束
+
+- 服务重启后截取结果丢失（可接受，工具结果可重新获取）
+- 截取元数据仅存在于 Agent 执行上下文中
+
+---
+
+## D-081: Sub-agent 声明方式
+
+### 决策
+
+Sub-agent 在父 Agent 的 YAML 配置中通过 `sub_agents` 段声明，引用已注册的 Agent ID：
+
+```yaml
+id: planner
+sub_agents:
+  - researcher
+  - writer
+```
+
+Sub-agent 不是独立的 `agent/` 用户，而是通过 Eino DeepAgent 的 TaskTool 在父 Agent 上下文中执行。Sub-agent 的输出流回父 Agent，只有父 Agent 向会话发送消息。
+
+### 原因
+
+1. **复用现有配置**：无需单独的 sub-agent 配置格式
+2. **与 D-054/D-055 一致**：不创建新 UserID，消息格式不变
+3. **简单组合**：通过组合已有 Agent 定义实现复杂层次
+
+### 约束
+
+- Sub-agent 深度限制为 2 层（parent → child → grandchild），防止无限递归
+- Sub-agent 必须在同一 AgentRegistry 中注册
+
+---
+
+## D-082: Agent 错误消息扩展分类
+
+### 决策
+
+D-067 错误分类扩展为覆盖 Phase 8 的新失败模式：
+
+| 错误类型 | 消息文本 |
+|---------|---------|
+| 工具执行失败 | "抱歉，工具调用失败，请稍后重试。" |
+| MCP 服务不可达 | "抱歉，外部工具服务不可用，请稍后重试。" |
+| 子 Agent 委派失败 | "抱歉，子任务执行失败，请稍后重试。" |
+| Checkpoint 过期（HITL） | "抱歉，等待时间过长，请重新发送消息。" |
+| 中间件（Summarization）失败 | "抱歉，上下文压缩失败，正在使用完整历史继续。" |
+
+### 原因
+
+1. **与 D-067 一致**：用户友好的中文消息
+2. **优雅降级**：中间件失败应继续执行（不中断）
+
+---
+
+## D-083: HITL CheckpointStore 失败策略
+
+### 决策
+
+当 CheckpointStore（Redis）在 checkpoint 保存时不可用，HITL 流程中止并持久化用户友好的错误消息（D-067 模式）。这**不是** fail-open — HITL 无法在没有 checkpoint 的情况下工作。但是，resume 任务的幂等性检查仍然使用 fail-open（与 D-072 一致）。
+
+### 原因
+
+1. **Checkpoint 丢失不可恢复**：与幂等性不同，checkpoint 丢失意味着 Agent 执行状态无法恢复
+2. **明确错误优于静默损坏**：中止并报错比重复执行更好
+
+---
+
+## D-084: HITL Resume 与并发锁协调
+
+### 决策
+
+当 Agent 遇到 HITL 中断时，per-conversation 锁**不释放**。锁的 TTL 延长到覆盖 checkpoint TTL（如 24h + buffer）。这防止其他任务在 HITL 流程 pending 期间处理同一会话。`agent_resume` 任务复用同一锁（已被持有）。如果锁 TTL 过期（用户 24h 内未响应），会话解锁，正常处理恢复。
+
+### 原因
+
+1. **防止冲突**：没有协调，用户的普通消息可能触发新 Agent 执行，与 pending 的 HITL resume 冲突
+2. **与 D-075 一致**：复用现有锁机制
+3. **自然过期**：24h 后自动解锁，无需额外清理
+
+---
+
+## D-085: agent_resume RPC 规范
+
+### 决策
+
+新增 `agent_resume` RPC 方法。参数：`{conversation_id: string, checkpoint_id: string, answer: string}`。Handler 入队 `TypeAgentResume` MQ 任务。任务处理器加载 checkpoint，注入用户答案到 Agent 上下文，恢复执行。遵循 D-073（总是返回 nil 给 MQ）和 D-002（无鉴权）。
+
+### 原因
+
+1. **复用现有基础设施**：MQ 确保锁和幂等机制适用
+2. **Thin RPC**：RPC 只是入队，实际处理在 MQ worker 中
+
+---
+
+## D-086: MCP Server 配置格式
+
+### 决策
+
+MCP Server 在 Agent YAML 配置的 `mcp_servers` 段中配置：
+
+```yaml
+mcp_servers:
+  - name: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  - name: github
+    transport: sse
+    url: https://mcp.github.io/sse
+```
+
+MCP 工具与自定义工具合并为 Agent 的单一工具集。MCP Server 连接失败时跳过并记录警告（fail-open，D-001 精神）。
+
+### 原因
+
+1. **Per-agent MCP**：不同 Agent 可连接不同工具生态
+2. **双传输**：支持 stdio（本地进程）和 SSE（远程服务）
+
+---
+
+## D-087: Agent Ephemeral Update 类型扩展
+
+### 决策
+
+新增 4 个 ephemeral Update 类型到 `pkg/protocol/protocol.go`：
+
+```go
+UpdateTypeAgentStatus            = "agent_status"              // ephemeral: Seq=0
+UpdateTypeAgentQuestion          = "agent_question"            // ephemeral: Seq=0
+UpdateTypeAgentCheckpointCreated = "agent_checkpoint_created"  // ephemeral: Seq=0
+UpdateTypeAgentTimeout           = "agent_timeout"             // ephemeral: Seq=0
+```
+
+扩展现有 ephemeral 类型族（`typing`、`streaming`）。不持久化，不被 `sync_updates` 拉取，直接通过 `BroadcastUpdates` 广播。旧客户端静默忽略未知 ephemeral 类型（D-050 约束）。
+
+### 原因
+
+1. **与 D-050 一致**：所有 Agent 状态信号都是 ephemeral
+2. **向后兼容**：旧客户端通过 default case 忽略未知类型
+
+---
+
 ## 版本历史
 
 | 日期       | 版本 | 变更                                                                                                 |
 | ---------- | ---- | ---------------------------------------------------------------------------------------------------- |
-| 2026-07-11 | v3.5 | 新增 D-075..D-077（Phase 7: 生产化加固），更新 D-058（Agent 配置从磁盘加载）                          |
+| 2026-07-11 | v3.6 | 新增 D-078..D-087（Phase 8: 高级功能产品决策）                                                      |
 | 2026-07-11 | v3.4 | 新增 D-070..D-074（Phase 5: AgentTaskHandler 产品决策）                                               |
 | 2026-07-11 | v3.3 | 新增 D-064（LLM 默认 BaseURL）、D-065（Agent 思考状态）、D-066（LLMProvider 接口）、D-067（Agent 错误消息） |
 | 2026-07-11 | v3.2 | 新增 D-062（Agent 消息路由触发模型）、D-063（AgentRegistry 可选注入）                                |

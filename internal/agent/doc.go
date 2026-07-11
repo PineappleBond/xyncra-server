@@ -143,4 +143,32 @@
 // 60s wait for the first LLM token. WithLLMMetrics attaches an LLMMetrics
 // recorder. All options ignore non-positive durations (zero/negative) to
 // preserve safe defaults.
+//
+// # Phase 8A: Tool System and Middleware
+//
+// Tool Registry (D-078): The tools sub-package provides a Registry that maps
+// tool names to ToolFactory functions. Built-in tools (get_weather,
+// get_current_time, retrieve_tool_result) are registered in DefaultRegistry
+// via init(). Agent configs reference tools by name in the YAML tools list.
+// Unknown tool names are logged and skipped (fail-open).
+//
+// Built-in Tools: get_weather returns mock weather data, get_current_time
+// returns the current time in a given timezone, retrieve_tool_result retrieves
+// full content of previously truncated tool results from the in-memory
+// ToolResultStore (D-080).
+//
+// ToolResultStore (D-080): Stores truncated tool results in memory with TTL
+// (default 1 hour). UTF-8-safe rune-based truncation at 50000 characters.
+// A background cleanup goroutine (StartCleanup) removes expired entries
+// periodically.
+//
+// Middleware Chain (D-079): buildMiddleware constructs the middleware chain
+// from AgentConfig.Middleware settings. Fixed order: PatchToolCalls →
+// Summarization → ToolReduction. Each middleware init failure is logged and
+// skipped (fail-open). Summarization uses the agent's chat model; ToolReduction
+// uses an in-memory filesystem backend.
+//
+// Enhanced Build(): AgentBuilder.Build() now creates tools from the registry
+// (when set via SetToolRegistry) and builds the middleware chain, passing both
+// to adk.ChatModelAgentConfig.
 package agent
