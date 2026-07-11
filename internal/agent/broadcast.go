@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"time"
 
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
@@ -16,16 +17,20 @@ type BroadcastServer interface {
 
 // StreamingPayload is the JSON payload for UpdateTypeStreaming.
 type StreamingPayload struct {
+	UserID         string `json:"user_id"`
 	ConversationID string `json:"conversation_id"`
 	StreamID       string `json:"stream_id"`
-	Content        string `json:"content"`
+	Text           string `json:"text"`
 	IsDone         bool   `json:"is_done"`
+	Timestamp      int64  `json:"timestamp"`
 }
 
 // TypingPayload is the JSON payload for UpdateTypeTyping.
 type TypingPayload struct {
+	UserID         string `json:"user_id"`
 	ConversationID string `json:"conversation_id"`
 	IsTyping       bool   `json:"is_typing"`
+	Timestamp      int64  `json:"timestamp"`
 }
 
 // BroadcastHelper sends streaming and typing updates to users via WebSocket
@@ -52,10 +57,12 @@ func NewBroadcastHelper(wsServer BroadcastServer) *BroadcastHelper {
 func (bh *BroadcastHelper) SendStreamUpdate(ctx context.Context, humanUserID, agentUserID, conversationID, streamID, text string, isDone bool) {
 	_ = ctx // reserved for future cancellation
 	payload, err := json.Marshal(StreamingPayload{
+		UserID:         agentUserID,
 		ConversationID: conversationID,
 		StreamID:       streamID,
-		Content:        text,
+		Text:           text,
 		IsDone:         isDone,
+		Timestamp:      time.Now().Unix(),
 	})
 	if err != nil {
 		bh.logger.Printf("SendStreamUpdate: marshal payload: %v", err)
@@ -82,12 +89,15 @@ func (bh *BroadcastHelper) SendStreamUpdate(ctx context.Context, humanUserID, ag
 
 // SendTyping broadcasts an ephemeral typing indicator (Seq=0, D-050 / D-065)
 // to targetUserID — typically the human user who should see the agent typing.
+// agentUserID is the agent's identity, placed in the payload's user_id field.
 // The ctx parameter is reserved for future cancellation support.
-func (bh *BroadcastHelper) SendTyping(ctx context.Context, targetUserID, conversationID string, isTyping bool) {
+func (bh *BroadcastHelper) SendTyping(ctx context.Context, agentUserID, targetUserID, conversationID string, isTyping bool) {
 	_ = ctx // reserved for future cancellation
 	payload, err := json.Marshal(TypingPayload{
+		UserID:         agentUserID,
 		ConversationID: conversationID,
 		IsTyping:       isTyping,
+		Timestamp:      time.Now().Unix(),
 	})
 	if err != nil {
 		bh.logger.Printf("SendTyping: marshal payload: %v", err)

@@ -84,7 +84,7 @@ func TestSendStreamUpdate_PayloadContainsCorrectFields(t *testing.T) {
 
 	assert.Equal(t, "conv-123", payload.ConversationID)
 	assert.Equal(t, "stream-456", payload.StreamID)
-	assert.Equal(t, "hello world", payload.Content)
+	assert.Equal(t, "hello world", payload.Text)
 	assert.True(t, payload.IsDone)
 }
 
@@ -135,7 +135,7 @@ func TestSendTyping_BroadcastsToTargetUser(t *testing.T) {
 	mock := &mockBroadcastServer{}
 	bh := NewBroadcastHelper(mock)
 
-	bh.SendTyping(context.Background(), "user/alice", "conv-1", true)
+	bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-1", true)
 
 	require.Len(t, mock.calls, 1, "should broadcast to target user only")
 	assert.Equal(t, "user/alice", mock.calls[0].userID)
@@ -145,7 +145,7 @@ func TestSendTyping_SeqIsZero(t *testing.T) {
 	mock := &mockBroadcastServer{}
 	bh := NewBroadcastHelper(mock)
 
-	bh.SendTyping(context.Background(), "user/alice", "conv-1", true)
+	bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-1", true)
 
 	require.Len(t, mock.calls, 1)
 	require.Len(t, mock.calls[0].updates.Updates, 1)
@@ -156,7 +156,7 @@ func TestSendTyping_TypeIsTyping(t *testing.T) {
 	mock := &mockBroadcastServer{}
 	bh := NewBroadcastHelper(mock)
 
-	bh.SendTyping(context.Background(), "user/alice", "conv-1", true)
+	bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-1", true)
 
 	require.Len(t, mock.calls, 1)
 	assert.Equal(t, protocol.UpdateTypeTyping, mock.calls[0].updates.Updates[0].Type)
@@ -176,7 +176,7 @@ func TestSendTyping_IsTypingPayload(t *testing.T) {
 			mock := &mockBroadcastServer{}
 			bh := NewBroadcastHelper(mock)
 
-			bh.SendTyping(context.Background(), "user/alice", "conv-42", tc.isTyping)
+			bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-42", tc.isTyping)
 
 			require.Len(t, mock.calls, 1)
 			raw := mock.calls[0].updates.Updates[0].Payload
@@ -196,7 +196,7 @@ func TestSendTyping_BroadcastError_NoPanic(t *testing.T) {
 	bh := NewBroadcastHelper(mock)
 
 	assert.NotPanics(t, func() {
-		bh.SendTyping(context.Background(), "user/alice", "conv-1", true)
+		bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-1", true)
 	})
 
 	assert.Len(t, mock.calls, 1)
@@ -213,4 +213,104 @@ func TestNewBroadcastHelper(t *testing.T) {
 	assert.NotNil(t, bh)
 	assert.NotNil(t, bh.logger)
 	assert.Equal(t, mock, bh.wsServer)
+}
+
+// ---------------------------------------------------------------------------
+// Payload format verification (Phase 6: client-agent integration)
+// ---------------------------------------------------------------------------
+
+func TestSendStreamUpdate_PayloadIncludesUserIDAndTimestamp(t *testing.T) {
+	mock := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mock)
+
+	bh.SendStreamUpdate(context.Background(), "user/alice", "agent/bot1", "conv-1", "stream-1", "hello", false)
+
+	require.Len(t, mock.calls, 2)
+	raw := mock.calls[0].updates.Updates[0].Payload
+
+	var payload StreamingPayload
+	err := json.Unmarshal(raw, &payload)
+	require.NoError(t, err)
+
+	// UserID should be the agent (the entity doing the streaming).
+	assert.Equal(t, "agent/bot1", payload.UserID, "streaming payload user_id should be the agent")
+	assert.NotZero(t, payload.Timestamp, "timestamp should be non-zero")
+	assert.Greater(t, payload.Timestamp, int64(0), "timestamp should be positive")
+}
+
+func TestSendTyping_PayloadIncludesUserIDAndTimestamp(t *testing.T) {
+	mock := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mock)
+
+	bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-1", true)
+
+	require.Len(t, mock.calls, 1)
+	raw := mock.calls[0].updates.Updates[0].Payload
+
+	var payload TypingPayload
+	err := json.Unmarshal(raw, &payload)
+	require.NoError(t, err)
+
+	// UserID should be the agent (the entity doing the typing/thinking).
+	assert.Equal(t, "agent/bot1", payload.UserID, "typing payload user_id should be the agent")
+	assert.NotZero(t, payload.Timestamp, "timestamp should be non-zero")
+}
+
+func TestSendStreamUpdate_JSONFieldNames(t *testing.T) {
+	// Verify JSON field names match client expectations (pkg/client/sync.go streamingUpdatePayload).
+	mock := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mock)
+
+	bh.SendStreamUpdate(context.Background(), "user/alice", "agent/bot1", "conv-1", "stream-1", "text", true)
+
+	raw := mock.calls[0].updates.Updates[0].Payload
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(raw, &m))
+
+	// Verify expected JSON keys exist.
+	assert.Contains(t, m, "user_id")
+	assert.Contains(t, m, "conversation_id")
+	assert.Contains(t, m, "stream_id")
+	assert.Contains(t, m, "text") // not "content"
+	assert.Contains(t, m, "is_done")
+	assert.Contains(t, m, "timestamp")
+	// "content" should NOT be a key (renamed to "text").
+	assert.NotContains(t, m, "content")
+}
+
+func TestSendTyping_JSONFieldNames(t *testing.T) {
+	// Verify JSON field names match client expectations (pkg/client/sync.go typingUpdatePayload).
+	mock := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mock)
+
+	bh.SendTyping(context.Background(), "agent/bot1", "user/alice", "conv-1", true)
+
+	raw := mock.calls[0].updates.Updates[0].Payload
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(raw, &m))
+
+	assert.Contains(t, m, "user_id")
+	assert.Contains(t, m, "conversation_id")
+	assert.Contains(t, m, "is_typing")
+	assert.Contains(t, m, "timestamp")
+}
+
+// ---------------------------------------------------------------------------
+// Unicode and special-character round-trip (Phase 6: client-agent integration)
+// ---------------------------------------------------------------------------
+
+// TestSendStreamUpdate_UnicodeAndSpecialChars verifies that streaming payloads
+// containing Unicode characters, emojis, quotes, backslashes, and control
+// characters survive JSON round-tripping without corruption.
+func TestSendStreamUpdate_UnicodeAndSpecialChars(t *testing.T) {
+	mock := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mock)
+
+	text := "Hello 世界 🌍 \"quoted\" \\backslash \n\tnewline"
+	bh.SendStreamUpdate(context.Background(), "user/a", "agent/b", "conv", "s", text, false)
+
+	require.Len(t, mock.calls, 2)
+	var payload StreamingPayload
+	require.NoError(t, json.Unmarshal(mock.calls[0].updates.Updates[0].Payload, &payload))
+	assert.Equal(t, text, payload.Text)
 }

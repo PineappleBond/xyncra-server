@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/PineappleBond/xyncra-server/pkg/client"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
@@ -959,5 +961,65 @@ func TestIPCHandler_RestoreConversation_RestoresLocally(t *testing.T) {
 	}
 	if gotConv.Title != "To Restore" {
 		t.Errorf("restored conversation title: got=%q want=%q", gotConv.Title, "To Restore")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Agent-aware display tests (D-065)
+// ---------------------------------------------------------------------------
+
+// TestCLIUpdateHandler_OnTyping_Matrix covers all 4 combinations of
+// (agent|human) x (started|stopped) for the typing indicator display (D-065).
+func TestCLIUpdateHandler_OnTyping_Matrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		userID     string
+		isTyping   bool
+		wantLabel  string // "[typing]" or "[thinking]"
+		wantAction string
+	}{
+		{"agent started typing", "agent/bot1", true, "[thinking]", "started typing"},
+		{"agent stopped typing", "agent/bot1", false, "[thinking]", "stopped thinking"},
+		{"human started typing", "alice", true, "[typing]", "started typing"},
+		{"human stopped typing", "alice", false, "[typing]", "stopped typing"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCLIUpdateHandler()
+			output := captureStdout(func() {
+				require.NoError(t, h.OnTyping(context.Background(), tc.userID, "conv-1", tc.isTyping))
+			})
+			assert.Contains(t, output, tc.wantLabel)
+			assert.Contains(t, output, tc.wantAction)
+			assert.Contains(t, output, tc.userID)
+		})
+	}
+}
+
+// TestCLIUpdateHandler_OnStreaming_Matrix covers all 4 combinations of
+// (agent|human) x (streaming|done) for the streaming display.
+func TestCLIUpdateHandler_OnStreaming_Matrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		userID     string
+		isDone     bool
+		wantLabel  string // "[streaming]" or "[agent]"
+		wantStatus string
+	}{
+		{"agent streaming", "agent/bot1", false, "[agent]", "streaming"},
+		{"agent done", "agent/bot1", true, "[agent]", "done"},
+		{"human streaming", "alice", false, "[streaming]", "streaming"},
+		{"human done", "alice", true, "[streaming]", "done"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCLIUpdateHandler()
+			output := captureStdout(func() {
+				require.NoError(t, h.OnStreaming(context.Background(), tc.userID, "conv-1", "stream-1", "hello", tc.isDone))
+			})
+			assert.Contains(t, output, tc.wantLabel)
+			assert.Contains(t, output, tc.wantStatus)
+			assert.Contains(t, output, tc.userID)
+		})
 	}
 }

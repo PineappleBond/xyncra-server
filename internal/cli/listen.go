@@ -77,12 +77,20 @@ func (h *cliUpdateHandler) OnGap(_ context.Context, seq uint32) error {
 }
 
 // OnTyping prints a typing indicator event to stdout (D-050 ephemeral push).
+// D-065: agent typing shows as "thinking", human typing as "typing".
 func (h *cliUpdateHandler) OnTyping(_ context.Context, userID, conversationID string, isTyping bool) error {
 	action := "started typing"
+	label := "typing"
 	if !isTyping {
 		action = "stopped typing"
 	}
-	fmt.Fprintf(os.Stdout, "[typing] user=%s conv=%s %s\n", userID, conversationID, action)
+	if client.IsAgentUser(userID) {
+		label = "thinking"
+		if !isTyping {
+			action = "stopped thinking"
+		}
+	}
+	fmt.Fprintf(os.Stdout, "[%s] user=%s conv=%s %s\n", label, userID, conversationID, action)
 	return nil
 }
 
@@ -92,8 +100,12 @@ func (h *cliUpdateHandler) OnStreaming(_ context.Context, userID, conversationID
 	if isDone {
 		status = "done"
 	}
-	fmt.Fprintf(os.Stdout, "[streaming] user=%s conv=%s stream=%s status=%s text=%q\n",
-		userID, conversationID, streamID, status, text)
+	prefix := "streaming"
+	if client.IsAgentUser(userID) {
+		prefix = "agent"
+	}
+	fmt.Fprintf(os.Stdout, "[%s] user=%s conv=%s stream=%s status=%s text=%q\n",
+		prefix, userID, conversationID, streamID, status, text)
 	return nil
 }
 

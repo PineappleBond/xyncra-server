@@ -38,11 +38,12 @@
 // goroutine wraps iter.Next() in a select so it is cancellable via context.
 //
 // BroadcastHelper (D-050 ephemeral, dual broadcast): BroadcastHelper sends
-// typing indicators and streaming updates to the human user via the
-// SyncBroadcast hub. SendStreamUpdate broadcasts cumulative text snapshots
-// with is_done=false during streaming and is_done=true on completion (D-052).
-// Typing indicators are ephemeral: sent true before agent work begins and
-// cleared either on the first token (D-065) or on exit.
+// typing indicators and streaming updates to conversation participants via
+// the SyncBroadcast hub. SendStreamUpdate broadcasts to both the human user
+// and the agent user; SendTyping broadcasts to the human user only. Cumulative
+// text snapshots use is_done=false during streaming and is_done=true on
+// completion (D-052). Typing indicators are ephemeral: sent true before agent
+// work begins and cleared either on the first token (D-065) or on exit.
 //
 // # Phase 4: Execution Pipeline
 //

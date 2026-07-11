@@ -100,7 +100,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 	}
 
 	// 4. Send typing=true to the human user (D-065).
-	e.broadcaster.SendTyping(ctx, payload.SenderID, payload.ConversationID, true)
+	e.broadcaster.SendTyping(ctx, payload.AgentID, payload.SenderID, payload.ConversationID, true)
 
 	// 5. Ensure typing is cleared on exit. Use sync.Once so both the
 	//    60-second typing timeout (D-065) and the first-token path can
@@ -108,7 +108,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 	var typingOnce sync.Once
 	clearTyping := func() {
 		typingOnce.Do(func() {
-			e.broadcaster.SendTyping(ctx, payload.SenderID, payload.ConversationID, false)
+			e.broadcaster.SendTyping(ctx, payload.AgentID, payload.SenderID, payload.ConversationID, false)
 		})
 	}
 	defer clearTyping()
