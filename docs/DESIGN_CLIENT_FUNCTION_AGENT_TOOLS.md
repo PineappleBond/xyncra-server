@@ -251,6 +251,274 @@ sequenceDiagram
   - 有丢包记录 → 2.5x
 ```
 
+### 3.7 阻塞等待机制与极端场景分析
+
+#### 3.7.1 ServerRequest 阻塞语义
+
+`ServerRequest()` 是一个同步阻塞调用，内部通过 `select` 等待 channel 或 context 超时：
+
+```go
+func (r *ReverseRPC) ServerRequest(ctx context.Context, userID, deviceID, method string, params json.RawMessage, timeout time.Duration) (json.RawMessage, error) {
+    pending := &reverseRPCPending{
+        respCh: make(chan *protocol.PackageDataResponse, 1),
+        ctx:    ctx,
+    }
+    // ... store pending, send request via WebSocket ...
+
+    select {
+    case resp := <-pending.respCh:
+        return resp.Data, nil  // ✅ 收到 Response
+    case <-ctx.Done():
+        // 超时或取消 → 异步写入 Redis（不阻塞调用方）
+        go r.persistToRedis(pending)
+        return nil, ErrRequestTimeout
+    }
+}
+```
+
+**核心原则**：
+
+- 调用方在 timeout 内**一定**会得到结果（成功或错误），不会无限阻塞
+- Redis 写入是**异步副作用**，调用方不感知
+- `context.WithTimeout` 控制阻塞上限
+
+#### 3.7.2 服务端 seq 追踪
+
+服务端为每个 `(userID, deviceID)` 维护两个关键状态：
+
+```go
+type DeviceState struct {
+    LastSentSeq  uint64  // 发送给该设备的最新 seq
+    LastSeenSeq  uint64  // 该设备报告已处理的最新 seq（重连时更新）
+}
+```
+
+- `LastSentSeq`：每次发出 Request 时递增
+- `LastSeenSeq`：客户端重连时通过 `reconnect{last_seen_seq}` 上报
+
+当 `LastSeenSeq < LastSentSeq` 时，说明有请求缺失，需要补发。
+
+#### 3.7.3 全场景时序
+
+##### 场景 1：网络稳定（正常路径）
+
+```mermaid
+sequenceDiagram
+    participant Caller as 调用方
+    participant RRPC as ServerRequest
+    participant WS as WebSocket
+    participant Client
+
+    Note over Caller: T=0
+    Caller->>RRPC: ServerRequest(timeout=30s)
+    RRPC->>WS: Request (seq=5)
+    RRPC->>RRPC: select { respCh / ctx.Done() }
+    WS->>Client: Request (seq=5)
+    Client->>Client: 执行函数
+    Client-->>WS: Response (seq=5)
+    WS-->>RRPC: respCh 收到
+    RRPC-->>Caller: T=0.1s: 返回结果 ✅
+```
+
+##### 场景 2：短暂断连，超时内重连成功
+
+```mermaid
+sequenceDiagram
+    participant Caller as 调用方
+    participant RRPC as ServerRequest
+    participant WS as WebSocket
+    participant Client
+
+    Note over Caller: T=0
+    Caller->>RRPC: ServerRequest(timeout=30s)
+    RRPC->>WS: Request (seq=5)
+    RRPC->>RRPC: select { respCh / ctx.Done() }
+
+    Note over Client: ❌ T=2: 网络中断
+    Note over RRPC: 继续阻塞等待...
+    Note over WS: 连接断开
+
+    Note over Client: ✅ T=10: 客户端重连
+    Client->>RRPC: reconnect {last_seen_seq: 4}
+    RRPC->>RRPC: last_seen_seq(4) < last_sent_seq(5)<br/>发现缺失 seq=5
+    RRPC->>Client: 补发 Request (seq=5)
+    Client->>Client: 幂等检查 → 执行函数
+    Client-->>RRPC: Response (seq=5)
+
+    Note over RRPC: respCh 收到 Response！
+    RRPC-->>Caller: T=11: 返回结果 ✅
+    Note over Caller: 30s 超时内成功！Redis 未介入
+```
+
+##### 场景 3：断连超过超时时间
+
+```mermaid
+sequenceDiagram
+    participant Caller as 调用方
+    participant RRPC as ServerRequest
+    participant Redis
+    participant Client
+
+    Note over Caller: T=0
+    Caller->>RRPC: ServerRequest(timeout=30s)
+    RRPC->>Client: Request (seq=5)
+
+    Note over Client: ❌ 网络中断
+    Note over RRPC: 阻塞等待中...
+
+    Note over RRPC: ⏰ T=30: 超时！
+    RRPC->>Redis: 异步写入 pending (seq=5, retry_count=0)
+    RRPC-->>Caller: T=30: 返回 ErrRequestTimeout
+    Note over Caller: 调用方拿到错误<br/>LLM 可以决策重试/告知用户
+
+    Note over Client: ✅ T=60: 客户端重连
+    Client->>RRPC: reconnect {last_seen_seq: 4}
+    RRPC->>Redis: 查询 seq > 4 的 pending
+    Redis-->>RRPC: [Request seq=5]
+    RRPC->>Client: 补发 Request (seq=5)
+    Client->>Client: 幂等检查 → 执行
+    Client-->>RRPC: Response (seq=5)
+    Note over RRPC: 原始调用方已离开<br/>结果丢弃或记录日志
+```
+
+##### 场景 4：重放后再次超时（有界重放）
+
+```mermaid
+sequenceDiagram
+    participant RRPC as ServerRequest
+    participant Redis
+    participant Client
+
+    Note over RRPC: T=0: 第一次发送
+    RRPC->>Client: Request (seq=5, retry_count=0)
+    Note over Client: ❌ 网络中断
+    Note over RRPC: T=30: 超时
+    RRPC->>Redis: 写入 pending (retry_count=0)
+
+    Note over Client: ✅ T=60: 重连
+    Client->>RRPC: reconnect {last_seen_seq: 4}
+    RRPC->>Client: 重放 Request (seq=5)
+    Note over Client: ❌ 又断了！
+    Note over RRPC: T=90: 再次超时
+    RRPC->>Redis: 更新 retry_count=1
+
+    Note over Client: ✅ T=120: 再次重连
+    Client->>RRPC: reconnect {last_seen_seq: 4}
+    RRPC->>Redis: 查询 → seq=5 (retry_count=1)
+    RRPC->>Client: 再次重放 Request (seq=5)
+    Note over Client: ❌ 又断了！
+    Note over RRPC: T=150: 第三次超时
+    RRPC->>Redis: 更新 retry_count=2
+
+    Note over Client: ✅ T=180: 再次重连
+    Client->>RRPC: reconnect {last_seen_seq: 4}
+    RRPC->>Redis: 查询 → seq=5 (retry_count=2)
+    RRPC->>Client: 最后一次重放 Request (seq=5)
+    Note over Client: ❌ 又断了！
+    Note over RRPC: T=210: 第四次超时
+    RRPC->>Redis: retry_count=3 >= max_retries=3
+    RRPC->>Redis: 删除 pending seq=5 💀
+    Note over RRPC: 放弃该请求
+```
+
+##### 场景 5：多请求断连 + 批量重放
+
+```mermaid
+sequenceDiagram
+    participant RRPC as ServerRequest
+    participant Redis
+    participant Client
+
+    RRPC->>Client: Request (seq=5) ✅ → Response
+    RRPC->>Client: Request (seq=6)
+    Note over Client: ❌ 网络中断
+    Note over RRPC: seq=6 超时
+    RRPC->>Redis: 写入 pending (seq=6)
+    RRPC->>Client: Request (seq=7) ❌ 发送失败
+    RRPC->>Redis: 写入 pending (seq=7)
+
+    Note over Client: ✅ T=60: 重连
+    Client->>RRPC: reconnect {last_seen_seq: 5}
+    RRPC->>Redis: 查询 seq > 5 的 pending
+    Redis-->>RRPC: [seq=6, seq=7]
+    RRPC->>Client: 补发 Request (seq=6)
+    Client-->>RRPC: Response (seq=6) ✅
+    RRPC->>Client: 补发 Request (seq=7)
+    Client-->>RRPC: Response (seq=7) ✅
+```
+
+##### 场景 6：设备替换（同 userID + deviceID 重连）
+
+```mermaid
+sequenceDiagram
+    participant OldClient as 旧客户端
+    participant DR as DeviceRegistry
+    participant RRPC as DeviceReverseRPC
+    participant NewClient as 新客户端
+
+    Note over OldClient: 旧连接活跃
+    OldClient->>DR: 已注册 (U1, D1)
+
+    Note over NewClient: 新连接到达 (U1, D1)
+    NewClient->>DR: Register(U1, D1, newConn)
+    DR->>DR: 发现 (U1, D1) 已存在
+
+    DR->>OldClient: 发送 Close Frame<br/>reason: "replaced by new connection"
+    DR->>RRPC: Fail 所有 (U1, D1) 的 pending 请求
+    RRPC->>RRPC: pending.respCh <- ErrConnectionReplaced
+    Note over RRPC: 阻塞调用方立即收到错误
+
+    DR->>DR: 移除旧连接
+    DR->>DR: 注册新连接 (U1, D1, newConn)
+    NewClient->>DR: 连接成功
+    NewClient->>RRPC: Function Manifest
+```
+
+##### 场景 7：并发请求 + 背压
+
+```mermaid
+sequenceDiagram
+    participant C1 as 调用方 1
+    participant C2 as 调用方 2
+    participant C3 as 调用方 3
+    participant RRPC as DeviceReverseRPC
+    participant Client
+
+    Note over RRPC: max_pending = 2
+
+    C1->>RRPC: ServerRequest()
+    RRPC->>RRPC: pending.count = 0 < 2 ✅
+    RRPC->>Client: Request (seq=1)
+
+    C2->>RRPC: ServerRequest()
+    RRPC->>RRPC: pending.count = 1 < 2 ✅
+    RRPC->>Client: Request (seq=2)
+
+    C3->>RRPC: ServerRequest()
+    RRPC->>RRPC: pending.count = 2 >= 2 ❌
+    RRPC-->>C3: 返回 ErrTooManyPending
+
+    Client-->>RRPC: Response (seq=1)
+    RRPC-->>C1: 返回结果 ✅
+    RRPC->>RRPC: pending.count = 1
+
+    C3->>RRPC: ServerRequest() 重试
+    RRPC->>RRPC: pending.count = 1 < 2 ✅
+    RRPC->>Client: Request (seq=3)
+```
+
+#### 3.7.4 场景总结
+
+| 场景 | 超时内重连？ | 重放结果 | 调用方体验 |
+|------|-------------|----------|-----------|
+| 网络稳定 | N/A | 直接成功 | ✅ 正常返回 |
+| 短暂断连 | ✅ 是 | 补发成功 | ✅ 超时内返回 |
+| 长时间断连 | ❌ 否 | Redis 重放 | ❌ 首次超时返回错误 |
+| 重放又超时 | ❌ 否 | retry_count++ | ❌ 最多重放 3 次后放弃 |
+| 多请求断连 | ✅ 是 | 批量补发 | ✅ 各请求独立处理 |
+| 设备替换 | N/A | 旧请求 fail | ❌ 收到 ErrConnectionReplaced |
+| 并发过载 | N/A | 拒绝新请求 | ❌ 收到 ErrTooManyPending |
+
 ---
 
 ## 4. Part II: Agent Tool 动态工具系统
