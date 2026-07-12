@@ -41,6 +41,7 @@ type agentResumeTaskPayload struct {
 	Answer         string `json:"answer"`
 	SenderID       string `json:"sender_id"` // human user who sent the answer
 	AgentID        string `json:"agent_id"`  // agent to resume
+	DeviceID       string `json:"device_id"` // Phase 6 (D-102)
 }
 
 // HandleRequest implements MethodHandler. It validates the params and enqueues
@@ -56,8 +57,10 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 
 	// The sender is the authenticated client user.
 	senderID := ""
+	deviceID := "" // Phase 6 (D-102)
 	if client != nil {
 		senderID = client.UserID()
+		deviceID = client.DeviceID()
 	}
 
 	payload := agentResumeTaskPayload{
@@ -67,6 +70,7 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 		Answer:         params.Answer,
 		SenderID:       senderID,
 		AgentID:        params.AgentID,
+		DeviceID:       deviceID, // Phase 6 (D-102)
 	}
 
 	raw, err := json.Marshal(payload)

@@ -94,6 +94,42 @@
 //	→ broadcast chunks (BroadcastHelper) → is_done=true broadcast
 //	→ persist message → return nil to MQ (D-067)
 //
+// # Phase 6: Client Device Function Invocation
+//
+// DynamicToolProvider (dynamic_tool_provider.go): DynamicToolProvider is an Eino
+// ChatModelAgentMiddleware that dynamically injects client-device functions as
+// InvokableTool instances before each agent run. BeforeAgent extracts the
+// CallerDevice from context, queries the device's registered functions via
+// ClientFunctionProvider, applies tag and exclusion filters, creates tools via
+// newClientFunctionTool, and merges them into runCtx.Tools. All errors are
+// fail-open: logged and skipped, never blocking agent execution (D-072 spirit).
+//
+// ClientFunctionProvider (dynamic_tool_provider.go): Interface for retrieving
+// function declarations registered by a client device. Defined here to avoid
+// circular dependency on the server package (D-101).
+//
+// ClientCaller (dynamic_tool_provider.go): Interface for sending requests to a
+// specific client device via ReverseRPC and waiting for a response. Defined here
+// to avoid circular dependency on the server package (D-101).
+//
+// CallerDevice (context_keys.go): CallerDevice holds the UserID and DeviceID of
+// the client device that initiated the conversation. It is injected into the
+// context by AgentExecutor.Execute and AgentResumeHandler when DeviceID is
+// present in the payload. DynamicToolProvider reads it from context to determine
+// which device's functions to expose as tools (D-102).
+//
+// ClientToolsConfig: Per-agent configuration for dynamic client tool injection.
+// FunctionTags filters which functions are exposed (empty = all). ExcludedFunctions
+// is a deny-list checked first. CallTimeout sets the default ReverseRPC timeout
+// (overridden per-function by FunctionInfo.TimeoutMs). Zero/negative CallTimeout
+// defaults to 30 seconds.
+//
+// AgentBuilder Integration: AgentBuilder exposes SetClientFunctionProvider and
+// SetClientCaller setters. When both are configured and an agent's Middleware
+// config has EnableClientTools=true, buildMiddleware creates a DynamicToolProvider
+// and inserts it as the first middleware (before PatchToolCalls, Summarization,
+// and ToolReduction) so injected tools are visible to all downstream middleware.
+//
 // # Phase 7: Production Hardening
 //
 // Semaphore (semaphore.go): Semaphore limits concurrent agent executions using

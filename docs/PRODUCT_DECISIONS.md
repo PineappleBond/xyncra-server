@@ -79,6 +79,11 @@
 | D-095 | 设备替换策略：Close Frame 4001 | 同设备多连接时新替旧，pending 请求立即 fail |
 | D-096 | ReverseRPC sendFunc 签名扩展 | 空 deviceID=广播，非空=定向发送 |
 | D-097 | reqID 格式：UUID 替代原子计数器 | 避免服务器重启后 ID 冲突 |
+| D-098 | `system.` 命名空间用于系统级 RPC 方法 | 系统方法与业务方法分离，职责清晰 |
+| D-099 | 客户端函数清单使用 JSON Schema 描述参数 | 标准化函数清单格式，客户端和服务端一致理解 |
+| D-100 | 客户端工具错误返回给 LLM 自主处理 | LLM 灵活决策，与 D-067 互补而非替代 |
+| D-101 | ClientFunctionProvider/ClientCaller 接口定义在 agent 包 | 避免循环依赖，与 D-070 一致 |
+| D-102 | DeviceID 通过 MQ payload 传播到 Agent context | 与 D-062 一致，向后兼容 |
 
 ---
 
@@ -2328,10 +2333,145 @@ ReverseRPC 的 reqID 从 `fmt.Sprintf("s-%d", atomic.AddUint64(...))` 改为 `fm
 
 ---
 
+## D-098: `system.` 命名空间用于系统级 RPC 方法
+
+### 决策
+
+引入 `system.` 前缀作为系统级 RPC 方法的命名空间，与业务方法（如 `send_message`, `create_conversation`）区分。系统方法不直接参与业务逻辑，而是用于客户端与服务端之间的元数据交换和能力声明。
+
+当前定义的系统方法：
+- `system.register_functions`: 客户端声明设备函数能力
+
+### 原因
+
+1. **命名空间隔离**：系统方法与业务方法分离，职责清晰
+2. **可扩展性**：未来可新增 `system.reconnect`, `system.ping`, `system.get_capabilities` 等
+3. **向后兼容**：不影响现有业务方法
+4. **语义明确**：客户端开发者一看便知这是系统级操作，非业务操作
+
+### 约束
+
+- 系统方法以 `system.` 开头，业务方法不使用此前缀
+- 系统方法的参数和响应格式独立定义，不与业务方法混用
+- 系统方法无鉴权（与 D-002 一致，内网部署模型）
+
+---
+
+## D-099: 客户端函数清单使用 JSON Schema 描述参数
+
+### 决策
+
+客户端通过 `system.register_functions` 声明设备函数能力。每个函数使用以下格式：
+
+```json
+{
+  "name": "read_file",
+  "description": "读取本地文件内容",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string", "description": "文件路径"}
+    },
+    "required": ["path"]
+  },
+  "returns": {"type": "string", "description": "文件内容"},
+  "tags": ["filesystem", "read"],
+  "timeout_ms": 5000
+}
+```
+
+字段说明：
+- `name` (必填): 函数唯一标识，设备内唯一，最长 255 字符
+- `description` (可选): 人类可读的函数描述
+- `parameters` (可选): JSON Schema (draft 7) 描述输入参数
+- `returns` (可选): 描述返回值类型
+- `tags` (可选): 标签数组，用于过滤
+- `timeout_ms` (可选): 函数执行超时（毫秒），0 或不填表示使用默认超时
+
+### 原因
+
+1. **JSON Schema 标准化**：广泛使用的参数描述格式，工具链丰富
+2. **向后兼容**：可选字段允许渐进式扩展
+3. **Agent 友好**：LLM 可直接理解 JSON Schema 生成调用参数
+4. **客户端灵活**：客户端可使用任意编程语言，只需生成符合格式的 JSON
+
+### 约束
+
+- `name` 是必填字段，为空时服务端拒绝注册
+- `parameters` 必须是合法的 JSON Schema，但服务端不校验 schema 本身（只存储）
+- `timeout_ms` 为 0 或不填时，Agent 调用时使用配置的默认超时（如 30s）
+- 每个设备最多注册 200 个函数（可通过 `XYNCRA_MAX_FUNCTIONS_PER_DEVICE` 环境变量调整）
+- 函数清单格式一旦确定，尽量避免破坏性变更；如需变更，使用版本号（如 `version: 1`）
+
+---
+
+## D-100: 客户端工具错误返回给 LLM 自主处理
+
+### 决策
+
+客户端工具（DynamicToolProvider 注入的工具）调用失败时，错误作为 tool error 返回给 LLM，由 LLM 决定重试策略或向用户说明。不直接触发 D-067 错误消息持久化。
+
+### 原因
+
+1. **LLM 自主决策**：LLM 可能选择重试、换一种方式、或告知用户，比硬编码的错误消息更灵活
+2. **与 D-067 互补**：D-067 覆盖的是 Agent 整体执行失败（LLM API 错误、上下文加载失败等），客户端工具失败是工具层面的局部错误
+3. **与 Eino 框架一致**：Eino 的 tool error 机制就是让 LLM 看到工具失败并自行处理
+4. **D-082 范围澄清**：D-082 的"工具执行失败"分类适用于服务端工具（`ToolRegistry` 注册的静态工具）的致命错误，客户端工具失败走不同的路径
+
+### 约束
+
+- 工具 error 消息应对 LLM 友好（描述性文本，非 Go error 原始格式）
+- 如果 LLM 在收到 tool error 后仍然完成了 Agent 执行（即使回复了"工具调用失败"），不触发 D-067
+- 仅当 Agent 整体执行异常（panic、LLM API 错误等）时才触发 D-067
+
+---
+
+## D-101: ClientFunctionProvider/ClientCaller 接口定义在 agent 包
+
+### 决策
+
+为避免 `agent` 包导入 `server` 包造成循环依赖，在 `agent` 包定义 `ClientFunctionProvider` 和 `ClientCaller` 接口。`server` 包的具体实现（`MemoryFunctionRegistry`、`ReverseRPC`/`WebSocketServer`）通过 Go duck typing 满足接口。
+
+### 原因
+
+1. **与 D-070 一致**：Agent 功能的所有权边界在 `internal/agent/`，依赖方向为 server → agent（接口定义）
+2. **可测试性**：测试时可注入 mock 实现
+3. **零适配器开销**：Go duck typing 无需额外的 adapter struct
+
+### 约束
+
+- 接口方法签名必须与 server 包的实现精确匹配
+- `main.go` 负责组装：将 server 包的具体实例传入 agent 包的 setter
+
+---
+
+## D-102: DeviceID 通过 MQ payload 传播到 Agent context
+
+### 决策
+
+`agentProcessPayload` 新增 `DeviceID` 字段，从 `send_message` handler 通过 MQ 传播到 `ExecutePayload`，再由 executor 写入 context（`ContextWithCallerDevice`）供 DynamicToolProvider 读取。
+
+### 原因
+
+1. **与 D-062 一致**：MQ payload 是 Agent 任务数据的标准传递路径
+2. **向后兼容**：JSON 增量字段，旧 payload 反序列化后 DeviceID 为空字符串
+3. **与 D-093 配合**：D-093 建立了 (userID, deviceID) 索引，DynamicToolProvider 利用此基础设施
+4. **context 不能跨 MQ**：Asynq 反序列化任务时使用新 context，context.Value 无法传递，必须通过 payload 字段
+
+### 约束
+
+- `DeviceID` 字段在 `agentProcessPayload` 和 `ExecutePayload` 中均为 string 类型
+- 空字符串表示"无设备信息"（旧版 payload 或无设备连接的场景）
+- `agent_resume` 任务同样需要传播 DeviceID
+
+---
+
 ## 版本历史
 
 | 日期       | 版本 | 变更                                                                                                 |
 | ---------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| 2026-07-12 | v3.12 | 新增 D-100（客户端工具错误返回 LLM）、D-101（接口定义在 agent 包）、D-102（DeviceID 通过 MQ payload 传播） |
+| 2026-07-12 | v3.11 | 新增 D-098（system. 命名空间）、D-099（函数清单协议格式）                                            |
 | 2026-07-12 | v3.10 | 新增 D-093..D-097（设备连接模型 + reqID UUID）                                                       |
 | 2026-07-12 | v3.9 | 新增 D-092（ReverseRPC 双向请求能力）                                                                 |
 | 2026-07-12 | v3.8 | 新增 D-091（Agent 输入边界定义）                                                                     |

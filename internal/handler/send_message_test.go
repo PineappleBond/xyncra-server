@@ -1079,3 +1079,23 @@ func TestSendMessage_AgentDetection_PersistFailsNoEnqueue(t *testing.T) {
 	assert.Equal(t, countAfterFirst, broker.callCount(),
 		"duplicate send should not trigger any additional Enqueue calls (agent detection is after persist)")
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6: agentProcessPayload DeviceID JSON field (DEV-03)
+// ---------------------------------------------------------------------------
+
+func TestAgentProcessPayload_DeviceID(t *testing.T) {
+	payload := agentProcessPayload{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test",
+		SenderID:       "alice",
+		DeviceID:       "device-1",
+	}
+	data, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, "device-1", decoded["device_id"])
+}

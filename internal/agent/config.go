@@ -1,6 +1,9 @@
 package agent
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // MiddlewareConfig controls which Eino middleware to enable per agent.
 // All fields are optional; when the middleware block is absent from YAML,
@@ -11,6 +14,26 @@ type MiddlewareConfig struct {
 	EnableToolReduction   bool `yaml:"enable_tool_reduction" json:"enable_tool_reduction"`
 	ToolReductionMaxChars int  `yaml:"tool_reduction_max_chars" json:"tool_reduction_max_chars"` // default: 50000
 	EnablePatchToolCalls  bool `yaml:"enable_patch_tool_calls" json:"enable_patch_tool_calls"`
+	// EnableClientTools enables dynamic injection of client device functions
+	// as agent tools. Requires ClientFunctionProvider and ClientCaller to be
+	// set on AgentBuilder (D-101).
+	EnableClientTools bool `yaml:"enable_client_tools" json:"enable_client_tools"`
+	// ClientTools controls how client device functions are surfaced as tools.
+	ClientTools ClientToolsConfig `yaml:"client_tools" json:"client_tools"`
+}
+
+// ClientToolsConfig controls how client device functions are surfaced as
+// agent tools (Phase 6 / D-100, D-101).
+type ClientToolsConfig struct {
+	// FunctionTags filters functions by tag. Empty = accept all functions.
+	// A function matches if it has at least one tag in this list (OR semantics).
+	FunctionTags []string `yaml:"function_tags" json:"function_tags"`
+	// ExcludedFunctions excludes specific function names. Exact match only.
+	ExcludedFunctions []string `yaml:"excluded_functions" json:"excluded_functions"`
+	// CallTimeout is the default timeout for client function calls.
+	// Individual functions may override via timeout_ms. Default: 30s.
+	// A zero value means "use default (30s)".
+	CallTimeout time.Duration `yaml:"call_timeout" json:"call_timeout"`
 }
 
 // MCPServerConfig defines an MCP server connection (D-086).

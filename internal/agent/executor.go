@@ -37,6 +37,7 @@ type ExecutePayload struct {
 	ConversationID string // Conversation to operate in
 	AgentID        string // Full "agent/xxx" userID
 	SenderID       string // Human user who sent the message
+	DeviceID       string // Device that initiated the conversation (D-102)
 }
 
 // AgentExecutor orchestrates the full agent execution pipeline:
@@ -140,6 +141,15 @@ func NewAgentExecutor(
 //  11. Persist the final message (D-052 step 2).
 func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) error {
 	startTime := time.Now()
+
+	// Inject caller device into context for DynamicToolProvider (D-102).
+	if payload.DeviceID != "" {
+		ctx = ContextWithCallerDevice(ctx, CallerDevice{
+			UserID:   payload.SenderID,
+			DeviceID: payload.DeviceID,
+		})
+	}
+
 	e.logger.Info("agent executor: starting",
 		"message_id", payload.MessageID,
 		"conversation_id", payload.ConversationID,

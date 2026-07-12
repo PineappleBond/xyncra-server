@@ -3,8 +3,11 @@ package agent
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestAgentConfig_Validate_Valid(t *testing.T) {
@@ -191,4 +194,35 @@ func TestAgentConfig_Validate_MCPDuplicateName(t *testing.T) {
 	err := cfg.Validate()
 	assert.Error(t, err)
 	assert.True(t, errors.Is(err, ErrMCPDuplicateName))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6: MiddlewareConfig client tools (CFG-01, CFG-02)
+// ---------------------------------------------------------------------------
+
+func TestMiddlewareConfig_ClientTools_YAML(t *testing.T) {
+	yamlData := `
+enable_client_tools: true
+client_tools:
+  function_tags:
+    - filesystem
+    - network
+  excluded_functions:
+    - dangerous_fn
+  call_timeout: 10s
+`
+	var cfg MiddlewareConfig
+	err := yaml.Unmarshal([]byte(yamlData), &cfg)
+	require.NoError(t, err)
+	assert.True(t, cfg.EnableClientTools)
+	assert.Equal(t, []string{"filesystem", "network"}, cfg.ClientTools.FunctionTags)
+	assert.Equal(t, []string{"dangerous_fn"}, cfg.ClientTools.ExcludedFunctions)
+	assert.Equal(t, 10*time.Second, cfg.ClientTools.CallTimeout)
+}
+
+func TestClientToolsConfig_Defaults(t *testing.T) {
+	var cfg ClientToolsConfig
+	assert.Nil(t, cfg.FunctionTags)
+	assert.Nil(t, cfg.ExcludedFunctions)
+	assert.Equal(t, time.Duration(0), cfg.CallTimeout)
 }

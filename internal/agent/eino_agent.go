@@ -285,11 +285,13 @@ func detectProvider(modelName, baseURL string) string {
 
 // AgentBuilder constructs runnable agents from AgentConfig using the Eino ADK.
 type AgentBuilder struct {
-	llmFactory      *LLMClientFactory
-	toolRegistry    *agenttools.Registry
-	registry        *AgentRegistry          // for sub-agent resolution (D-081)
-	checkpointStore compose.CheckPointStore // for HITL checkpoint persistence (D-083)
-	mcpBridge       *agenttools.MCPBridge   // for MCP server connections (D-086)
+	llmFactory             *LLMClientFactory
+	toolRegistry           *agenttools.Registry
+	registry               *AgentRegistry          // for sub-agent resolution (D-081)
+	checkpointStore        compose.CheckPointStore // for HITL checkpoint persistence (D-083)
+	mcpBridge              *agenttools.MCPBridge   // for MCP server connections (D-086)
+	clientFunctionProvider ClientFunctionProvider  // Phase 6 (D-101)
+	clientCaller           ClientCaller            // Phase 6 (D-101)
 }
 
 // NewAgentBuilder creates an AgentBuilder backed by the given LLM factory.
@@ -319,6 +321,20 @@ func (b *AgentBuilder) SetCheckPointStore(store compose.CheckPointStore) {
 // If not set, MCP servers configured in AgentConfig are ignored.
 func (b *AgentBuilder) SetMCPBridge(bridge *agenttools.MCPBridge) {
 	b.mcpBridge = bridge
+}
+
+// SetClientFunctionProvider sets the function registry used to retrieve
+// client device functions for dynamic tool injection (D-101).
+// If not set, client tools are not available.
+func (b *AgentBuilder) SetClientFunctionProvider(provider ClientFunctionProvider) {
+	b.clientFunctionProvider = provider
+}
+
+// SetClientCaller sets the caller used to invoke remote client functions
+// via ReverseRPC (D-101).
+// If not set, client tools are not available.
+func (b *AgentBuilder) SetClientCaller(caller ClientCaller) {
+	b.clientCaller = caller
 }
 
 // BuiltAgent wraps an Eino Runner together with the config it was built from.

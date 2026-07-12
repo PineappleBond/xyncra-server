@@ -108,3 +108,45 @@ func TestBuildMiddleware_DefaultMaxChars(t *testing.T) {
 		t.Errorf("expected 1 middleware (tool reduction), got %d", len(mws))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TestBuildMiddleware_DynamicToolProvider
+// ---------------------------------------------------------------------------
+
+func TestBuildMiddleware_DynamicToolProvider(t *testing.T) {
+	// When EnableClientTools=true and provider/caller are set → DynamicToolProvider registered.
+	builder := &AgentBuilder{
+		clientFunctionProvider: &mockFunctionProvider{},
+		clientCaller:           &mockCallerForDTP{},
+	}
+	config := &AgentConfig{
+		ID: "test-agent",
+		Middleware: MiddlewareConfig{
+			EnableClientTools: true,
+		},
+	}
+
+	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{})
+	if len(mws) != 1 {
+		t.Errorf("expected 1 middleware (DynamicToolProvider), got %d", len(mws))
+	}
+}
+
+func TestBuildMiddleware_DynamicToolProvider_NilProviderSkipped(t *testing.T) {
+	// When EnableClientTools=true but FunctionProvider/Caller not set → skipped.
+	builder := &AgentBuilder{
+		clientFunctionProvider: nil,
+		clientCaller:           nil,
+	}
+	config := &AgentConfig{
+		ID: "test-agent",
+		Middleware: MiddlewareConfig{
+			EnableClientTools: true,
+		},
+	}
+
+	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{})
+	if len(mws) != 0 {
+		t.Errorf("expected 0 middleware (provider nil → skipped), got %d", len(mws))
+	}
+}

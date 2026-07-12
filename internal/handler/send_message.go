@@ -59,6 +59,7 @@ type agentProcessPayload struct {
 	ConversationID string `json:"conversation_id"`
 	AgentID        string `json:"agent_id"` // full "agent/xxx" userID
 	SenderID       string `json:"sender_id"`
+	DeviceID       string `json:"device_id"` // Phase 6 (D-102)
 }
 
 // --------------------------------------------------------------------------
@@ -206,6 +207,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 					ConversationID: conv.ID,
 					AgentID:        peerID,
 					SenderID:       senderID,
+					DeviceID:       client.DeviceID(), // Phase 6 (D-102)
 				}
 				if payloadBytes, err := json.Marshal(agentPayload); err != nil {
 					log.Printf("send_message: failed to marshal agent MQ payload: %v", err)

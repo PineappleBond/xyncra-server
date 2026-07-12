@@ -25,6 +25,7 @@ type AgentResumePayload struct {
 	Answer         string `json:"answer"`
 	SenderID       string `json:"sender_id"` // human user who sent the answer
 	AgentID        string `json:"agent_id"`  // agent to resume (e.g. "agent/xxx")
+	DeviceID       string `json:"device_id"` // Phase 6 (D-102)
 }
 
 // NewAgentResumeHandler returns an mq.TaskHandler-compatible function that
@@ -105,7 +106,15 @@ func NewAgentResumeHandler(
 			return nil
 		}
 
-		// 5. Build the agent.
+		// 5. Inject caller device into context for DynamicToolProvider (D-102).
+		if payload.DeviceID != "" {
+			ctx = ContextWithCallerDevice(ctx, CallerDevice{
+				UserID:   payload.SenderID,
+				DeviceID: payload.DeviceID,
+			})
+		}
+
+		// 6. Build the agent.
 		builtAgent, err := executor.agentBuilder.Build(ctx, config)
 		if err != nil {
 			logger.Error("agent resume: build failed", "agent_id", agentID, "error", err)
@@ -113,6 +122,7 @@ func NewAgentResumeHandler(
 				ConversationID: payload.ConversationID,
 				AgentID:        payload.AgentID,
 				SenderID:       payload.SenderID,
+				DeviceID:       payload.DeviceID, // Phase 6 (D-102)
 			}
 			executor.sendErrorMessage(ctx, execPayload,
 				"抱歉，恢复执行失败，请重新发送消息。")
@@ -120,7 +130,7 @@ func NewAgentResumeHandler(
 			return nil
 		}
 
-		// 6. Resume the agent.
+		// 7. Resume the agent.
 		ctx, cancel := context.WithTimeout(ctx, executor.totalTimeout)
 		defer cancel()
 
@@ -152,6 +162,7 @@ func NewAgentResumeHandler(
 					ConversationID: payload.ConversationID,
 					AgentID:        payload.AgentID,
 					SenderID:       payload.SenderID,
+					DeviceID:       payload.DeviceID, // Phase 6 (D-102)
 				}
 				executor.sendErrorMessage(ctx, execPayload,
 					"抱歉，等待时间过长，请重新发送消息。")
@@ -160,13 +171,13 @@ func NewAgentResumeHandler(
 			return nil
 		}
 
-		// 7. Bridge the stream.
+		// 8. Bridge the stream.
 		streamID := uuid.New().String()
 		chunkCh := make(chan StreamChunk, 64)
 		interruptCh := make(chan *InterruptInfo, 1)
 		go executor.streamBridge.BridgeWithInterrupt(ctx, iter, chunkCh, interruptCh)
 
-		// 8. Consume chunks and broadcast.
+		// 9. Consume chunks and broadcast.
 		var fullResponse strings.Builder
 		firstToken := true
 
@@ -192,7 +203,7 @@ func NewAgentResumeHandler(
 			}
 		}
 
-		// 9. Check for another interrupt (multi-turn HITL).
+		// 10. Check for another interrupt (multi-turn HITL).
 		if info, ok := <-interruptCh; ok && info != nil {
 			checkpointID := uuid.New().String()
 			executor.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")
@@ -203,7 +214,7 @@ func NewAgentResumeHandler(
 			return nil
 		}
 
-		// 10. Send is_done and persist.
+		// 11. Send is_done and persist.
 		finalText := fullResponse.String()
 		executor.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, finalText, true)
 

@@ -18,6 +18,7 @@ type AgentProcessPayload struct {
 	ConversationID string `json:"conversation_id"`
 	AgentID        string `json:"agent_id"`
 	SenderID       string `json:"sender_id"`
+	DeviceID       string `json:"device_id"` // Phase 6 (D-102)
 }
 
 // IdempotencyStore provides atomic check-and-set for agent task deduplication.
@@ -151,6 +152,7 @@ func NewAgentTaskHandler(
 			ConversationID: payload.ConversationID,
 			AgentID:        payload.AgentID,
 			SenderID:       payload.SenderID,
+			DeviceID:       payload.DeviceID, // Phase 6 (D-102)
 		}
 		execErr := executor.ExecuteWithErrorMessage(ctx, execPayload)
 

@@ -258,6 +258,12 @@ func main() {
 	mcpBridge := agenttools.NewMCPBridge(nil) // nil → uses log.Default()
 	agentBuilder.SetMCPBridge(mcpBridge)
 
+	// Wire client function provider and caller for DynamicToolProvider (Phase 6 / D-101).
+	// funcRegistry (*server.MemoryFunctionRegistry) satisfies ClientFunctionProvider.
+	// srv (*server.WebSocketServer) satisfies ClientCaller via ServerRequest().
+	agentBuilder.SetClientFunctionProvider(funcRegistry)
+	agentBuilder.SetClientCaller(srv)
+
 	// ---------------------------------------------------------------
 	// Context & signal handling
 	// ---------------------------------------------------------------

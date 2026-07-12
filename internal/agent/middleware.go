@@ -25,6 +25,16 @@ func (b *AgentBuilder) buildMiddleware(
 ) []adk.ChatModelAgentMiddleware {
 	var mws []adk.ChatModelAgentMiddleware
 
+	// 0. DynamicToolProvider (must be first -- injects tools before other middleware sees them)
+	if config.Middleware.EnableClientTools {
+		if b.clientFunctionProvider != nil && b.clientCaller != nil {
+			dtp := NewDynamicToolProvider(b.clientFunctionProvider, b.clientCaller, config.Middleware.ClientTools, nil)
+			mws = append(mws, dtp)
+		} else {
+			log.Default().Printf("agent %s: client_tools enabled but FunctionProvider/Caller not set, skipping", config.ID)
+		}
+	}
+
 	// 1. PatchToolCalls (D-079)
 	if config.Middleware.EnablePatchToolCalls {
 		mw, err := patchtoolcalls.New(ctx, &patchtoolcalls.Config{})

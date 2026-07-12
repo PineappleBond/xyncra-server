@@ -566,3 +566,112 @@ func TestWithLLMMetrics_SetsMetrics(t *testing.T) {
 
 	assert.NotNil(t, executor.metrics, "WithLLMMetrics should set the metrics field")
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6: ExecutePayload DeviceID field (DEV-01, DEV-02)
+// ---------------------------------------------------------------------------
+
+func TestExecutePayload_DeviceID(t *testing.T) {
+	payload := ExecutePayload{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test",
+		SenderID:       "alice",
+		DeviceID:       "device-1",
+	}
+	assert.Equal(t, "device-1", payload.DeviceID)
+}
+
+func TestExecutePayload_EmptyDeviceID(t *testing.T) {
+	payload := ExecutePayload{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test",
+		SenderID:       "alice",
+	}
+	assert.Empty(t, payload.DeviceID) // backward compatible: empty = no device info
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6: Execute injects CallerDevice into context when DeviceID is set
+// ---------------------------------------------------------------------------
+
+// contextCapturingContextManager captures the context passed to GetContext
+// so tests can verify that CallerDevice was injected.
+type contextCapturingContextManager struct {
+	capturedCtx context.Context
+	err         error
+}
+
+func (m *contextCapturingContextManager) GetContext(ctx context.Context, _ string, _ *AgentConfig) ([]*model.Message, error) {
+	m.capturedCtx = ctx
+	return nil, m.err
+}
+
+func (m *contextCapturingContextManager) InvalidateCache(_ string) {}
+
+func TestExecute_DeviceID_InjectedIntoContext(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(&AgentConfig{
+		ID:    "test-agent",
+		Name:  "Test",
+		Model: "gpt-4",
+	})
+
+	ccMgr := &contextCapturingContextManager{err: ErrContextLoad}
+	mockStore := &mockStoreAPI{}
+	mockBS := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mockBS, testLogger{})
+	sb := NewStreamBridge()
+
+	executor := NewAgentExecutor(registry, ccMgr, nil, sb, bh, mockStore, 0, testLogger{})
+
+	payload := ExecutePayload{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "alice",
+		DeviceID:       "device-42",
+	}
+
+	// Execute will fail at context loading, but the context injection happens
+	// before that, so we can still verify the CallerDevice was set.
+	_ = executor.Execute(context.Background(), payload)
+
+	require.NotNil(t, ccMgr.capturedCtx, "GetContext should have been called")
+	device, ok := CallerDeviceFromContext(ccMgr.capturedCtx)
+	require.True(t, ok, "CallerDevice should be in context when DeviceID is set")
+	assert.Equal(t, "alice", device.UserID)
+	assert.Equal(t, "device-42", device.DeviceID)
+}
+
+func TestExecute_EmptyDeviceID_NoCallerDeviceInContext(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(&AgentConfig{
+		ID:    "test-agent",
+		Name:  "Test",
+		Model: "gpt-4",
+	})
+
+	ccMgr := &contextCapturingContextManager{err: ErrContextLoad}
+	mockStore := &mockStoreAPI{}
+	mockBS := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mockBS, testLogger{})
+	sb := NewStreamBridge()
+
+	executor := NewAgentExecutor(registry, ccMgr, nil, sb, bh, mockStore, 0, testLogger{})
+
+	payload := ExecutePayload{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "alice",
+		// DeviceID intentionally empty
+	}
+
+	_ = executor.Execute(context.Background(), payload)
+
+	require.NotNil(t, ccMgr.capturedCtx, "GetContext should have been called")
+	_, ok := CallerDeviceFromContext(ccMgr.capturedCtx)
+	assert.False(t, ok, "CallerDevice should NOT be in context when DeviceID is empty")
+}
