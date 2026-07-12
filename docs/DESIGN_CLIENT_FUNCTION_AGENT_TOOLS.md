@@ -68,26 +68,29 @@
 ```mermaid
 sequenceDiagram
     participant Server
+    participant Redis
     participant Client
 
     Server->>Client: ① Request (id, method, params,<br/>idempotency_key, priority, seq)
 
-    Client-->>Server: ② ACK (id, received=true)
-
     Note over Client: 执行函数...
 
     alt 正常响应
-        Client-->>Server: ③ Response (id, code, data)
-    else 网络中断
-        Note over Server: 未收到 ACK → 重试 (最多3次, 指数退避)
-        Server->>Client: ①' 重发 Request (相同 idempotency_key)
-        Note over Client: 幂等检查 → 不重复执行
+        Client-->>Server: ② Response (id, code, data)
+    else 网络中断 / 超时
+        Note over Server: 未收到 Response → 写入 Redis pending 队列
+        Server->>Redis: 持久化 pending request
+        Note over Server: 返回超时错误给调用方
     else 断连后重连
         Note over Client: 客户端重连, 发送 reconnect (last_seen_seq)
-        Note over Server: 补发缺失的请求
-        Client-->>Server: ④ 重放 Response
+        Note over Server: 从 Redis 补发 seq > last_seen_seq 的请求
+        Server->>Client: ③ 重放 Request
+        Note over Client: 幂等检查 → 不重复执行
+        Client-->>Server: ④ Response
     end
 ```
+
+> **设计决策**：不使用 ACK 机制。服务端以 Response 作为唯一的送达确认。超时未收到 Response 则写入 Redis 等待重连重放，配合幂等键防止重复执行。这比 ACK + 重试更简洁，且功能等价。
 
 ### 3.3 层级 1：基础加固
 
@@ -130,34 +133,9 @@ flowchart TD
 
 ### 3.4 层级 2：请求可靠性
 
-#### 3.4.1 ACK 机制
+> **设计决策**：不使用 ACK 机制。ACK 的功能（确认送达 + 触发重试）被 Redis 持久化 + 重连重放完全覆盖。移除 ACK 后层级 2 简化为：幂等性 + 客户端响应重试队列。
 
-```mermaid
-sequenceDiagram
-    participant Server
-    participant Client
-
-    Server->>Client: Request (id, ...)
-    
-    alt 收到 ACK
-        Note over Server: 标记 "已送达"
-        Client-->>Server: ACK (id)
-    else 未收到 ACK (超时 T1)
-        Server->>Client: 重发 Request (attempt 2)
-        alt 仍未收到
-            Server->>Client: 重发 Request (attempt 3)
-            alt 3次都失败
-                Note over Server: 标记 "待重放"<br/>写入 Redis
-            end
-        end
-    end
-```
-
-- 客户端收到 `PackageTypeRequest` 后立即回复 `PackageTypeACK`（新增包类型）
-- 服务端收到 ACK 标记请求为"已送达"
-- 未收到 ACK 的请求触发服务端重试（最多 3 次，指数退避）
-
-#### 3.4.2 客户端响应重试队列
+#### 3.4.1 客户端响应重试队列
 
 ```mermaid
 flowchart TD
@@ -172,7 +150,7 @@ flowchart TD
     style F fill:#ffebee
 ```
 
-#### 3.4.3 幂等性保证
+#### 3.4.2 幂等性保证
 
 - 每个请求携带 `idempotency_key`（服务端生成，基于 reqID）
 - 客户端维护最近 N 个 key 的 LRU 缓存（默认 1000）
@@ -182,7 +160,7 @@ flowchart TD
 
 #### 3.5.1 服务端请求持久化
 
-- 未收到 ACK 或 Response 的请求写入 Redis
+- 超时未收到 Response 的请求写入 Redis
 - Key: `rrpc:pending:{userID}:{deviceID}`
 - TTL: 24h
 - 客户端重连后服务端检查并重放
@@ -211,7 +189,7 @@ sequenceDiagram
     Client->>Server: reconnect {last_seen_seq: 42}
     Server->>Server: 查询 seq > 42 的待重放请求
     Server->>Client: 补发 Request seq=43, seq=44, ...
-    Client-->>Server: ACK + Response (逐个)
+    Client-->>Server: Response (逐个)
 ```
 
 ### 3.6 自适应超时策略
@@ -270,6 +248,33 @@ graph TB
 | **DynamicToolProvider** | BeforeAgent 中间件，每次 Run 前从缓存创建工具 | 无状态 |
 | **DeviceReverseRPC** | 增强 ReverseRPC，支持 `(userID, deviceID)` 定向发送 + 全部弱网优化 | 内存 |
 | **FunctionManifestHandler** | 处理客户端连接时发送的函数清单注册 | 无状态 |
+
+### 4.2.1 (userID, deviceID) 唯一连接约束（新约束）
+
+> **重要**：当前服务端代码仅按 `userID` 管理连接（`clientsByUser[userID]map[connID]*Client`），不追踪 `deviceID`。本设计引入新约束：**每个 `(userID, deviceID)` 组合只允许一个活跃连接**。
+
+**处理流程**：
+
+```mermaid
+flowchart TD
+    A["新连接: userID=U1, deviceID=D1"] --> B{"(U1, D1) 已有活跃连接?"}
+    B -->|No| C["注册新连接<br/>clientsByDevice[U1][D1] = conn"]
+    B -->|Yes| D["向旧连接发送 Close Frame<br/>（reason: replaced by new connection）"]
+    D --> E["移除旧连接"]
+    E --> C
+    C --> F["旧连接的 pending 请求<br/>立即 fail（ErrConnectionReplaced）"]
+
+    style C fill:#e8f5e9
+    style D fill:#fff3e0
+```
+
+**实现要点**：
+
+- 连接注册从 `clientsByUser[userID]map[connID]*Client` 改为 `clientsByDevice[userID]map[deviceID]*Client`
+- WebSocket 连接参数新增 `device_id`：`/ws?user_id=U1&device_id=D1`
+- 客户端 SDK 必须在连接时提供 `deviceID`（可由客户端生成或使用设备标识）
+- 旧连接被替换时，其 pending 请求立即失败（不等 timeout）
+- `sendToUser` 改为 `sendToDevice(userID, deviceID)` 定向发送
 
 ### 4.3 函数清单协议（Function Manifest）
 
@@ -341,7 +346,7 @@ sequenceDiagram
     Client->>FMR: 发送 Function Manifest
     FMR->>CFR: Cache(U1, D1, functions, TTL=5min)
     CFR-->>FMR: OK
-    FMR-->>Client: ACK (注册成功)
+    FMR-->>Client: OK (注册成功)
 ```
 
 ### 4.5 Agent 调用客户端函数的完整流程
@@ -456,7 +461,8 @@ flowchart TD
 ### 5.1 新增包类型
 
 ```go
-PackageTypeACK  PackageType = 3  // 轻量确认（服务端请求的ACK）
+PackageTypeManifest  PackageType = 3  // 客户端发送函数清单
+PackageTypeReconnect PackageType = 4  // 客户端断连重连后补发请求
 ```
 
 ### 5.2 增强的请求结构
@@ -472,15 +478,7 @@ type PackageDataRequest struct {
 }
 ```
 
-### 5.3 ACK 结构
-
-```go
-type PackageDataACK struct {
-    ID string `json:"id"`  // 对应请求的 ID
-}
-```
-
-### 5.4 Function Manifest 结构
+### 5.3 Function Manifest 结构
 
 ```go
 type FunctionManifest struct {
@@ -505,7 +503,7 @@ type ReturnInfo struct {
 }
 ```
 
-### 5.5 Reconnect 结构
+### 5.4 Reconnect 结构
 
 ```go
 type PackageDataReconnect struct {
@@ -528,22 +526,17 @@ flowchart TD
     D -->|在缓存中| E["返回错误:<br/>'设备 X 当前离线，函数 Y 不可用'"]
     D -->|不在缓存| F["返回错误:<br/>'未找到函数 Y'"]
 
-    C --> G{"收到 ACK?"}
-    G -->|是| H{"等待 Response"}
-    G -->|否| I["服务端重试 (最多3次)"]
-    I --> J{"3次都失败?"}
-    J -->|是| K["标记为待重放<br/>返回超时错误"]
-    J -->|否| H
+    C --> G{"收到 Response?"}
+    G -->|是| H["返回结果"]
+    G -->|超时| I["写入 Redis pending 队列"]
+    I --> J["返回超时错误给 LLM"]
 
-    H --> L{"收到 Response?"}
-    L -->|是| M["返回结果"]
-    L -->|超时| N{"有断连重放队列?"}
-    N -->|有| O["等待重放"]
-    N -->|无| P["返回超时错误"]
+    J --> K["客户端重连后<br/>通过 seq 补发缺失请求"]
+    K --> L["客户端幂等执行"]
+    L --> M["Response 到达"]
 
-    style M fill:#e8f5e9
-    style K fill:#ffebee
-    style P fill:#ffebee
+    style H fill:#e8f5e9
+    style J fill:#ffebee
 ```
 
 ### 6.2 错误类型
@@ -602,10 +595,9 @@ tool_config:
 # config.yaml
 reverse_rpc:
   max_pending_per_device: 50      # 每个设备最大 pending 请求数
-  ack_timeout: 5s                 # ACK 超时时间
-  max_retries: 3                  # 最大重试次数
-  retry_backoff_base: 1s          # 重试退避基数
+  request_timeout: 30s            # 请求超时时间（自适应，可被网络质量因子放大）
   request_ttl: 24h                # 请求在 Redis 中的存活时间
+  max_functions_per_device: 200   # 每个设备最大函数数
 
 client_tools:
   enabled: true
@@ -647,7 +639,7 @@ graph TB
     DRPC -->|"增强替代"| RR
     FMH -->|"更新"| CFR
     WS -->|"通知连接/断开事件"| DR
-    DMH -->|"路由 ACK/Reconnect"| DRPC
+    DMH -->|"路由 Reconnect"| DRPC
 
     style DTP fill:#e1f5fe
     style DR fill:#fff3e0
@@ -700,30 +692,12 @@ sequenceDiagram
 
     LLM->>RRPC: InvokableRun("read_file", {path: "/tmp/a.txt"})
     RRPC->>Client: Request (seq=1, idempotency_key="s-42")
-    Client-->>RRPC: ACK
     Client->>Client: 执行 read_file
     Client-->>RRPC: Response (code=0, data="file content")
     RRPC-->>LLM: "file content"
 ```
 
-### B. 弱网 + ACK 重试
-
-```mermaid
-sequenceDiagram
-    participant RRPC as DeviceReverseRPC
-    participant Client
-
-    RRPC->>Client: Request (seq=5)
-    Note over RRPC: 等待 ACK...
-    Note over RRPC: ACK 超时 (5s)
-    RRPC->>Client: 重发 Request (seq=5, attempt 2)
-    Client-->>RRPC: ACK
-    Client->>Client: 执行函数
-    Client-->>RRPC: Response
-    RRPC->>RRPC: 幂等 key 匹配，正常返回
-```
-
-### C. 断连 + 重连 + 重放
+### B. 弱网 + 超时 + Redis 重放
 
 ```mermaid
 sequenceDiagram
@@ -731,22 +705,49 @@ sequenceDiagram
     participant Redis
     participant Client
 
-    RRPC->>Client: Request (seq=10)
-    Note over Client: ❌ 网络断开
-    Note over RRPC: 未收到 ACK
-    RRPC->>Client: 重发 (attempt 2) ❌
-    RRPC->>Client: 重发 (attempt 3) ❌
-    RRPC->>Redis: 持久化 pending request (seq=10)
+    RRPC->>Client: Request (seq=5)
+    Note over Client: ❌ 网络延迟/中断
+    Note over RRPC: 等待 Response...
+    Note over RRPC: 超时 (30s)
+    RRPC->>Redis: 持久化 pending request (seq=5)
+    Note over RRPC: 返回 ErrRequestTimeout
 
     Note over Client: ✅ 网络恢复
     Client->>RRPC: WebSocket Reconnect
-    Client->>RRPC: reconnect {last_seen_seq: 9}
-    RRPC->>Redis: 查询 seq > 9 的请求
-    Redis-->>RRPC: [request seq=10]
-    RRPC->>Client: 重放 Request (seq=10)
-    Client-->>RRPC: ACK
-    Client->>Client: 执行函数
+    Client->>RRPC: reconnect {last_seen_seq: 4}
+    RRPC->>Redis: 查询 seq > 4 的请求
+    Redis-->>RRPC: [request seq=5]
+    RRPC->>Client: 重放 Request (seq=5)
+    Client->>Client: 幂等检查 → 新请求，执行函数
     Client-->>RRPC: Response
+    RRPC-->>RRPC: 正常返回
+```
+
+### C. 断连 + 多请求重放
+
+```mermaid
+sequenceDiagram
+    participant RRPC as DeviceReverseRPC
+    participant Redis
+    participant Client
+
+    RRPC->>Client: Request (seq=10) ✅ 正常处理
+    RRPC->>Client: Request (seq=11)
+    Note over Client: ❌ 网络断开
+    Note over RRPC: seq=11 超时
+    RRPC->>Redis: 持久化 (seq=11)
+    RRPC->>Client: Request (seq=12) ❌ 发送失败
+    RRPC->>Redis: 持久化 (seq=12)
+
+    Note over Client: ✅ 网络恢复
+    Client->>RRPC: WebSocket Reconnect
+    Client->>RRPC: reconnect {last_seen_seq: 10}
+    RRPC->>Redis: 查询 seq > 10 的请求
+    Redis-->>RRPC: [seq=11, seq=12]
+    RRPC->>Client: 重放 Request (seq=11)
+    Client-->>RRPC: Response (seq=11)
+    RRPC->>Client: 重放 Request (seq=12)
+    Client-->>RRPC: Response (seq=12)
 ```
 
 ### D. 多设备同名函数合并
@@ -787,7 +788,6 @@ sequenceDiagram
     participant Queue as 客户端重试队列
 
     RRPC->>Client: Request
-    Client-->>RRPC: ACK
     Client->>Client: 执行函数
     Client->>Client: SendPackage(Response) ❌ 网络抖动
     Client->>Queue: 入队 (FIFO)
