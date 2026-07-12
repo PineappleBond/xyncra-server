@@ -16,6 +16,13 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// RequestHandlerFunc
+// ---------------------------------------------------------------------------
+
+// RequestHandlerFunc processes a server-initiated request and returns response data (D-092).
+type RequestHandlerFunc func(ctx context.Context, req *protocol.PackageDataRequest) (json.RawMessage, error)
+
+// ---------------------------------------------------------------------------
 // XyncraClient
 // ---------------------------------------------------------------------------
 
@@ -34,6 +41,10 @@ type XyncraClient struct {
 	mu        sync.Mutex
 	pending   map[string]chan *protocol.PackageDataResponse
 	nextReqID uint64
+
+	// Request handler registry (D-092).
+	reqMu           sync.RWMutex
+	requestHandlers map[string]RequestHandlerFunc
 
 	// Lifecycle.
 	ctx     context.Context
@@ -81,17 +92,19 @@ func New(opts ...ClientOption) (*XyncraClient, error) {
 	}
 
 	c := &XyncraClient{
-		opts:    o,
-		db:      o.db,
-		pending: make(map[string]chan *protocol.PackageDataResponse),
-		done:    make(chan struct{}),
-		logger:  o.logger,
+		opts:            o,
+		db:              o.db,
+		pending:         make(map[string]chan *protocol.PackageDataResponse),
+		requestHandlers: make(map[string]RequestHandlerFunc),
+		done:            make(chan struct{}),
+		logger:          o.logger,
 	}
 
 	// Connection manager with callbacks wired into the dispatch layer.
 	c.connMgr = newConnectionManager(o, connectionCallbacks{
 		onResponse:   c.dispatchResponse,
 		onUpdates:    c.dispatchUpdates,
+		onRequest:    func(req *protocol.PackageDataRequest) { c.handleIncomingRequest(req) },
 		onConnect:    func() { c.logger.Info("connection established") },
 		onDisconnect: func() { c.logger.Info("connection lost") },
 	})
@@ -464,6 +477,67 @@ func (c *XyncraClient) dispatchResponse(resp *protocol.PackageDataResponse) {
 func (c *XyncraClient) dispatchUpdates(updates *protocol.PackageDataUpdates) {
 	if err := c.syncMgr.ApplyUpdates(c.ctx, updates.Updates); err != nil {
 		c.logger.Error("apply updates", "error", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Server-initiated request handling (D-092)
+// ---------------------------------------------------------------------------
+
+// RegisterRequestHandler registers a handler for server-initiated requests
+// with the given method name. When the server sends a request with a matching
+// method, the handler is invoked and its result is sent back as a response.
+// This enables the client to respond to server-initiated RPCs (D-092).
+func (c *XyncraClient) RegisterRequestHandler(method string, h RequestHandlerFunc) {
+	c.reqMu.Lock()
+	defer c.reqMu.Unlock()
+	c.requestHandlers[method] = h
+}
+
+// handleIncomingRequest processes a server-initiated request by looking up
+// the registered handler, invoking it, and sending back a response package.
+// If no handler is found, an error response is sent. This runs in the
+// readPump goroutine; handlers should be fast or spawn their own goroutines.
+func (c *XyncraClient) handleIncomingRequest(req *protocol.PackageDataRequest) {
+	c.reqMu.RLock()
+	handler, ok := c.requestHandlers[req.Method]
+	c.reqMu.RUnlock()
+
+	var resp protocol.PackageDataResponse
+	resp.ID = req.ID
+
+	// Use client context if available, otherwise fall back to Background.
+	ctx := c.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if !ok {
+		resp.Code = protocol.ResponseCodeError
+		resp.Msg = fmt.Sprintf("unknown method: %s", req.Method)
+	} else {
+		data, err := handler(ctx, req)
+		if err != nil {
+			resp.Code = protocol.ResponseCodeError
+			resp.Msg = err.Error()
+		} else {
+			resp.Code = protocol.ResponseCodeOK
+			resp.Msg = "ok"
+			resp.Data = data
+		}
+	}
+
+	respData, err := json.Marshal(resp)
+	if err != nil {
+		c.logger.Error("marshal response to server request", "error", err)
+		return
+	}
+	pkg := &protocol.Package{
+		Type: protocol.PackageTypeResponse,
+		Data: respData,
+	}
+	if err := c.connMgr.SendPackage(pkg); err != nil {
+		c.logger.Error("send response to server request", "error", err)
 	}
 }
 

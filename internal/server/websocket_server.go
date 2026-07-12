@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -309,6 +310,9 @@ type WebSocketServer struct {
 	// nodeID is a unique identifier for this node, used to skip
 	// self-originated messages in Pub/Sub (D-018).
 	nodeID string
+
+	// reverseRPC enables server-initiated requests to clients (D-092).
+	reverseRPC *ReverseRPC
 }
 
 // Ensure WebSocketServer implements Server at compile time.
@@ -416,6 +420,17 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 			MaxMessageSize:    o.maxMessageSize,
 			MessageHandler:    handler,
 		},
+	}
+
+	// Create ReverseRPC with sendToUser function (D-092).
+	s.reverseRPC = NewReverseRPC(ReverseRPCConfig{
+		SendFunc: s.sendToUser,
+		Logger:   s.logger,
+	})
+
+	// Auto-wire ReverseRPC to the message handler if it's a DefaultMessageHandler (D-092).
+	if dmh, ok := handler.(*DefaultMessageHandler); ok {
+		dmh.SetReverseRPC(s.reverseRPC)
 	}
 
 	return s, nil
@@ -601,6 +616,11 @@ func (s *WebSocketServer) removeClient(connID, userID string) {
 // 5 seconds for their write pumps to drain before forcefully closing
 // remaining connections (P2-5).
 func (s *WebSocketServer) closeAllClients() {
+	// Cancel all pending reverse RPC requests (D-092).
+	if s.reverseRPC != nil {
+		s.reverseRPC.CancelAll()
+	}
+
 	s.mu.RLock()
 	clients := make([]*Client, 0, len(s.clients))
 	for _, c := range s.clients {
@@ -681,6 +701,46 @@ func (s *WebSocketServer) broadcastLocal(userID string, updates *protocol.Packag
 			s.logger.Error("websocket: broadcast to [connID=%s]: %v", client.ConnID(), sendErr)
 		}
 	}
+}
+
+// sendToUser sends pkg to all connections of userID.
+// Returns error if no connections exist.
+func (s *WebSocketServer) sendToUser(userID string, pkg *protocol.Package) error {
+	data, err := jsonMarshal(pkg)
+	if err != nil {
+		return fmt.Errorf("reverse_rpc: marshal: %w", err)
+	}
+
+	s.mu.RLock()
+	userClients := s.clientsByUser[userID]
+	clients := make([]*Client, 0, len(userClients))
+	for _, c := range userClients {
+		clients = append(clients, c)
+	}
+	s.mu.RUnlock()
+
+	if len(clients) == 0 {
+		return fmt.Errorf("reverse_rpc: no connections for user %s", userID)
+	}
+
+	for _, client := range clients {
+		client.Send(data) // non-blocking
+	}
+	return nil
+}
+
+// ReverseRPC returns the ReverseRPC instance for server-initiated requests.
+func (s *WebSocketServer) ReverseRPC() *ReverseRPC {
+	return s.reverseRPC
+}
+
+// ServerRequest sends a request to a specific user and waits for a response.
+// This is a convenience wrapper around ReverseRPC().ServerRequest().
+func (s *WebSocketServer) ServerRequest(ctx context.Context, userID, method string, params json.RawMessage, timeout time.Duration) (*protocol.PackageDataResponse, error) {
+	if s.reverseRPC == nil {
+		return nil, fmt.Errorf("reverse_rpc: not configured")
+	}
+	return s.reverseRPC.ServerRequest(ctx, userID, method, params, timeout)
 }
 
 // handleRemoteBroadcast is called when a Pub/Sub message is received from

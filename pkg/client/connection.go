@@ -25,6 +25,8 @@ type connectionCallbacks struct {
 	onResponse func(*protocol.PackageDataResponse)
 	// onUpdates is called when a PackageTypeUpdates batch is received from the server.
 	onUpdates func(*protocol.PackageDataUpdates)
+	// onRequest is called when a server-initiated PackageTypeRequest is received (D-092).
+	onRequest func(*protocol.PackageDataRequest)
 	// onConnect is called after a WebSocket connection has been successfully established.
 	onConnect func()
 	// onDisconnect is called when an active WebSocket connection is lost unexpectedly.
@@ -368,6 +370,16 @@ func (cm *connectionManager) readPump(conn *websocket.Conn, disconnectCh chan st
 			}
 			if cm.callbacks.onUpdates != nil {
 				cm.callbacks.onUpdates(&updates)
+			}
+
+		case protocol.PackageTypeRequest:
+			var req protocol.PackageDataRequest
+			if err := json.Unmarshal(pkg.Data, &req); err != nil {
+				cm.logger.Error("decode server request", "error", err)
+				continue
+			}
+			if cm.callbacks.onRequest != nil {
+				cm.callbacks.onRequest(&req)
 			}
 		}
 	}
