@@ -2,229 +2,523 @@
 
 **Date**: 2026-07-12
 **Status**: Draft
-**Author**: Claude + User
 
 ## Table of Contents
 
-1. [Overview](#1-overview)
-2. [Background & Motivation](#2-background--motivation)
-3. [Part I: ReverseRPC 弱网优化](#3-part-i-reverserpc-弱网优化)
-4. [Part II: Agent Tool 动态工具系统](#4-part-ii-agent-tool-动态工具系统)
-5. [Protocol Extensions](#5-protocol-extensions)
-6. [Error Handling](#6-error-handling)
+1. [Current State (Existing Code)](#1-current-state-existing-code)
+2. [What Needs to Be Built](#2-what-needs-to-be-built)
+3. [Comprehensive Flow Diagram](#3-comprehensive-flow-diagram)
+4. [Part I: ReverseRPC 弱网增强](#4-part-i-reverserpc-弱网增强)
+5. [Part II: Agent Tool 动态工具系统](#5-part-ii-agent-tool-动态工具系统)
+6. [Protocol Extensions](#6-protocol-extensions)
 7. [Configuration](#7-configuration)
-8. [Integration Points](#8-integration-points)
 
 ---
 
-## 1. Overview
+## 1. Current State (Existing Code)
 
-本设计包含两个紧密关联的子系统：
+> 以下内容均基于实际代码逐行阅读，不是推测。
 
-1. **ReverseRPC 弱网优化** — 增强现有的服务端→客户端双向通信机制，使其在弱网环境下可靠工作
-2. **Agent Tool 动态工具系统** — 基于优化后的 ReverseRPC，让 Agent 能动态发现并调用客户端暴露的函数（类似 SKILL，但建立在双向通信之上）
+### 1.1 ReverseRPC 机制
 
-### 核心概念
+**文件**: `internal/server/reverse_rpc.go`
 
-- **客户端**：用户的设备（桌面端、移动端、CLI 等），通过 WebSocket 连接到服务器
-- **设备标识**：每个连接由 `(userID, deviceID)` 唯一标识，同一组合只允许一个活跃连接
-- **函数清单**：客户端连接时主动声明自己可提供哪些函数（名称、描述、参数 schema）
-- **动态工具**：Agent 运行时，通过 BeforeAgent 中间件将客户端函数动态注入为 Eino InvokableTool
+```go
+type ReverseRPC struct {
+    mu        sync.Mutex
+    pending   map[string]*reverseRPCPending  // reqID → pending
+    nextReqID uint64                         // 全局原子计数器
+    sendFunc  func(userID string, pkg *protocol.Package) error
+    logger    Logger
+}
 
-## 2. Background & Motivation
+type reverseRPCPending struct {
+    respCh chan *protocol.PackageDataResponse  // buffered cap=1
+    cancel context.CancelFunc
+}
+```
 
-### 现有架构
+**ServerRequest() 阻塞语义**:
 
-当前系统已具备：
+```go
+func (r *ReverseRPC) ServerRequest(ctx, userID, method, params, timeout) (*Response, error) {
+    reqID := fmt.Sprintf("s-%d", atomic.AddUint64(&r.nextReqID, 1))
+    ctx, cancel := context.WithTimeout(ctx, timeout)
+    defer cancel()
 
-- WebSocket 双向通信（gorilla/websocket，`/ws` endpoint）
-- ReverseRPC 机制：服务端可通过 `ReverseRPC.ServerRequest()` 主动向客户端发请求
-- 客户端通过 `RegisterRequestHandler(method, handler)` 注册处理函数
-- Agent Tool 系统基于 Eino ADK 的 `tool.BaseTool` / `InvokableTool` 接口
-- Eino `BeforeAgent` 中间件支持动态修改工具列表
+    pending := &reverseRPCPending{respCh: make(chan *Response, 1), cancel: cancel}
+    r.pending[reqID] = pending
+    defer delete(r.pending, reqID)  // 函数退出时清理
 
-### 缺失的能力
+    r.sendFunc(userID, pkg)  // 发送到客户端
 
-1. **函数发现**：服务端不知道客户端有哪些函数
-2. **设备路由**：ReverseRPC 按 userID 广播，无法定向到特定设备
-3. **弱网可靠性**：当前 ReverseRPC 在弱网下有多个痛点（见下文分析）
+    select {
+    case resp := <-pending.respCh:
+        return resp, nil          // 收到响应
+    case <-ctx.Done():
+        return nil, ctx.Err()     // 超时或取消
+    }
+}
+```
+
+**关键事实**:
+
+- **没有重试逻辑** — 发一次，等响应或超时
+- **没有 seq 追踪** — `nextReqID` 是全局计数器，格式 `"s-%d"`，不区分用户/设备
+- **没有幂等键** — `PackageDataRequest` 只有 `ID`, `Method`, `Params` 三个字段
+- **没有优先级** — 所有请求同等对待
+- **sendFunc 失败时立即返回错误** — defer 清理 pending entry
+- **CancelAll() 存在** — 可向所有 pending 发送合成响应并 cancel context
+- **DispatchResponse()** — 按 `resp.ID` 查找 pending，发送到 respCh
+
+### 1.2 WebSocket 连接管理
+
+**文件**: `internal/server/websocket_server.go`
+
+```go
+// 服务端连接存储
+clients     map[string]*Client              // connID → Client
+clientsByUser map[string]map[string]*Client  // userID → (connID → Client)
+```
+
+**sendToUser()**: 广播到该 userID 的**所有**连接
+
+```go
+func (s *WebSocketServer) sendToUser(userID string, pkg *protocol.Package) error {
+    // 取出该用户的所有连接
+    for _, client := range clients {
+        client.Send(data)  // 非阻塞，buffer 满时静默丢弃
+    }
+    return nil
+}
+```
+
+**关键事实**:
+
+- **没有 device_id** — 连接仅按 `(userID, connID)` 管理
+- **Client.Send() 是非阻塞的** — `select { case send <- msg: default: log("dropping") }`
+- **buffer 满时静默丢弃** — 不返回 error，只打日志
+- **一个 userID 可有多个连接** — 多端同时在线
+
+### 1.3 客户端连接
+
+**文件**: `pkg/client/connection.go`
+
+```go
+// 连接 URL: ?user_id=xxx（没有 device_id）
+q.Set("user_id", cm.userID)
+
+// SendPackage() — 非阻塞，但会返回 error
+select {
+case send <- data:
+default:
+    return NewConnectionError(fmt.Errorf("send buffer full"))
+}
+```
+
+**关键事实**:
+
+- **连接参数只有 user_id** — 没有 device_id
+- **SendPackage() 会返回 error**（与 server 端 Send() 不同）
+- **自动重连** — 指数退避 + 25% jitter，无限重试（`maxRetries=0`）
+- **重连后 FullSync** — 调用 `sync_updates` RPC 拉取缺失数据
+
+### 1.4 客户端处理服务端请求
+
+**文件**: `pkg/client/client.go`
+
+```go
+func (c *XyncraClient) handleIncomingRequest(req *PackageDataRequest) {
+    handler, ok := c.requestHandlers[req.Method]
+    // 调用 handler，构造 Response，通过 SendPackage() 发回
+    if err := c.connMgr.SendPackage(pkg); err != nil {
+        c.logger.Error("send response to server request", "error", err)
+        // 仅打日志，不重试
+    }
+}
+```
+
+**关键事实**:
+
+- **响应发送失败仅打日志** — 不重试，服务端会超时
+- **requestHandlers 是内存 map** — 客户端启动时注册，不会动态变化
+- **没有函数清单发现机制** — 服务端不知道客户端有哪些 handler
+
+### 1.5 协议定义
+
+**文件**: `pkg/protocol/protocol.go`
+
+```go
+type PackageType uint8
+const (
+    PackageTypeRequest  PackageType = iota  // 0: 请求
+    PackageTypeResponse                     // 1: 响应
+    PackageTypeUpdates                      // 2: 数据推送
+)
+
+type PackageDataRequest struct {
+    ID     string          `json:"id"`
+    Method string          `json:"method"`
+    Params json.RawMessage `json:"params"`
+}
+
+type PackageDataResponse struct {
+    ID   string          `json:"id"`
+    Code ResponseCode    `json:"code"`   // 0=OK, <0=error
+    Msg  string          `json:"msg"`
+    Data json.RawMessage `json:"data"`
+}
+```
+
+**关键事实**: 协议极简，只有 Request/Response/Updates 三种包类型。Request 没有幂等键、seq、优先级等字段。
+
+### 1.6 Agent Tool 系统
+
+**文件**: `internal/agent/tools/registry.go`
+
+```go
+type ToolFactory func(ctx context.Context, config map[string]any) (tool.BaseTool, error)
+
+type Registry struct {
+    factories map[string]ToolFactory
+}
+```
+
+**已注册工具**: `get_weather`, `get_current_time`, `retrieve_tool_result`
+
+**工具创建模式** (`utils.InferTool`):
+
+```go
+utils.InferTool("tool_name", "description", func(ctx, input *InputType) (*OutputType, error) {
+    // 实现
+})
+```
+
+自动生成 JSON Schema，返回 `tool.InvokableTool`。
+
+### 1.7 Agent 构建流程
+
+**文件**: `internal/agent/eino_agent.go`
+
+```go
+func (b *AgentBuilder) Build(ctx, config) (*BuiltAgent, error) {
+    // 1. 创建 LLM
+    chatModel := b.llmFactory.Create(ctx, config)
+
+    // 2. 创建工具（Registry 静态注册）
+    einoTools := b.toolRegistry.Create(ctx, config.Tools, config.ToolConfig)
+
+    // 3. 解析子 Agent → 包装为 AgentTool
+    einoTools = append(einoTools, b.resolveSubAgents(ctx, config)...)
+
+    // 4. 连接 MCP 服务器 → 获取工具
+    einoTools = append(einoTools, b.mcpBridge.Connect*(...)...)
+
+    // 5. 构建中间件链
+    handlers := b.buildMiddleware(ctx, config, chatModel)
+
+    // 6. 创建 Eino Agent
+    agent := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+        ToolsConfig: compose.ToolsNodeConfig{Tools: einoTools},
+        Handlers:    handlers,
+    })
+    runner := adk.NewRunner(ctx, runnerCfg)
+}
+```
+
+**中间件链** (`middleware.go`):
+
+```go
+// 按顺序注册:
+1. PatchToolCalls (if enabled)
+2. Summarization (if enabled)
+3. ToolReduction (if enabled)
+// 没有 BeforeAgent 中间件用于动态工具注入
+```
+
+### 1.8 现有代码的弱网痛点总结
+
+| 痛点 | 代码位置 | 影响 |
+|------|----------|------|
+| Send() buffer 满时静默丢包 | `websocket_client.go:Send()` | 请求丢失，调用方不知道 |
+| 客户端响应发送失败仅打日志 | `client.go:handleIncomingRequest()` | 响应丢失，服务端超时 |
+| 断连后 pending 请求不取消 | `reverse_rpc.go:ServerRequest()` | 等到超时才返回错误 |
+| sendToUser 广播到所有连接 | `websocket_server.go:sendToUser()` | 无法定向到特定设备 |
+| 没有函数发现机制 | 全局 | 服务端不知道客户端有哪些能力 |
 
 ---
 
-## 3. Part I: ReverseRPC 弱网优化
+## 2. What Needs to Be Built
 
-### 3.1 现有问题分析
+基于现有代码，需要新增以下能力：
 
-| 严重度 | 问题 | 位置 |
-|--------|------|------|
-| 🔴 关键 | 客户端发送响应失败后无重试，响应静默丢失 | `client.go:539-541` |
-| 🔴 关键 | 断连重连后无请求重放，pending 请求全部超时 | `client.go:314-316` |
-| 🔴 关键 | pending 请求无上限，高负载下内存无限增长 | `reverse_rpc.go:17` |
-| 🟡 中等 | send buffer 满时静默丢包，调用方感知不到 | `websocket_client.go:176-180` |
-| 🟡 中等 | 服务端不感知连接健康状态，发出去不代表收到了 | `websocket_server.go:726-728` |
+### 2.1 连接模型变更
 
-### 3.2 增强后的请求生命周期
+**现状**: `(userID, connID) → Client`，connID 是服务端生成的 UUID
+
+**目标**: `(userID, deviceID) → Client`，deviceID 是客户端提供的设备标识
+
+**改动**:
+
+- WebSocket 连接 URL 新增 `device_id` 参数: `?user_id=xxx&device_id=yyy`
+- 服务端连接存储改为 `clientsByDevice[userID][deviceID]*Client`
+- 同一 `(userID, deviceID)` 只允许一个活跃连接（新连接替换旧连接）
+- `sendToUser` → `sendToDevice(userID, deviceID)` 定向发送
+
+### 2.2 函数清单发现
+
+**现状**: 客户端通过 `RegisterRequestHandler(method, handler)` 注册处理函数，服务端不知道
+
+**目标**: 客户端连接后发送 Function Manifest，服务端缓存每个设备的函数清单
+
+### 2.3 Agent Tool 动态注入
+
+**现状**: 工具在 `AgentBuilder.Build()` 时静态创建
+
+**目标**: 通过 `BeforeAgent` 中间件，每次 Agent Run 前从缓存动态创建客户端函数工具
+
+### 2.4 ReverseRPC 弱网增强
+
+**现状**: 发一次，等响应或超时，无重试
+
+**目标**: 超时后写入 Redis，支持断连重连后重放，配合幂等键防止重复执行
+
+---
+
+## 3. Comprehensive Flow Diagram
+
+> 一张图覆盖所有场景：正常、超时、重连内恢复、超时后重放、重放又失败、设备替换。
+
+```mermaid
+flowchart TD
+    Start["Agent Tool 调用<br/>ServerRequest(userID, deviceID, method, params, timeout)"]
+
+    Start --> CheckDevice{"设备在线?<br/>clientsByDevice<br/>[userID][deviceID]"}
+    CheckDevice -->|不在线| Offline["返回 ErrDeviceOffline"]
+
+    CheckDevice -->|在线| Send["发送到设备<br/>sendToDevice()"]
+    Send --> SendOK{"发送成功?"}
+    SendOK -->|失败: buffer 满 / 连接断开| SendFail["返回 ErrSendFailed"]
+
+    SendOK -->|成功| Wait["阻塞等待<br/>select respCh / ctx.Done()"]
+
+    Wait --> Response{"收到 Response?"}
+    Response -->|Yes, 在 timeout 内| Success["✅ 返回结果"]
+
+    Response -->|No, timeout 到期| Timeout["ctx.Done() 触发"]
+    Timeout --> Persist["异步写入 Redis<br/>pending:{userID}:{deviceID}<br/>+ idempotency_key + retry_count=0"]
+    Persist --> ReturnErr["返回 ErrRequestTimeout 给调用方"]
+
+    ReturnErr --> ClientReconnect{"客户端重连?<br/>(可能很久以后)"}
+    ClientReconnect -->|不重连| RedisTTL["Redis TTL 24h 到期<br/>自动清理 💀"]
+
+    ClientReconnect -->|重连| Reconnect["客户端连接<br/>发送 reconnect{last_seen_seq}"]
+    Reconnect --> FindMissing["服务端比较<br/>last_sent_seq vs last_seen_seq<br/>找到缺失请求"]
+    FindMissing --> Replay["重放缺失请求"]
+    Replay --> ReplayResult{"收到 Response?"}
+
+    ReplayResult -->|Yes| ReplaySuccess["✅ Response 到达<br/>（原调用方已离开，结果记录日志）"]
+    ReplayResult -->|No, 又超时| CheckRetry{"retry_count < max?"}
+    CheckRetry -->|Yes| IncRetry["retry_count++<br/>更新 Redis"]
+    IncRetry --> ClientReconnect
+    CheckRetry -->|No| GiveUp["从 Redis 删除<br/>放弃该请求 💀"]
+
+    style Success fill:#e8f5e9
+    style Offline fill:#ffebee
+    style SendFail fill:#ffebee
+    style ReturnErr fill:#fff3e0
+    style GiveUp fill:#ffebee
+    style RedisTTL fill:#ffebee
+    style ReplaySuccess fill:#e8f5e9
+```
+
+### 3.1 关键路径说明
+
+| 路径 | 触发条件 | 结果 |
+|------|----------|------|
+| **正常** | 网络稳定 | 直接收到 Response，返回结果 |
+| **超时→重连→成功** | 断连但超时内重连 | 通过 reconnect+seq 补发 → 在 timeout 内收到 Response → 调用成功 |
+| **超时→Redis→重放** | 断连超过 timeout | 返回超时错误 → Redis 持久化 → 重连后重放 |
+| **重放又超时** | 网络持续不稳定 | retry_count++ → 最多重放 N 次后放弃 |
+| **设备替换** | 同 (userID, deviceID) 新连接 | 旧连接 Close → 旧 pending 立即 fail |
+
+### 3.2 阻塞等待机制详解
 
 ```mermaid
 sequenceDiagram
-    participant Server
+    participant Caller as 调用方
+    participant RRPC as ServerRequest()
+    participant WS as WebSocket
     participant Redis
     participant Client
 
-    Server->>Client: ① Request (id, method, params,<br/>idempotency_key, priority, seq)
+    Note over Caller: 调用 ServerRequest(timeout=30s)
+    Caller->>RRPC: 进入阻塞
 
-    Note over Client: 执行函数...
+    RRPC->>WS: 发送 Request (id="s-42")
+    RRPC->>RRPC: select { case respCh: / case ctx.Done(): }
 
-    alt 正常响应
-        Client-->>Server: ② Response (id, code, data)
-    else 网络中断 / 超时
-        Note over Server: 未收到 Response → 写入 Redis pending 队列
-        Server->>Redis: 持久化 pending request
-        Note over Server: 返回超时错误给调用方
-    else 断连后重连
-        Note over Client: 客户端重连, 发送 reconnect (last_seen_seq)
-        Note over Server: 从 Redis 补发 seq > last_seen_seq 的请求
-        Server->>Client: ③ 重放 Request
-        Note over Client: 幂等检查 → 不重复执行
-        Client-->>Server: ④ Response
+    alt 场景A: 正常响应
+        WS->>Client: Request
+        Client->>Client: 执行函数
+        Client-->>WS: Response (id="s-42")
+        WS-->>RRPC: respCh 收到
+        RRPC-->>Caller: 返回结果 ✅ (耗时 0.1s)
+    end
+
+    alt 场景B: 超时后 Redis 持久化
+        Note over Client: ❌ 网络断开
+        Note over RRPC: ⏰ 30s 超时
+        RRPC->>Redis: go persistToRedis(pending)
+        RRPC-->>Caller: 返回 ErrRequestTimeout
+        Note over Caller: 调用方立即恢复，不等 Redis
+
+        Note over Client: ✅ 60s 后重连
+        Client->>RRPC: reconnect{last_seen_seq: 41}
+        RRPC->>Redis: 查询缺失请求
+        RRPC->>Client: 重放 Request
+        Client->>Client: 幂等检查 → 执行
+        Client-->>RRPC: Response
+        Note over RRPC: 原调用方已离开<br/>结果记录日志
     end
 ```
 
-> **设计决策**：不使用 ACK 机制。服务端以 Response 作为唯一的送达确认。超时未收到 Response 则写入 Redis 等待重连重放，配合幂等键防止重复执行。这比 ACK + 重试更简洁，且功能等价。
+**核心原则**:
 
-### 3.3 层级 1：基础加固
+- `ServerRequest()` 在 timeout 内**一定**返回（成功或错误）
+- Redis 写入是**异步副作用**（`go persistToRedis()`），不影响调用方
+- 调用方拿到 `ErrRequestTimeout` 后自行决策（重试 / 告知用户 / 换策略）
+- Redis 重放是独立的后台流程，与原调用方**完全解耦**
 
-#### 3.3.1 Pending 请求上限与背压
+---
+
+## 4. Part I: ReverseRPC 弱网增强
+
+### 4.1 连接模型变更: (userID, deviceID)
+
+**改动文件**: `internal/server/websocket_server.go`
+
+```go
+// 现有:
+clientsByUser map[string]map[string]*Client  // userID → (connID → Client)
+
+// 新增:
+clientsByDevice map[string]map[string]*Client  // userID → (deviceID → Client)
+```
+
+**连接建立流程**:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant WS as WebSocketServer
+    participant DR as DeviceRegistry
+
+    Client->>WS: WebSocket Connect<br/>?user_id=U1&device_id=D1
+    WS->>DR: Register(U1, D1, conn)
+
+    alt (U1, D1) 已有活跃连接
+        DR->>DR: 向旧连接发送 Close Frame<br/>reason: "replaced"
+        DR->>DR: 旧连接的 pending 请求立即 fail<br/>(CancelAll for this device)
+        DR->>DR: 移除旧连接
+    end
+
+    DR->>DR: clientsByDevice[U1][D1] = conn
+    DR-->>WS: OK
+    WS-->>Client: 连接成功
+```
+
+### 4.2 Send 反馈增强
+
+**改动文件**: `internal/server/websocket_client.go`
+
+```go
+// 现有 (静默丢弃):
+func (c *Client) Send(msg []byte) {
+    select {
+    case c.send <- msg:
+    default:
+        log.Printf("send buffer full, dropping")  // 静默丢弃
+    }
+}
+
+// 目标 (返回 error):
+func (c *Client) Send(msg []byte) error {
+    if c.closed {
+        return ErrClientClosed
+    }
+    select {
+    case c.send <- msg:
+        return nil
+    default:
+        return ErrSendBufferFull
+    }
+}
+```
+
+### 4.3 连接断开 → 立即 Fail Pending
+
+当检测到连接断开时，立即 fail 该设备的所有 pending 请求：
 
 ```mermaid
 flowchart TD
-    A["ServerRequest()"] --> B{"pending[userDevice].count < limit?"}
-    B -->|Yes| C["创建 pending entry<br/>发送请求"]
-    B -->|No| D["返回 ErrTooManyPending"]
-
-    style C fill:#e8f5e9
-    style D fill:#ffebee
+    A["readPump 检测到断开"] --> B["Client.Close()"]
+    B --> C["通知 WebSocketServer"]
+    C --> D["ReverseRPC.CancelDevice(deviceID)"]
+    D --> E["遍历 pending map<br/>找到该设备的所有请求"]
+    E --> F["向 respCh 发送 ErrDeviceDisconnected"]
+    F --> G["阻塞调用方立即收到错误"]
 ```
 
-- 每个 `(userID, deviceID)` 最多 N 个 pending 请求（可配置，默认 50）
-- 超出返回 `ErrTooManyPending`，调用方可感知并决策
+### 4.4 幂等键与 Redis 持久化
 
-#### 3.3.2 Send 失败反馈
+**增强 PackageDataRequest**:
 
-- `Client.Send()` 从非阻塞 `select default` 改为返回 `error`
-- buffer 满时返回 `ErrSendBufferFull`
-- 调用方（DeviceReverseRPC）收到错误后可选择重试或快速失败
+```go
+// 现有:
+type PackageDataRequest struct {
+    ID     string          `json:"id"`
+    Method string          `json:"method"`
+    Params json.RawMessage `json:"params"`
+}
 
-#### 3.3.3 连接健康预检
-
-```mermaid
-flowchart TD
-    A["sendToDevice()"] --> B{"conn.lastPong > 90s ago?"}
-    B -->|No| C["发送请求"]
-    B -->|Yes| D["标记连接不健康<br/>返回 ErrConnectionUnhealthy"]
-
-    style C fill:#e8f5e9
-    style D fill:#ffebee
+// 增强 (新增字段，向后兼容):
+type PackageDataRequest struct {
+    ID             string          `json:"id"`
+    Method         string          `json:"method"`
+    Params         json.RawMessage `json:"params"`
+    IdempotencyKey string          `json:"idempotency_key,omitempty"`  // 新增
+    Seq            uint64          `json:"seq,omitempty"`              // 新增：per-device 序号
+}
 ```
 
-#### 3.3.4 连接断开 → 立即 Fail Pending
-
-当检测到连接断开时，立即 fail 该 `(userID, deviceID)` 下所有 pending 请求（不等 timeout）。
-
-### 3.4 层级 2：请求可靠性
-
-> **设计决策**：不使用 ACK 机制。ACK 的功能（确认送达 + 触发重试）被 Redis 持久化 + 重连重放完全覆盖。移除 ACK 后层级 2 简化为：幂等性 + 客户端响应重试队列。
-
-#### 3.4.1 客户端响应重试队列
-
-```mermaid
-flowchart TD
-    A["客户端执行完函数"] --> B{"SendPackage 成功?"}
-    B -->|Yes| C["响应已发送"]
-    B -->|No| D{"重试队列 < 100?"}
-    D -->|Yes| E["入队 (FIFO)"]
-    D -->|No| F["丢弃最旧的请求"]
-    E --> G["网络恢复后重发"]
-
-    style C fill:#e8f5e9
-    style F fill:#ffebee
-```
-
-#### 3.4.2 幂等性保证
-
-- 每个请求携带 `idempotency_key`（服务端生成，基于 reqID）
-- 客户端维护最近 N 个 key 的 LRU 缓存（默认 1000）
-- 重复 key 直接返回上次结果，不重复执行
-
-### 3.5 层级 3：断连重放
-
-#### 3.5.1 服务端请求持久化
-
-- 超时未收到 Response 的请求写入 Redis
-- Key: `rrpc:pending:{userID}:{deviceID}`
-- TTL: 24h（最终兜底）
-- 客户端重连后服务端检查并重放
-
-#### 3.5.2 有界重放（Bounded Replay）
-
-重放请求也可能再次超时（网络仍然不稳定）。为避免无限重放循环，引入 `retry_count`：
-
-```mermaid
-flowchart TD
-    A["Request seq=5 发出"] --> B{"收到 Response?"}
-    B -->|Yes| C["正常完成"]
-    B -->|Timeout| D["写入 Redis<br/>retry_count=0"]
-    D --> E["返回超时给调用方"]
-
-    F["客户端重连"] --> G["重放 seq=5"]
-    G --> H{"收到 Response?"}
-    H -->|Yes| C
-    H -->|Timeout| I{"retry_count < max_retries?"}
-    I -->|Yes| J["retry_count++<br/>更新 Redis"]
-    J --> K["等待下次重连"]
-    K --> G
-    I -->|No| L["从 Redis 删除<br/>放弃该请求"]
-
-    style C fill:#e8f5e9
-    style L fill:#ffebee
-```
-
-**PendingRequest 结构**：
+**Redis 持久化结构**:
 
 ```go
 type PendingRequest struct {
     ID             string          `json:"id"`
+    UserID         string          `json:"user_id"`
+    DeviceID       string          `json:"device_id"`
     Method         string          `json:"method"`
     Params         json.RawMessage `json:"params"`
     IdempotencyKey string          `json:"idempotency_key"`
     Seq            uint64          `json:"seq"`
-    RetryCount     int             `json:"retry_count"`   // 已重试次数
-    MaxRetries     int             `json:"max_retries"`   // 最大重放次数（默认 3）
-    CreatedAt      time.Time       `json:"created_at"`    // 原始请求时间
+    RetryCount     int             `json:"retry_count"`
+    MaxRetries     int             `json:"max_retries"`      // 默认 3
+    CreatedAt      time.Time       `json:"created_at"`
 }
 ```
 
-**重放策略**：
+**Redis Key 设计**:
 
-- 每次重放超时 → `retry_count++`
-- `retry_count >= max_retries` → 放弃，从 Redis 删除
-- 默认 `max_retries = 3`（可配置）
-- 重放间隔：每次重连时重放，不主动定时重试
-
-#### 3.5.3 客户端离线队列
-
-```mermaid
-flowchart LR
-    A["设备 D1 断连"] --> B["服务端将发给 D1 的请求<br/>写入 Redis List"]
-    C["D1 重连"] --> D["发送 reconnect<br/>(last_seen_seq)"]
-    D --> E["服务端补发缺失请求"]
-    E --> F["D1 处理并返回结果"]
-
-    style B fill:#fff3e0
-    style E fill:#e8f5e9
+```text
+rrpc:pending:{userID}:{deviceID}  → Redis List of PendingRequest (JSON)
+rrpc:device:seq:{userID}:{deviceID}  → last_sent_seq (integer)
 ```
 
-#### 3.5.3 重连握手增强
+### 4.5 重连握手与请求补发
+
+**新增 Protocol 概念**: 客户端重连后发送 `reconnect` 方法:
 
 ```mermaid
 sequenceDiagram
@@ -232,367 +526,50 @@ sequenceDiagram
     participant Server
 
     Client->>Server: WebSocket Connect<br/>?user_id=U1&device_id=D1
-    Client->>Server: reconnect {last_seen_seq: 42}
-    Server->>Server: 查询 seq > 42 的待重放请求
-    Server->>Client: 补发 Request seq=43, seq=44, ...
-    Client-->>Server: Response (逐个)
+    Client->>Server: Request {method: "system.reconnect",<br/>params: {last_seen_seq: 42}}
+
+    Server->>Server: 查询 rrpc:device:seq:U1:D1<br/>得到 last_sent_seq = 45
+    Server->>Server: 缺失 seq = 43, 44, 45
+    Server->>Redis: LRANGE rrpc:pending:U1:D1
+
+    loop 逐个补发
+        Server->>Client: Request (seq=43, idempotency_key=...)
+        Client->>Client: 幂等检查 → 新请求
+        Client-->>Server: Response (seq=43)
+    end
+
+    Server->>Server: 从 Redis 移除已响应的请求
 ```
 
-### 3.6 自适应超时策略
+### 4.6 客户端侧增强
+
+**文件**: `pkg/client/client.go`
+
+1. **连接时提供 device_id**: URL 参数新增 `device_id`
+2. **幂等 key 缓存**: LRU 缓存最近 1000 个已处理的 idempotency_key
+3. **响应重试队列**: `SendPackage()` 失败时入队，网络恢复后重发
+4. **Function Manifest 发送**: 连接成功后发送函数清单
+
+### 4.7 自适应超时
 
 ```text
 基础超时 = 30s
 实际超时 = 基础超时 × 网络质量因子
 
-网络质量因子：
-  - 最近 10 次请求平均 RTT < 200ms → 1.0x
+网络质量因子:
+  - 最近 10 次 RTT < 200ms → 1.0x
   - RTT 200ms-1s → 1.5x
   - RTT 1s-5s → 2.0x
   - 有丢包记录 → 2.5x
 ```
 
-### 3.7 阻塞等待机制与极端场景分析
-
-#### 3.7.1 ServerRequest 阻塞语义
-
-`ServerRequest()` 是一个同步阻塞调用，内部通过 `select` 等待 channel 或 context 超时：
-
-```go
-func (r *ReverseRPC) ServerRequest(ctx context.Context, userID, deviceID, method string, params json.RawMessage, timeout time.Duration) (json.RawMessage, error) {
-    pending := &reverseRPCPending{
-        respCh: make(chan *protocol.PackageDataResponse, 1),
-        ctx:    ctx,
-    }
-    // ... store pending, send request via WebSocket ...
-
-    select {
-    case resp := <-pending.respCh:
-        return resp.Data, nil  // ✅ 收到 Response
-    case <-ctx.Done():
-        // 超时或取消 → 异步写入 Redis（不阻塞调用方）
-        go r.persistToRedis(pending)
-        return nil, ErrRequestTimeout
-    }
-}
-```
-
-**核心原则**：
-
-- 调用方在 timeout 内**一定**会得到结果（成功或错误），不会无限阻塞
-- Redis 写入是**异步副作用**，调用方不感知
-- `context.WithTimeout` 控制阻塞上限
-
-#### 3.7.2 服务端 seq 追踪
-
-服务端为每个 `(userID, deviceID)` 维护两个关键状态：
-
-```go
-type DeviceState struct {
-    LastSentSeq  uint64  // 发送给该设备的最新 seq
-    LastSeenSeq  uint64  // 该设备报告已处理的最新 seq（重连时更新）
-}
-```
-
-- `LastSentSeq`：每次发出 Request 时递增
-- `LastSeenSeq`：客户端重连时通过 `reconnect{last_seen_seq}` 上报
-
-当 `LastSeenSeq < LastSentSeq` 时，说明有请求缺失，需要补发。
-
-#### 3.7.3 全场景时序
-
-##### 场景 1：网络稳定（正常路径）
-
-```mermaid
-sequenceDiagram
-    participant Caller as 调用方
-    participant RRPC as ServerRequest
-    participant WS as WebSocket
-    participant Client
-
-    Note over Caller: T=0
-    Caller->>RRPC: ServerRequest(timeout=30s)
-    RRPC->>WS: Request (seq=5)
-    RRPC->>RRPC: select { respCh / ctx.Done() }
-    WS->>Client: Request (seq=5)
-    Client->>Client: 执行函数
-    Client-->>WS: Response (seq=5)
-    WS-->>RRPC: respCh 收到
-    RRPC-->>Caller: T=0.1s: 返回结果 ✅
-```
-
-##### 场景 2：短暂断连，超时内重连成功
-
-```mermaid
-sequenceDiagram
-    participant Caller as 调用方
-    participant RRPC as ServerRequest
-    participant WS as WebSocket
-    participant Client
-
-    Note over Caller: T=0
-    Caller->>RRPC: ServerRequest(timeout=30s)
-    RRPC->>WS: Request (seq=5)
-    RRPC->>RRPC: select { respCh / ctx.Done() }
-
-    Note over Client: ❌ T=2: 网络中断
-    Note over RRPC: 继续阻塞等待...
-    Note over WS: 连接断开
-
-    Note over Client: ✅ T=10: 客户端重连
-    Client->>RRPC: reconnect {last_seen_seq: 4}
-    RRPC->>RRPC: last_seen_seq(4) < last_sent_seq(5)<br/>发现缺失 seq=5
-    RRPC->>Client: 补发 Request (seq=5)
-    Client->>Client: 幂等检查 → 执行函数
-    Client-->>RRPC: Response (seq=5)
-
-    Note over RRPC: respCh 收到 Response！
-    RRPC-->>Caller: T=11: 返回结果 ✅
-    Note over Caller: 30s 超时内成功！Redis 未介入
-```
-
-##### 场景 3：断连超过超时时间
-
-```mermaid
-sequenceDiagram
-    participant Caller as 调用方
-    participant RRPC as ServerRequest
-    participant Redis
-    participant Client
-
-    Note over Caller: T=0
-    Caller->>RRPC: ServerRequest(timeout=30s)
-    RRPC->>Client: Request (seq=5)
-
-    Note over Client: ❌ 网络中断
-    Note over RRPC: 阻塞等待中...
-
-    Note over RRPC: ⏰ T=30: 超时！
-    RRPC->>Redis: 异步写入 pending (seq=5, retry_count=0)
-    RRPC-->>Caller: T=30: 返回 ErrRequestTimeout
-    Note over Caller: 调用方拿到错误<br/>LLM 可以决策重试/告知用户
-
-    Note over Client: ✅ T=60: 客户端重连
-    Client->>RRPC: reconnect {last_seen_seq: 4}
-    RRPC->>Redis: 查询 seq > 4 的 pending
-    Redis-->>RRPC: [Request seq=5]
-    RRPC->>Client: 补发 Request (seq=5)
-    Client->>Client: 幂等检查 → 执行
-    Client-->>RRPC: Response (seq=5)
-    Note over RRPC: 原始调用方已离开<br/>结果丢弃或记录日志
-```
-
-##### 场景 4：重放后再次超时（有界重放）
-
-```mermaid
-sequenceDiagram
-    participant RRPC as ServerRequest
-    participant Redis
-    participant Client
-
-    Note over RRPC: T=0: 第一次发送
-    RRPC->>Client: Request (seq=5, retry_count=0)
-    Note over Client: ❌ 网络中断
-    Note over RRPC: T=30: 超时
-    RRPC->>Redis: 写入 pending (retry_count=0)
-
-    Note over Client: ✅ T=60: 重连
-    Client->>RRPC: reconnect {last_seen_seq: 4}
-    RRPC->>Client: 重放 Request (seq=5)
-    Note over Client: ❌ 又断了！
-    Note over RRPC: T=90: 再次超时
-    RRPC->>Redis: 更新 retry_count=1
-
-    Note over Client: ✅ T=120: 再次重连
-    Client->>RRPC: reconnect {last_seen_seq: 4}
-    RRPC->>Redis: 查询 → seq=5 (retry_count=1)
-    RRPC->>Client: 再次重放 Request (seq=5)
-    Note over Client: ❌ 又断了！
-    Note over RRPC: T=150: 第三次超时
-    RRPC->>Redis: 更新 retry_count=2
-
-    Note over Client: ✅ T=180: 再次重连
-    Client->>RRPC: reconnect {last_seen_seq: 4}
-    RRPC->>Redis: 查询 → seq=5 (retry_count=2)
-    RRPC->>Client: 最后一次重放 Request (seq=5)
-    Note over Client: ❌ 又断了！
-    Note over RRPC: T=210: 第四次超时
-    RRPC->>Redis: retry_count=3 >= max_retries=3
-    RRPC->>Redis: 删除 pending seq=5 💀
-    Note over RRPC: 放弃该请求
-```
-
-##### 场景 5：多请求断连 + 批量重放
-
-```mermaid
-sequenceDiagram
-    participant RRPC as ServerRequest
-    participant Redis
-    participant Client
-
-    RRPC->>Client: Request (seq=5) ✅ → Response
-    RRPC->>Client: Request (seq=6)
-    Note over Client: ❌ 网络中断
-    Note over RRPC: seq=6 超时
-    RRPC->>Redis: 写入 pending (seq=6)
-    RRPC->>Client: Request (seq=7) ❌ 发送失败
-    RRPC->>Redis: 写入 pending (seq=7)
-
-    Note over Client: ✅ T=60: 重连
-    Client->>RRPC: reconnect {last_seen_seq: 5}
-    RRPC->>Redis: 查询 seq > 5 的 pending
-    Redis-->>RRPC: [seq=6, seq=7]
-    RRPC->>Client: 补发 Request (seq=6)
-    Client-->>RRPC: Response (seq=6) ✅
-    RRPC->>Client: 补发 Request (seq=7)
-    Client-->>RRPC: Response (seq=7) ✅
-```
-
-##### 场景 6：设备替换（同 userID + deviceID 重连）
-
-```mermaid
-sequenceDiagram
-    participant OldClient as 旧客户端
-    participant DR as DeviceRegistry
-    participant RRPC as DeviceReverseRPC
-    participant NewClient as 新客户端
-
-    Note over OldClient: 旧连接活跃
-    OldClient->>DR: 已注册 (U1, D1)
-
-    Note over NewClient: 新连接到达 (U1, D1)
-    NewClient->>DR: Register(U1, D1, newConn)
-    DR->>DR: 发现 (U1, D1) 已存在
-
-    DR->>OldClient: 发送 Close Frame<br/>reason: "replaced by new connection"
-    DR->>RRPC: Fail 所有 (U1, D1) 的 pending 请求
-    RRPC->>RRPC: pending.respCh <- ErrConnectionReplaced
-    Note over RRPC: 阻塞调用方立即收到错误
-
-    DR->>DR: 移除旧连接
-    DR->>DR: 注册新连接 (U1, D1, newConn)
-    NewClient->>DR: 连接成功
-    NewClient->>RRPC: Function Manifest
-```
-
-##### 场景 7：并发请求 + 背压
-
-```mermaid
-sequenceDiagram
-    participant C1 as 调用方 1
-    participant C2 as 调用方 2
-    participant C3 as 调用方 3
-    participant RRPC as DeviceReverseRPC
-    participant Client
-
-    Note over RRPC: max_pending = 2
-
-    C1->>RRPC: ServerRequest()
-    RRPC->>RRPC: pending.count = 0 < 2 ✅
-    RRPC->>Client: Request (seq=1)
-
-    C2->>RRPC: ServerRequest()
-    RRPC->>RRPC: pending.count = 1 < 2 ✅
-    RRPC->>Client: Request (seq=2)
-
-    C3->>RRPC: ServerRequest()
-    RRPC->>RRPC: pending.count = 2 >= 2 ❌
-    RRPC-->>C3: 返回 ErrTooManyPending
-
-    Client-->>RRPC: Response (seq=1)
-    RRPC-->>C1: 返回结果 ✅
-    RRPC->>RRPC: pending.count = 1
-
-    C3->>RRPC: ServerRequest() 重试
-    RRPC->>RRPC: pending.count = 1 < 2 ✅
-    RRPC->>Client: Request (seq=3)
-```
-
-#### 3.7.4 场景总结
-
-| 场景 | 超时内重连？ | 重放结果 | 调用方体验 |
-|------|-------------|----------|-----------|
-| 网络稳定 | N/A | 直接成功 | ✅ 正常返回 |
-| 短暂断连 | ✅ 是 | 补发成功 | ✅ 超时内返回 |
-| 长时间断连 | ❌ 否 | Redis 重放 | ❌ 首次超时返回错误 |
-| 重放又超时 | ❌ 否 | retry_count++ | ❌ 最多重放 3 次后放弃 |
-| 多请求断连 | ✅ 是 | 批量补发 | ✅ 各请求独立处理 |
-| 设备替换 | N/A | 旧请求 fail | ❌ 收到 ErrConnectionReplaced |
-| 并发过载 | N/A | 拒绝新请求 | ❌ 收到 ErrTooManyPending |
-
 ---
 
-## 4. Part II: Agent Tool 动态工具系统
+## 5. Part II: Agent Tool 动态工具系统
 
-### 4.1 整体架构
+### 5.1 函数清单协议 (Function Manifest)
 
-```mermaid
-graph TB
-    subgraph "Agent Runtime"
-        A[ChatModelAgent] --> B[BeforeAgent Middleware<br/>DynamicToolProvider]
-        B --> C[ClientFunctionRegistry]
-        B --> D[DeviceRegistry]
-        B --> E["创建 InvokableTool 列表<br/>每个客户端函数一个工具"]
-        E --> F["LLM 看到并调用工具"]
-        F --> G["InvokableTool.InvokableRun()"]
-        G --> H[DeviceReverseRPC]
-    end
-
-    subgraph "WebSocket Layer"
-        H --> I["ReverseRPC.ServerRequest<br/>(userID, deviceID, method, params)"]
-        I --> J["sendToDevice<br/>定向发送到 (userID, deviceID)"]
-    end
-
-    subgraph "Client Device"
-        J --> K["handleIncomingRequest<br/>匹配 method → 执行本地函数"]
-        K --> L["返回 Response"]
-    end
-
-    style B fill:#e1f5fe
-    style C fill:#fff3e0
-    style D fill:#fff3e0
-    style E fill:#e8f5e9
-```
-
-### 4.2 核心组件
-
-| 组件 | 职责 | 存储 |
-|------|------|------|
-| **DeviceRegistry** | 维护 `(userID, deviceID) → *Client` 映射，强制一对一 | 内存 + Redis |
-| **ClientFunctionRegistry** | 缓存每个设备的函数清单，带 TTL 过期 | 内存（主）+ Redis（持久化） |
-| **DynamicToolProvider** | BeforeAgent 中间件，每次 Run 前从缓存创建工具 | 无状态 |
-| **DeviceReverseRPC** | 增强 ReverseRPC，支持 `(userID, deviceID)` 定向发送 + 全部弱网优化 | 内存 |
-| **FunctionManifestHandler** | 处理客户端连接时发送的函数清单注册 | 无状态 |
-
-### 4.2.1 (userID, deviceID) 唯一连接约束（新约束）
-
-> **重要**：当前服务端代码仅按 `userID` 管理连接（`clientsByUser[userID]map[connID]*Client`），不追踪 `deviceID`。本设计引入新约束：**每个 `(userID, deviceID)` 组合只允许一个活跃连接**。
-
-**处理流程**：
-
-```mermaid
-flowchart TD
-    A["新连接: userID=U1, deviceID=D1"] --> B{"(U1, D1) 已有活跃连接?"}
-    B -->|No| C["注册新连接<br/>clientsByDevice[U1][D1] = conn"]
-    B -->|Yes| D["向旧连接发送 Close Frame<br/>（reason: replaced by new connection）"]
-    D --> E["移除旧连接"]
-    E --> C
-    C --> F["旧连接的 pending 请求<br/>立即 fail（ErrConnectionReplaced）"]
-
-    style C fill:#e8f5e9
-    style D fill:#fff3e0
-```
-
-**实现要点**：
-
-- 连接注册从 `clientsByUser[userID]map[connID]*Client` 改为 `clientsByDevice[userID]map[deviceID]*Client`
-- WebSocket 连接参数新增 `device_id`：`/ws?user_id=U1&device_id=D1`
-- 客户端 SDK 必须在连接时提供 `deviceID`（可由客户端生成或使用设备标识）
-- 旧连接被替换时，其 pending 请求立即失败（不等 timeout）
-- `sendToUser` 改为 `sendToDevice(userID, deviceID)` 定向发送
-
-### 4.3 函数清单协议（Function Manifest）
-
-客户端连接后主动向服务端声明自己有哪些函数：
+客户端连接成功后，发送 Function Manifest 声明自己的能力:
 
 ```json
 {
@@ -606,200 +583,36 @@ flowchart TD
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {
-            "type": "string",
-            "description": "文件路径"
-          }
+          "path": {"type": "string", "description": "文件路径"}
         },
         "required": ["path"]
       },
-      "returns": {
-        "type": "string",
-        "description": "文件内容"
-      },
+      "returns": {"type": "string", "description": "文件内容"},
       "tags": ["filesystem", "read"],
       "timeout_ms": 5000
-    },
-    {
-      "name": "execute_command",
-      "description": "在本地执行 shell 命令",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "command": { "type": "string", "description": "Shell 命令" },
-          "timeout_ms": { "type": "integer", "description": "超时时间" }
-        },
-        "required": ["command"]
-      },
-      "tags": ["system", "execute"],
-      "timeout_ms": 30000
     }
   ]
 }
 ```
 
-### 4.4 设备连接与函数注册流程
+### 5.2 服务端函数缓存
 
-```mermaid
-sequenceDiagram
-    participant Client as 客户端
-    participant WS as WebSocketServer
-    participant DR as DeviceRegistry
-    participant FMR as FunctionManifestHandler
-    participant CFR as ClientFunctionRegistry
-
-    Client->>WS: WebSocket Connect<br/>?user_id=U1&device_id=D1
-    WS->>DR: Register(U1, D1, conn)
-    DR-->>WS: OK / ErrAlreadyConnected
-
-    alt 已有同 (userID, deviceID) 连接
-        DR->>DR: 踢掉旧连接<br/>(发送 Close Frame, 拒绝新连接)<br/>策略: 旧连接主动下线，新连接被拒绝<br/>原因: 同一设备不应有两个活跃连接
-    end
-
-    WS-->>Client: 连接成功
-    Client->>FMR: 发送 Function Manifest
-    FMR->>CFR: Cache(U1, D1, functions, TTL=5min)
-    CFR-->>FMR: OK
-    FMR-->>Client: OK (注册成功)
-```
-
-### 4.5 Agent 调用客户端函数的完整流程
-
-```mermaid
-sequenceDiagram
-    participant LLM as LLM
-    participant MW as DynamicToolProvider<br/>(BeforeAgent)
-    participant CFR as ClientFunctionRegistry
-    participant DR as DeviceRegistry
-    participant RRPC as DeviceReverseRPC
-    participant Client as 客户端设备
-
-    Note over LLM: Agent.Run() 开始
-    LLM->>MW: BeforeAgent(ctx, runCtx)
-
-    MW->>DR: GetDevices(userID)
-    DR-->>MW: [{D1, online}, {D2, online}]
-
-    MW->>CFR: GetFunctions(userID)
-    CFR-->>MW: [{D1: [read_file, exec]}, {D2: [screenshot]}]
-
-    Note over MW: 为每个函数创建 InvokableTool<br/>工具名 = 函数名<br/>（冲突时加 device 前缀）
-
-    MW->>MW: runCtx.Tools += [read_file, exec, screenshot]
-    MW-->>LLM: 继续 Agent Run
-
-    Note over LLM: LLM 选择调用 read_file(path="/tmp/test.txt")
-    LLM->>RRPC: InvokableRun(ctx, args)
-    RRPC->>RRPC: 路由到 D1（拥有 read_file 的设备）
-    RRPC->>Client: ServerRequest(U1, D1, "read_file", {path: "/tmp/test.txt"})
-    Client->>Client: 执行本地函数
-    Client-->>RRPC: Response {content: "hello world"}
-    RRPC-->>LLM: 工具结果 "hello world"
-```
-
-### 4.6 工具命名与冲突解决
-
-```mermaid
-flowchart TD
-    A["获取所有设备的函数"] --> B{"有同名函数吗?"}
-    B -->|无冲突| C["工具名 = 函数名<br/>如: read_file"]
-    B -->|有冲突| D{"函数签名相同?"}
-    D -->|相同| E["合并为一个工具<br/>自动路由到任一可用设备"]
-    D -->|不同| F["加设备类型前缀<br/>如: desktop_read_file, mobile_read_file"]
-
-    style C fill:#e8f5e9
-    style E fill:#e8f5e9
-    style F fill:#fff3e0
-```
-
-**命名规则**：
-
-1. 函数名全局唯一 → 直接用函数名
-2. 多设备有同名同签名函数 → 合并为一个工具，内部自动选择可用设备
-3. 多设备有同名不同签名函数 → 加 `device_type` 前缀（如 `desktop_read_file`）
-
-### 4.7 多设备场景
-
-```mermaid
-graph LR
-    subgraph "用户 U1 的设备"
-        D1["Desktop D1<br/>read_file, exec, screenshot"]
-        D2["Mobile D2<br/>take_photo, get_location"]
-        D3["IoT D3<br/>read_sensor, toggle_light"]
-    end
-
-    subgraph "Agent 看到的工具"
-        T1["read_file"]
-        T2["exec"]
-        T3["screenshot"]
-        T4["take_photo"]
-        T5["get_location"]
-        T6["read_sensor"]
-        T7["toggle_light"]
-        T0["client_list_devices"]
-    end
-
-    D1 --> T1 & T2 & T3
-    D2 --> T4 & T5
-    D3 --> T6 & T7
-
-    style T0 fill:#e1f5fe
-```
-
-额外提供的管理工具 `client_list_devices`：LLM 可以主动查询当前用户有哪些设备在线、各自有什么函数。
-
-### 4.8 设备路由策略
-
-当多个设备有同名函数（合并为一个工具）时，内部如何选择设备：
-
-```mermaid
-flowchart TD
-    A["InvokableRun()"] --> B{"有多个设备提供此函数?"}
-    B -->|No| C["直接路由到唯一设备"]
-    B -->|Yes| D{"有设备偏好配置?"}
-    D -->|Yes| E["按偏好选择<br/>如: 优先 desktop"]
-    D -->|No| F{"所有设备都在线?"}
-    F -->|Yes| G["选择 RTT 最低的设备"]
-    F -->|No| H["选择在线的设备中 RTT 最低的"]
-
-    style C fill:#e8f5e9
-    style E fill:#e8f5e9
-    style G fill:#e8f5e9
-    style H fill:#e8f5e9
-```
-
----
-
-## 5. Protocol Extensions
-
-### 5.1 新增包类型
+**新增组件**: `ClientFunctionRegistry`
 
 ```go
-PackageTypeManifest  PackageType = 3  // 客户端发送函数清单
-PackageTypeReconnect PackageType = 4  // 客户端断连重连后补发请求
-```
-
-### 5.2 增强的请求结构
-
-```go
-type PackageDataRequest struct {
-    ID             string          `json:"id"`
-    Method         string          `json:"method"`
-    Params         json.RawMessage `json:"params"`
-    IdempotencyKey string          `json:"idempotency_key,omitempty"` // 幂等键
-    Priority       int             `json:"priority,omitempty"`        // 0=normal, 1=high, 2=critical
-    Seq            uint64          `json:"seq,omitempty"`             // 服务端单调递增序号
+type ClientFunctionRegistry struct {
+    mu       sync.RWMutex
+    cache    map[string]map[string]*DeviceFunctions  // userID → deviceID → functions
+    redis    RedisClient
+    defaultTTL time.Duration
 }
-```
 
-### 5.3 Function Manifest 结构
-
-```go
-type FunctionManifest struct {
-    DeviceID   string             `json:"device_id"`
-    DeviceName string             `json:"device_name"`
-    DeviceType string             `json:"device_type"`
-    Functions  []FunctionInfo     `json:"functions"`
+type DeviceFunctions struct {
+    DeviceID    string         `json:"device_id"`
+    DeviceName  string         `json:"device_name"`
+    DeviceType  string         `json:"device_type"`
+    Functions   []FunctionInfo `json:"functions"`
+    CachedAt    time.Time      `json:"cached_at"`
 }
 
 type FunctionInfo struct {
@@ -810,78 +623,68 @@ type FunctionInfo struct {
     Tags        []string        `json:"tags,omitempty"`
     TimeoutMs   int             `json:"timeout_ms,omitempty"`
 }
-
-type ReturnInfo struct {
-    Type        string `json:"type"`
-    Description string `json:"description"`
-}
 ```
 
-### 5.4 Reconnect 结构
+### 5.3 DynamicToolProvider 中间件
+
+**新增组件**: 实现 Eino `ChatModelAgentMiddleware` 的 `BeforeAgent` 方法
 
 ```go
-type PackageDataReconnect struct {
-    DeviceID    string `json:"device_id"`
-    LastSeenSeq uint64 `json:"last_seen_seq"`
+type DynamicToolProvider struct {
+    *adk.BaseChatModelAgentMiddleware
+    funcRegistry *ClientFunctionRegistry
+    deviceRegistry *DeviceRegistry
+    reverseRPC   *DeviceReverseRPC
+    config       ClientToolsConfig
+}
+
+func (dtp *DynamicToolProvider) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
+    // 从 context 获取当前用户信息
+    userID := getUserFromContext(ctx)
+
+    // 获取该用户所有设备的函数
+    allFuncs := dtp.funcRegistry.GetFunctions(userID)
+
+    // 按 config 过滤（device_filter, function_tags, excluded_functions）
+    filtered := dtp.applyFilters(allFuncs)
+
+    // 为每个函数创建 InvokableTool
+    tools := dtp.createTools(filtered)
+
+    // 注入到 runCtx.Tools
+    runCtx.Tools = append(runCtx.Tools, tools...)
+
+    return ctx, runCtx, nil
 }
 ```
 
----
-
-## 6. Error Handling
-
-### 6.1 工具调用错误处理全景
+### 5.4 工具创建与命名
 
 ```mermaid
 flowchart TD
-    A["LLM 调用工具"] --> B{"设备在线?"}
-    B -->|在线| C["通过 ReverseRPC 调用"]
-    B -->|离线| D{"函数清单在缓存中?"}
-    D -->|在缓存中| E["返回错误:<br/>'设备 X 当前离线，函数 Y 不可用'"]
-    D -->|不在缓存| F["返回错误:<br/>'未找到函数 Y'"]
-
-    C --> G{"收到 Response?"}
-    G -->|是| H["返回结果"]
-    G -->|超时| I["写入 Redis pending 队列"]
-    I --> J["返回超时错误给 LLM"]
-
-    J --> K["客户端重连后<br/>通过 seq 补发缺失请求"]
-    K --> L["客户端幂等执行"]
-    L --> M["Response 到达"]
-
-    style H fill:#e8f5e9
-    style J fill:#ffebee
+    A["获取所有设备函数"] --> B{"有同名函数?"}
+    B -->|无冲突| C["工具名 = 函数名<br/>如: read_file"]
+    B -->|有冲突| D{"函数签名相同?"}
+    D -->|相同| E["合并为一个工具<br/>内部自动选设备"]
+    D -->|不同| F["加 device_type 前缀<br/>如: desktop_read_file"]
 ```
 
-### 6.2 错误类型
+**InvokableTool 实现**:
 
 ```go
-// 工具调用相关错误
-var (
-    ErrDeviceOffline       = errors.New("device offline")
-    ErrFunctionNotFound    = errors.New("function not found")
-    ErrTooManyPending      = errors.New("too many pending requests")
-    ErrSendBufferFull      = errors.New("send buffer full")
-    ErrConnectionUnhealthy = errors.New("connection unhealthy")
-    ErrRequestTimeout      = errors.New("request timeout")
-    ErrAllDevicesFailed    = errors.New("all devices failed")
-)
+func (dtp *DynamicToolProvider) createTool(funcInfo FunctionInfo, deviceID string) tool.InvokableTool {
+    return utils.InferTool(
+        funcInfo.Name,
+        funcInfo.Description,
+        func(ctx context.Context, input json.RawMessage) (json.RawMessage, error) {
+            // 通过 DeviceReverseRPC 定向调用
+            return dtp.reverseRPC.ServerRequest(ctx, userID, deviceID, funcInfo.Name, input, timeout)
+        },
+    )
+}
 ```
 
-### 6.3 降级策略
-
-| 场景 | 降级行为 |
-|------|----------|
-| 设备离线但有缓存 | 工具可见但调用返回 `ErrDeviceOffline`，LLM 可决策换设备 |
-| 所有设备都离线 | `client_list_devices` 返回空列表，LLM 告知用户 |
-| 函数执行超时 | 返回超时错误，LLM 可重试或换策略 |
-| 函数清单缓存过期 | BeforeAgent 尝试刷新，刷新失败用旧缓存（stale-while-revalidate） |
-
----
-
-## 7. Configuration
-
-### 7.1 Agent YAML 配置
+### 5.5 Agent YAML 配置
 
 ```yaml
 # agents/my-agent.md
@@ -890,222 +693,140 @@ name: my-smart-agent
 description: Agent with client device capabilities
 tools:
   - get_weather          # 静态服务端工具
-  - get_current_time      # 静态服务端工具
-  # 不需要显式配置客户端工具 —— 动态注入
-tool_config:
+  # 客户端工具自动注入，不需要在 tools 列表中声明
+middleware:
+  enable_client_tools: true   # 新增开关
   client_tools:
-    enabled: true
-    device_filter: []            # 空 = 所有设备；可指定 ["desktop"] 过滤
-    function_tags: []            # 空 = 所有函数；可指定 ["filesystem", "system"] 过滤
-    excluded_functions: []       # 排除特定函数名
-    cache_ttl: 300s              # 函数清单缓存 TTL
-    call_timeout: 30s            # 默认调用超时
+    device_filter: []          # 空 = 所有设备
+    function_tags: []          # 空 = 所有函数
+    excluded_functions: []     # 排除特定函数名
+    cache_ttl: 300s
+    call_timeout: 30s
 ---
 ```
 
-### 7.2 服务端配置
-
-```yaml
-# config.yaml
-reverse_rpc:
-  max_pending_per_device: 50      # 每个设备最大 pending 请求数
-  request_timeout: 30s            # 请求超时时间（自适应，可被网络质量因子放大）
-  request_ttl: 24h                # 请求在 Redis 中的存活时间
-  max_functions_per_device: 200   # 每个设备最大函数数
-
-client_tools:
-  enabled: true
-  default_cache_ttl: 300s         # 函数清单默认缓存 TTL
-  max_functions_per_device: 200   # 每个设备最大函数数
-  conflict_resolution: "prefix"   # "prefix" | "error" | "merge"
-```
-
----
-
-## 8. Integration Points
-
-### 8.1 与现有系统的集成
-
-```mermaid
-graph TB
-    subgraph "现有组件"
-        AB[AgentBuilder<br/>eino_agent.go]
-        TR[ToolRegistry<br/>tools/registry.go]
-        RR[ReverseRPC<br/>reverse_rpc.go]
-        WS[WebSocketServer<br/>websocket_server.go]
-        DMH[DefaultMessageHandler<br/>websocket_handler.go]
-    end
-
-    subgraph "新增组件"
-        DTP[DynamicToolProvider<br/>BeforeAgent 中间件]
-        DR[DeviceRegistry]
-        CFR[ClientFunctionRegistry]
-        DRPC[DeviceReverseRPC]
-        FMH[FunctionManifestHandler]
-    end
-
-    AB -->|"注册 Handler"| DTP
-    TR -->|"静态工具"| AB
-    DTP -->|"动态工具"| AB
-    DTP --> CFR
-    DTP --> DR
-    DTP --> DRPC
-    DRPC -->|"增强替代"| RR
-    FMH -->|"更新"| CFR
-    WS -->|"通知连接/断开事件"| DR
-    DMH -->|"路由 Reconnect"| DRPC
-
-    style DTP fill:#e1f5fe
-    style DR fill:#fff3e0
-    style CFR fill:#fff3e0
-    style DRPC fill:#fff3e0
-    style FMH fill:#fff3e0
-```
-
-### 8.2 中间件注册顺序
-
-按照 Eino 推荐的中间件顺序，DynamicToolProvider 应放在靠后的位置（在文件系统、Skill 等之后）：
+### 5.6 中间件注册顺序
 
 ```go
-Handlers: []adk.ChatModelAgentMiddleware{
-    patchToolCallsMW,     // 1. Fix message history first
-    agentsMdMW,           // 2. Inject reference docs
-    summarizationMW,      // 3. Compress if needed
-    reductionMW,          // 4. Handle large tool results
-    filesystemMW,         // 5. Add file tools
-    skillMW,              // 6. Add skill discovery
-    planTaskMW,           // 7. Add task management
-    dynamicToolProviderMW, // 8. Add client device tools (新增)
+// middleware.go 中新增:
+func (b *AgentBuilder) buildMiddleware(ctx, config, chatModel) []adk.ChatModelAgentMiddleware {
+    var mws []adk.ChatModelAgentMiddleware
+
+    // 现有中间件...
+    if config.Middleware.EnablePatchToolCalls { mws = append(mws, patchtoolcallsMW) }
+    if config.Middleware.EnableSummarization { mws = append(mws, summarizationMW) }
+    if config.Middleware.EnableToolReduction { mws = append(mws, reductionMW) }
+
+    // 新增:
+    if config.Middleware.EnableClientTools {
+        mws = append(mws, dtp)  // DynamicToolProvider
+    }
+
+    return mws
 }
 ```
 
-### 8.3 客户端 SDK 扩展
+### 5.7 管理工具: client_list_devices
 
-客户端 SDK 需要新增：
+额外提供一个静态注册的工具，让 LLM 主动查询设备状态:
 
-1. `RegisterFunctions(manifest FunctionManifest)` — 注册函数清单
-2. `RegisterFunctionHandler(name string, handler RequestHandlerFunc)` — 注册函数处理（已有）
-3. 内部维护响应重试队列和幂等 key 缓存
-4. 连接成功后自动发送 Function Manifest
+```go
+// 工具名: client_list_devices
+// 描述: 列出当前用户所有在线设备及其函数概要
+// 输入: 无
+// 输出: [{device_id, device_name, device_type, functions: [{name, description}]}]
+```
 
 ---
 
-## Appendix: Scenario Flows
+## 6. Protocol Extensions
 
-### A. 正常调用流程
+### 6.1 增强的 PackageDataRequest
 
-```mermaid
-sequenceDiagram
-    participant LLM
-    participant DTP as DynamicToolProvider
-    participant RRPC as DeviceReverseRPC
-    participant Client
-
-    LLM->>DTP: BeforeAgent
-    DTP-->>LLM: 注入工具列表
-
-    LLM->>RRPC: InvokableRun("read_file", {path: "/tmp/a.txt"})
-    RRPC->>Client: Request (seq=1, idempotency_key="s-42")
-    Client->>Client: 执行 read_file
-    Client-->>RRPC: Response (code=0, data="file content")
-    RRPC-->>LLM: "file content"
+```go
+type PackageDataRequest struct {
+    ID             string          `json:"id"`
+    Method         string          `json:"method"`
+    Params         json.RawMessage `json:"params"`
+    IdempotencyKey string          `json:"idempotency_key,omitempty"`  // 新增
+    Seq            uint64          `json:"seq,omitempty"`              // 新增
+}
 ```
 
-### B. 弱网 + 超时 + Redis 重放
+> **向后兼容**: 新增字段有 `omitempty`，旧客户端忽略它们。
 
-```mermaid
-sequenceDiagram
-    participant RRPC as DeviceReverseRPC
-    participant Redis
-    participant Client
+### 6.2 Function Manifest
 
-    RRPC->>Client: Request (seq=5)
-    Note over Client: ❌ 网络延迟/中断
-    Note over RRPC: 等待 Response...
-    Note over RRPC: 超时 (30s)
-    RRPC->>Redis: 持久化 pending request (seq=5)
-    Note over RRPC: 返回 ErrRequestTimeout
+通过现有的 `PackageTypeRequest` 发送，method 为 `system.register_functions`:
 
-    Note over Client: ✅ 网络恢复
-    Client->>RRPC: WebSocket Reconnect
-    Client->>RRPC: reconnect {last_seen_seq: 4}
-    RRPC->>Redis: 查询 seq > 4 的请求
-    Redis-->>RRPC: [request seq=5]
-    RRPC->>Client: 重放 Request (seq=5)
-    Client->>Client: 幂等检查 → 新请求，执行函数
-    Client-->>RRPC: Response
-    RRPC-->>RRPC: 正常返回
+```go
+// 客户端 → 服务端
+type RegisterFunctionsParams struct {
+    DeviceID   string         `json:"device_id"`
+    DeviceName string         `json:"device_name"`
+    DeviceType string         `json:"device_type"`
+    Functions  []FunctionInfo `json:"functions"`
+}
 ```
 
-### C. 断连 + 多请求重放
+### 6.3 Reconnect
 
-```mermaid
-sequenceDiagram
-    participant RRPC as DeviceReverseRPC
-    participant Redis
-    participant Client
+通过现有的 `PackageTypeRequest` 发送，method 为 `system.reconnect`:
 
-    RRPC->>Client: Request (seq=10) ✅ 正常处理
-    RRPC->>Client: Request (seq=11)
-    Note over Client: ❌ 网络断开
-    Note over RRPC: seq=11 超时
-    RRPC->>Redis: 持久化 (seq=11)
-    RRPC->>Client: Request (seq=12) ❌ 发送失败
-    RRPC->>Redis: 持久化 (seq=12)
-
-    Note over Client: ✅ 网络恢复
-    Client->>RRPC: WebSocket Reconnect
-    Client->>RRPC: reconnect {last_seen_seq: 10}
-    RRPC->>Redis: 查询 seq > 10 的请求
-    Redis-->>RRPC: [seq=11, seq=12]
-    RRPC->>Client: 重放 Request (seq=11)
-    Client-->>RRPC: Response (seq=11)
-    RRPC->>Client: 重放 Request (seq=12)
-    Client-->>RRPC: Response (seq=12)
+```go
+type ReconnectParamsstruct {
+    LastSeenSeq uint64 `json:"last_seen_seq"`
+}
 ```
 
-### D. 多设备同名函数合并
+### 6.4 新增配置字段
 
-```mermaid
-sequenceDiagram
-    participant LLM
-    participant DTP as DynamicToolProvider
-    participant CFR as ClientFunctionRegistry
-    participant RRPC as DeviceReverseRPC
-    participant D1 as Desktop
-    participant D2 as Mobile
+```go
+// AgentConfig.Middleware 新增:
+type MiddlewareConfig struct {
+    // 现有字段...
+    EnableSummarization   bool `yaml:"enable_summarization"`
+    EnableToolReduction   bool `yaml:"enable_tool_reduction"`
+    EnablePatchToolCalls  bool `yaml:"enable_patch_tool_calls"`
 
-    Note over D1: 注册函数: read_file
-    Note over D2: 注册函数: read_file (相同签名)
-    D1->>CFR: manifest: [read_file]
-    D2->>CFR: manifest: [read_file]
+    // 新增:
+    EnableClientTools     bool              `yaml:"enable_client_tools"`
+    ClientTools           ClientToolsConfig `yaml:"client_tools"`
+}
 
-    LLM->>DTP: BeforeAgent
-    DTP->>CFR: GetFunctions(userID)
-    CFR-->>DTP: {D1: [read_file], D2: [read_file]}
-    DTP->>DTP: 同名同签名 → 合并为一个 read_file 工具
-    DTP-->>LLM: 注入 [read_file]
-
-    LLM->>RRPC: InvokableRun("read_file", ...)
-    RRPC->>RRPC: 选择 RTT 最低的设备 (D1)
-    RRPC->>D1: ServerRequest → read_file
-    D1-->>RRPC: Response
-    RRPC-->>LLM: 结果
+type ClientToolsConfig struct {
+    DeviceFilter      []string      `yaml:"device_filter"`
+    FunctionTags      []string      `yaml:"function_tags"`
+    ExcludedFunctions []string      `yaml:"excluded_functions"`
+    CacheTTL          time.Duration `yaml:"cache_ttl"`
+    CallTimeout       time.Duration `yaml:"call_timeout"`
+}
 ```
 
-### E. 客户端响应发送失败 + 重试
+---
 
-```mermaid
-sequenceDiagram
-    participant RRPC as DeviceReverseRPC
-    participant Client
-    participant Queue as 客户端重试队列
+## 7. Configuration
 
-    RRPC->>Client: Request
-    Client->>Client: 执行函数
-    Client->>Client: SendPackage(Response) ❌ 网络抖动
-    Client->>Queue: 入队 (FIFO)
-    Note over Queue: 等待网络恢复...
-    Queue->>RRPC: 重发 Response ✅
-    RRPC->>RRPC: 匹配 pending request，正常返回
+### 7.1 服务端配置
+
+```yaml
+reverse_rpc:
+  max_pending_per_device: 50       # 每个设备最大 pending 请求数
+  request_timeout: 30s             # 默认请求超时
+  request_ttl: 24h                 # Redis 中请求存活时间
+  max_replay_retries: 3            # 最大重放次数
+
+client_tools:
+  default_cache_ttl: 300s          # 函数清单默认缓存 TTL
+  max_functions_per_device: 200    # 每个设备最大函数数
+  conflict_resolution: "prefix"    # "prefix" | "error" | "merge"
+```
+
+### 7.2 客户端配置
+
+```yaml
+client:
+  device_id: "auto"                # "auto" = 自动生成, 或指定固定值
+  response_retry_queue_size: 100   # 响应重试队列大小
+  idempotency_cache_size: 1000     # 幂等 key 缓存大小
 ```
