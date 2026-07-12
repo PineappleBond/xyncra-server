@@ -574,8 +574,20 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 
 	if oldClient != nil {
 		// Send Close Frame (4001) outside the lock.
+		s.logger.Info("websocket: device replacement detected [userID=%s, deviceID=%s, oldConnID=%s]",
+			userID, deviceID, oldClient.ConnID())
 		closeMsg := websocket.FormatCloseMessage(4001, "replaced by new connection from same device")
-		_ = oldClient.conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(5*time.Second))
+		if writeErr := oldClient.conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(5*time.Second)); writeErr != nil {
+			s.logger.Error("websocket: failed to send 4001 close frame [oldConnID=%s]: %v",
+				oldClient.ConnID(), writeErr)
+		}
+		// WriteControl writes the close frame to the kernel TCP send buffer,
+		// but conn.Close() (called inside oldClient.Close below) sends a TCP
+		// FIN immediately. Without a brief pause, the FIN can race ahead of
+		// the close-frame data, causing the client to see a TCP reset or EOF
+		// instead of the 4001 close frame. The 100 ms delay gives the kernel
+		// enough time to flush the frame to the wire (D-095).
+		time.Sleep(100 * time.Millisecond)
 		oldClient.Close()
 
 		// Wait for old connection to finish cleanup (at most 2s).
