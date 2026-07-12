@@ -72,6 +72,13 @@ func (r *ReverseRPC) ServerRequest(ctx, userID, method, params, timeout) (*Respo
 - **CancelAll() 存在** — 可向所有 pending 发送合成响应并 cancel context
 - **DispatchResponse()** — 按 `resp.ID` 查找 pending，发送到 respCh
 
+**当前局限性 — reqID 计数器重启冲突**:
+
+> `nextReqID` 是内存中的 `uint64` 原子计数器，服务器重启后从 0 重新递增。
+> 若 Redis 中仍存在旧服务实例写入的 pending 请求（例如 `s-1`, `s-2`, ...），
+> 新实例会生成相同的 reqID，导致 ID 冲突 — 旧 pending 可能被错误地匹配到新请求的响应。
+> **解决方案**: 将 reqID 替换为 UUID，确保全局唯一性（详见 [5.8 reqID: 原子计数器 → UUID](#58-reqid-原子计数器--uuid)）。
+
 ### 1.2 WebSocket 连接管理
 
 **文件**: `internal/server/websocket_server.go`
@@ -396,16 +403,16 @@ sequenceDiagram
     Note over Caller: 调用 ServerRequest(U1, D1, timeout=30s)
     Caller->>RRPC: 进入阻塞
 
-    RRPC->>RRPC: 生成 reqID="s-42"
-    RRPC->>RRPC: 创建 pending entry<br/>pending["s-42"] = {respCh, cancel}
+    RRPC->>RRPC: 生成 reqID=uuid (如 "550e8400-...")
+    RRPC->>RRPC: 创建 pending entry<br/>pending["550e8400-..."] = {respCh, cancel}
     RRPC->>WS: sendToDevice(U1, D1, Request)
     RRPC->>RRPC: select {<br/>  case resp := <-respCh:<br/>  case <-ctx.Done():<br/>}
 
-    WS->>Client: Request (id="s-42")
+    WS->>Client: Request (id="550e8400-...")
     Client->>Client: 执行函数
-    Client-->>WS: Response (id="s-42")
+    Client-->>WS: Response (id="550e8400-...")
     WS-->>RRPC: DispatchResponse()<br/>respCh 收到响应
-    RRPC->>RRPC: delete(pending, "s-42")
+    RRPC->>RRPC: delete(pending, "550e8400-...")
     RRPC-->>Caller: 返回结果 ✅ (耗时 0.1s)
 ```
 
@@ -620,6 +627,43 @@ sequenceDiagram
   - RTT 1s-5s → 2.0x
   - 有丢包记录 → 2.5x
 ```
+
+### 5.8 reqID: 原子计数器 → UUID
+
+**改动文件**: `internal/server/reverse_rpc.go`
+
+**问题**: 现有 `nextReqID` 是内存中的 `uint64` 原子计数器，服务器重启后从 0 重新递增。若 Redis 中仍有旧实例的 pending 请求（例如 `s-1`, `s-2`），新实例会生成重复 reqID，导致 ID 冲突。
+
+**解决方案**: 将 reqID 替换为 UUID（如 `uuid.New().String()`），确保全局唯一性，即使服务器重启也不会与 Redis 中的旧 pending 请求冲突。
+
+```go
+// 现有:
+type ReverseRPC struct {
+    mu        sync.Mutex
+    pending   map[string]*reverseRPCPending
+    nextReqID uint64                         // 全局原子计数器 — 重启后归零
+    sendFunc  func(userID string, pkg *protocol.Package) error
+    logger    Logger
+}
+
+reqID := fmt.Sprintf("s-%d", atomic.AddUint64(&r.nextReqID, 1))
+
+// 改为:
+type ReverseRPC struct {
+    mu       sync.Mutex
+    pending  map[string]*reverseRPCPending
+    sendFunc func(userID string, pkg *protocol.Package) error
+    logger   Logger
+}
+
+reqID := uuid.New().String()  // 例如: "550e8400-e29b-41d4-a716-446655440000"
+```
+
+**Rationale**:
+
+- UUID v4 有 122 bit 随机性，碰撞概率可忽略不计
+- 服务器重启不影响 ID 唯一性 — Redis 中的旧 pending 请求不会与新请求冲突
+- 移除 `nextReqID` 字段和 `sync/atomic` 依赖，代码更简洁
 
 ---
 
