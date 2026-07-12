@@ -1859,23 +1859,37 @@ Middleware 在 Agent YAML front matter 的 `middleware` 段中配置，所有字
 
 ```yaml
 middleware:
+  enable_client_tools: true
+  client_tools:
+    function_tags: []          # 空 = 所有函数
+    excluded_functions: []     # 排除特定函数名
+    call_timeout: 30s          # 工具调用超时
+  enable_patch_tool_calls: true
   enable_summarization: true
   summarization_tokens: 160000
   enable_tool_reduction: true
   tool_reduction_max_chars: 50000
-  enable_patch_tool_calls: true
 ```
 
-当 `middleware` 段缺失时，不应用任何中间件（与 Phase 1-7 向后兼容）。中间件顺序固定为：PatchToolCalls → Summarization → ToolReduction。
+当 `middleware` 段缺失时，不应用任何中间件（与 Phase 1-7 向后兼容）。中间件顺序固定为：DynamicToolProvider → PatchToolCalls → Summarization → ToolReduction。其中 DynamicToolProvider 仅在 `enable_client_tools: true` 时存在。
+
+各中间件说明：
+
+- **DynamicToolProvider**：从客户端设备函数注册表中动态注入工具。需要 `enable_client_tools: true`。通过 `client_tools.function_tags` 按标签过滤（OR 语义，空列表 = 所有函数），通过 `client_tools.excluded_functions` 排除特定函数，通过 `client_tools.call_timeout` 控制调用超时（默认 30s）。过滤顺序：`excluded_functions` 先于 `function_tags` 执行。
+- **PatchToolCalls**：修复 LLM 产生的格式不合法的工具调用（如参数类型不匹配）。
+- **Summarization**：上下文过长时自动压缩历史消息。
+- **ToolReduction**：工具返回结果过大时截取，通过 `retrieve_tool_result` 按 ID 找回完整结果。
 
 ### 原因
 
 1. **Per-agent 控制**：不同 Agent 可有不同压缩策略
 2. **向后兼容**：无 `middleware` 段的配置行为不变
 3. **顺序固定**：避免错误配置导致的问题
+4. **DynamicToolProvider 必须在首位**：它注入的工具需要被后续中间件（PatchToolCalls、Summarization、ToolReduction）看到
 
 ### 约束
 
+- DynamicToolProvider 需要 `clientFunctionProvider` 和 `clientCaller` 已注入（`nil` 时跳过并记录警告）
 - Summarization 的压缩模型默认使用主模型，可选覆盖
 - 中间件创建失败时跳过（fail-open），不阻塞 Agent 构建
 

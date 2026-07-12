@@ -253,3 +253,87 @@ func TestNewClientFunctionTool_ConcurrentInvoke(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// ---------------------------------------------------------------------------
+// CFT-09: Connection lost error -> "unable to reach" fallback
+// ---------------------------------------------------------------------------
+
+// TestNewClientFunctionTool_InvokeConnectionLost verifies that when the
+// caller returns a connection-level error (not timeout, not "no connections"),
+// formatClientToolError maps it to the generic "unable to reach" message.
+func TestNewClientFunctionTool_InvokeConnectionLost(t *testing.T) {
+	funcInfo := protocol.FunctionInfo{
+		Name:        "read_file",
+		Description: "Read a local file",
+		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+	caller := &errCaller{err: errWithMessage("connection reset by peer")}
+	tool, err := newClientFunctionTool(funcInfo, caller, "alice", "dev-1", 30*time.Second)
+	require.NoError(t, err)
+
+	_, err = tool.InvokableRun(context.Background(), `{}`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unable to reach")
+}
+
+// ---------------------------------------------------------------------------
+// CFT-10: Unknown error -> generic fallback message
+// ---------------------------------------------------------------------------
+
+// TestNewClientFunctionTool_InvokeUnknownError verifies that an unrecognized
+// error produces a generic "unable to reach" message (the fallback branch
+// of formatClientToolError), not a panic or empty string.
+func TestNewClientFunctionTool_InvokeUnknownError(t *testing.T) {
+	funcInfo := protocol.FunctionInfo{
+		Name:        "read_file",
+		Description: "Read a local file",
+		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+	caller := &errCaller{err: errWithMessage("something completely unexpected")}
+	tool, err := newClientFunctionTool(funcInfo, caller, "alice", "dev-1", 30*time.Second)
+	require.NoError(t, err)
+
+	_, err = tool.InvokableRun(context.Background(), `{}`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unable to reach")
+}
+
+// ---------------------------------------------------------------------------
+// CFT-11: buildToolInfo with invalid / non-object schema does not panic
+// ---------------------------------------------------------------------------
+
+// TestBuildToolInfo_InvalidSchema verifies that buildToolInfo handles
+// degenerate parameter schemas (non-object types) without panicking.
+// The function uses JSON roundtrip so most map[string]any inputs produce
+// valid jsonschema.Schema values, but degenerate inputs should still
+// be tolerated gracefully.
+func TestBuildToolInfo_InvalidSchema(t *testing.T) {
+	tests := []struct {
+		name   string
+		params map[string]any
+	}{
+		{"empty map", map[string]any{}},
+		{"non-object type field", map[string]any{"type": "string"}},
+		{"malformed nested structure", map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"field": "not-a-schema"},
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			funcInfo := protocol.FunctionInfo{
+				Name:        "degenerate_fn",
+				Description: "A function with degenerate schema",
+				Parameters:  tc.params,
+			}
+			require.NotPanics(t, func() {
+				info, err := buildToolInfo(funcInfo)
+				// buildToolInfo may succeed or return an error,
+				// but must not panic.
+				if err == nil {
+					assert.Equal(t, "degenerate_fn", info.Name)
+				}
+			})
+		})
+	}
+}

@@ -66,6 +66,22 @@ type mockToolResponse struct {
 	Result    string
 }
 
+// triggerToolCall holds a tool call configuration triggered by message content.
+type triggerToolCall struct {
+	toolName string
+	args     string
+}
+
+// ToolCallStep represents one step in a multi-turn tool call sequence.
+// If ToolName is non-empty, the step produces a tool_call response.
+// If ToolName is empty, the step produces a text response (using Text).
+type ToolCallStep struct {
+	ToolName  string // empty for text response
+	Arguments string
+	Result    string // for tool result (informational; not used by mock directly)
+	Text      string // for text response in the final round
+}
+
 // llmWeakNetConfig controls fault injection in the mock LLM server.
 // Zero value means all fault injection is disabled (backward compatible).
 type llmWeakNetConfig struct {
@@ -84,23 +100,29 @@ type llmWeakNetConfig struct {
 // It routes requests based on message content and supports both streaming
 // and non-streaming responses, including tool calls.
 type mockLLMServer struct {
-	server        *httptest.Server
-	callCount     int32 // atomic
-	toolCallCount int32 // atomic
-	mu            sync.Mutex
-	responses     map[string]string // pattern → response text
-	toolResponses map[string]*mockToolResponse
-	requestMsgCnt []int // message count per request (for context assertions)
-	weakNet       llmWeakNetConfig
-	weakNetMu     sync.Mutex
+	server            *httptest.Server
+	callCount         int32 // atomic
+	toolCallCount     int32 // atomic
+	mu                sync.Mutex
+	responses         map[string]string // pattern → response text
+	toolResponses     map[string]*mockToolResponse
+	requestMsgCnt     []int                      // message count per request (for context assertions)
+	triggerToToolCall map[string]triggerToolCall // trigger string → tool call config
+	sequenceSteps     []ToolCallStep             // multi-step sequence
+	sequenceIndex     int                        // current step index
+	recordedTools     [][]mockToolDef            // tools from each request
+	lastMessages      []mockChatMessage          // messages from last request
+	weakNet           llmWeakNetConfig
+	weakNetMu         sync.Mutex
 }
 
 // newMockLLMServer creates and starts an OpenAI-compatible mock LLM server.
 // Default responses are configured for common test patterns.
 func newMockLLMServer() *mockLLMServer {
 	m := &mockLLMServer{
-		responses:     make(map[string]string),
-		toolResponses: make(map[string]*mockToolResponse),
+		responses:         make(map[string]string),
+		toolResponses:     make(map[string]*mockToolResponse),
+		triggerToToolCall: make(map[string]triggerToolCall),
 	}
 	m.server = httptest.NewServer(http.HandlerFunc(m.handle))
 	// Pre-populate default responses.
@@ -290,12 +312,19 @@ func (m *mockLLMServer) handleChatCompletions(w http.ResponseWriter, r *http.Req
 	}
 
 	// Record the message count for this request (used by context tests).
+	// Also record tools and messages for DynamicToolProvider verification.
 	m.mu.Lock()
 	m.requestMsgCnt = append(m.requestMsgCnt, len(req.Messages))
+	toolsCopy := make([]mockToolDef, len(req.Tools))
+	copy(toolsCopy, req.Tools)
+	m.recordedTools = append(m.recordedTools, toolsCopy)
+	msgsCopy := make([]mockChatMessage, len(req.Messages))
+	copy(msgsCopy, req.Messages)
+	m.lastMessages = msgsCopy
 	m.mu.Unlock()
 
 	// Determine response type based on message content.
-	responseType, responseText := m.selectResponse(req)
+	responseType, responseText, step := m.selectResponse(req)
 
 	if responseType == "error" {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -303,27 +332,28 @@ func (m *mockLLMServer) handleChatCompletions(w http.ResponseWriter, r *http.Req
 	}
 
 	if req.Stream {
-		m.writeStreamResponse(w, req, responseType, responseText)
+		m.writeStreamResponse(w, req, responseType, responseText, step)
 		return
 	}
-	m.writeNonStreamResponse(w, req, responseType, responseText)
+	m.writeNonStreamResponse(w, req, responseType, responseText, step)
 }
 
 // selectResponse inspects the request messages and returns a response type
-// ("text", "tool_call") and the text content for text responses.
-func (m *mockLLMServer) selectResponse(req mockChatRequest) (responseType, text string) {
+// ("text", "tool_call") and the text content for text responses. If the
+// response is a sequence step, the step is returned as well.
+func (m *mockLLMServer) selectResponse(req mockChatRequest) (responseType, text string, step *ToolCallStep) {
+	// Check sequence steps first (highest priority).
+	if s, ok := m.consumeStep(); ok {
+		if s.ToolName != "" {
+			return "tool_call_step", "", &s
+		}
+		return "text_step", s.Text, nil
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// If the message history contains tool results, this is the second turn
-	// after a tool call — return a normal text response.
-	for _, msg := range req.Messages {
-		if msg.Role == "tool" {
-			return "text", m.responses["default"]
-		}
-	}
-
-	// Check user messages for trigger patterns.
+	// Check trigger-based tool calls (second priority).
 	lastUserContent := ""
 	for i := len(req.Messages) - 1; i >= 0; i-- {
 		if req.Messages[i].Role == "user" {
@@ -331,15 +361,29 @@ func (m *mockLLMServer) selectResponse(req mockChatRequest) (responseType, text 
 			break
 		}
 	}
+	for trigger, tc := range m.triggerToToolCall {
+		if strings.Contains(lastUserContent, trigger) && len(req.Tools) > 0 {
+			_ = tc // ensure tc is captured
+			return "tool_call_trigger", "", nil
+		}
+	}
+
+	// If the message history contains tool results, this is the second turn
+	// after a tool call — return a normal text response.
+	for _, msg := range req.Messages {
+		if msg.Role == "tool" {
+			return "text", m.responses["default"], nil
+		}
+	}
 
 	// Error trigger → HTTP 500.
 	if strings.Contains(lastUserContent, "error_trigger") {
-		return "error", ""
+		return "error", "", nil
 	}
 
 	// Empty/whitespace-only message → HTTP 500 (D-091: reject with error).
 	if strings.TrimSpace(lastUserContent) == "" {
-		return "error", ""
+		return "error", "", nil
 	}
 
 	// Tool call trigger: request has tools defined and content triggers it.
@@ -347,25 +391,108 @@ func (m *mockLLMServer) selectResponse(req mockChatRequest) (responseType, text 
 	// use it. Otherwise fall back to the default get_weather trigger.
 	if len(req.Tools) > 0 && strings.Contains(lastUserContent, "tool_weather") {
 		if len(m.toolResponses) > 0 {
-			return "tool_call", ""
+			return "tool_call", "", nil
 		}
-		return "tool_call", ""
+		return "tool_call", "", nil
 	}
 
 	// Pattern-based text responses.
 	if strings.Contains(lastUserContent, "hello") || strings.Contains(lastUserContent, "hi") {
-		return "text", m.responses["hello"]
+		return "text", m.responses["hello"], nil
 	}
 	if strings.Contains(lastUserContent, "context") {
-		return "text", m.responses["context"]
+		return "text", m.responses["context"], nil
 	}
-	return "text", m.responses["default"]
+	return "text", m.responses["default"], nil
 }
 
 // writeNonStreamResponse writes a standard (non-streaming) chat completion
-// response in OpenAI JSON format.
-func (m *mockLLMServer) writeNonStreamResponse(w http.ResponseWriter, req mockChatRequest, responseType, text string) {
+// response in OpenAI JSON format. step is used only when responseType is
+// "tool_call_step"; it may be nil for other response types.
+func (m *mockLLMServer) writeNonStreamResponse(w http.ResponseWriter, req mockChatRequest, responseType, text string, step *ToolCallStep) {
 	w.Header().Set("Content-Type", "application/json")
+
+	if responseType == "tool_call_step" {
+		atomic.AddInt32(&m.toolCallCount, 1)
+		toolName := step.ToolName
+		toolArgs := step.Arguments
+		if toolArgs == "" {
+			toolArgs = "{}"
+		}
+
+		resp := map[string]any{
+			"id":      "chatcmpl-mock-" + fmt.Sprintf("%d", atomic.LoadInt32(&m.callCount)),
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   req.Model,
+			"choices": []map[string]any{
+				{
+					"index": 0,
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": nil,
+						"tool_calls": []map[string]any{
+							{
+								"id":   "call_1",
+								"type": "function",
+								"function": map[string]any{
+									"name":      toolName,
+									"arguments": toolArgs,
+								},
+							},
+						},
+					},
+					"finish_reason": "tool_calls",
+				},
+			},
+			"usage": map[string]any{
+				"prompt_tokens":     50,
+				"completion_tokens": 20,
+				"total_tokens":      70,
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	if responseType == "tool_call_trigger" {
+		atomic.AddInt32(&m.toolCallCount, 1)
+		toolName, toolArgs := m.activeToolCallFromTrigger()
+
+		resp := map[string]any{
+			"id":      "chatcmpl-mock-" + fmt.Sprintf("%d", atomic.LoadInt32(&m.callCount)),
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   req.Model,
+			"choices": []map[string]any{
+				{
+					"index": 0,
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": nil,
+						"tool_calls": []map[string]any{
+							{
+								"id":   "call_1",
+								"type": "function",
+								"function": map[string]any{
+									"name":      toolName,
+									"arguments": toolArgs,
+								},
+							},
+						},
+					},
+					"finish_reason": "tool_calls",
+				},
+			},
+			"usage": map[string]any{
+				"prompt_tokens":     50,
+				"completion_tokens": 20,
+				"total_tokens":      70,
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
 
 	if responseType == "tool_call" {
 		atomic.AddInt32(&m.toolCallCount, 1)
@@ -435,8 +562,9 @@ func (m *mockLLMServer) writeNonStreamResponse(w http.ResponseWriter, req mockCh
 
 // writeStreamResponse writes a streaming (SSE) chat completion response.
 // For text responses, tokens are emitted with ~10ms intervals. For tool_call
-// responses, the tool call delta is emitted in a single chunk.
-func (m *mockLLMServer) writeStreamResponse(w http.ResponseWriter, req mockChatRequest, responseType, text string) {
+// responses, the tool call delta is emitted in a single chunk. step is used
+// only when responseType is "tool_call_step"; it may be nil for other types.
+func (m *mockLLMServer) writeStreamResponse(w http.ResponseWriter, req mockChatRequest, responseType, text string, step *ToolCallStep) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -446,6 +574,84 @@ func (m *mockLLMServer) writeStreamResponse(w http.ResponseWriter, req mockChatR
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+
+	if responseType == "tool_call_step" {
+		atomic.AddInt32(&m.toolCallCount, 1)
+		toolName := step.ToolName
+		toolArgs := step.Arguments
+		if toolArgs == "" {
+			toolArgs = "{}"
+		}
+
+		chunk := map[string]any{
+			"id":      "chatcmpl-mock-stream-" + fmt.Sprintf("%d", atomic.LoadInt32(&m.callCount)),
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"model":   req.Model,
+			"choices": []map[string]any{
+				{
+					"index": 0,
+					"delta": map[string]any{
+						"tool_calls": []map[string]any{
+							{
+								"index": 0,
+								"id":    "call_1",
+								"type":  "function",
+								"function": map[string]any{
+									"name":      toolName,
+									"arguments": toolArgs,
+								},
+							},
+						},
+					},
+					"finish_reason": "tool_calls",
+				},
+			},
+		}
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
+
+	if responseType == "tool_call_trigger" {
+		atomic.AddInt32(&m.toolCallCount, 1)
+		toolName, toolArgs := m.activeToolCallFromTrigger()
+
+		chunk := map[string]any{
+			"id":      "chatcmpl-mock-stream-" + fmt.Sprintf("%d", atomic.LoadInt32(&m.callCount)),
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"model":   req.Model,
+			"choices": []map[string]any{
+				{
+					"index": 0,
+					"delta": map[string]any{
+						"tool_calls": []map[string]any{
+							{
+								"index": 0,
+								"id":    "call_1",
+								"type":  "function",
+								"function": map[string]any{
+									"name":      toolName,
+									"arguments": toolArgs,
+								},
+							},
+						},
+					},
+					"finish_reason": "tool_calls",
+				},
+			},
+		}
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
 
 	if responseType == "tool_call" {
 		atomic.AddInt32(&m.toolCallCount, 1)
@@ -465,8 +671,9 @@ func (m *mockLLMServer) writeStreamResponse(w http.ResponseWriter, req mockChatR
 					"delta": map[string]any{
 						"tool_calls": []map[string]any{
 							{
-								"id":   "call_1",
-								"type": "function",
+								"index": 0,
+								"id":    "call_1",
+								"type":  "function",
 								"function": map[string]any{
 									"name":      toolName,
 									"arguments": toolArgs,
@@ -566,4 +773,78 @@ func splitIntoTokens(text string) []string {
 		tokens = []string{text}
 	}
 	return tokens
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7 extensions: trigger-based tool calls, sequences, recording
+// ---------------------------------------------------------------------------
+
+// SetToolCallForTrigger configures the mock to return a tool_call for the given
+// tool when the user message contains the trigger string. This is more flexible
+// than the hardcoded "tool_weather" trigger.
+func (m *mockLLMServer) SetToolCallForTrigger(trigger, toolName, args string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.triggerToToolCall[trigger] = triggerToolCall{
+		toolName: toolName,
+		args:     args,
+	}
+}
+
+// SetToolCallSequence configures a sequence of responses. Steps are consumed
+// in order: first step for first request, second step for second request, etc.
+// After all steps are consumed, falls back to default behavior.
+func (m *mockLLMServer) SetToolCallSequence(steps []ToolCallStep) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sequenceSteps = steps
+	m.sequenceIndex = 0
+}
+
+// RecordedTools returns the tool definitions from each request, in order.
+// Used to verify DynamicToolProvider injected the correct client functions.
+func (m *mockLLMServer) RecordedTools() [][]mockToolDef {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([][]mockToolDef, len(m.recordedTools))
+	for i, tools := range m.recordedTools {
+		toolsCopy := make([]mockToolDef, len(tools))
+		copy(toolsCopy, tools)
+		result[i] = toolsCopy
+	}
+	return result
+}
+
+// LastRequestMessages returns the messages from the last request.
+func (m *mockLLMServer) LastRequestMessages() []mockChatMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]mockChatMessage, len(m.lastMessages))
+	copy(result, m.lastMessages)
+	return result
+}
+
+// consumeStep returns the next sequence step and advances the index.
+// Returns (step, true) if a step was available, (zero, false) otherwise.
+// Exported fields of the returned step are safe to use without holding the lock.
+func (m *mockLLMServer) consumeStep() (ToolCallStep, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sequenceIndex >= len(m.sequenceSteps) {
+		return ToolCallStep{}, false
+	}
+	step := m.sequenceSteps[m.sequenceIndex]
+	m.sequenceIndex++
+	return step, true
+}
+
+// activeToolCallFromTrigger returns the tool name and arguments from the first
+// configured trigger-based tool call. Caller must NOT hold m.mu.
+func (m *mockLLMServer) activeToolCallFromTrigger() (name, args string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, tc := range m.triggerToToolCall {
+		return tc.toolName, tc.args
+	}
+	return "unknown_tool", "{}"
 }

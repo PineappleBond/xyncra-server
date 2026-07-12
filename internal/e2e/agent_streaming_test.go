@@ -26,8 +26,17 @@ var directMsgCounter int64
 
 // insertUserMessageDirect inserts a user message into the database WITHOUT
 // going through the send_message RPC handler, avoiding the automatic MQ
-// agent_process task (D-063).
+// agent_process task (D-063). The conversation members list uses
+// "agent/test-bot" as the agent user ID.
 func insertUserMessageDirect(t *testing.T, env *agentE2EEnv, userID, convID, content string) *model.Message {
+	t.Helper()
+	return insertUserMessageDirectWithAgent(t, env, userID, "agent/test-bot", convID, content)
+}
+
+// insertUserMessageDirectWithAgent inserts a user message into the database
+// WITHOUT going through the send_message RPC handler. The caller specifies the
+// agentUserID so that the conversation member list is correct for any agent.
+func insertUserMessageDirectWithAgent(t *testing.T, env *agentE2EEnv, userID, agentUserID, convID, content string) *model.Message {
 	t.Helper()
 	msg := &model.Message{
 		ID:              fmt.Sprintf("msg-direct-%d", atomic.AddInt64(&directMsgCounter, 1)),
@@ -39,7 +48,7 @@ func insertUserMessageDirect(t *testing.T, env *agentE2EEnv, userID, convID, con
 		Status:          "sent",
 		CreatedAt:       time.Now(),
 	}
-	_, err := env.store.SendMessage(context.Background(), msg, []string{userID, "agent/test-bot"})
+	_, err := env.store.SendMessage(context.Background(), msg, []string{userID, agentUserID})
 	require.NoError(t, err, "insert user message should succeed")
 	return msg
 }

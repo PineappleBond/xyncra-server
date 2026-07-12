@@ -59,16 +59,17 @@ const (
 // receives its own isolated environment (independent SQLite DB, independent
 // Redis key namespace).
 type e2eEnv struct {
-	db          *store.Database
-	store       *store.Store
-	connStore   *server.RedisConnectionStore
-	broker      *mq.AsynqBroker
-	srv         *server.WebSocketServer
-	addr        string
-	cancel      context.CancelFunc
-	redisKey    string                        // key prefix for TTL verification
-	taskHandler *mq.TaskHandler               // exposed for agent E2E handler registration
-	msgHandler  *server.DefaultMessageHandler // exposed for agent E2E RPC registration
+	db           *store.Database
+	store        *store.Store
+	connStore    *server.RedisConnectionStore
+	broker       *mq.AsynqBroker
+	srv          *server.WebSocketServer
+	addr         string
+	cancel       context.CancelFunc
+	redisKey     string                         // key prefix for TTL verification
+	taskHandler  *mq.TaskHandler                // exposed for agent E2E handler registration
+	msgHandler   *server.DefaultMessageHandler  // exposed for agent E2E RPC registration
+	funcRegistry *server.MemoryFunctionRegistry // in-memory function registry for client tools E2E
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +138,9 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 	// 7. Message handler.
 	msgHandler := server.NewDefaultMessageHandler()
 
+	// 7b. In-memory function registry for client function tools.
+	funcRegistry := server.NewMemoryFunctionRegistry(server.FunctionRegistryConfig{})
+
 	// 8. WebSocket server (created before RegisterAll so BroadcastFn is available).
 	srv, err := server.NewWebSocketServer(
 		server.WSWithAddr(":0"),
@@ -144,6 +148,7 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 		server.WSWithStore(dataStore),
 		server.WSWithBroker(broker),
 		server.WSWithMessageHandler(msgHandler),
+		server.WSWithFunctionRegistry(funcRegistry),
 		server.WSWithPingPeriod(500*time.Millisecond),
 		server.WSWithPongWait(3*time.Second),
 		server.WSWithWriteWait(3*time.Second),
@@ -152,10 +157,11 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 
 	// 9. RegisterAll with BroadcastFn (requires srv to exist first).
 	handler.RegisterAll(msgHandler, handler.Dependencies{
-		ConnStore:   connStore,
-		Store:       dataStore,
-		Broker:      broker,
-		BroadcastFn: srv.BroadcastUpdates,
+		ConnStore:        connStore,
+		Store:            dataStore,
+		Broker:           broker,
+		BroadcastFn:      srv.BroadcastUpdates,
+		FunctionRegistry: funcRegistry,
 	})
 
 	// 10. Task handler + Register(TypeSendMessage).
@@ -218,16 +224,17 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 	})
 
 	return &e2eEnv{
-		db:          db,
-		store:       dataStore,
-		connStore:   connStore,
-		broker:      broker,
-		srv:         srv,
-		addr:        addr,
-		cancel:      cancel,
-		redisKey:    keyPrefix,
-		taskHandler: taskHandler,
-		msgHandler:  msgHandler,
+		db:           db,
+		store:        dataStore,
+		connStore:    connStore,
+		broker:       broker,
+		srv:          srv,
+		addr:         addr,
+		cancel:       cancel,
+		redisKey:     keyPrefix,
+		taskHandler:  taskHandler,
+		msgHandler:   msgHandler,
+		funcRegistry: funcRegistry,
 	}
 }
 

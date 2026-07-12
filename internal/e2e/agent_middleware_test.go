@@ -41,6 +41,17 @@ func writeMiddlewareAgentConfig(t *testing.T, dir string, config *agent.AgentCon
 	if mw.ToolReductionMaxChars > 0 {
 		mwYAML += fmt.Sprintf("  tool_reduction_max_chars: %d\n", mw.ToolReductionMaxChars)
 	}
+	if mw.EnableClientTools {
+		mwYAML += "  enable_client_tools: true\n"
+		mwYAML += "  client_tools:\n"
+		mwYAML += formatStringSliceYAML("function_tags", mw.ClientTools.FunctionTags, 4)
+		mwYAML += formatStringSliceYAML("excluded_functions", mw.ClientTools.ExcludedFunctions, 4)
+		if mw.ClientTools.CallTimeout > 0 {
+			mwYAML += fmt.Sprintf("    call_timeout: %s\n", mw.ClientTools.CallTimeout)
+		} else {
+			mwYAML += "    call_timeout: 0s\n"
+		}
+	}
 
 	content := fmt.Sprintf(`---
 id: %s
@@ -55,7 +66,7 @@ parameters:
 context:
   max_tokens: %d
   max_messages: %d
-%s---
+%s%s---
 %s
 `,
 		config.ID,
@@ -68,6 +79,7 @@ context:
 		config.Parameters.MaxTokens,
 		config.Context.MaxTokens,
 		config.Context.MaxMessages,
+		formatToolsYAML(config.Tools),
 		mwYAML,
 		config.SystemPrompt,
 	)
@@ -91,6 +103,20 @@ func middlewareAgentConfig(mockURL string, id string) *agent.AgentConfig {
 		Context:      agent.AgentContext{MaxTokens: 4000, MaxMessages: 10},
 		SystemPrompt: "You are a test assistant.",
 	}
+}
+
+// formatStringSliceYAML returns a YAML indented block for a string slice field.
+// indent is the number of leading spaces. Empty slices produce "[]".
+func formatStringSliceYAML(key string, values []string, indent int) string {
+	prefix := strings.Repeat(" ", indent)
+	if len(values) == 0 {
+		return fmt.Sprintf("%s%s: []\n", prefix, key)
+	}
+	result := fmt.Sprintf("%s%s:\n", prefix, key)
+	for _, v := range values {
+		result += fmt.Sprintf("%s  - %s\n", prefix, v)
+	}
+	return result
 }
 
 // getAgentHandlerTypeNames uses unsafe reflection to inspect Eino's internal

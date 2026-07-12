@@ -119,6 +119,8 @@ func setupAgentE2E(t *testing.T, opts ...agent.ExecutorOption) *agentE2EEnv {
 	agentBuilder := agent.NewAgentBuilder(llmFactory)
 	agentBuilder.SetToolRegistry(agenttools.DefaultRegistry)
 	agentBuilder.SetRegistry(agentRegistry)
+	agentBuilder.SetClientFunctionProvider(base.funcRegistry)
+	agentBuilder.SetClientCaller(base.srv)
 
 	// 6. Redis client for idempotency, conversation lock, and checkpoints.
 	//    Uses a dedicated client (same pattern as production main.go, D-074).
@@ -172,11 +174,12 @@ func setupAgentE2E(t *testing.T, opts ...agent.ExecutorOption) *agentE2EEnv {
 	//     because handler.RegisterAll re-registers ALL standard methods plus
 	//     the agent-specific ones (reload_agents, agent_resume).
 	handler.RegisterAll(base.msgHandler, handler.Dependencies{
-		ConnStore:     base.connStore,
-		Store:         base.store,
-		Broker:        base.broker,
-		BroadcastFn:   base.srv.BroadcastUpdates,
-		AgentRegistry: agentRegistry,
+		ConnStore:        base.connStore,
+		Store:            base.store,
+		Broker:           base.broker,
+		BroadcastFn:      base.srv.BroadcastUpdates,
+		AgentRegistry:    agentRegistry,
+		FunctionRegistry: base.funcRegistry,
 	})
 
 	return &agentE2EEnv{
@@ -322,6 +325,15 @@ func toolAgentConfig(mockURL string) *agent.AgentConfig {
 		Tools:        []string{"get_weather", "get_current_time"},
 		SystemPrompt: "You are a helpful assistant with access to weather and time tools.",
 	}
+}
+
+// clientToolsAgentConfig returns an AgentConfig with client tools middleware
+// enabled. The caller can customise the full MiddlewareConfig (tags, excluded
+// functions, call timeout). Intended for use with writeMiddlewareAgentConfig.
+func clientToolsAgentConfig(mockURL string, mw agent.MiddlewareConfig) *agent.AgentConfig {
+	cfg := middlewareAgentConfig(mockURL, "client-tools-bot")
+	cfg.Middleware = mw
+	return cfg
 }
 
 // ---------------------------------------------------------------------------
