@@ -66,6 +66,20 @@ type mockToolResponse struct {
 	Result    string
 }
 
+// llmWeakNetConfig controls fault injection in the mock LLM server.
+// Zero value means all fault injection is disabled (backward compatible).
+type llmWeakNetConfig struct {
+	// ResponseDelay adds a delay before sending the response.
+	ResponseDelay time.Duration
+	// BlackHoleTimeout causes the server to never respond, triggering client timeout.
+	BlackHoleTimeout bool
+	// StreamDisconnectAfter closes the stream after N chunks (0 = disabled).
+	// Only applies to streaming responses.
+	StreamDisconnectAfter int
+	// RateLimitFirstN returns HTTP 429 for the first N requests (0 = disabled).
+	RateLimitFirstN int
+}
+
 // mockLLMServer is an OpenAI-compatible mock LLM for agent E2E tests.
 // It routes requests based on message content and supports both streaming
 // and non-streaming responses, including tool calls.
@@ -77,6 +91,8 @@ type mockLLMServer struct {
 	responses     map[string]string // pattern → response text
 	toolResponses map[string]*mockToolResponse
 	requestMsgCnt []int // message count per request (for context assertions)
+	weakNet       llmWeakNetConfig
+	weakNetMu     sync.Mutex
 }
 
 // newMockLLMServer creates and starts an OpenAI-compatible mock LLM server.
@@ -161,6 +177,59 @@ func (m *mockLLMServer) Close() {
 	m.server.Close()
 }
 
+// SetWeakNetConfig configures fault injection for weak network simulation.
+// Pass a zero-value llmWeakNetConfig{} to disable all fault injection.
+func (m *mockLLMServer) SetWeakNetConfig(cfg llmWeakNetConfig) {
+	m.weakNetMu.Lock()
+	defer m.weakNetMu.Unlock()
+	m.weakNet = cfg
+}
+
+// ResetWeakNet disables all weak network fault injection.
+// Equivalent to SetWeakNetConfig(llmWeakNetConfig{}).
+func (m *mockLLMServer) ResetWeakNet() {
+	m.SetWeakNetConfig(llmWeakNetConfig{})
+}
+
+// applyWeakNetFaults checks the current weak net config and applies fault
+// injection. Returns true if the fault was handled (response already written),
+// false if normal processing should continue.
+func (m *mockLLMServer) applyWeakNetFaults(w http.ResponseWriter, r *http.Request) bool {
+	m.weakNetMu.Lock()
+	cfg := m.weakNet
+	m.weakNetMu.Unlock()
+
+	// Rate limit: return HTTP 429 for the first N requests.
+	if cfg.RateLimitFirstN > 0 {
+		currentCall := int(atomic.LoadInt32(&m.callCount))
+		if currentCall <= cfg.RateLimitFirstN {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return true
+		}
+	}
+
+	// Black hole: accept the TCP connection but never send an HTTP response,
+	// causing the client to time out. Hijack the connection and close it
+	// immediately so that no HTTP headers (not even a default 200) are sent.
+	if cfg.BlackHoleTimeout {
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, err := hj.Hijack()
+			if err == nil {
+				conn.Close() // abrupt close — no HTTP response at all
+			}
+		}
+		return true
+	}
+
+	// Response delay: sleep before processing.
+	if cfg.ResponseDelay > 0 {
+		time.Sleep(cfg.ResponseDelay)
+	}
+
+	return false
+}
+
 // handle is the HTTP handler for all mock endpoints.
 func (m *mockLLMServer) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
@@ -208,6 +277,11 @@ func (m *mockLLMServer) activeToolCall() (name, args string) {
 // handleChatCompletions processes chat completion requests.
 func (m *mockLLMServer) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt32(&m.callCount, 1)
+
+	// Apply weak net fault injection before processing the request.
+	if m.applyWeakNetFaults(w, r) {
+		return // fault handled (rate limit, black hole, etc.)
+	}
 
 	var req mockChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -260,6 +334,11 @@ func (m *mockLLMServer) selectResponse(req mockChatRequest) (responseType, text 
 
 	// Error trigger → HTTP 500.
 	if strings.Contains(lastUserContent, "error_trigger") {
+		return "error", ""
+	}
+
+	// Empty/whitespace-only message → HTTP 500 (D-091: reject with error).
+	if strings.TrimSpace(lastUserContent) == "" {
 		return "error", ""
 	}
 
@@ -410,6 +489,13 @@ func (m *mockLLMServer) writeStreamResponse(w http.ResponseWriter, req mockChatR
 
 	// Text streaming: split response into tokens and emit with delay.
 	tokens := splitIntoTokens(text)
+
+	// Get weak net config for stream disconnect.
+	m.weakNetMu.Lock()
+	disconnectAfter := m.weakNet.StreamDisconnectAfter
+	m.weakNetMu.Unlock()
+
+	chunkCount := 0
 	for _, token := range tokens {
 		chunk := map[string]any{
 			"id":      "chatcmpl-mock-stream-" + fmt.Sprintf("%d", atomic.LoadInt32(&m.callCount)),
@@ -428,7 +514,19 @@ func (m *mockLLMServer) writeStreamResponse(w http.ResponseWriter, req mockChatR
 		data, _ := json.Marshal(chunk)
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
+		chunkCount++
 		time.Sleep(10 * time.Millisecond)
+
+		// Stream disconnect: abruptly close connection after N chunks.
+		if disconnectAfter > 0 && chunkCount >= disconnectAfter {
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, err := hj.Hijack()
+				if err == nil {
+					conn.Close()
+				}
+			}
+			return
+		}
 	}
 
 	// Final chunk with finish_reason.

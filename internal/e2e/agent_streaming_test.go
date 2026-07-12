@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,14 +19,19 @@ import (
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
 
+// directMsgCounter is an atomic counter for generating unique message IDs
+// in insertUserMessageDirect, replacing UnixNano to prevent ID collisions
+// under rapid goroutine scheduling (AE-EDGE-008, AE-EDGE-010).
+var directMsgCounter int64
+
 // insertUserMessageDirect inserts a user message into the database WITHOUT
 // going through the send_message RPC handler, avoiding the automatic MQ
 // agent_process task (D-063).
 func insertUserMessageDirect(t *testing.T, env *agentE2EEnv, userID, convID, content string) *model.Message {
 	t.Helper()
 	msg := &model.Message{
-		ID:              fmt.Sprintf("msg-direct-%d", time.Now().UnixNano()),
-		ClientMessageID: fmt.Sprintf("cmid-direct-%d", time.Now().UnixNano()),
+		ID:              fmt.Sprintf("msg-direct-%d", atomic.AddInt64(&directMsgCounter, 1)),
+		ClientMessageID: fmt.Sprintf("cmid-direct-%d", atomic.AddInt64(&directMsgCounter, 1)),
 		ConversationID:  convID,
 		SenderID:        userID,
 		Content:         content,

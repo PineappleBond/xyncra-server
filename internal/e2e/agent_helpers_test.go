@@ -80,7 +80,11 @@ func (testLogger) Debug(string, ...any) {}
 //
 // The returned agentE2EEnv can be used directly in test functions to send
 // messages to agents and wait for replies.
-func setupAgentE2E(t *testing.T) *agentE2EEnv {
+//
+// Optional ExecutorOption values (e.g. agent.WithTotalTimeout) override the
+// executor defaults. This is particularly useful for weak net tests that need
+// shorter timeouts.
+func setupAgentE2E(t *testing.T, opts ...agent.ExecutorOption) *agentE2EEnv {
 	t.Helper()
 
 	// 1. Base E2E environment (Redis, SQLite, broker, WS server).
@@ -147,6 +151,7 @@ func setupAgentE2E(t *testing.T) *agentE2EEnv {
 		base.store,
 		5, // maxConcurrent: lower for tests
 		testLogger{},
+		opts...,
 	)
 
 	// 12. Idempotency store (Redis SETNX).
@@ -183,6 +188,36 @@ func setupAgentE2E(t *testing.T) *agentE2EEnv {
 		agentsDir:    agentsDir,
 		lock:         conversationLock,
 	}
+}
+
+// ---------------------------------------------------------------------------
+// setupAgentE2EWeakNet — agent E2E with weak network simulation
+// ---------------------------------------------------------------------------
+
+// setupAgentE2EWeakNet creates an agent E2E environment with weak network
+// fault injection enabled on the mock LLM server. It is a convenience wrapper
+// around setupAgentE2E that applies the given llmWeakNetConfig to the mock.
+//
+// The cfg controls fault injection behavior (delays, rate limits, black holes,
+// stream disconnects). Optional ExecutorOption values (e.g. agent.WithTotalTimeout)
+// can override executor defaults — useful for weak net tests that need shorter
+// timeouts to detect failures faster.
+//
+// Returns nil mockLLM in real LLM mode (weak net config is not applied).
+func setupAgentE2EWeakNet(t *testing.T, cfg llmWeakNetConfig, opts ...agent.ExecutorOption) *agentE2EEnv {
+	t.Helper()
+
+	env := setupAgentE2E(t, opts...)
+
+	// Apply weak net config to the mock LLM server (only in mock mode).
+	if env.mockLLM != nil {
+		env.mockLLM.SetWeakNetConfig(cfg)
+		t.Cleanup(func() {
+			env.mockLLM.ResetWeakNet()
+		})
+	}
+
+	return env
 }
 
 // ---------------------------------------------------------------------------
