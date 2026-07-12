@@ -18,11 +18,13 @@
 //	-db-dsn        Database DSN / connection string (default "xyncra.db")
 //	-max-conns     Max connections per user, 0 = unlimited (default 0)
 //	-agents-dir    Path to agent config directory (default "agents")
+//	-max-functions-per-device  Max functions a device can register (default 200)
 //
 // Environment variables (used as fallback when flags are not set):
 //
 //	XYNCRA_ADDR, XYNCRA_REDIS_ADDR, XYNCRA_REDIS_PASSWORD, XYNCRA_REDIS_DB,
-//	XYNCRA_DB_DRIVER, XYNCRA_DB_DSN, XYNCRA_MAX_CONNS_PER_USER
+//	XYNCRA_DB_DRIVER, XYNCRA_DB_DSN, XYNCRA_MAX_CONNS_PER_USER,
+//	XYNCRA_MAX_FUNCTIONS_PER_DEVICE
 package main
 
 import (
@@ -74,6 +76,9 @@ func main() {
 		"Max connections per user (0 = unlimited)")
 	agentsDir := flag.String("agents-dir", envOrDefault("XYNCRA_AGENTS_DIR", "agents"),
 		"Path to agent config directory")
+	maxFunctionsPerDevice := flag.Int("max-functions-per-device",
+		envOrDefaultInt("XYNCRA_MAX_FUNCTIONS_PER_DEVICE", 200),
+		"Max functions a device can register")
 	flag.Parse()
 
 	log.Printf("starting xyncra-server %s (%s) built %s on %s", version, commit, buildTime, *addr)
@@ -162,6 +167,14 @@ func main() {
 	log.Printf("loaded %d agent configuration(s)", agentRegistry.Count())
 
 	// ---------------------------------------------------------------
+	// Function Registry (D-099)
+	// ---------------------------------------------------------------
+
+	funcRegistry := server.NewMemoryFunctionRegistry(server.FunctionRegistryConfig{
+		MaxFunctionsPerDevice: *maxFunctionsPerDevice,
+	})
+
+	// ---------------------------------------------------------------
 	// WebSocket Server
 	// ---------------------------------------------------------------
 
@@ -172,6 +185,7 @@ func main() {
 		server.WSWithBroker(broker),
 		server.WSWithMessageHandler(msgHandler),
 		server.WSWithNodeBroadcaster(nodeBroadcaster),
+		server.WSWithFunctionRegistry(funcRegistry),
 	)
 	if err != nil {
 		log.Fatalf("failed to create websocket server: %v", err)
@@ -183,11 +197,12 @@ func main() {
 	// Register method handlers after srv is created so that BroadcastFn
 	// can reference srv.BroadcastUpdates.
 	handler.RegisterAll(msgHandler, handler.Dependencies{
-		ConnStore:     connStore,
-		Store:         dataStore,
-		Broker:        broker,
-		BroadcastFn:   srv.BroadcastUpdates,
-		AgentRegistry: agentRegistry,
+		ConnStore:        connStore,
+		Store:            dataStore,
+		Broker:           broker,
+		BroadcastFn:      srv.BroadcastUpdates,
+		AgentRegistry:    agentRegistry,
+		FunctionRegistry: funcRegistry,
 	})
 
 	// ---------------------------------------------------------------

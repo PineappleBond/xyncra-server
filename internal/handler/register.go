@@ -17,6 +17,9 @@ type Dependencies struct {
 	// AgentRegistry is the optional agent configuration registry.
 	// When nil, agent detection is skipped (D-063).
 	AgentRegistry *agent.AgentRegistry
+	// FunctionRegistry manages client-declared function capabilities.
+	// When nil, system.register_functions is not registered (nil-safe per D-063).
+	FunctionRegistry server.FunctionRegistry
 }
 
 // RegisterAll registers all method handlers on the given DefaultMessageHandler.
@@ -37,6 +40,7 @@ type Dependencies struct {
 //   - "stream_text": ephemeral streaming text broadcast (Seq=0, no persistence)
 //   - "reload_agents": reload agent configs from disk directory (D-076)
 //   - "agent_resume": resume a paused agent after HITL interrupt (Phase 8B / D-085)
+//   - "system.register_functions": register device function capabilities (D-098, nil-safe)
 //
 // Note: mq_send_message is a task handler (processed by the MQ worker), not a
 // method handler (invoked by client RPC), and is therefore not registered here.
@@ -57,4 +61,8 @@ func RegisterAll(h *server.DefaultMessageHandler, deps Dependencies) {
 	h.RegisterMethod("stream_text", NewStreamTextHandler(deps.Store, deps.BroadcastFn))
 	h.RegisterMethod("reload_agents", NewReloadAgentsHandler(deps.AgentRegistry))
 	h.RegisterMethod("agent_resume", NewAgentResumeHandler(deps.Broker))
+	// Phase 2: register function registry handler (nil-safe per D-063).
+	if deps.FunctionRegistry != nil {
+		h.RegisterMethod("system.register_functions", NewRegisterFunctionsHandler(deps.FunctionRegistry))
+	}
 }

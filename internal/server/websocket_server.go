@@ -134,6 +134,7 @@ type webSocketServerOptions struct {
 	logger                 Logger
 	connectionInfoEnricher func(*ConnectionInfo, *http.Request)
 	nodeBroadcaster        NodeBroadcaster
+	functionRegistry       FunctionRegistry
 }
 
 // WSWithAddr sets the listen address.
@@ -250,6 +251,14 @@ func WSWithNodeBroadcaster(nb NodeBroadcaster) WebSocketServerOption {
 	}
 }
 
+// WSWithFunctionRegistry sets the function registry for managing client-declared
+// function capabilities. When not set, function registry features are disabled.
+func WSWithFunctionRegistry(fr FunctionRegistry) WebSocketServerOption {
+	return func(o *webSocketServerOptions) {
+		o.functionRegistry = fr
+	}
+}
+
 // --------------------------------------------------------------------------
 // WebSocketServer
 // --------------------------------------------------------------------------
@@ -321,6 +330,10 @@ type WebSocketServer struct {
 
 	// reverseRPC enables server-initiated requests to clients (D-092).
 	reverseRPC *ReverseRPC
+
+	// functionRegistry manages client-declared function capabilities.
+	// When nil, function registry features are disabled (nil-safe per D-063).
+	functionRegistry FunctionRegistry
 }
 
 // Ensure WebSocketServer implements Server at compile time.
@@ -416,6 +429,7 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 		logger:                 logger,
 		connectionInfoEnricher: o.connectionInfoEnricher,
 		nodeBroadcaster:        nodeBroadcaster,
+		functionRegistry:       o.functionRegistry,
 		nodeID:                 uuid.New().String(),
 		wsConfig: WebSocketServerConfig{
 			Path:              o.path,
@@ -676,6 +690,27 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 		s.logger.Error("websocket: remove connection [connID=%s]: %v", connID, removeErr)
 	}
 	s.removeClient(connID, userID, deviceID)
+
+	// Clean up function registry for this device (Phase 2).
+	// Only clean up if no other connection exists for this device.
+	// This prevents a race where a replacement connection has already
+	// registered functions before the old connection's defer cleanup runs.
+	if s.functionRegistry != nil {
+		deviceKey := userID + "\x00" + deviceID
+		s.mu.RLock()
+		_, hasActiveConn := s.clientsByDevice[deviceKey]
+		s.mu.RUnlock()
+
+		if !hasActiveConn {
+			if removed, regErr := s.functionRegistry.OnDeviceDisconnect(cleanupCtx, userID, deviceID); regErr != nil {
+				s.logger.Error("websocket: clean function registry [userID=%s, deviceID=%s]: %v",
+					userID, deviceID, regErr)
+			} else if removed != nil {
+				s.logger.Info("websocket: cleaned %d function(s) from registry [userID=%s, deviceID=%s]",
+					len(removed.Functions), userID, deviceID)
+			}
+		}
+	}
 
 	s.logger.Info("websocket: client disconnected [connID=%s, userID=%s, deviceID=%s]", connID, userID, deviceID)
 }
