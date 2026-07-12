@@ -198,3 +198,150 @@ func TestHandleRemoteBroadcast_NoLocalClients(t *testing.T) {
 		srv.handleRemoteBroadcast("user-ghost", updates, "other-node")
 	})
 }
+
+// ---------------------------------------------------------------------------
+// broadcastLocal send-failure tolerance tests (Phase 3)
+// ---------------------------------------------------------------------------
+
+// closeBroadcastClient marks a test client as closed without touching the
+// nil WebSocket connection.
+func closeBroadcastClient(c *Client) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.closed {
+		c.closed = true
+		if c.cancel != nil {
+			c.cancel()
+		}
+	}
+}
+
+// TestBroadcastLocal_ToleratesSendFailure verifies that broadcastLocal does
+// not panic when some clients are closed; healthy clients still receive the
+// broadcast.
+func TestBroadcastLocal_ToleratesSendFailure(t *testing.T) {
+	srv := newTestWSServer(t)
+
+	closed := newTestClientWithBuffer("user-1", "conn-closed")
+	healthy1 := newTestClientWithBuffer("user-1", "conn-h1")
+	healthy2 := newTestClientWithBuffer("user-1", "conn-h2")
+
+	srv.mu.Lock()
+	srv.clientsByUser["user-1"] = map[string]*Client{
+		"conn-closed": closed,
+		"conn-h1":     healthy1,
+		"conn-h2":     healthy2,
+	}
+	srv.mu.Unlock()
+
+	// Close one client.
+	closeBroadcastClient(closed)
+
+	updates := &protocol.PackageDataUpdates{
+		Updates: []protocol.PackageDataUpdate{
+			{Seq: 1, Payload: json.RawMessage(`{"event":"test"}`)},
+		},
+	}
+
+	// broadcastLocal should not panic even with a closed client.
+	assert.NotPanics(t, func() {
+		srv.broadcastLocal("user-1", updates)
+	})
+
+	// The two healthy clients should have received the broadcast.
+	for _, c := range []*Client{healthy1, healthy2} {
+		select {
+		case msg := <-c.send:
+			var pkg protocol.Package
+			require.NoError(t, json.Unmarshal(msg, &pkg))
+			assert.Equal(t, protocol.PackageTypeUpdates, pkg.Type)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("healthy client %s did not receive broadcast", c.ConnID())
+		}
+	}
+}
+
+// TestBroadcastLocal_AllFailed_NoPanic verifies that broadcastLocal does
+// not panic when all clients fail to receive the broadcast.
+func TestBroadcastLocal_AllFailed_NoPanic(t *testing.T) {
+	srv := newTestWSServer(t)
+
+	c1 := newTestClientWithBuffer("user-1", "conn-1")
+	c2 := newTestClientWithBuffer("user-1", "conn-2")
+
+	srv.mu.Lock()
+	srv.clientsByUser["user-1"] = map[string]*Client{
+		"conn-1": c1,
+		"conn-2": c2,
+	}
+	srv.mu.Unlock()
+
+	// Close all clients.
+	closeBroadcastClient(c1)
+	closeBroadcastClient(c2)
+
+	updates := &protocol.PackageDataUpdates{
+		Updates: []protocol.PackageDataUpdate{
+			{Seq: 1, Payload: json.RawMessage(`{"event":"test"}`)},
+		},
+	}
+
+	// broadcastLocal should not panic even when all sends fail.
+	assert.NotPanics(t, func() {
+		srv.broadcastLocal("user-1", updates)
+	})
+
+	// No messages should be in any send channel.
+	for _, c := range []*Client{c1, c2} {
+		select {
+		case msg := <-c.send:
+			t.Fatalf("closed client %s should not have received a message, got %d bytes", c.ConnID(), len(msg))
+		case <-time.After(50 * time.Millisecond):
+			// Expected: no message delivered.
+		}
+	}
+}
+
+// TestBroadcastLocal_Success_AllClientsReceive verifies that broadcastLocal
+// delivers the update to all healthy clients when no send errors occur.
+func TestBroadcastLocal_Success_AllClientsReceive(t *testing.T) {
+	srv := newTestWSServer(t)
+
+	c1 := newTestClientWithBuffer("user-1", "conn-1")
+	c2 := newTestClientWithBuffer("user-1", "conn-2")
+	c3 := newTestClientWithBuffer("user-1", "conn-3")
+
+	srv.mu.Lock()
+	srv.clientsByUser["user-1"] = map[string]*Client{
+		"conn-1": c1,
+		"conn-2": c2,
+		"conn-3": c3,
+	}
+	srv.mu.Unlock()
+
+	updates := &protocol.PackageDataUpdates{
+		Updates: []protocol.PackageDataUpdate{
+			{Seq: 42, Payload: json.RawMessage(`{"event":"broadcast-test"}`)},
+		},
+	}
+
+	srv.broadcastLocal("user-1", updates)
+
+	// All three clients should have received the broadcast.
+	for _, c := range []*Client{c1, c2, c3} {
+		select {
+		case msg := <-c.send:
+			var pkg protocol.Package
+			require.NoError(t, json.Unmarshal(msg, &pkg))
+			assert.Equal(t, protocol.PackageTypeUpdates, pkg.Type)
+
+			var gotUpdates protocol.PackageDataUpdates
+			require.NoError(t, json.Unmarshal(pkg.Data, &gotUpdates))
+			require.Len(t, gotUpdates.Updates, 1)
+			assert.Equal(t, uint32(42), gotUpdates.Updates[0].Seq)
+			assert.JSONEq(t, `{"event":"broadcast-test"}`, string(gotUpdates.Updates[0].Payload))
+		case <-time.After(2 * time.Second):
+			t.Fatalf("client %s did not receive broadcast", c.ConnID())
+		}
+	}
+}

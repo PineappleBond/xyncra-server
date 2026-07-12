@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -9,6 +10,14 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
+)
+
+var (
+	// ErrClientClosed is returned by Send when the client connection has been closed.
+	ErrClientClosed = errors.New("websocket: client closed")
+
+	// ErrSendBufferFull is returned by Send when the send channel buffer is full.
+	ErrSendBufferFull = errors.New("websocket: send buffer full")
 )
 
 // --------------------------------------------------------------------------
@@ -169,21 +178,25 @@ func (c *Client) DeviceID() string { return c.deviceID }
 // ConnID returns the unique connection identifier.
 func (c *Client) ConnID() string { return c.connID }
 
-// Send enqueues a message for asynchronous delivery to the peer. If the send
-// channel is full the message is dropped silently to avoid blocking the caller.
-// Send is a no-op after Close.
-func (c *Client) Send(msg []byte) {
+// Send enqueues a message for sending. It returns ErrClientClosed if the
+// connection has been closed, or ErrSendBufferFull if the send buffer is full.
+//
+// Send may return nil even if Close is called between the closed check and
+// the channel send; in that case the message is queued but discarded by
+// writePump when it exits via context cancellation.
+func (c *Client) Send(msg []byte) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return
+		return ErrClientClosed
 	}
 	c.mu.Unlock()
 
 	select {
 	case c.send <- msg:
+		return nil
 	default:
-		log.Printf("websocket: send buffer full, dropping message [connID=%s]", c.connID)
+		return ErrSendBufferFull
 	}
 }
 
@@ -193,8 +206,7 @@ func (c *Client) SendPackage(pkg *protocol.Package) error {
 	if err != nil {
 		return err
 	}
-	c.Send(data)
-	return nil
+	return c.Send(data)
 }
 
 // Close shuts down the client: it cancels the client context (which causes

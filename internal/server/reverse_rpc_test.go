@@ -604,3 +604,128 @@ func TestReverseRPC_ServerRequest_WithDeviceID(t *testing.T) {
 		t.Fatal("ServerRequest did not return")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// CancelDevice / CancelDeviceWithReason tests (Phase 3)
+// ---------------------------------------------------------------------------
+
+// TestReverseRPC_CancelDevice_Idempotent verifies that calling CancelDevice
+// multiple times does not panic and only the first call delivers a response.
+func TestReverseRPC_CancelDevice_Idempotent(t *testing.T) {
+	ms := &mockSendFunc{}
+	rpc := newTestReverseRPC(ms)
+
+	var result *protocol.PackageDataResponse
+	var reqErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		result, reqErr = rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 5*time.Second)
+	}()
+
+	require.True(t, ms.waitForCalls(1, time.Second), "sendFunc was not called")
+
+	// Call CancelDevice three times; only the first should have effect.
+	assert.NotPanics(t, func() {
+		rpc.CancelDevice("user-1", "device-1")
+		rpc.CancelDevice("user-1", "device-1")
+		rpc.CancelDevice("user-1", "device-1")
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServerRequest did not return after CancelDevice")
+	}
+
+	// The first CancelDevice should have delivered a response.
+	if reqErr != nil {
+		assert.ErrorIs(t, reqErr, context.Canceled)
+	} else {
+		require.NotNil(t, result)
+		assert.Equal(t, protocol.ResponseCode(-1), result.Code)
+		assert.Contains(t, result.Msg, "device replaced")
+	}
+}
+
+// TestReverseRPC_CancelDevice_MultiplePending verifies that CancelDevice
+// cancels all pending requests for the same device.
+func TestReverseRPC_CancelDevice_MultiplePending(t *testing.T) {
+	ms := &mockSendFunc{}
+	rpc := newTestReverseRPC(ms)
+
+	const numRequests = 3
+	type outcome struct {
+		resp *protocol.PackageDataResponse
+		err  error
+	}
+	results := make([]outcome, numRequests)
+	dones := make([]chan struct{}, numRequests)
+
+	for i := range numRequests {
+		dones[i] = make(chan struct{})
+		go func(idx int) {
+			defer close(dones[idx])
+			results[idx].resp, results[idx].err = rpc.ServerRequest(
+				context.Background(), "user-1", "device-1", "ping", nil, 5*time.Second,
+			)
+		}(i)
+	}
+
+	require.True(t, ms.waitForCalls(numRequests, 2*time.Second), "all requests should be sent")
+
+	// Cancel all pending requests for device-1.
+	rpc.CancelDevice("user-1", "device-1")
+
+	// All requests should return.
+	for i := range numRequests {
+		select {
+		case <-dones[i]:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("request %d did not return after CancelDevice", i)
+		}
+
+		if results[i].err != nil {
+			// Rare race: ctx.Done() may win first.
+			assert.ErrorIs(t, results[i].err, context.Canceled)
+		} else {
+			require.NotNil(t, results[i].resp)
+			assert.Equal(t, protocol.ResponseCode(-1), results[i].resp.Code)
+			assert.Equal(t, "device replaced", results[i].resp.Msg)
+		}
+	}
+}
+
+// TestReverseRPC_CancelDeviceWithReason_NormalDisconnect verifies that
+// CancelDeviceWithReason delivers the custom reason in the response.
+func TestReverseRPC_CancelDeviceWithReason_NormalDisconnect(t *testing.T) {
+	ms := &mockSendFunc{}
+	rpc := newTestReverseRPC(ms)
+
+	var result *protocol.PackageDataResponse
+	var reqErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		result, reqErr = rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 5*time.Second)
+	}()
+
+	require.True(t, ms.waitForCalls(1, time.Second), "sendFunc was not called")
+
+	// Cancel with a custom reason (simulating a normal disconnect).
+	rpc.CancelDeviceWithReason("user-1", "device-1", "device disconnected")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServerRequest did not return after CancelDeviceWithReason")
+	}
+
+	if reqErr != nil {
+		assert.ErrorIs(t, reqErr, context.Canceled)
+	} else {
+		require.NotNil(t, result)
+		assert.Equal(t, protocol.ResponseCode(-1), result.Code)
+		assert.Equal(t, "device disconnected", result.Msg)
+	}
+}

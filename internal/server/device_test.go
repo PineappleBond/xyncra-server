@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -330,4 +331,206 @@ func TestDeviceIndex_ConcurrentReplacement(t *testing.T) {
 
 	require.Len(t, deviceClients, 1, "exactly one connection should remain for the device")
 	assert.Equal(t, 1, totalClients, "exactly one client should be in the global index")
+}
+
+// ---------------------------------------------------------------------------
+// sendToDevice / sendToUser error-propagation tests (Phase 3)
+// ---------------------------------------------------------------------------
+
+// newDeviceTestClientWithBufSize creates a Client with a custom send buffer
+// size for device index tests.
+func newDeviceTestClientWithBufSize(t *testing.T, userID, deviceID, connID string, bufSize int) *Client {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	return &Client{
+		userID:   userID,
+		deviceID: deviceID,
+		connID:   connID,
+		send:     make(chan []byte, bufSize),
+		ctx:      ctx,
+		cancel:   cancel,
+		done:     make(chan struct{}),
+	}
+}
+
+// closeTestClient marks a test client as closed without touching the nil
+// WebSocket connection.
+func closeTestClient(c *Client) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.closed {
+		c.closed = true
+		c.cancel()
+	}
+}
+
+// registerClient registers a client in all server indexes.
+func registerClient(srv *WebSocketServer, c *Client) {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	connID := c.ConnID()
+	userID := c.UserID()
+	deviceID := c.DeviceID()
+
+	srv.clients[connID] = c
+	if srv.clientsByUser[userID] == nil {
+		srv.clientsByUser[userID] = make(map[string]*Client)
+	}
+	srv.clientsByUser[userID][connID] = c
+
+	deviceKey := userID + "\x00" + deviceID
+	if srv.clientsByDevice[deviceKey] == nil {
+		srv.clientsByDevice[deviceKey] = make(map[string]*Client)
+	}
+	srv.clientsByDevice[deviceKey][connID] = c
+}
+
+// TestDeviceIndex_SendToDevice_SendError verifies that sendToDevice returns
+// an error wrapping ErrClientClosed when the target client has been closed.
+func TestDeviceIndex_SendToDevice_SendError(t *testing.T) {
+	t.Parallel()
+
+	srv := newDeviceTestServer(t)
+	client := newDeviceTestClient(t, "user-1", "device-1", "conn-1")
+	registerClient(srv, client)
+
+	// Close the client before sending.
+	closeTestClient(client)
+
+	pkg := &protocol.Package{
+		Type: protocol.PackageTypeRequest,
+		Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
+	}
+	err := srv.sendToDevice("user-1", "device-1", pkg)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrClientClosed), "error should wrap ErrClientClosed")
+	assert.Contains(t, err.Error(), "device-1", "error message should mention the target device ID")
+}
+
+// TestDeviceIndex_SendToDevice_BufferFull_ReturnsError verifies that
+// sendToDevice returns an error wrapping ErrSendBufferFull when the target
+// client's send buffer is full.
+func TestDeviceIndex_SendToDevice_BufferFull_ReturnsError(t *testing.T) {
+	t.Parallel()
+
+	srv := newDeviceTestServer(t)
+	// Create client with buffer size 1.
+	client := newDeviceTestClientWithBufSize(t, "user-1", "device-1", "conn-1", 1)
+	registerClient(srv, client)
+
+	// Fill the buffer with one message.
+	pkg1 := &protocol.Package{
+		Type: protocol.PackageTypeRequest,
+		Data: json.RawMessage(`{"id":"fill","method":"ping","params":{}}`),
+	}
+	err := srv.sendToDevice("user-1", "device-1", pkg1)
+	require.NoError(t, err, "first send should succeed")
+
+	// Now the buffer is full; the next send should fail.
+	pkg2 := &protocol.Package{
+		Type: protocol.PackageTypeRequest,
+		Data: json.RawMessage(`{"id":"overflow","method":"ping","params":{}}`),
+	}
+	err = srv.sendToDevice("user-1", "device-1", pkg2)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrSendBufferFull), "error should wrap ErrSendBufferFull")
+}
+
+// TestSendToUser_AllSuccess verifies that sendToUser returns nil when all
+// client sends succeed.
+func TestSendToUser_AllSuccess(t *testing.T) {
+	t.Parallel()
+
+	srv := newDeviceTestServer(t)
+	c1 := newDeviceTestClient(t, "user-1", "device-1", "conn-1")
+	c2 := newDeviceTestClient(t, "user-1", "device-2", "conn-2")
+	c3 := newDeviceTestClient(t, "user-1", "device-3", "conn-3")
+	registerClient(srv, c1)
+	registerClient(srv, c2)
+	registerClient(srv, c3)
+
+	pkg := &protocol.Package{
+		Type: protocol.PackageTypeRequest,
+		Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
+	}
+	err := srv.sendToUser("user-1", pkg)
+	require.NoError(t, err)
+
+	// All three clients should receive the message.
+	for _, c := range []*Client{c1, c2, c3} {
+		msg := readMsgFromSend(t, c, 2*time.Second)
+		require.NotNil(t, msg, "client %s should receive the message", c.ConnID())
+	}
+}
+
+// TestSendToUser_PartialFailure verifies that sendToUser returns nil when at
+// least one client succeeds, even if others are closed.
+func TestSendToUser_PartialFailure(t *testing.T) {
+	t.Parallel()
+
+	srv := newDeviceTestServer(t)
+	closed := newDeviceTestClient(t, "user-1", "device-1", "conn-closed")
+	healthy1 := newDeviceTestClient(t, "user-1", "device-2", "conn-h1")
+	healthy2 := newDeviceTestClient(t, "user-1", "device-3", "conn-h2")
+	registerClient(srv, closed)
+	registerClient(srv, healthy1)
+	registerClient(srv, healthy2)
+
+	// Close one client.
+	closeTestClient(closed)
+
+	pkg := &protocol.Package{
+		Type: protocol.PackageTypeRequest,
+		Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
+	}
+	err := srv.sendToUser("user-1", pkg)
+	assert.NoError(t, err, "sendToUser should succeed when at least one send succeeds")
+
+	// The two healthy clients should receive the message.
+	for _, c := range []*Client{healthy1, healthy2} {
+		msg := readMsgFromSend(t, c, 2*time.Second)
+		require.NotNil(t, msg, "healthy client %s should receive the message", c.ConnID())
+	}
+}
+
+// TestSendToUser_AllFailed verifies that sendToUser returns an error wrapping
+// the last Send error when all clients fail.
+func TestSendToUser_AllFailed(t *testing.T) {
+	t.Parallel()
+
+	srv := newDeviceTestServer(t)
+	c1 := newDeviceTestClient(t, "user-1", "device-1", "conn-1")
+	c2 := newDeviceTestClient(t, "user-1", "device-2", "conn-2")
+	registerClient(srv, c1)
+	registerClient(srv, c2)
+
+	// Close all clients.
+	closeTestClient(c1)
+	closeTestClient(c2)
+
+	pkg := &protocol.Package{
+		Type: protocol.PackageTypeRequest,
+		Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
+	}
+	err := srv.sendToUser("user-1", pkg)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrClientClosed), "error should wrap ErrClientClosed")
+	assert.Contains(t, err.Error(), "all sends to user", "error message should describe all sends failed")
+}
+
+// TestSendToUser_NoConnections verifies that sendToUser returns an error
+// when no connections exist for the user.
+func TestSendToUser_NoConnections(t *testing.T) {
+	t.Parallel()
+
+	srv := newDeviceTestServer(t)
+
+	pkg := &protocol.Package{
+		Type: protocol.PackageTypeRequest,
+		Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
+	}
+	err := srv.sendToUser("user-nonexistent", pkg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no connections for user")
 }

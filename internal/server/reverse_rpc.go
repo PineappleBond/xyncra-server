@@ -119,9 +119,9 @@ func (r *ReverseRPC) DispatchResponse(resp *protocol.PackageDataResponse) {
 	}
 }
 
-// CancelDevice cancels all pending ReverseRPC requests for a specific device.
-// Called when a device connection is replaced by a new connection.
-func (r *ReverseRPC) CancelDevice(userID, deviceID string) {
+// CancelDeviceWithReason cancels all pending reverse-RPC requests for the given
+// device and sends a synthetic response with the specified reason message.
+func (r *ReverseRPC) CancelDeviceWithReason(userID, deviceID, reason string) {
 	r.mu.Lock()
 	var toCancel []*reverseRPCPending
 	for id, p := range r.pending {
@@ -133,11 +133,21 @@ func (r *ReverseRPC) CancelDevice(userID, deviceID string) {
 	r.mu.Unlock()
 	for _, p := range toCancel {
 		select {
-		case p.respCh <- &protocol.PackageDataResponse{Code: -1, Msg: "device replaced"}:
+		case p.respCh <- &protocol.PackageDataResponse{Code: -1, Msg: reason}:
 		default:
 		}
-		p.cancel()
+		// Do NOT call p.cancel() here: the respCh write above is already in
+		// the select, and calling cancel() would make ctx.Done() race with
+		// respCh in ServerRequest's select. Let ServerRequest's defer cancel()
+		// clean up after it receives the respCh response.
 	}
+}
+
+// CancelDevice cancels all pending reverse-RPC requests for the given device.
+// It is a convenience wrapper around CancelDeviceWithReason with "device replaced"
+// as the default reason (D-095).
+func (r *ReverseRPC) CancelDevice(userID, deviceID string) {
+	r.CancelDeviceWithReason(userID, deviceID, "device replaced")
 }
 
 // CancelAll fails all pending requests (called on shutdown).
@@ -155,6 +165,7 @@ func (r *ReverseRPC) CancelAll() {
 		}:
 		default:
 		}
-		p.cancel()
+		// Do NOT call p.cancel() here: see CancelDeviceWithReason for the
+		// rationale. Let ServerRequest's defer cancel() handle cleanup.
 	}
 }

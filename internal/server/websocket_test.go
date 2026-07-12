@@ -902,49 +902,21 @@ func TestClient_SendAndReceive(t *testing.T) {
 	assert.Equal(t, "pong", data["echo"])
 }
 
-// TestClient_SendBufferFullDropsMessage verifies that when the send channel
-// buffer is full, messages are silently dropped rather than blocking.
-func TestClient_SendBufferFullDropsMessage(t *testing.T) {
-	// This test creates a client connected to a real WebSocket server, but
-	// the handler never reads from the client. We fill the send buffer by
-	// pushing messages faster than they are drained.
-	cs, cleanup := setupTestRedis(t)
-	defer cleanup()
+// TestClient_Send_BufferFull_ReturnsErrSendBufferFull verifies that when the
+// send channel buffer is full, Send returns ErrSendBufferFull rather than
+// blocking or silently dropping.
+func TestClient_Send_BufferFull_ReturnsErrSendBufferFull(t *testing.T) {
+	// Use a client with a small buffer (size=1) so we can deterministically
+	// fill it and verify the error return.
+	c := newClientWithSendBuf(t, "u-buf-full", 1)
 
-	srv, addr, wsCleanup := startWSServer(t, cs,
-		WSWithPingPeriod(1*time.Hour), // disable pings
-	)
-	defer wsCleanup()
+	// Fill the buffer.
+	err := c.Send([]byte("first"))
+	require.NoError(t, err, "first Send should succeed")
 
-	conn := connectWS(t, addr, "user-buffer-full")
-	defer conn.Close()
-
-	// Wait for the server to register the client.
-	require.Eventually(t, func() bool {
-		return srv.ClientCount() >= 1
-	}, 2*time.Second, 50*time.Millisecond)
-
-	// Find the client in the server.
-	targetClient := findClient(srv, "user-buffer-full")
-	require.NotNil(t, targetClient)
-
-	// Send many messages rapidly. Since no one is reading the client's send
-	// channel fast enough (and the buffer is defaultSendBufSize=256), many
-	// will be dropped but Send must not block.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for i := 0; i < 10000; i++ {
-			targetClient.Send([]byte(fmt.Sprintf("msg-%d", i)))
-		}
-	}()
-
-	select {
-	case <-done:
-		// Success: Send did not block.
-	case <-time.After(5 * time.Second):
-		t.Fatal("Send blocked when buffer was full; expected silent drop")
-	}
+	// Buffer is now full; the next Send should return ErrSendBufferFull.
+	err = c.Send([]byte("second"))
+	assert.ErrorIs(t, err, ErrSendBufferFull, "Send should return ErrSendBufferFull when buffer is full")
 }
 
 // TestClient_CloseIdempotent verifies that calling Close multiple times on a
@@ -976,8 +948,9 @@ func TestClient_CloseIdempotent(t *testing.T) {
 	})
 }
 
-// TestClient_SendAfterClose verifies that Send is a no-op after Close.
-func TestClient_SendAfterClose(t *testing.T) {
+// TestClient_Send_Closed_ReturnsErrClientClosed verifies that Send returns
+// ErrClientClosed after the client has been closed.
+func TestClient_Send_Closed_ReturnsErrClientClosed(t *testing.T) {
 	cs, cleanup := setupTestRedis(t)
 	defer cleanup()
 
@@ -1005,9 +978,10 @@ func TestClient_SendAfterClose(t *testing.T) {
 		return targetClient.closed
 	}, 2*time.Second, 50*time.Millisecond)
 
-	// Send after Close should be a no-op (not panic, not block).
+	// Send after Close should return ErrClientClosed (not panic, not block).
 	assert.NotPanics(t, func() {
-		targetClient.Send([]byte("after-close"))
+		err := targetClient.Send([]byte("after-close"))
+		assert.ErrorIs(t, err, ErrClientClosed, "Send should return ErrClientClosed after Close")
 	})
 }
 
@@ -1815,6 +1789,8 @@ func TestClient_WritePump_CtxCancelSendsCloseFrame(t *testing.T) {
 
 // TestClient_Send_ConcurrentWithClose verifies that concurrent Send and
 // Close calls do not cause data races or panics under the race detector.
+// Send errors (ErrSendBufferFull or ErrClientClosed) are expected when
+// concurrent Sends race with Close.
 func TestClient_Send_ConcurrentWithClose(t *testing.T) {
 	srv, addr, cleanup := startWSServerMem(t,
 		WSWithPingPeriod(1*time.Hour),
@@ -1839,7 +1815,9 @@ func TestClient_Send_ConcurrentWithClose(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				client.Send([]byte(fmt.Sprintf("sender-%d-msg-%d", id, j)))
+				// Send may return ErrSendBufferFull or ErrClientClosed during
+				// the race with Close; that is expected behaviour.
+				_ = client.Send([]byte(fmt.Sprintf("sender-%d-msg-%d", id, j)))
 			}
 		}(i)
 	}
@@ -1853,9 +1831,138 @@ func TestClient_Send_ConcurrentWithClose(t *testing.T) {
 	// Wait for all senders to finish.
 	wg.Wait()
 
-	// After Close, Send must be a no-op (not panic).
+	// After Close, Send must return ErrClientClosed (not panic).
 	assert.NotPanics(t, func() {
-		client.Send([]byte("after-close"))
+		err := client.Send([]byte("after-close"))
+		assert.ErrorIs(t, err, ErrClientClosed, "Send after Close should return ErrClientClosed")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Client.Send / Client.SendPackage unit tests (Phase 3 error propagation)
+// ---------------------------------------------------------------------------
+
+// TestClient_Send_Success verifies that Send returns nil and enqueues the
+// message into the send channel when the client is open and the buffer is
+// not full.
+func TestClient_Send_Success(t *testing.T) {
+	c := newClientWithSendBuf(t, "u-send-ok", 10)
+
+	err := c.Send([]byte("hello"))
+	assert.NoError(t, err, "Send should succeed on an open client with buffer space")
+
+	// Verify the message was enqueued.
+	select {
+	case msg := <-c.send:
+		assert.Equal(t, []byte("hello"), msg, "enqueued message should match what was sent")
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a message in the send channel")
+	}
+}
+
+// TestClient_SendPackage_Success verifies that SendPackage marshals a
+// protocol.Package and enqueues it successfully, returning nil.
+func TestClient_SendPackage_Success(t *testing.T) {
+	c := newClientWithSendBuf(t, "u-sendpkg-ok", 10)
+
+	pkg := &protocol.Package{
+		Type: protocol.PackageTypeUpdates,
+		Data: json.RawMessage(`{"seq":42}`),
+	}
+	err := c.SendPackage(pkg)
+	assert.NoError(t, err, "SendPackage should succeed on an open client")
+
+	// Verify the message was enqueued and is valid JSON.
+	select {
+	case msg := <-c.send:
+		var decoded protocol.Package
+		require.NoError(t, json.Unmarshal(msg, &decoded))
+		assert.Equal(t, protocol.PackageTypeUpdates, decoded.Type)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a message in the send channel")
+	}
+}
+
+// TestClient_SendPackage_SendFails_ReturnsError verifies that SendPackage
+// returns an error when the underlying Send fails (buffer full or client
+// closed).
+func TestClient_SendPackage_SendFails_ReturnsError(t *testing.T) {
+	t.Run("ClientClosed", func(t *testing.T) {
+		c := newClientWithSendBuf(t, "u-sendpkg-closed", 10)
+
+		// Close the client.
+		c.mu.Lock()
+		c.closed = true
+		c.cancel()
+		c.mu.Unlock()
+
+		pkg := &protocol.Package{
+			Type: protocol.PackageTypeUpdates,
+			Data: json.RawMessage(`{"seq":1}`),
+		}
+		err := c.SendPackage(pkg)
+		assert.Error(t, err, "SendPackage should return error on closed client")
+		assert.ErrorIs(t, err, ErrClientClosed)
+	})
+
+	t.Run("BufferFull", func(t *testing.T) {
+		// Create a client with buffer size 1.
+		c := newClientWithSendBuf(t, "u-sendpkg-full", 1)
+
+		// Fill the buffer.
+		pkg1 := &protocol.Package{
+			Type: protocol.PackageTypeUpdates,
+			Data: json.RawMessage(`{"seq":1}`),
+		}
+		err := c.SendPackage(pkg1)
+		require.NoError(t, err, "first SendPackage should succeed")
+
+		// Second SendPackage should fail because the buffer is full.
+		pkg2 := &protocol.Package{
+			Type: protocol.PackageTypeUpdates,
+			Data: json.RawMessage(`{"seq":2}`),
+		}
+		err = c.SendPackage(pkg2)
+		assert.Error(t, err, "second SendPackage should fail when buffer is full")
+		assert.ErrorIs(t, err, ErrSendBufferFull)
+	})
+}
+
+// TestClient_Send_ConcurrentSendAndClose_RaceFree verifies that concurrent
+// Send and Close calls do not panic and are safe under the race detector.
+func TestClient_Send_ConcurrentSendAndClose_RaceFree(t *testing.T) {
+	c := newClientWithSendBuf(t, "u-race-free", 256)
+
+	const numSenders = 20
+	var wg sync.WaitGroup
+
+	// Launch many goroutines that Send concurrently.
+	for i := 0; i < numSenders; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				_ = c.Send([]byte(fmt.Sprintf("s-%d-m-%d", id, j)))
+			}
+		}(i)
+	}
+
+	// Concurrently mark client as closed (simulating Close without touching
+	// the nil conn).
+	time.Sleep(500 * time.Microsecond)
+	assert.NotPanics(t, func() {
+		c.mu.Lock()
+		c.closed = true
+		c.cancel()
+		c.mu.Unlock()
+	})
+
+	wg.Wait()
+
+	// After Close, Send should return ErrClientClosed, not panic.
+	assert.NotPanics(t, func() {
+		err := c.Send([]byte("post-close"))
+		assert.ErrorIs(t, err, ErrClientClosed)
 	})
 }
 
@@ -2404,8 +2511,8 @@ func TestSendErrorResponse(t *testing.T) {
 }
 
 // TestSendResponse_AfterClientClose verifies that calling sendResponse on a
-// closed client does not panic and returns no error (the message is silently
-// dropped by Send).
+// closed client does not panic and returns ErrClientClosed (propagated from
+// Send through SendPackage).
 func TestSendResponse_AfterClientClose(t *testing.T) {
 	c := newClientWithSendBuf(t, "u-closed", 10)
 
@@ -2415,16 +2522,15 @@ func TestSendResponse_AfterClientClose(t *testing.T) {
 	c.cancel()
 	c.mu.Unlock()
 
-	// sendResponse after close should not panic.
+	// sendResponse after close should not panic and should return an error.
 	assert.NotPanics(t, func() {
 		err := sendSuccessResponse(c, "id-after-close", json.RawMessage(`{}`))
-		// The error may be nil because Send silently drops after close.
-		_ = err
+		assert.Error(t, err, "sendSuccessResponse after close should return an error")
 	})
 
 	assert.NotPanics(t, func() {
 		err := sendErrorResponse(c, "id-after-close", protocol.ResponseCodeError, "test")
-		_ = err
+		assert.Error(t, err, "sendErrorResponse after close should return an error")
 	})
 }
 
@@ -2659,4 +2765,169 @@ func TestHandleRemoteBroadcast_DeliversFromOtherNode(t *testing.T) {
 	require.NoError(t, json.Unmarshal(pkg.Data, &upd))
 	require.Len(t, upd.Updates, 1)
 	assert.Equal(t, uint32(42), upd.Updates[0].Seq)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 integration tests — device replacement does not cancel replacement's
+// pending ReverseRPC requests
+// ---------------------------------------------------------------------------
+
+// TestHandleWebSocket_DeviceReplacement_DoesNotCancelReplacementPendingRPC
+// verifies that when a device replacement occurs:
+//  1. The old connection's pending ServerRequest receives "device replaced".
+//  2. After old connection cleanup, a new ServerRequest to the replacement
+//     connection remains pending (not cancelled by old connection's cleanup).
+func TestHandleWebSocket_DeviceReplacement_DoesNotCancelReplacementPendingRPC(t *testing.T) {
+	srv, addr, cleanup := startWSServerMem(t,
+		WSWithPingPeriod(1*time.Hour),
+		WSWithPongWait(30*time.Second),
+	)
+	defer cleanup()
+
+	const userID = "user-replace"
+	const deviceID = "device-replace"
+
+	// Step 1: Connect A with (userID, deviceID).
+	connA := connectWSWithDevice(t, addr, userID, deviceID)
+
+	require.Eventually(t, func() bool {
+		return srv.ClientCount() >= 1
+	}, 2*time.Second, 50*time.Millisecond)
+
+	// Step 2: Launch a ServerRequest to deviceID; client A will NOT respond.
+	type requestResult struct {
+		resp *protocol.PackageDataResponse
+		err  error
+	}
+	resultChA := make(chan requestResult, 1)
+	go func() {
+		resp, err := srv.ServerRequest(
+			context.Background(), userID, deviceID, "ping", nil, 15*time.Second,
+		)
+		resultChA <- requestResult{resp: resp, err: err}
+	}()
+
+	// Wait for client A to receive the server request.
+	_ = connA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, err := connA.ReadMessage()
+	require.NoError(t, err, "client A should receive the server request")
+
+	// Step 3: Connect B with the same (userID, deviceID) — triggers device
+	// replacement.
+	connB := connectWSWithDevice(t, addr, userID, deviceID)
+
+	// Step 4: Old connection A's pending request must be cancelled.
+	// Depending on timing, either "device replaced" (from connB's CancelDevice
+	// call) or "device disconnected" (from connA's cleanup path, if connA
+	// finishes before connB calls CancelDevice) is acceptable.
+	select {
+	case result := <-resultChA:
+		if result.err != nil {
+			// Rare race: ctx.Done() may win first.
+			assert.ErrorIs(t, result.err, context.Canceled)
+		} else {
+			require.NotNil(t, result.resp)
+			assert.Equal(t, protocol.ResponseCode(-1), result.resp.Code)
+			assert.Contains(t, result.resp.Msg, "device",
+				"reason should be 'device replaced' or 'device disconnected'")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("old connection A's pending ServerRequest was not cancelled after device replacement")
+	}
+
+	// Step 5: Launch a second ServerRequest to the new connection B.
+	resultChB := make(chan requestResult, 1)
+	go func() {
+		resp, err := srv.ServerRequest(
+			context.Background(), userID, deviceID, "ping2", nil, 15*time.Second,
+		)
+		resultChB <- requestResult{resp: resp, err: err}
+	}()
+
+	// Wait for client B to receive the server request.
+	_ = connB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, err = connB.ReadMessage()
+	require.NoError(t, err, "client B should receive the server request")
+
+	// Step 6: Wait for old connection A cleanup to complete (it should detect
+	// hasActiveConn=true because B is already registered, and skip cancelling).
+	time.Sleep(500 * time.Millisecond)
+
+	// Step 7: Verify that connection B's ServerRequest is still pending (not
+	// cancelled by old connection A's cleanup).
+	select {
+	case result := <-resultChB:
+		t.Fatalf("new connection B's ServerRequest should still be pending, but got: resp=%v, err=%v",
+			result.resp, result.err)
+	case <-time.After(1 * time.Second):
+		// Expected: still pending.
+	}
+
+	// Clean up.
+	connB.Close()
+	connA.Close()
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 integration tests — normal disconnect cancels pending ReverseRPC
+// ---------------------------------------------------------------------------
+
+// TestHandleWebSocket_NormalDisconnect_CancelsPendingReverseRPC verifies that
+// when a client disconnects normally, all pending ReverseRPC requests for that
+// device are immediately cancelled with "device disconnected" as the reason.
+func TestHandleWebSocket_NormalDisconnect_CancelsPendingReverseRPC(t *testing.T) {
+	srv, addr, cleanup := startWSServerMem(t,
+		WSWithPingPeriod(1*time.Hour),  // disable pings to avoid interference
+		WSWithPongWait(30*time.Second), // prevent readPump timeout
+	)
+	defer cleanup()
+
+	const userID = "user-integ"
+	const deviceID = "device-integ"
+
+	// Connect a client with a known deviceID.
+	conn := connectWSWithDevice(t, addr, userID, deviceID)
+
+	// Wait for the server to register the client.
+	require.Eventually(t, func() bool {
+		return srv.ClientCount() >= 1
+	}, 2*time.Second, 50*time.Millisecond)
+
+	// Launch a ServerRequest in a goroutine. The client will NOT respond,
+	// so this request will remain pending until the client disconnects.
+	type requestResult struct {
+		resp *protocol.PackageDataResponse
+		err  error
+	}
+	resultCh := make(chan requestResult, 1)
+	go func() {
+		resp, err := srv.ServerRequest(
+			context.Background(), userID, deviceID, "ping", nil, 10*time.Second,
+		)
+		resultCh <- requestResult{resp: resp, err: err}
+	}()
+
+	// Wait for the server request to be sent (the client should receive it).
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, err := conn.ReadMessage()
+	require.NoError(t, err, "client should receive the server request")
+
+	// Now disconnect the client normally (close the WebSocket connection).
+	conn.Close()
+
+	// The pending ServerRequest should return promptly with a cancellation
+	// response containing "device disconnected" as the reason.
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			// Rare race: ctx.Done() may win first.
+			assert.ErrorIs(t, result.err, context.Canceled)
+		} else {
+			require.NotNil(t, result.resp)
+			assert.Equal(t, protocol.ResponseCode(-1), result.resp.Code)
+			assert.Equal(t, "device disconnected", result.resp.Msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("pending ServerRequest was not cancelled after client disconnect")
+	}
 }

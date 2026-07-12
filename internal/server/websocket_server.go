@@ -712,6 +712,20 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// Fail pending reverse-RPC requests for this device on normal disconnect (D-095).
+	// Must run AFTER removeClient so that hasActiveConn correctly detects replacement
+	// connections. If a replacement has registered, skip cancellation to avoid failing
+	// the replacement's pending requests.
+	if s.reverseRPC != nil {
+		deviceKey := userID + "\x00" + deviceID
+		s.mu.RLock()
+		_, hasActiveConn := s.clientsByDevice[deviceKey]
+		s.mu.RUnlock()
+		if !hasActiveConn {
+			s.reverseRPC.CancelDeviceWithReason(userID, deviceID, "device disconnected")
+		}
+	}
+
 	s.logger.Info("websocket: client disconnected [connID=%s, userID=%s, deviceID=%s]", connID, userID, deviceID)
 }
 
@@ -856,10 +870,20 @@ func (s *WebSocketServer) sendToUser(userID string, pkg *protocol.Package) error
 		return fmt.Errorf("reverse_rpc: no connections for user %s", userID)
 	}
 
+	var lastErr error
+	anySuccess := false
 	for _, client := range clients {
-		client.Send(data) // non-blocking
+		if err := client.Send(data); err != nil {
+			lastErr = err
+			s.logger.Error("websocket: send to user [connID=%s]: %v", client.ConnID(), err)
+		} else {
+			anySuccess = true
+		}
 	}
-	return nil
+	if anySuccess {
+		return nil
+	}
+	return fmt.Errorf("reverse_rpc: all sends to user %s failed: %w", userID, lastErr)
 }
 
 // sendToDevice sends a package to a specific device of a user.
@@ -883,7 +907,9 @@ func (s *WebSocketServer) sendToDevice(userID, deviceID string, pkg *protocol.Pa
 	if client == nil {
 		return ErrDeviceOffline
 	}
-	client.Send(data)
+	if err := client.Send(data); err != nil {
+		return fmt.Errorf("reverse_rpc: send to device %s: %w", deviceID, err)
+	}
 	return nil
 }
 
