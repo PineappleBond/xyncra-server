@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,9 +37,8 @@ type XyncraClient struct {
 	retryMgr *retryManager
 
 	// RPC dispatch state.
-	mu        sync.Mutex
-	pending   map[string]chan *protocol.PackageDataResponse
-	nextReqID uint64
+	mu      sync.Mutex
+	pending map[string]chan *protocol.PackageDataResponse
 
 	// Request handler registry (D-092).
 	reqMu           sync.RWMutex
@@ -337,8 +335,8 @@ func (c *XyncraClient) Call(ctx context.Context, method string, params any) (jso
 	}
 	c.muState.Unlock()
 
-	// Generate a unique request ID.
-	reqID := fmt.Sprintf("%d", atomic.AddUint64(&c.nextReqID, 1))
+	// Generate a unique request ID (D-097: UUID, no prefix).
+	reqID := uuid.New().String()
 
 	// Serialize params.
 	var paramsBytes []byte

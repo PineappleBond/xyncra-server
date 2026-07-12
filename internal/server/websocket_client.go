@@ -53,6 +53,9 @@ type Client struct {
 	// userID is the authenticated user that owns this connection.
 	userID string
 
+	// deviceID is the identifier of the device this connection belongs to.
+	deviceID string
+
 	// connID is the unique identifier for this connection, used for
 	// registration in the ConnectionStore.
 	connID string
@@ -132,12 +135,13 @@ func WithMessageHandler(h MessageHandler) ClientOption {
 // NewClient creates a Client wrapping the given WebSocket connection. The
 // caller must call Run to start the read/write goroutines and Close to clean
 // up when the client is no longer needed.
-func NewClient(conn *websocket.Conn, userID, connID string, opts ...ClientOption) *Client {
+func NewClient(conn *websocket.Conn, userID, deviceID, connID string, opts ...ClientOption) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &Client{
 		conn:           conn,
 		userID:         userID,
+		deviceID:       deviceID,
 		connID:         connID,
 		send:           make(chan []byte, defaultSendBufSize),
 		ctx:            ctx,
@@ -158,6 +162,9 @@ func NewClient(conn *websocket.Conn, userID, connID string, opts ...ClientOption
 
 // UserID returns the authenticated user ID of this client.
 func (c *Client) UserID() string { return c.userID }
+
+// DeviceID returns the device identifier of this client.
+func (c *Client) DeviceID() string { return c.deviceID }
 
 // ConnID returns the unique connection identifier.
 func (c *Client) ConnID() string { return c.connID }

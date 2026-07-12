@@ -97,7 +97,7 @@ func TestAgentStream_AE_STREAM_001(t *testing.T) {
 	agentUserID := "agent/test-bot"
 
 	conv := createAgentConversation(t, env, userID, agentUserID)
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 	_ = insertUserMessageDirect(t, env, userID, conv.ID, "hello")
 
@@ -136,7 +136,7 @@ func TestAgentStream_AE_STREAM_002(t *testing.T) {
 	agentUserID := "agent/test-bot"
 
 	conv := createAgentConversation(t, env, userID, agentUserID)
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 	_ = insertUserMessageDirect(t, env, userID, conv.ID, "hello")
 
@@ -191,7 +191,7 @@ func TestAgentStream_AE_STREAM_003(t *testing.T) {
 	agentUserID := "agent/test-bot"
 
 	conv := createAgentConversation(t, env, userID, agentUserID)
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 	_ = insertUserMessageDirect(t, env, userID, conv.ID, "hello")
 
@@ -215,7 +215,7 @@ func TestAgentStream_AE_STREAM_004(t *testing.T) {
 	agentUserID := "agent/test-bot"
 
 	conv := createAgentConversation(t, env, userID, agentUserID)
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 	_ = insertUserMessageDirect(t, env, userID, conv.ID, "hello")
 
@@ -285,7 +285,7 @@ func TestAgentStream_AE_STREAM_005(t *testing.T) {
 	agentUserID := "agent/test-bot"
 
 	conv := createAgentConversation(t, env, userID, agentUserID)
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	_ = insertUserMessageDirect(t, env, userID, conv.ID, "hello")
 
 	execDone := make(chan struct{})
@@ -318,7 +318,7 @@ func TestAgentStream_AE_STREAM_005(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond)
 
 	// Reconnect and verify sync_updates has no streaming/typing.
-	newConn := connectClient(t, env.addr, userID)
+	newConn := connectClient(t, env.addr, userID, "device-1")
 	defer newConn.Close()
 	drainPushUpdates(t, newConn)
 
@@ -362,7 +362,7 @@ func TestAgentStream_AE_STREAM_006(t *testing.T) {
 	agentUserID := "agent/test-bot"
 
 	conv := createAgentConversation(t, env, userID, agentUserID)
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 	_ = insertUserMessageDirect(t, env, userID, conv.ID, "hello")
 

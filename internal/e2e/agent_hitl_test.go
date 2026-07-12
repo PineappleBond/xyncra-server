@@ -44,7 +44,7 @@ func TestAgentHITL_AE_HITL_001(t *testing.T) {
 	createAgentConversation(t, env, userID, agentUserID)
 
 	// Connect user WebSocket.
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 
 	// Drain any initial push updates.
@@ -279,7 +279,7 @@ func TestAgentHITL_AE_HITL_006(t *testing.T) {
 	createAgentConversation(t, env, userID, agentUserID)
 
 	// Connect user WebSocket.
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 
 	// Drain any initial push updates.

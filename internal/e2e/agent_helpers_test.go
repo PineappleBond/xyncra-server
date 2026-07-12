@@ -347,7 +347,7 @@ func sendToAgent(t *testing.T, env *agentE2EEnv, userID, agentUserID, convID, me
 	t.Helper()
 
 	// Connect user.
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 
 	// Send message via send_message RPC.
 	clientMsgID := fmt.Sprintf("agent-msg-%s-%d", userID, time.Now().UnixNano())

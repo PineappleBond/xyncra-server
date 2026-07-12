@@ -226,6 +226,7 @@ type StreamingHandler interface {
 type clientOptions struct {
 	serverURL          string
 	userID             string
+	deviceID           string
 	rpcTimeout         time.Duration
 	heartbeatInterval  time.Duration
 	syncBatchSize      int
@@ -257,6 +258,12 @@ func WithServerURL(url string) ClientOption {
 // WithUserID sets the user identifier used for authentication (D-005).
 func WithUserID(id string) ClientOption {
 	return func(o *clientOptions) { o.userID = id }
+}
+
+// WithDeviceID sets the device identifier for this client.
+// If not set, a random UUID is generated on connect (D-033).
+func WithDeviceID(id string) ClientOption {
+	return func(o *clientOptions) { o.deviceID = id }
 }
 
 // WithRPCTimeout sets the maximum duration for a single RPC call.

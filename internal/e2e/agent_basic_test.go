@@ -32,7 +32,7 @@ import (
 func sendUserMessage(t *testing.T, env *agentE2EEnv, userID, convID, content string) *wsConn {
 	t.Helper()
 
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 
 	clientMsgID := fmt.Sprintf("msg-%s-%d", userID, time.Now().UnixNano())
 	sendRequest(t, conn, "req-1", "send_message", map[string]interface{}{
@@ -209,7 +209,7 @@ func TestAgentBasic_AE_BASIC_003(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond, "old connection should be cleaned up")
 
 	// Reconnect as the same user.
-	newConn := connectClient(t, env.addr, userID)
+	newConn := connectClient(t, env.addr, userID, "device-1")
 	defer newConn.Close()
 	drainPushUpdates(t, newConn)
 
@@ -277,7 +277,7 @@ func TestAgentBasic_AE_BASIC_004(t *testing.T) {
 	conv := createTestConversation(t, env.store, user1, user2)
 
 	// Connect user1 and send a message.
-	conn1 := connectClient(t, env.addr, user1)
+	conn1 := connectClient(t, env.addr, user1, "device-1")
 	defer conn1.Close()
 	drainPushUpdates(t, conn1)
 
@@ -303,7 +303,7 @@ func TestAgentBasic_AE_BASIC_004(t *testing.T) {
 	assert.Equal(t, "Hello human!", dbMsgs[0].Content)
 
 	// Connect user2 and verify via sync_updates (more reliable than push).
-	conn2 := connectClient(t, env.addr, user2)
+	conn2 := connectClient(t, env.addr, user2, "device-1")
 	defer conn2.Close()
 	drainPushUpdates(t, conn2)
 
@@ -359,7 +359,7 @@ func TestAgentBasic_AE_BASIC_005(t *testing.T) {
 	conv := createAgentConversation(t, env, agent1, agent2)
 
 	// Connect as agent/test-bot via WebSocket.
-	conn1 := connectClient(t, env.addr, agent1)
+	conn1 := connectClient(t, env.addr, agent1, "device-1")
 	defer conn1.Close()
 
 	// Send a message from agent/test-bot to agent/test-bot-2.

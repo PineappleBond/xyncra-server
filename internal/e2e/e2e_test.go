@@ -235,17 +235,20 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 // Helper functions
 // ---------------------------------------------------------------------------
 
-// connectClient opens a WebSocket connection for the given userID and returns
-// a *wsConn (channel-backed wrapper). The connection URL is constructed as
-// ws://{addr}/ws?user_id={userID} (C-4).
-func connectClient(t *testing.T, addr, userID string) *wsConn {
+// connectClient opens a WebSocket connection for the given userID and deviceID,
+// returning a *wsConn (channel-backed wrapper). The connection URL is constructed
+// as ws://{addr}/ws?user_id={userID}&device_id={deviceID} (C-4, D-033).
+func connectClient(t *testing.T, addr, userID, deviceID string) *wsConn {
 	t.Helper()
 
+	q := url.Values{}
+	q.Set("user_id", userID)
+	q.Set("device_id", deviceID)
 	u := url.URL{
 		Scheme:   "ws",
 		Host:     addr,
 		Path:     "/ws",
-		RawQuery: url.Values{"user_id": {userID}}.Encode(),
+		RawQuery: q.Encode(),
 	}
 
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
@@ -442,9 +445,9 @@ func TestBasicMessageDelivery(t *testing.T) {
 	env := setupE2ETest(t)
 
 	// 1. Connect Alice and Bob.
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	// 2. Create conversation.
@@ -523,7 +526,7 @@ func TestOfflineMessageSync(t *testing.T) {
 	env := setupE2ETest(t)
 
 	// 1. Alice connects and sends a message (Bob is offline).
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
 
@@ -553,7 +556,7 @@ func TestOfflineMessageSync(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond, "alice should be disconnected")
 
 	// 4. Bob comes online.
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	// 5. Bob requests sync_updates from the beginning.
@@ -615,9 +618,9 @@ func TestOfflineMessageSync(t *testing.T) {
 func TestMultipleMessageOrdering(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
@@ -687,9 +690,9 @@ func TestMultipleMessageOrdering(t *testing.T) {
 func TestMessageIdempotency(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
@@ -770,7 +773,7 @@ func TestHeartbeatKeepAlive(t *testing.T) {
 	env := setupE2ETest(t)
 
 	// 1. Alice connects.
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
 
 	// 2. Wait for connection registration.
@@ -844,15 +847,15 @@ func TestHeartbeatKeepAlive(t *testing.T) {
 func TestNonMemberSendRejected(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
 
 	// Eve is not a member.
-	eveConn := connectClient(t, env.addr, "eve")
+	eveConn := connectClient(t, env.addr, "eve", "eve")
 	defer eveConn.Close()
 
 	clientMsgID := uuid.New().String()
@@ -879,7 +882,7 @@ func TestNonMemberSendRejected(t *testing.T) {
 func TestSendToNonexistentConversation(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
 
 	clientMsgID := uuid.New().String()
@@ -939,7 +942,7 @@ func TestSendMessageValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env := setupE2ETest(t)
 
-			aliceConn := connectClient(t, env.addr, "alice")
+			aliceConn := connectClient(t, env.addr, "alice", "alice")
 			defer aliceConn.Close()
 
 			sendRequest(t, aliceConn, "req-1", "send_message", tc.params)
@@ -1087,9 +1090,9 @@ func TestGetConversationE2E(t *testing.T) {
 	env := setupE2ETest(t)
 
 	// 1. Connect alice and bob.
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	// 2. Create conversation in DB.
@@ -1166,9 +1169,9 @@ func TestMarkAsReadAndGetConversationE2E(t *testing.T) {
 	env := setupE2ETest(t)
 
 	// 1. Connect alice and bob.
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	// 2. Create conversation, alice sends 3 messages.
@@ -1272,9 +1275,9 @@ func TestDeleteAndRestoreConversationE2E(t *testing.T) {
 	env := setupE2ETest(t)
 
 	// 1. Connect alice and bob.
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	// 2. Create conversation, alice sends 2 messages.
@@ -1362,9 +1365,9 @@ func TestDeleteMessageE2E(t *testing.T) {
 	env := setupE2ETest(t)
 
 	// 1. Connect alice and bob.
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	// 2. Create conversation, alice sends 2 messages.
@@ -1436,11 +1439,11 @@ func TestNonMemberOperationsRejectedE2E(t *testing.T) {
 	env := setupE2ETest(t)
 
 	// 1. Connect alice, bob, and eve (non-member).
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
-	eveConn := connectClient(t, env.addr, "eve")
+	eveConn := connectClient(t, env.addr, "eve", "eve")
 	defer eveConn.Close()
 
 	// 2. Create conversation between alice and bob.
@@ -1496,9 +1499,9 @@ func TestCreateConversationE2E(t *testing.T) {
 	env := setupE2ETest(t)
 
 	// Setup: connect alice and bob.
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	// Drain any startup messages.
@@ -1659,9 +1662,9 @@ func TestCreateConversationE2E(t *testing.T) {
 	// CC-7: Concurrent creates — only one conversation should exist in DB.
 	// -----------------------------------------------------------------------
 	// Use a fresh pair to avoid interaction with prior scenarios.
-	charlieConn := connectClient(t, env.addr, "charlie")
+	charlieConn := connectClient(t, env.addr, "charlie", "charlie")
 	defer charlieConn.Close()
-	daveConn := connectClient(t, env.addr, "dave")
+	daveConn := connectClient(t, env.addr, "dave", "dave")
 	defer daveConn.Close()
 
 	drainPushUpdates(t, charlieConn)
@@ -1723,7 +1726,7 @@ func TestListConversationsE2E(t *testing.T) {
 	t.Run("LC-1_HappyPath", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		// Pre-create 3 conversations for alice with different users.
@@ -1771,7 +1774,7 @@ func TestListConversationsE2E(t *testing.T) {
 		env := setupE2ETest(t)
 
 		// "newuser" has never been part of any conversation.
-		newConn := connectClient(t, env.addr, "newuser")
+		newConn := connectClient(t, env.addr, "newuser", "newuser")
 		defer newConn.Close()
 
 		drainPushUpdates(t, newConn)
@@ -1800,7 +1803,7 @@ func TestListConversationsE2E(t *testing.T) {
 	t.Run("LC-3_Pagination", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		// Pre-create 5 conversations for alice.
@@ -1882,7 +1885,7 @@ func TestListConversationsE2E(t *testing.T) {
 	t.Run("LC-4_Ordering", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		// Create 3 conversations with distinct LastMessageAt values.
@@ -1945,7 +1948,7 @@ func TestListConversationsE2E(t *testing.T) {
 	t.Run("LC-5_UserIsolation", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		// Alice has a conversation with Bob.
@@ -1990,7 +1993,7 @@ func TestListConversationsE2E(t *testing.T) {
 	t.Run("LC-6_SoftDeletedExcluded", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		// Create 3 conversations for alice.
@@ -2058,9 +2061,9 @@ func TestGetMessagesE2E(t *testing.T) {
 	t.Run("GM-E1_HappyPath", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
-		bobConn := connectClient(t, env.addr, "bob")
+		bobConn := connectClient(t, env.addr, "bob", "bob")
 		defer bobConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2130,7 +2133,7 @@ func TestGetMessagesE2E(t *testing.T) {
 	t.Run("GM-E2_EmptyConversation", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2163,9 +2166,9 @@ func TestGetMessagesE2E(t *testing.T) {
 	t.Run("GM-E3_Pagination", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
-		bobConn := connectClient(t, env.addr, "bob")
+		bobConn := connectClient(t, env.addr, "bob", "bob")
 		defer bobConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2228,9 +2231,9 @@ func TestGetMessagesE2E(t *testing.T) {
 	t.Run("GM-E4_HasMore", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
-		bobConn := connectClient(t, env.addr, "bob")
+		bobConn := connectClient(t, env.addr, "bob", "bob")
 		defer bobConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2283,9 +2286,9 @@ func TestGetMessagesE2E(t *testing.T) {
 	t.Run("GM-E5_NonMemberRejected", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
-		eveConn := connectClient(t, env.addr, "eve")
+		eveConn := connectClient(t, env.addr, "eve", "eve")
 		defer eveConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2311,7 +2314,7 @@ func TestGetMessagesE2E(t *testing.T) {
 	t.Run("GM-E6_NonExistentConversation", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		drainPushUpdates(t, aliceConn)
@@ -2334,9 +2337,9 @@ func TestGetMessagesE2E(t *testing.T) {
 	t.Run("GM-E7_SoftDeletedExcluded", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
-		bobConn := connectClient(t, env.addr, "bob")
+		bobConn := connectClient(t, env.addr, "bob", "bob")
 		defer bobConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2421,9 +2424,9 @@ func TestSearchMessagesE2E(t *testing.T) {
 	t.Run("SM-E1_HappyPath", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
-		bobConn := connectClient(t, env.addr, "bob")
+		bobConn := connectClient(t, env.addr, "bob", "bob")
 		defer bobConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2493,7 +2496,7 @@ func TestSearchMessagesE2E(t *testing.T) {
 	t.Run("SM-E2_NoResults", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2539,7 +2542,7 @@ func TestSearchMessagesE2E(t *testing.T) {
 	t.Run("SM-E3_CaseInsensitive", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2591,7 +2594,7 @@ func TestSearchMessagesE2E(t *testing.T) {
 	t.Run("SM-E4_Pagination", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2696,7 +2699,7 @@ func TestSearchMessagesE2E(t *testing.T) {
 	t.Run("SM-E5_OrderingDESC", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2761,9 +2764,9 @@ func TestSearchMessagesE2E(t *testing.T) {
 	t.Run("SM-E6_NonMemberRejected", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
-		eveConn := connectClient(t, env.addr, "eve")
+		eveConn := connectClient(t, env.addr, "eve", "eve")
 		defer eveConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2790,7 +2793,7 @@ func TestSearchMessagesE2E(t *testing.T) {
 	t.Run("SM-E7_EmptyQuery", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")
@@ -2816,7 +2819,7 @@ func TestSearchMessagesE2E(t *testing.T) {
 	t.Run("SM-E8_LIKESpecialChars", func(t *testing.T) {
 		env := setupE2ETest(t)
 
-		aliceConn := connectClient(t, env.addr, "alice")
+		aliceConn := connectClient(t, env.addr, "alice", "alice")
 		defer aliceConn.Close()
 
 		conv := createTestConversation(t, env.store, "alice", "bob")

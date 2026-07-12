@@ -173,7 +173,7 @@ func TestAgentRealLLM_REAL_003(t *testing.T) {
 		}
 
 		// Reconnect.
-		newConn := connectClient(t, env.addr, userID)
+		newConn := connectClient(t, env.addr, userID, "device-1")
 		defer newConn.Close()
 		drainPushUpdates(t, newConn)
 
@@ -234,7 +234,7 @@ func TestAgentRealLLM_REAL_004(t *testing.T) {
 	conv := createAgentConversation(t, env, userID, agentUserID)
 
 	retryRealLLM(t, 2, func(t *testing.T) error {
-		conn := connectClient(t, env.addr, userID)
+		conn := connectClient(t, env.addr, userID, "device-1")
 		defer conn.Close()
 		_ = insertUserMessageDirect(t, env, userID, conv.ID, "Tell me a short fun fact.")
 
@@ -298,7 +298,7 @@ func TestAgentRealLLM_REAL_005(t *testing.T) {
 	conv := createAgentConversation(t, env, userID, agentUserID)
 
 	retryRealLLM(t, 2, func(t *testing.T) error {
-		conn := connectClient(t, env.addr, userID)
+		conn := connectClient(t, env.addr, userID, "device-1")
 		defer conn.Close()
 		_ = insertUserMessageDirect(t, env, userID, conv.ID, "Say hello in one sentence.")
 
@@ -461,7 +461,7 @@ func TestAgentRealLLM_REAL_008(t *testing.T) {
 	conv := createAgentConversation(t, env, userID, agentUserID)
 
 	retryRealLLM(t, 2, func(t *testing.T) error {
-		conn := connectClient(t, env.addr, userID)
+		conn := connectClient(t, env.addr, userID, "device-1")
 		defer conn.Close()
 		_ = insertUserMessageDirect(t, env, userID, conv.ID, "Hello")
 
@@ -518,7 +518,7 @@ func TestAgentRealLLM_REAL_009(t *testing.T) {
 	conv := createAgentConversation(t, env, userID, agentUserID)
 
 	retryRealLLM(t, 2, func(t *testing.T) error {
-		conn := connectClient(t, env.addr, userID)
+		conn := connectClient(t, env.addr, userID, "device-1")
 		defer conn.Close()
 		_ = insertUserMessageDirect(t, env, userID, conv.ID, "Hello")
 
@@ -782,7 +782,7 @@ func TestAgentRealLLM_REAL_013(t *testing.T) {
 	conv := createAgentConversation(t, env, userID, agentUserID)
 
 	retryRealLLM(t, 2, func(t *testing.T) error {
-		conn := connectClient(t, env.addr, userID)
+		conn := connectClient(t, env.addr, userID, "device-1")
 		defer conn.Close()
 		_ = insertUserMessageDirect(t, env, userID, conv.ID, "Say hello in a few words.")
 
@@ -843,7 +843,7 @@ func TestAgentRealLLM_REAL_013(t *testing.T) {
 			return fmt.Errorf("connection not cleaned up")
 		}
 
-		newConn := connectClient(t, env.addr, userID)
+		newConn := connectClient(t, env.addr, userID, "device-1")
 		defer newConn.Close()
 		drainPushUpdates(t, newConn)
 
@@ -913,7 +913,7 @@ func TestAgentRealLLM_REAL_014(t *testing.T) {
 	conv := createTestConversation(t, env.store, user1, user2)
 
 	// Connect user1 and send a message.
-	conn1 := connectClient(t, env.addr, user1)
+	conn1 := connectClient(t, env.addr, user1, "device-1")
 	defer conn1.Close()
 	drainPushUpdates(t, conn1)
 
@@ -939,7 +939,7 @@ func TestAgentRealLLM_REAL_014(t *testing.T) {
 
 	retryRealLLM(t, 2, func(t *testing.T) error {
 		// Connect user2 and verify via sync_updates.
-		conn2 := connectClient(t, env.addr, user2)
+		conn2 := connectClient(t, env.addr, user2, "device-1")
 		defer conn2.Close()
 		drainPushUpdates(t, conn2)
 

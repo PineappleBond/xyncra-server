@@ -28,9 +28,9 @@ import (
 func TestStreaming_OnlineRecipientReceivesEvent(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
@@ -106,7 +106,7 @@ func TestStreaming_OnlineRecipientReceivesEvent(t *testing.T) {
 func TestStreaming_OfflineRecipientDoesNotReceive(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
 	// Bob does NOT connect.
 
@@ -139,9 +139,9 @@ func TestStreaming_OfflineRecipientDoesNotReceive(t *testing.T) {
 func TestStreaming_SyncUpdatesDoesNotReturnStreaming(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
@@ -196,7 +196,7 @@ func TestStreaming_SyncUpdatesDoesNotReturnStreaming(t *testing.T) {
 func TestStreaming_NonMemberRejected(t *testing.T) {
 	env := setupE2ETest(t)
 
-	eveConn := connectClient(t, env.addr, "eve")
+	eveConn := connectClient(t, env.addr, "eve", "eve")
 	defer eveConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
@@ -225,7 +225,7 @@ func TestStreaming_NonMemberRejected(t *testing.T) {
 func TestStreaming_NoDBSideEffects(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
@@ -287,9 +287,9 @@ func TestStreaming_NoDBSideEffects(t *testing.T) {
 func TestStreaming_IsDoneFollowedBySendMessage(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
@@ -362,9 +362,9 @@ func TestStreaming_IsDoneFollowedBySendMessage(t *testing.T) {
 func TestStreaming_SenderAlsoReceivesPush(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")

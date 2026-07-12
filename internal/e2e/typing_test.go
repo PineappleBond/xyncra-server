@@ -28,9 +28,9 @@ import (
 func TestTyping_OnlineRecipientReceivesEvent(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
@@ -96,7 +96,7 @@ func TestTyping_OnlineRecipientReceivesEvent(t *testing.T) {
 func TestTyping_OfflineRecipientDoesNotReceive(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
 	// Bob does NOT connect.
 
@@ -130,9 +130,9 @@ func TestTyping_OfflineRecipientDoesNotReceive(t *testing.T) {
 func TestTyping_SyncUpdatesDoesNotReturnTyping(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
@@ -183,9 +183,9 @@ func TestTyping_SyncUpdatesDoesNotReturnTyping(t *testing.T) {
 func TestTyping_NonMemberRejected(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	eveConn := connectClient(t, env.addr, "eve")
+	eveConn := connectClient(t, env.addr, "eve", "eve")
 	defer eveConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
@@ -212,9 +212,9 @@ func TestTyping_NonMemberRejected(t *testing.T) {
 func TestTyping_StopTypingEvent(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
-	bobConn := connectClient(t, env.addr, "bob")
+	bobConn := connectClient(t, env.addr, "bob", "bob")
 	defer bobConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")
@@ -257,7 +257,7 @@ func TestTyping_StopTypingEvent(t *testing.T) {
 func TestTyping_NoDBSideEffects(t *testing.T) {
 	env := setupE2ETest(t)
 
-	aliceConn := connectClient(t, env.addr, "alice")
+	aliceConn := connectClient(t, env.addr, "alice", "alice")
 	defer aliceConn.Close()
 
 	conv := createTestConversation(t, env.store, "alice", "bob")

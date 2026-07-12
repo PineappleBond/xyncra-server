@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
@@ -49,6 +50,8 @@ type connectionManager struct {
 	// userID is the authenticated user identifier appended as a query parameter
 	// per D-005.
 	userID string
+	// deviceID identifies this device, appended as a query parameter (D-033).
+	deviceID string
 
 	// Connection tuning parameters.
 	writeWait   time.Duration
@@ -98,9 +101,14 @@ type connectionManager struct {
 // and callbacks. Connection-level parameters that are not part of clientOptions
 // use the default constants defined in options.go.
 func newConnectionManager(opts clientOptions, callbacks connectionCallbacks) *connectionManager {
+	deviceID := opts.deviceID
+	if deviceID == "" {
+		deviceID = uuid.New().String()
+	}
 	return &connectionManager{
 		serverURL:   opts.serverURL,
 		userID:      opts.userID,
+		deviceID:    deviceID,
 		writeWait:   defaultWriteWait,
 		pongWait:    defaultPongWait,
 		pingPeriod:  defaultPingPeriod,
@@ -128,6 +136,7 @@ func (cm *connectionManager) Connect(ctx context.Context) error {
 	}
 	q := u.Query()
 	q.Set("user_id", cm.userID)
+	q.Set("device_id", cm.deviceID)
 	u.RawQuery = q.Encode()
 
 	dialer := websocket.Dialer{}
@@ -339,6 +348,7 @@ func (cm *connectionManager) readPump(conn *websocket.Conn, disconnectCh chan st
 			if websocket.IsUnexpectedCloseError(err,
 				websocket.CloseGoingAway,
 				websocket.CloseNormalClosure,
+				4001, // device replaced (D-095)
 			) {
 				cm.logger.Error("read error", "error", err)
 			}

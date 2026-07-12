@@ -5,30 +5,32 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
 
 // ReverseRPC enables the server to send requests to clients and await responses.
 type ReverseRPC struct {
-	mu        sync.Mutex
-	pending   map[string]*reverseRPCPending // reqID → pending
-	nextReqID uint64                        // atomic counter
+	mu      sync.Mutex
+	pending map[string]*reverseRPCPending // reqID → pending
 
-	sendFunc func(userID string, pkg *protocol.Package) error
+	sendFunc func(userID, deviceID string, pkg *protocol.Package) error
 	logger   Logger
 }
 
 type reverseRPCPending struct {
-	respCh chan *protocol.PackageDataResponse // buffered cap=1
-	cancel context.CancelFunc
+	respCh   chan *protocol.PackageDataResponse // buffered cap=1
+	cancel   context.CancelFunc
+	userID   string // for CancelDevice cross-user safety
+	deviceID string // for CancelDevice per-device filtering
 }
 
 // ReverseRPCConfig configures a ReverseRPC during construction.
 type ReverseRPCConfig struct {
-	SendFunc func(userID string, pkg *protocol.Package) error
+	SendFunc func(userID, deviceID string, pkg *protocol.Package) error
 	Logger   Logger
 }
 
@@ -41,18 +43,21 @@ func NewReverseRPC(cfg ReverseRPCConfig) *ReverseRPC {
 	}
 }
 
-// ServerRequest sends a request to all connections of userID and blocks until
+// ServerRequest sends a request to a specific user's device and blocks until
 // a response arrives, the context is cancelled, or the timeout expires.
-// Returns error if user has no active connections.
-func (r *ReverseRPC) ServerRequest(ctx context.Context, userID string, method string, params json.RawMessage, timeout time.Duration) (*protocol.PackageDataResponse, error) {
-	reqID := fmt.Sprintf("s-%d", atomic.AddUint64(&r.nextReqID, 1))
+// If deviceID is empty, the request is broadcast to all connections of the user.
+// Returns error if user has no active connections (or the device is offline).
+func (r *ReverseRPC) ServerRequest(ctx context.Context, userID, deviceID string, method string, params json.RawMessage, timeout time.Duration) (*protocol.PackageDataResponse, error) {
+	reqID := fmt.Sprintf("s-%s", uuid.New().String())
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	pending := &reverseRPCPending{
-		respCh: make(chan *protocol.PackageDataResponse, 1),
-		cancel: cancel,
+		respCh:   make(chan *protocol.PackageDataResponse, 1),
+		cancel:   cancel,
+		userID:   userID,
+		deviceID: deviceID,
 	}
 
 	r.mu.Lock()
@@ -82,7 +87,7 @@ func (r *ReverseRPC) ServerRequest(ctx context.Context, userID string, method st
 		Data:    data,
 	}
 
-	if err := r.sendFunc(userID, pkg); err != nil {
+	if err := r.sendFunc(userID, deviceID, pkg); err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
 	}
 
@@ -111,6 +116,27 @@ func (r *ReverseRPC) DispatchResponse(resp *protocol.PackageDataResponse) {
 	select {
 	case pending.respCh <- resp:
 	default:
+	}
+}
+
+// CancelDevice cancels all pending ReverseRPC requests for a specific device.
+// Called when a device connection is replaced by a new connection.
+func (r *ReverseRPC) CancelDevice(userID, deviceID string) {
+	r.mu.Lock()
+	var toCancel []*reverseRPCPending
+	for id, p := range r.pending {
+		if p.userID == userID && p.deviceID == deviceID {
+			delete(r.pending, id)
+			toCancel = append(toCancel, p)
+		}
+	}
+	r.mu.Unlock()
+	for _, p := range toCancel {
+		select {
+		case p.respCh <- &protocol.PackageDataResponse{Code: -1, Msg: "device replaced"}:
+		default:
+		}
+		p.cancel()
 	}
 }
 

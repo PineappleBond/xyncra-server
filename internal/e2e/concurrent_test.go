@@ -248,10 +248,10 @@ func runConcurrentSend(t *testing.T, env *e2eEnv) {
 	// exactly one writer per connection at all times.
 	aliceConns := make([]*wsConn, numGoroutines)
 	for i := 0; i < numGoroutines; i++ {
-		aliceConns[i] = connectClient(t, env.addr, aliceID)
+		aliceConns[i] = connectClient(t, env.addr, aliceID, fmt.Sprintf("alice-dev-%d", i))
 		defer aliceConns[i].Close()
 	}
-	bobConn := connectClient(t, env.addr, bobID)
+	bobConn := connectClient(t, env.addr, bobID, "bob-dev")
 	defer bobConn.Close()
 
 	conv := createTestConversation(t, env.store, aliceID, bobID)
@@ -359,8 +359,8 @@ func runConcurrentCreateConversation(t *testing.T, env *e2eEnv) {
 		user1 := fmt.Sprintf("ccc-p%d-u1", p)
 		user2 := fmt.Sprintf("ccc-p%d-u2", p)
 
-		c1 := connectClient(t, env.addr, user1)
-		c2 := connectClient(t, env.addr, user2)
+		c1 := connectClient(t, env.addr, user1, "device-1")
+		c2 := connectClient(t, env.addr, user2, "device-1")
 		conns[p*2] = c1
 		conns[p*2+1] = c2
 
@@ -437,11 +437,11 @@ func runMultiDeviceBroadcast(t *testing.T, env *e2eEnv) {
 	// Alice connects 3 devices.
 	aliceDevs := make([]*wsConn, 3)
 	for i := 0; i < 3; i++ {
-		aliceDevs[i] = connectClient(t, env.addr, aliceUserID)
+		aliceDevs[i] = connectClient(t, env.addr, aliceUserID, fmt.Sprintf("mdb-alice-dev-%d", i))
 		defer aliceDevs[i].Close()
 	}
 
-	bobConn := connectClient(t, env.addr, bobUserID)
+	bobConn := connectClient(t, env.addr, bobUserID, "mdb-bob-dev")
 	defer bobConn.Close()
 
 	// Create conversation.
@@ -509,8 +509,8 @@ func runOfflineThenSync(t *testing.T, env *e2eEnv) {
 	bobUserID := "ots-bob"
 
 	// 1. Both connect.
-	aliceConn := connectClient(t, env.addr, aliceUserID)
-	bobConn := connectClient(t, env.addr, bobUserID)
+	aliceConn := connectClient(t, env.addr, aliceUserID, "device-1")
+	bobConn := connectClient(t, env.addr, bobUserID, "device-1")
 	defer bobConn.Close()
 
 	conv := createTestConversation(t, env.store, aliceUserID, bobUserID)
@@ -544,7 +544,7 @@ func runOfflineThenSync(t *testing.T, env *e2eEnv) {
 	drainPushUpdates(t, bobConn)
 
 	// 4. Alice reconnects.
-	aliceConn2 := connectClient(t, env.addr, aliceUserID)
+	aliceConn2 := connectClient(t, env.addr, aliceUserID, "device-1")
 	defer aliceConn2.Close()
 
 	// 5. Alice calls sync_updates.

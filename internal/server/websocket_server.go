@@ -33,6 +33,9 @@ var (
 	// ErrAuthenticationFailed indicates the client could not be
 	// authenticated during the WebSocket upgrade handshake.
 	ErrAuthenticationFailed = errors.New("websocket: authentication failed")
+
+	// ErrDeviceOffline is returned when the target device is not connected.
+	ErrDeviceOffline = errors.New("reverse_rpc: device is offline")
 )
 
 // --------------------------------------------------------------------------
@@ -274,7 +277,7 @@ type WebSocketServer struct {
 	// handler is the MessageHandler for incoming packages.
 	handler MessageHandler
 
-	// mu protects clients and clientsByUser.
+	// mu protects clients, clientsByUser, and clientsByDevice.
 	mu sync.RWMutex
 
 	// clients is the set of active client connections, keyed by connID.
@@ -284,6 +287,11 @@ type WebSocketServer struct {
 	// userID then connID. It enables O(1) lookup for BroadcastUpdates
 	// instead of scanning all clients (P1-03).
 	clientsByUser map[string]map[string]*Client
+
+	// clientsByDevice is a per-device index of active connections, keyed by
+	// "userID\x00deviceID" then connID. It enables O(1) lookup for device
+	// replacement (D-093, D-095).
+	clientsByDevice map[string]map[string]*Client
 
 	// httpServer is the underlying HTTP server.
 	httpServer *http.Server
@@ -403,6 +411,7 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 		handler:                handler,
 		clients:                make(map[string]*Client),
 		clientsByUser:          make(map[string]map[string]*Client),
+		clientsByDevice:        make(map[string]map[string]*Client),
 		clientOptions:          clientOpts,
 		logger:                 logger,
 		connectionInfoEnricher: o.connectionInfoEnricher,
@@ -422,10 +431,15 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 		},
 	}
 
-	// Create ReverseRPC with sendToUser function (D-092).
+	// Create ReverseRPC with sendFunc that routes by deviceID (D-092).
 	s.reverseRPC = NewReverseRPC(ReverseRPCConfig{
-		SendFunc: s.sendToUser,
-		Logger:   s.logger,
+		SendFunc: func(userID, deviceID string, pkg *protocol.Package) error {
+			if deviceID != "" {
+				return s.sendToDevice(userID, deviceID, pkg)
+			}
+			return s.sendToUser(userID, pkg)
+		},
+		Logger: s.logger,
 	})
 
 	// Auto-wire ReverseRPC to the message handler if it's a DefaultMessageHandler (D-092).
@@ -532,6 +546,53 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Extract device_id from query param (D-002/D-005).
+	// If missing, auto-generate a UUID v4 (D-094).
+	q := r.URL.Query()
+	deviceID := q.Get("device_id")
+	if deviceID == "" {
+		deviceID = uuid.New().String()
+		s.logger.Info("client connected without device_id, assigned UUID", "user_id", userID, "device_id", deviceID)
+	}
+	if len(deviceID) > 255 {
+		http.Error(w, "device_id too long", http.StatusBadRequest)
+		return
+	}
+
+	// Device replacement: if there is an existing connection for the same
+	// (userID, deviceID), close it with a 4001 frame and fail its pending
+	// reverse-RPC requests (D-095).
+	deviceKey := userID + "\x00" + deviceID
+	s.mu.Lock()
+	existingClients := s.clientsByDevice[deviceKey]
+	var oldClient *Client
+	for _, c := range existingClients {
+		oldClient = c
+		break
+	}
+	s.mu.Unlock()
+
+	if oldClient != nil {
+		// Send Close Frame (4001) outside the lock.
+		closeMsg := websocket.FormatCloseMessage(4001, "replaced by new connection from same device")
+		_ = oldClient.conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(5*time.Second))
+		oldClient.Close()
+
+		// Wait for old connection to finish cleanup (at most 2s).
+		select {
+		case <-oldClient.Done():
+		case <-time.After(2 * time.Second):
+		}
+
+		// Clean up old indexes.
+		s.removeClient(oldClient.ConnID(), userID, oldClient.DeviceID())
+
+		// Remove from ConnectionStore.
+		cleanupOldCtx, cleanupOldCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		s.ConnectionStore().Remove(cleanupOldCtx, oldClient.ConnID())
+		cleanupOldCancel()
+	}
+
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		s.logger.Error("websocket: upgrade: %v", err)
@@ -540,9 +601,17 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 
 	connID := uuid.New().String()
 
-	client := NewClient(conn, userID, connID, s.clientOptions...)
+	client := NewClient(conn, userID, deviceID, connID, s.clientOptions...)
 
-	// Register the client in the local map and per-user index atomically.
+	// CancelDevice: fail pending reverse-RPC requests for this device.
+	// Moved here (after Upgrade succeeds) so that if Upgrade fails, the
+	// old connection's pending requests are not prematurely cancelled (D-095).
+	if s.reverseRPC != nil && oldClient != nil {
+		s.reverseRPC.CancelDevice(userID, deviceID)
+	}
+
+	// Register the client in the local map, per-user index, and per-device
+	// index atomically.
 	// Intentional design: registering locally first (before the
 	// ConnectionStore) minimizes latency for the client. If the
 	// ConnectionStore registration fails, we clean up the local state
@@ -556,6 +625,10 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 		s.clientsByUser[userID] = userClients
 	}
 	userClients[connID] = client
+	if s.clientsByDevice[deviceKey] == nil {
+		s.clientsByDevice[deviceKey] = make(map[string]*Client)
+	}
+	s.clientsByDevice[deviceKey][connID] = client
 	s.mu.Unlock()
 
 	// Register in the ConnectionStore.
@@ -563,6 +636,7 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 	connInfo := &ConnectionInfo{
 		ID:        connID,
 		UserID:    userID,
+		DeviceID:  deviceID,
 		Protocol:  "websocket",
 		IPAddress: ip,
 		Status:    "active",
@@ -574,7 +648,7 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 	if addErr := s.ConnectionStore().Add(s.Context(), connInfo); addErr != nil {
 		s.logger.Error("websocket: register connection [connID=%s]: %v", connID, addErr)
 		client.Close()
-		s.removeClient(connID, userID)
+		s.removeClient(connID, userID, deviceID)
 		return
 	}
 
@@ -589,18 +663,18 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 	if removeErr := s.ConnectionStore().Remove(cleanupCtx, connID); removeErr != nil {
 		s.logger.Error("websocket: remove connection [connID=%s]: %v", connID, removeErr)
 	}
-	s.removeClient(connID, userID)
+	s.removeClient(connID, userID, deviceID)
 
-	s.logger.Info("websocket: client disconnected [connID=%s, userID=%s]", connID, userID)
+	s.logger.Info("websocket: client disconnected [connID=%s, userID=%s, deviceID=%s]", connID, userID, deviceID)
 }
 
 // --------------------------------------------------------------------------
 // Client management
 // --------------------------------------------------------------------------
 
-// removeClient removes a client from both the local map and the per-user
-// index by connID and userID.
-func (s *WebSocketServer) removeClient(connID, userID string) {
+// removeClient removes a client from the local map, the per-user index, and
+// the per-device index by connID, userID, and deviceID.
+func (s *WebSocketServer) removeClient(connID, userID, deviceID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.clients, connID)
@@ -608,6 +682,13 @@ func (s *WebSocketServer) removeClient(connID, userID string) {
 		delete(userClients, connID)
 		if len(userClients) == 0 {
 			delete(s.clientsByUser, userID)
+		}
+	}
+	deviceKey := userID + "\x00" + deviceID
+	if deviceClients, ok := s.clientsByDevice[deviceKey]; ok {
+		delete(deviceClients, connID)
+		if len(deviceClients) == 0 {
+			delete(s.clientsByDevice, deviceKey)
 		}
 	}
 }
@@ -621,12 +702,17 @@ func (s *WebSocketServer) closeAllClients() {
 		s.reverseRPC.CancelAll()
 	}
 
-	s.mu.RLock()
+	// Collect client references, then reset all client indexes in a single
+	// lock acquisition to avoid unnecessary lock separation.
+	s.mu.Lock()
 	clients := make([]*Client, 0, len(s.clients))
 	for _, c := range s.clients {
 		clients = append(clients, c)
 	}
-	s.mu.RUnlock()
+	s.clientsByDevice = make(map[string]map[string]*Client)
+	s.clientsByUser = make(map[string]map[string]*Client)
+	s.clients = make(map[string]*Client)
+	s.mu.Unlock()
 
 	// First, cancel all client contexts so writePumps send close frames and
 	// stop accepting new messages.
@@ -729,18 +815,44 @@ func (s *WebSocketServer) sendToUser(userID string, pkg *protocol.Package) error
 	return nil
 }
 
+// sendToDevice sends a package to a specific device of a user.
+// Returns ErrDeviceOffline if the device is not connected.
+func (s *WebSocketServer) sendToDevice(userID, deviceID string, pkg *protocol.Package) error {
+	data, err := jsonMarshal(pkg)
+	if err != nil {
+		return fmt.Errorf("reverse_rpc: marshal: %w", err)
+	}
+
+	deviceKey := userID + "\x00" + deviceID
+	s.mu.RLock()
+	deviceClients := s.clientsByDevice[deviceKey]
+	var client *Client
+	for _, c := range deviceClients {
+		client = c
+		break
+	}
+	s.mu.RUnlock()
+
+	if client == nil {
+		return ErrDeviceOffline
+	}
+	client.Send(data)
+	return nil
+}
+
 // ReverseRPC returns the ReverseRPC instance for server-initiated requests.
 func (s *WebSocketServer) ReverseRPC() *ReverseRPC {
 	return s.reverseRPC
 }
 
-// ServerRequest sends a request to a specific user and waits for a response.
+// ServerRequest sends a request to a specific user's device and waits for a response.
 // This is a convenience wrapper around ReverseRPC().ServerRequest().
-func (s *WebSocketServer) ServerRequest(ctx context.Context, userID, method string, params json.RawMessage, timeout time.Duration) (*protocol.PackageDataResponse, error) {
+// If deviceID is empty, the request is broadcast to all devices of the user.
+func (s *WebSocketServer) ServerRequest(ctx context.Context, userID, deviceID, method string, params json.RawMessage, timeout time.Duration) (*protocol.PackageDataResponse, error) {
 	if s.reverseRPC == nil {
 		return nil, fmt.Errorf("reverse_rpc: not configured")
 	}
-	return s.reverseRPC.ServerRequest(ctx, userID, method, params, timeout)
+	return s.reverseRPC.ServerRequest(ctx, userID, deviceID, method, params, timeout)
 }
 
 // handleRemoteBroadcast is called when a Pub/Sub message is received from

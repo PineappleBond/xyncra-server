@@ -1476,7 +1476,7 @@ func newClientWithSendBuf(t *testing.T, userID string, bufSize int) *Client {
 // TestNewClient_Defaults verifies that NewClient applies the documented
 // default constants when no options are provided.
 func TestNewClient_Defaults(t *testing.T) {
-	c := NewClient(nil, "u1", "c1")
+	c := NewClient(nil, "u1", "device-1", "c1")
 
 	// D-001: zero-config defaults must match the documented constants.
 	assert.Equal(t, defaultWriteWait, c.writeWait, "writeWait default (D-001)")
@@ -1511,7 +1511,7 @@ func TestNewClient_Defaults(t *testing.T) {
 func TestNewClient_WithOptions(t *testing.T) {
 	customHandler := MessageHandlerFunc(func(ctx context.Context, client *Client, pkg *protocol.Package) {})
 
-	c := NewClient(nil, "u2", "c2",
+	c := NewClient(nil, "u2", "device-1", "c2",
 		WithWriteWait(5*time.Second),
 		WithPongWait(30*time.Second),
 		WithPingPeriod(25*time.Second),
@@ -1534,15 +1534,15 @@ func TestNewClient_WithOptions(t *testing.T) {
 // zero or negative values preserves the default buffer size (D-001).
 func TestNewClient_WithSendBufSize_Invalid(t *testing.T) {
 	// n=0 → keep default
-	c0 := NewClient(nil, "u", "c", WithSendBufSize(0))
+	c0 := NewClient(nil, "u", "device-1", "c", WithSendBufSize(0))
 	assert.Equal(t, defaultSendBufSize, cap(c0.send), "WithSendBufSize(0) keeps default (D-001)")
 
 	// n=-1 → keep default
-	c1 := NewClient(nil, "u", "c", WithSendBufSize(-1))
+	c1 := NewClient(nil, "u", "device-1", "c", WithSendBufSize(-1))
 	assert.Equal(t, defaultSendBufSize, cap(c1.send), "WithSendBufSize(-1) keeps default (D-001)")
 
 	// n=-100 → keep default
-	c2 := NewClient(nil, "u", "c", WithSendBufSize(-100))
+	c2 := NewClient(nil, "u", "device-1", "c", WithSendBufSize(-100))
 	assert.Equal(t, defaultSendBufSize, cap(c2.send), "WithSendBufSize(-100) keeps default (D-001)")
 }
 
@@ -1975,7 +1975,7 @@ func TestClient_WritePump_BatchDrain(t *testing.T) {
 // no-op. The full idempotency test with a real connection is covered by
 // TestClient_CloseIdempotent.
 func TestClient_Close_IdempotentUnit(t *testing.T) {
-	c := NewClient(nil, "u", "c")
+	c := NewClient(nil, "u", "device-1", "c")
 
 	// Simulate what Close does internally (without touching conn).
 	c.mu.Lock()

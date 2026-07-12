@@ -124,7 +124,7 @@ func TestAgentWeakNet_AE_WEAKNET_002(t *testing.T) {
 	agentUserID := "agent/test-bot"
 
 	conv := createAgentConversation(t, env, userID, agentUserID)
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 
 	_ = insertUserMessageDirect(t, env, userID, conv.ID, "hello")

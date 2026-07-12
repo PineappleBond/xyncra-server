@@ -31,7 +31,7 @@ func TestAgentHITL_E2E_AE_HITL_E2E_001_UserApproves(t *testing.T) {
 	env.msgHandler.SetReverseRPC(env.srv.ReverseRPC())
 
 	userID := "user-hitl-001"
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 
 	// Wait for connection registration.
@@ -93,7 +93,7 @@ func TestAgentHITL_E2E_AE_HITL_E2E_001_UserApproves(t *testing.T) {
 	})
 	require.NoError(t, err, "marshal request params should succeed")
 
-	resp, err := env.srv.ServerRequest(context.Background(), userID, "hitl.request_approval", reqParams, 5*time.Second)
+	resp, err := env.srv.ServerRequest(context.Background(), userID, "device-1", "hitl.request_approval", reqParams, 5*time.Second)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ResponseCodeOK, resp.Code)
 
@@ -120,7 +120,7 @@ func TestAgentHITL_E2E_AE_HITL_E2E_002_UserRejects(t *testing.T) {
 	env.msgHandler.SetReverseRPC(env.srv.ReverseRPC())
 
 	userID := "user-hitl-002"
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 
 	// Wait for connection registration.
@@ -178,7 +178,7 @@ func TestAgentHITL_E2E_AE_HITL_E2E_002_UserRejects(t *testing.T) {
 	})
 	require.NoError(t, err, "marshal request params should succeed")
 
-	resp, err := env.srv.ServerRequest(context.Background(), userID, "hitl.request_approval", reqParams, 5*time.Second)
+	resp, err := env.srv.ServerRequest(context.Background(), userID, "device-1", "hitl.request_approval", reqParams, 5*time.Second)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ResponseCodeOK, resp.Code)
 
@@ -193,13 +193,13 @@ func TestAgentHITL_E2E_AE_HITL_E2E_002_UserRejects(t *testing.T) {
 // AE_HITL_E2E_003: TestAgentHITL_E2E_AE_HITL_E2E_003_UserOffline
 // Verifies: Server sends "hitl.request_approval" to an offline user ->
 //
-//	returns error containing "no connections".
+//	returns error containing "offline".
 //
 // ---------------------------------------------------------------------------
 
 // TestAgentHITL_E2E_AE_HITL_E2E_003_UserOffline verifies that when the server
 // sends a HITL approval request to a user with no active connections, the
-// ServerRequest call returns an error containing "no connections" immediately,
+// ServerRequest call returns an error containing "offline" immediately,
 // without waiting for the timeout.
 func TestAgentHITL_E2E_AE_HITL_E2E_003_UserOffline(t *testing.T) {
 	env := setupE2ETest(t)
@@ -213,14 +213,14 @@ func TestAgentHITL_E2E_AE_HITL_E2E_003_UserOffline(t *testing.T) {
 	require.NoError(t, err, "marshal request params should succeed")
 
 	start := time.Now()
-	_, err = env.srv.ServerRequest(context.Background(), "offline-user", "hitl.request_approval", reqParams, 5*time.Second)
+	_, err = env.srv.ServerRequest(context.Background(), "offline-user", "device-1", "hitl.request_approval", reqParams, 5*time.Second)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no connections",
-		"error should mention 'no connections'")
+	assert.Contains(t, err.Error(), "offline",
+		"error should mention 'offline' (device offline when user has no connections)")
 
 	// Should return almost immediately, not wait for the 5s timeout.
 	assert.Less(t, elapsed, 2*time.Second,
-		"should return quickly when no connections exist, not wait for timeout")
+		"should return quickly when user is offline, not wait for timeout")
 }

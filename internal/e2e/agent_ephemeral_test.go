@@ -39,7 +39,7 @@ func TestAgentEph_AE_EPH_001(t *testing.T) {
 	createAgentConversation(t, env, userID, agentUserID)
 
 	// Connect user WebSocket client.
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 	drainPushUpdates(t, conn)
 
@@ -86,7 +86,7 @@ func TestAgentEph_AE_EPH_002(t *testing.T) {
 
 	createAgentConversation(t, env, userID, agentUserID)
 
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 	drainPushUpdates(t, conn)
 
@@ -129,7 +129,7 @@ func TestAgentEph_AE_EPH_003(t *testing.T) {
 
 	createAgentConversation(t, env, userID, agentUserID)
 
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 	drainPushUpdates(t, conn)
 
@@ -178,7 +178,7 @@ func TestAgentEph_AE_EPH_004(t *testing.T) {
 	convID := conv.ID
 
 	// Connect and receive ephemeral updates in real time.
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 
 	// Drain initial connection setup updates.
 	drainPushUpdates(t, conn)
@@ -208,7 +208,7 @@ func TestAgentEph_AE_EPH_004(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond, "connection should be fully closed")
 
 	// Reconnect and call sync_updates.
-	newConn := connectClient(t, env.addr, userID)
+	newConn := connectClient(t, env.addr, userID, "device-1")
 	defer newConn.Close()
 	drainPushUpdates(t, newConn)
 
@@ -277,7 +277,7 @@ func TestAgentEph_AE_EPH_005(t *testing.T) {
 
 	createAgentConversation(t, env, userID, agentUserID)
 
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 	drainPushUpdates(t, conn)
 

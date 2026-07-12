@@ -27,7 +27,7 @@ func TestReverseRPC_E2E_RRPC_001_BasicRoundTrip(t *testing.T) {
 	env.msgHandler.SetReverseRPC(env.srv.ReverseRPC())
 
 	userID := "user-rrpc-001"
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 
 	// Wait for connection registration.
@@ -76,7 +76,7 @@ func TestReverseRPC_E2E_RRPC_001_BasicRoundTrip(t *testing.T) {
 	}()
 
 	// Server sends request via ServerRequest.
-	resp, err := env.srv.ServerRequest(context.Background(), userID, "ping", nil, 5*time.Second)
+	resp, err := env.srv.ServerRequest(context.Background(), userID, "device-1", "ping", nil, 5*time.Second)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ResponseCodeOK, resp.Code)
 
@@ -98,7 +98,7 @@ func TestReverseRPC_E2E_RRPC_002_Timeout(t *testing.T) {
 	env.msgHandler.SetReverseRPC(env.srv.ReverseRPC())
 
 	userID := "user-rrpc-002"
-	conn := connectClient(t, env.addr, userID)
+	conn := connectClient(t, env.addr, userID, "device-1")
 	defer conn.Close()
 
 	// Wait for connection registration.
@@ -113,7 +113,7 @@ func TestReverseRPC_E2E_RRPC_002_Timeout(t *testing.T) {
 	}()
 
 	// Server sends request with short timeout; client does NOT respond.
-	_, err := env.srv.ServerRequest(context.Background(), userID, "ping", nil, 200*time.Millisecond)
+	_, err := env.srv.ServerRequest(context.Background(), userID, "device-1", "ping", nil, 200*time.Millisecond)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded,
 		"timeout error should be context.DeadlineExceeded")
@@ -121,11 +121,11 @@ func TestReverseRPC_E2E_RRPC_002_Timeout(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // RRPC-003: TestReverseRPC_E2E_RRPC_003_NoConnection
-// Verifies: Request to a non-existent user returns "no connections" error
+// Verifies: Request to a non-existent user returns "offline" error
 // ---------------------------------------------------------------------------
 
 // TestReverseRPC_E2E_RRPC_003_NoConnection verifies that sending a request to
-// a user with no active connections returns an error containing "no connections"
+// a user with no active connections returns an error containing "offline"
 // immediately, without waiting for the timeout.
 func TestReverseRPC_E2E_RRPC_003_NoConnection(t *testing.T) {
 	env := setupE2ETest(t)
@@ -133,14 +133,14 @@ func TestReverseRPC_E2E_RRPC_003_NoConnection(t *testing.T) {
 
 	// No client connected for this user.
 	start := time.Now()
-	_, err := env.srv.ServerRequest(context.Background(), "nonexistent-user", "ping", nil, 5*time.Second)
+	_, err := env.srv.ServerRequest(context.Background(), "nonexistent-user", "device-1", "ping", nil, 5*time.Second)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no connections",
-		"error should mention 'no connections'")
+	assert.Contains(t, err.Error(), "offline",
+		"error should mention 'offline' (device offline when user has no connections)")
 
 	// Should return almost immediately, not wait for the 5s timeout.
 	assert.Less(t, elapsed, 2*time.Second,
-		"should return quickly when no connections exist, not wait for timeout")
+		"should return quickly when user is offline, not wait for timeout")
 }
