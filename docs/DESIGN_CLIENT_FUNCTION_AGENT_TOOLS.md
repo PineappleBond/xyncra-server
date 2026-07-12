@@ -162,10 +162,56 @@ flowchart TD
 
 - 超时未收到 Response 的请求写入 Redis
 - Key: `rrpc:pending:{userID}:{deviceID}`
-- TTL: 24h
+- TTL: 24h（最终兜底）
 - 客户端重连后服务端检查并重放
 
-#### 3.5.2 客户端离线队列
+#### 3.5.2 有界重放（Bounded Replay）
+
+重放请求也可能再次超时（网络仍然不稳定）。为避免无限重放循环，引入 `retry_count`：
+
+```mermaid
+flowchart TD
+    A["Request seq=5 发出"] --> B{"收到 Response?"}
+    B -->|Yes| C["正常完成"]
+    B -->|Timeout| D["写入 Redis<br/>retry_count=0"]
+    D --> E["返回超时给调用方"]
+
+    F["客户端重连"] --> G["重放 seq=5"]
+    G --> H{"收到 Response?"}
+    H -->|Yes| C
+    H -->|Timeout| I{"retry_count < max_retries?"}
+    I -->|Yes| J["retry_count++<br/>更新 Redis"]
+    J --> K["等待下次重连"]
+    K --> G
+    I -->|No| L["从 Redis 删除<br/>放弃该请求"]
+
+    style C fill:#e8f5e9
+    style L fill:#ffebee
+```
+
+**PendingRequest 结构**：
+
+```go
+type PendingRequest struct {
+    ID             string          `json:"id"`
+    Method         string          `json:"method"`
+    Params         json.RawMessage `json:"params"`
+    IdempotencyKey string          `json:"idempotency_key"`
+    Seq            uint64          `json:"seq"`
+    RetryCount     int             `json:"retry_count"`   // 已重试次数
+    MaxRetries     int             `json:"max_retries"`   // 最大重放次数（默认 3）
+    CreatedAt      time.Time       `json:"created_at"`    // 原始请求时间
+}
+```
+
+**重放策略**：
+
+- 每次重放超时 → `retry_count++`
+- `retry_count >= max_retries` → 放弃，从 Redis 删除
+- 默认 `max_retries = 3`（可配置）
+- 重放间隔：每次重连时重放，不主动定时重试
+
+#### 3.5.3 客户端离线队列
 
 ```mermaid
 flowchart LR
