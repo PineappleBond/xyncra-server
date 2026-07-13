@@ -172,6 +172,10 @@ func NewAgentResumeHandler(
 					"抱歉，等待时间过长，请重新发送消息。")
 			}
 			releaseLock()
+			// Return transient errors to MQ for retry.
+			if isTransientError(err) {
+				return err
+			}
 			return nil
 		}
 
@@ -191,6 +195,10 @@ func NewAgentResumeHandler(
 				executor.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, partialText, true)
 				clearTyping()
 				releaseLock()
+				// Return transient stream errors (LLM timeout, rate limit) for retry.
+				if isTransientError(chunk.Err) {
+					return chunk.Err
+				}
 				return nil
 			}
 			if chunk.Content != "" {

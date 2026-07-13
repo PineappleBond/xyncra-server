@@ -168,8 +168,13 @@ func NewAgentTaskHandler(
 
 		if execErr != nil {
 			// Error already persisted as user-friendly message (D-067).
-			// Return nil to prevent MQ retry — the error is terminal.
 			logger.Error("agent task: execution failed", "error", execErr)
+			// Return transient errors to MQ for retry (D-073 refinement):
+			// LLM timeouts and rate limits are recoverable via Asynq retry.
+			// Permanent errors (agent not found, unmarshal, etc.) return nil.
+			if isTransientError(execErr) {
+				return execErr
+			}
 		}
 
 		return nil
@@ -179,4 +184,11 @@ func NewAgentTaskHandler(
 // isHITLInterrupt reports whether err wraps ErrHITLInterrupted.
 func isHITLInterrupt(err error) bool {
 	return errors.Is(err, ErrHITLInterrupted)
+}
+
+// isTransientError reports whether err is a transient failure that may
+// succeed on retry (e.g. LLM timeout, rate limit). Permanent failures
+// (unmarshal, agent not found, etc.) return false.
+func isTransientError(err error) bool {
+	return errors.Is(err, ErrLLMTimeout) || errors.Is(err, ErrLLMRateLimited)
 }
