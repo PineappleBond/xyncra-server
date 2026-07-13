@@ -448,7 +448,12 @@ func filterMessagesBySender(handler *fullChainUpdateHandler, senderID string) []
 // Streaming (including is_done), typing, agent_status, and message persistence
 // are hard assertions (require). HITL question trigger remains a soft assertion
 // because the real LLM may not always trigger ask_user_question.
-func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *agentE2EEnv, agentUserID, convID string) {
+//
+// It also verifies three storage layers (hard assertions):
+//   - Server DB: user message persisted, conversation exists, agent message (if applicable)
+//   - Redis: checkpoint created for HITL (if HITL was triggered)
+//   - Client DB: messages cached locally, conversation cached locally
+func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *agentE2EEnv, clientDB *store.ClientDB, agentUserID, userID, convID string) {
 	t.Helper()
 
 	handler.mu.Lock()
@@ -496,6 +501,81 @@ func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *
 		assert.Equal(t, convID, lastMsg.ConversationID)
 		assert.NotEmpty(t, lastMsg.Content)
 	}
+
+	// -----------------------------------------------------------------------
+	// 6. Server DB assertions — hard
+	// -----------------------------------------------------------------------
+
+	// 6a. User message should be persisted in server DB.
+	var userServerMsgs []*servermodel.Message
+	for _, msg := range agentMsgs {
+		if msg.SenderID == userID {
+			userServerMsgs = append(userServerMsgs, msg)
+		}
+	}
+	require.Greater(t, len(userServerMsgs), 0, "server DB should have user's message in conversation")
+
+	// 6b. Conversation should exist in server DB.
+	serverConv, err := env.store.ConversationStore().Get(context.Background(), convID)
+	require.NoError(t, err, "server DB conversation should be queryable")
+	require.NotNil(t, serverConv, "server DB should have the conversation")
+	assert.Equal(t, convID, serverConv.ID, "conversation ID should match")
+
+	// 6c. If HITL triggered resume and LLM produced text, agent message should exist.
+	//     This is already covered by section 5 above (agentSenderMsgs check).
+	//     Log a summary for clarity.
+	if len(handler.questions) > 0 && len(agentSenderMsgs) > 0 {
+		t.Logf("Server DB: HITL resume produced %d agent message(s) -- verified", len(agentSenderMsgs))
+	}
+
+	// -----------------------------------------------------------------------
+	// 7. Redis assertions — hard
+	// -----------------------------------------------------------------------
+
+	// 7a. If HITL was triggered, a checkpoint should have been created.
+	//     The checkpoint is stored in Redis by RedisCheckPointStore and broadcast
+	//     via agent_checkpoint_created event. handler.checkpoints records these
+	//     broadcasts, confirming Redis checkpoint creation.
+	if len(handler.questions) > 0 {
+		require.Greater(t, len(handler.checkpoints), 0,
+			"Redis checkpoint should have been created for HITL (agent_checkpoint_created event expected)")
+		t.Logf("Redis: %d checkpoint event(s) recorded -- HITL checkpoint verified", len(handler.checkpoints))
+	}
+
+	// -----------------------------------------------------------------------
+	// 8. Client DB assertions — hard (with polling for async sync pipeline)
+	// -----------------------------------------------------------------------
+
+	// 8a. Messages should be cached in client DB (poll — sync pipeline is async).
+	var clientMsgs []*model.Message
+	require.Eventually(t, func() bool {
+		var err error
+		clientMsgs, err = clientDB.Messages.ListRecentByConversation(context.Background(), convID, 50)
+		return err == nil && len(clientMsgs) > 0
+	}, testTimeout(30*time.Second), 500*time.Millisecond,
+		"client DB should have cached messages for the conversation")
+	t.Logf("Client DB: %d message(s) cached locally", len(clientMsgs))
+
+	// 8b. Verify user message is among the cached messages.
+	var clientUserMsgs []*model.Message
+	for _, msg := range clientMsgs {
+		if msg.SenderID == userID {
+			clientUserMsgs = append(clientUserMsgs, msg)
+		}
+	}
+	require.Greater(t, len(clientUserMsgs), 0,
+		"client DB should have the user's message cached locally")
+
+	// 8c. Conversation should be cached in client DB.
+	var clientConv *model.Conversation
+	require.Eventually(t, func() bool {
+		var err error
+		clientConv, err = clientDB.Conversations.Get(context.Background(), convID)
+		return err == nil && clientConv != nil
+	}, testTimeout(10*time.Second), 500*time.Millisecond,
+		"client DB should have the conversation cached")
+	assert.Equal(t, convID, clientConv.ID, "client conversation ID should match")
+	t.Logf("Client DB: conversation %s cached locally -- verified", convID)
 }
 
 // truncate returns the first n chars of s (or s if shorter).
@@ -705,18 +785,25 @@ func TestFullChainE2E(t *testing.T) {
 		}
 
 		// ---------------------------------------------------------------
-		// Step 9: Wait for Completion
+		// Step 9: Wait for Completion + Sync Client DB
 		// ---------------------------------------------------------------
 
 		// Give the agent a moment to persist the final message after
 		// the stream completes.
 		time.Sleep(5 * time.Second)
 
+		// Trigger a full sync to pull all pending updates into the client DB.
+		// The sync pipeline processes push updates asynchronously, so we
+		// explicitly sync to ensure the client DB is up-to-date before assertions.
+		if syncErr := xyncraClient.FullSync(ctx); syncErr != nil {
+			t.Logf("WARNING: FullSync failed: %v (client DB may be incomplete)", syncErr)
+		}
+
 		// ---------------------------------------------------------------
 		// Step 10: Assertions
 		// ---------------------------------------------------------------
 
-		assertFullChainResults(t, handler, env, agentUserID, convID)
+		assertFullChainResults(t, handler, env, clientDB, agentUserID, userID, convID)
 
 		return nil
 	})
