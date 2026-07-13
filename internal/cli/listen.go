@@ -226,6 +226,7 @@ func runListen(cmd *cobra.Command, _ []string) error {
 	clientOpts := []client.ClientOption{
 		client.WithServerURL(serverURL),
 		client.WithUserID(cliCtx.UserID),
+		client.WithDeviceID(cliCtx.DeviceID),
 		client.WithDB(db),
 		client.WithUpdateHandler(handler),
 		client.WithLogger(logger),

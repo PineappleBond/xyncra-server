@@ -67,6 +67,18 @@ const (
 	// design (D-044). This constant is retained only to keep the struct field
 	// initialiser valid; it has no runtime effect.
 	defaultReconnectMaxRetries = 0
+	// defaultIdempotencyCacheSize is the maximum number of idempotency keys to cache.
+	defaultIdempotencyCacheSize = 1024
+	// defaultRTTWindowSize is the sliding window size for RTT samples.
+	defaultRTTWindowSize = 50
+	// defaultAdaptiveTimeoutMin is the minimum adaptive timeout.
+	defaultAdaptiveTimeoutMin = 5 * time.Second
+	// defaultAdaptiveTimeoutMax is the maximum adaptive timeout.
+	defaultAdaptiveTimeoutMax = 120 * time.Second
+	// defaultResponseRetryMaxSize is the maximum size of the response retry queue.
+	defaultResponseRetryMaxSize = 100
+	// defaultResponseRetryMax is the maximum retry attempts per response.
+	defaultResponseRetryMax = 3
 )
 
 // ---------------------------------------------------------------------------
@@ -245,6 +257,13 @@ type clientOptions struct {
 	db                  *store.ClientDB
 	updateHandler       UpdateHandler
 	logger              Logger
+
+	idempotencyCacheSize int
+	rttWindowSize        int
+	adaptiveTimeoutMin   time.Duration
+	adaptiveTimeoutMax   time.Duration
+	responseRetryMaxSize int
+	responseRetryMax     int
 }
 
 // ClientOption configures a Client instance via the functional options pattern.
@@ -261,7 +280,7 @@ func WithUserID(id string) ClientOption {
 }
 
 // WithDeviceID sets the device identifier for this client.
-// If not set, a random UUID is generated on connect (D-033).
+// If not set, a random UUID is generated at client creation time (D-033).
 func WithDeviceID(id string) ClientOption {
 	return func(o *clientOptions) { o.deviceID = id }
 }
@@ -334,4 +353,46 @@ func WithUpdateHandler(h UpdateHandler) ClientOption {
 // WithLogger sets the Logger used for client diagnostic output.
 func WithLogger(l Logger) ClientOption {
 	return func(o *clientOptions) { o.logger = l }
+}
+
+// WithIdempotencyCacheSize sets the maximum number of idempotency keys to cache.
+func WithIdempotencyCacheSize(n int) ClientOption {
+	return func(o *clientOptions) {
+		o.idempotencyCacheSize = n
+	}
+}
+
+// WithRTTWindowSize sets the sliding window size for RTT samples.
+func WithRTTWindowSize(n int) ClientOption {
+	return func(o *clientOptions) {
+		o.rttWindowSize = n
+	}
+}
+
+// WithAdaptiveTimeoutMin sets the minimum adaptive timeout.
+func WithAdaptiveTimeoutMin(d time.Duration) ClientOption {
+	return func(o *clientOptions) {
+		o.adaptiveTimeoutMin = d
+	}
+}
+
+// WithAdaptiveTimeoutMax sets the maximum adaptive timeout.
+func WithAdaptiveTimeoutMax(d time.Duration) ClientOption {
+	return func(o *clientOptions) {
+		o.adaptiveTimeoutMax = d
+	}
+}
+
+// WithResponseRetryMaxSize sets the maximum size of the response retry queue.
+func WithResponseRetryMaxSize(n int) ClientOption {
+	return func(o *clientOptions) {
+		o.responseRetryMaxSize = n
+	}
+}
+
+// WithResponseRetryMax sets the maximum retry attempts per response.
+func WithResponseRetryMax(n int) ClientOption {
+	return func(o *clientOptions) {
+		o.responseRetryMax = n
+	}
 }

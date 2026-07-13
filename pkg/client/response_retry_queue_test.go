@@ -209,3 +209,142 @@ func TestResponseRetryQueue_Ordering(t *testing.T) {
 		}
 	}
 }
+
+// TestResponseRetryQueue_EnqueueWithBackoff_Basic verifies that an entry
+// enqueued with backoff is not drained until its nextRetry time arrives.
+func TestResponseRetryQueue_EnqueueWithBackoff_Basic(t *testing.T) {
+	q := NewResponseRetryQueue(10, 5, &testLogger{t: t})
+
+	entry := &responseRetryEntry{
+		resp:     makeResp("backoff-basic"),
+		attempts: 0,
+		maxRetry: 5,
+	}
+	q.EnqueueWithBackoff(entry)
+
+	if q.Len() != 1 {
+		t.Fatalf("Len after EnqueueWithBackoff: got %d, want 1", q.Len())
+	}
+
+	// Drain immediately — should return nothing (nextRetry is in the future).
+	entries := q.Drain(time.Now())
+	if len(entries) != 0 {
+		t.Errorf("Drain immediately after EnqueueWithBackoff: got %d entries, want 0", len(entries))
+	}
+	if q.Len() != 1 {
+		t.Errorf("Len after immediate Drain: got %d, want 1", q.Len())
+	}
+
+	// Wait for the backoff delay (attempts=0 → baseDelay*2^0 = 1s) to elapse.
+	time.Sleep(1100 * time.Millisecond)
+
+	entries = q.Drain(time.Now())
+	if len(entries) != 1 {
+		t.Errorf("Drain after backoff elapsed: got %d entries, want 1", len(entries))
+	}
+	if q.Len() != 0 {
+		t.Errorf("Len after final Drain: got %d, want 0", q.Len())
+	}
+}
+
+// TestResponseRetryQueue_EnqueueWithBackoff_ExponentialDelay verifies that the
+// backoff delay increases exponentially: attempts=0→1s, attempts=1→2s, attempts=2→4s.
+func TestResponseRetryQueue_EnqueueWithBackoff_ExponentialDelay(t *testing.T) {
+	q := NewResponseRetryQueue(10, 5, &testLogger{t: t})
+
+	for attempts, wantMinDelay := range []time.Duration{
+		1 * time.Second, // 2^0 * 1s
+		2 * time.Second, // 2^1 * 1s
+		4 * time.Second, // 2^2 * 1s
+	} {
+		entry := &responseRetryEntry{
+			resp:     makeResp(fmt.Sprintf("exp-%d", attempts)),
+			attempts: attempts,
+			maxRetry: 5,
+		}
+		q.EnqueueWithBackoff(entry)
+
+		// Drain just before expected delay — should return nothing.
+		earlyDrain := q.Drain(time.Now().Add(wantMinDelay - 200*time.Millisecond))
+		if len(earlyDrain) != 0 {
+			t.Errorf("attempts=%d: Drain before delay returned %d entries, want 0", attempts, len(earlyDrain))
+		}
+
+		// Drain at/after expected delay — should return the entry.
+		lateDrain := q.Drain(time.Now().Add(wantMinDelay + 100*time.Millisecond))
+		if len(lateDrain) != 1 {
+			t.Errorf("attempts=%d: Drain after delay returned %d entries, want 1", attempts, len(lateDrain))
+		}
+	}
+}
+
+// TestResponseRetryQueue_EnqueueWithBackoff_Cap verifies that the backoff
+// delay is capped at 16s regardless of attempts.
+func TestResponseRetryQueue_EnqueueWithBackoff_Cap(t *testing.T) {
+	q := NewResponseRetryQueue(10, 100, &testLogger{t: t})
+
+	// attempts=10 would give 2^10 * 1s = 1024s, but should be capped at 16s.
+	entry := &responseRetryEntry{
+		resp:     makeResp("capped"),
+		attempts: 10,
+		maxRetry: 100,
+	}
+	q.EnqueueWithBackoff(entry)
+
+	// Drain at 15s — should return nothing (still capped at 16s).
+	entries := q.Drain(time.Now().Add(15 * time.Second))
+	if len(entries) != 0 {
+		t.Errorf("Drain at 15s: got %d entries, want 0 (capped at 16s)", len(entries))
+	}
+
+	// Drain at 17s — should return the entry.
+	entries = q.Drain(time.Now().Add(17 * time.Second))
+	if len(entries) != 1 {
+		t.Errorf("Drain at 17s: got %d entries, want 1", len(entries))
+	}
+}
+
+// TestResponseRetryQueue_EnqueueWithBackoff_DrainInteraction verifies the full
+// cycle: enqueue with backoff, wait, drain returns it, re-enqueue with higher
+// attempts, verify longer delay.
+func TestResponseRetryQueue_EnqueueWithBackoff_DrainInteraction(t *testing.T) {
+	q := NewResponseRetryQueue(10, 5, &testLogger{t: t})
+
+	// Enqueue with attempts=0 (delay=1s).
+	entry := &responseRetryEntry{
+		resp:     makeResp("drain-interaction"),
+		attempts: 0,
+		maxRetry: 5,
+	}
+	q.EnqueueWithBackoff(entry)
+
+	// Wait for delay to elapse.
+	time.Sleep(1100 * time.Millisecond)
+
+	// Drain should return the entry.
+	entries := q.Drain(time.Now())
+	if len(entries) != 1 {
+		t.Fatalf("Drain: got %d entries, want 1", len(entries))
+	}
+
+	// Simulate failed send: increment attempts and re-enqueue.
+	entries[0].attempts++ // now attempts=1 (delay=2s)
+	q.EnqueueWithBackoff(entries[0])
+
+	if q.Len() != 1 {
+		t.Fatalf("Len after re-enqueue: got %d, want 1", q.Len())
+	}
+
+	// Drain at 1s — should return nothing (new delay is 2s).
+	earlyEntries := q.Drain(time.Now().Add(1 * time.Second))
+	if len(earlyEntries) != 0 {
+		t.Errorf("Drain at 1s after re-enqueue: got %d entries, want 0", len(earlyEntries))
+	}
+
+	// Drain at 2.5s — should return the entry.
+	time.Sleep(2600 * time.Millisecond)
+	lateEntries := q.Drain(time.Now())
+	if len(lateEntries) != 1 {
+		t.Errorf("Drain after 2s delay: got %d entries, want 1", len(lateEntries))
+	}
+}

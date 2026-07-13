@@ -134,6 +134,12 @@ func TestDefaultConstants(t *testing.T) {
 		{"defaultReconnectBaseDelay", defaultReconnectBaseDelay, 1 * time.Second},
 		{"defaultReconnectMaxDelay", defaultReconnectMaxDelay, 30 * time.Second},
 		{"defaultReconnectMaxRetries", defaultReconnectMaxRetries, 0},
+		{"defaultIdempotencyCacheSize", defaultIdempotencyCacheSize, 1024},
+		{"defaultRTTWindowSize", defaultRTTWindowSize, 50},
+		{"defaultAdaptiveTimeoutMin", defaultAdaptiveTimeoutMin, 5 * time.Second},
+		{"defaultAdaptiveTimeoutMax", defaultAdaptiveTimeoutMax, 120 * time.Second},
+		{"defaultResponseRetryMaxSize", defaultResponseRetryMaxSize, 100},
+		{"defaultResponseRetryMax", defaultResponseRetryMax, 3},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -227,6 +233,54 @@ func TestWithReconnectOptions(t *testing.T) {
 	}
 	if opts.reconnectMaxRetries != 3 {
 		t.Errorf("reconnectMaxRetries = %d, want %d", opts.reconnectMaxRetries, 3)
+	}
+}
+
+func TestWithIdempotencyCacheSize(t *testing.T) {
+	var opts clientOptions
+	WithIdempotencyCacheSize(2048)(&opts)
+	if opts.idempotencyCacheSize != 2048 {
+		t.Errorf("idempotencyCacheSize = %d, want %d", opts.idempotencyCacheSize, 2048)
+	}
+}
+
+func TestWithRTTWindowSize(t *testing.T) {
+	var opts clientOptions
+	WithRTTWindowSize(100)(&opts)
+	if opts.rttWindowSize != 100 {
+		t.Errorf("rttWindowSize = %d, want %d", opts.rttWindowSize, 100)
+	}
+}
+
+func TestWithAdaptiveTimeoutMin(t *testing.T) {
+	var opts clientOptions
+	WithAdaptiveTimeoutMin(10 * time.Second)(&opts)
+	if opts.adaptiveTimeoutMin != 10*time.Second {
+		t.Errorf("adaptiveTimeoutMin = %v, want %v", opts.adaptiveTimeoutMin, 10*time.Second)
+	}
+}
+
+func TestWithAdaptiveTimeoutMax(t *testing.T) {
+	var opts clientOptions
+	WithAdaptiveTimeoutMax(60 * time.Second)(&opts)
+	if opts.adaptiveTimeoutMax != 60*time.Second {
+		t.Errorf("adaptiveTimeoutMax = %v, want %v", opts.adaptiveTimeoutMax, 60*time.Second)
+	}
+}
+
+func TestWithResponseRetryMaxSize(t *testing.T) {
+	var opts clientOptions
+	WithResponseRetryMaxSize(200)(&opts)
+	if opts.responseRetryMaxSize != 200 {
+		t.Errorf("responseRetryMaxSize = %d, want %d", opts.responseRetryMaxSize, 200)
+	}
+}
+
+func TestWithResponseRetryMax(t *testing.T) {
+	var opts clientOptions
+	WithResponseRetryMax(5)(&opts)
+	if opts.responseRetryMax != 5 {
+		t.Errorf("responseRetryMax = %d, want %d", opts.responseRetryMax, 5)
 	}
 }
 

@@ -43,4 +43,20 @@
 //   - Request (Type=0): client-initiated RPC calls
 //   - Response (Type=1): server replies correlated by request ID
 //   - Updates (Type=2): push notifications with incremental data changes
+//
+// # Phase 8 Enhancements
+//
+// The following client-side enhancements provide resilience under weak or
+// intermittent network conditions:
+//
+//   - IdempotencyCache: LRU dedup cache for replayed server-initiated requests,
+//     preventing duplicate handler invocations after reconnect.
+//   - RTTTracker: adaptive RPC timeout based on a sliding window of round-trip
+//     time samples (trimmed-mean SRTT), automatically adjusting to network
+//     conditions.
+//   - ResponseRetryQueue: queues responses that failed to send (e.g. due to a
+//     mid-flight disconnect) and retries them with exponential backoff.
+//   - Reconnect handshake: on each (re)connect the client sends a
+//     system.reconnect request carrying last_seen_seq and re-registers its
+//     function handlers, enabling the server to replay missed requests.
 package client

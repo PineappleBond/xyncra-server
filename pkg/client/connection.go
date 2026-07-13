@@ -313,6 +313,11 @@ func (cm *connectionManager) Attempt() int {
 	return cm.attempt
 }
 
+// DeviceID returns the device identifier used by this connection manager.
+func (cm *connectionManager) DeviceID() string {
+	return cm.deviceID
+}
+
 // Disconnected returns a receive-only channel that is closed when an unexpected
 // disconnection occurs. The connectionMonitor in client.go selects on this
 // channel to trigger automatic reconnection. A new channel is created after

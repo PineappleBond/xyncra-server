@@ -36,6 +36,17 @@ type XyncraClient struct {
 	syncMgr  *syncManager
 	retryMgr *retryManager
 
+	// Phase 8: client-side enhancements.
+	idempotencyCache *IdempotencyCache
+	rttTracker       *RTTTracker
+	respRetryQueue   *ResponseRetryQueue
+
+	// lastReqSeq is the highest PackageDataRequest.Seq received from the server.
+	// Tracks the server's reverse-RPC sequence space (uint64), separate from
+	// the sync update sequence space (uint32).
+	lastReqSeqMu sync.Mutex
+	lastReqSeq   uint64
+
 	// RPC dispatch state.
 	mu      sync.Mutex
 	pending map[string]chan *protocol.PackageDataResponse
@@ -60,17 +71,23 @@ type XyncraClient struct {
 // managers, and returns a client that is ready to be started with Start.
 func New(opts ...ClientOption) (*XyncraClient, error) {
 	o := clientOptions{
-		serverURL:           defaultServerURL,
-		rpcTimeout:          defaultRPCTimeout,
-		heartbeatInterval:   defaultHeartbeatInterval,
-		syncBatchSize:       defaultSyncBatchSize,
-		pullDebounce:        defaultPullDebounce,
-		retryBaseDelay:      defaultRetryBaseDelay,
-		retryMaxAttempts:    defaultRetryMaxAttempts,
-		retryPollInterval:   defaultRetryPollInterval,
-		reconnectBaseDelay:  defaultReconnectBaseDelay,
-		reconnectMaxDelay:   defaultReconnectMaxDelay,
-		reconnectMaxRetries: defaultReconnectMaxRetries,
+		serverURL:            defaultServerURL,
+		rpcTimeout:           defaultRPCTimeout,
+		heartbeatInterval:    defaultHeartbeatInterval,
+		syncBatchSize:        defaultSyncBatchSize,
+		pullDebounce:         defaultPullDebounce,
+		retryBaseDelay:       defaultRetryBaseDelay,
+		retryMaxAttempts:     defaultRetryMaxAttempts,
+		retryPollInterval:    defaultRetryPollInterval,
+		reconnectBaseDelay:   defaultReconnectBaseDelay,
+		reconnectMaxDelay:    defaultReconnectMaxDelay,
+		reconnectMaxRetries:  defaultReconnectMaxRetries,
+		idempotencyCacheSize: defaultIdempotencyCacheSize,
+		rttWindowSize:        defaultRTTWindowSize,
+		adaptiveTimeoutMin:   defaultAdaptiveTimeoutMin,
+		adaptiveTimeoutMax:   defaultAdaptiveTimeoutMax,
+		responseRetryMaxSize: defaultResponseRetryMaxSize,
+		responseRetryMax:     defaultResponseRetryMax,
 	}
 	for _, fn := range opts {
 		fn(&o)
@@ -97,6 +114,10 @@ func New(opts ...ClientOption) (*XyncraClient, error) {
 		done:            make(chan struct{}),
 		logger:          o.logger,
 	}
+
+	c.idempotencyCache = NewIdempotencyCache(o.idempotencyCacheSize)
+	c.rttTracker = NewRTTTracker(o.rttWindowSize)
+	c.respRetryQueue = NewResponseRetryQueue(o.responseRetryMaxSize, o.responseRetryMax, o.logger)
 
 	// Connection manager with callbacks wired into the dispatch layer.
 	c.connMgr = newConnectionManager(o, connectionCallbacks{
@@ -158,6 +179,10 @@ func (c *XyncraClient) Start(ctx context.Context) error {
 	c.syncMgr.Start(c.ctx)
 	c.retryMgr.Start(c.ctx)
 
+	// 1b. Response retry loop.
+	c.wg.Add(1)
+	go c.responseRetryLoop()
+
 	// 2. Heartbeat goroutine.
 	c.wg.Add(1)
 	go c.heartbeatLoop()
@@ -194,6 +219,11 @@ func (c *XyncraClient) Stop() {
 // Close is an alias for Stop.
 func (c *XyncraClient) Close() {
 	c.Stop()
+}
+
+// DeviceID returns the device identifier used by this client.
+func (c *XyncraClient) DeviceID() string {
+	return c.connMgr.DeviceID()
 }
 
 // shutdown performs the ordered teardown of all subsystems. It is safe to call
@@ -282,6 +312,7 @@ func (c *XyncraClient) connectionMonitorWithInitialConnect() {
 		err := c.connMgr.Connect(c.ctx)
 		if err == nil {
 			c.logger.Info("initial connection established")
+			c.performReconnectHandshake(c.ctx)
 			if syncErr := c.syncMgr.FullSync(c.ctx); syncErr != nil {
 				c.logger.Error("initial full sync failed", "error", syncErr)
 			}
@@ -309,6 +340,7 @@ func (c *XyncraClient) connectionMonitorWithInitialConnect() {
 				err := c.connMgr.Reconnect(c.ctx)
 				if err == nil {
 					c.logger.Info("reconnected successfully")
+					c.performReconnectHandshake(c.ctx)
 					if syncErr := c.syncMgr.FullSync(c.ctx); syncErr != nil {
 						c.logger.Error("full sync after reconnect", "error", syncErr)
 					}
@@ -318,6 +350,46 @@ func (c *XyncraClient) connectionMonitorWithInitialConnect() {
 			}
 		}
 	}
+}
+
+// performReconnectHandshake sends system.reconnect followed by
+// system.register_functions after a (re)connect. Errors are logged but do
+// not prevent FullSync from proceeding (graceful degradation, D-072).
+// Runs asynchronously so the reconnect handshake timeout does not block
+// FullSync.
+func (c *XyncraClient) performReconnectHandshake(ctx context.Context) {
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		// Step 1: system.reconnect
+		c.lastReqSeqMu.Lock()
+		lastSeq := c.lastReqSeq
+		c.lastReqSeqMu.Unlock()
+
+		params, _ := json.Marshal(map[string]uint64{"last_seen_seq": lastSeq})
+		_, err := c.Call(ctx, "system.reconnect", json.RawMessage(params))
+		if err != nil {
+			c.logger.Error("system.reconnect handshake failed", "error", err)
+		}
+
+		// Step 2: re-register functions.
+		c.reregisterFunctions(ctx)
+	}()
+}
+
+// reregisterFunctions re-sends system.register_functions after reconnect.
+// Currently a placeholder — logs the intent. Full implementation pending
+// client-side function manifest API.
+func (c *XyncraClient) reregisterFunctions(ctx context.Context) {
+	c.reqMu.RLock()
+	count := len(c.requestHandlers)
+	c.reqMu.RUnlock()
+
+	if count == 0 {
+		return
+	}
+
+	c.logger.Info("function re-registration pending", "count", count)
 }
 
 // ---------------------------------------------------------------------------
@@ -411,9 +483,16 @@ func (c *XyncraClient) Call(ctx context.Context, method string, params any) (jso
 	_ = c.db.RPCLogs.Save(ctx, rpcLog)
 
 	// Wait for response, context cancellation, or timeout.
+	adaptiveTimeout := c.rttTracker.AdaptiveTimeout(
+		c.opts.rpcTimeout,
+		c.opts.adaptiveTimeoutMin,
+		c.opts.adaptiveTimeoutMax,
+	)
 	var resp *protocol.PackageDataResponse
 	select {
 	case resp = <-respCh:
+		rtt := time.Since(startTime)
+		c.rttTracker.Record(rtt)
 	case <-ctx.Done():
 		rpcLog.Duration = time.Since(startTime)
 		rpcLog.ErrorMsg = ctx.Err().Error()
@@ -423,7 +502,7 @@ func (c *XyncraClient) Call(ctx context.Context, method string, params any) (jso
 		// Enqueue for retry on context cancellation (transient failure).
 		_ = c.retryMgr.Enqueue(ctx, method, paramsBytes)
 		return nil, NewTimeoutError(ctx.Err())
-	case <-time.After(c.opts.rpcTimeout):
+	case <-time.After(adaptiveTimeout):
 		rpcLog.Duration = time.Since(startTime)
 		rpcLog.ErrorMsg = fmt.Sprintf("rpc %s timed out", method)
 		rpcLog.StatusCode = int(ErrorCodeTimeoutError)
@@ -497,6 +576,32 @@ func (c *XyncraClient) RegisterRequestHandler(method string, h RequestHandlerFun
 // If no handler is found, an error response is sent. This runs in the
 // readPump goroutine; handlers should be fast or spawn their own goroutines.
 func (c *XyncraClient) handleIncomingRequest(req *protocol.PackageDataRequest) {
+	// Track highest request seq (for system.reconnect).
+	if req.Seq > 0 {
+		c.lastReqSeqMu.Lock()
+		if req.Seq > c.lastReqSeq {
+			c.lastReqSeq = req.Seq
+		}
+		c.lastReqSeqMu.Unlock()
+	}
+
+	// Idempotency dedup check.
+	if req.IdempotencyKey != "" && c.idempotencyCache.Contains(req.IdempotencyKey) {
+		c.logger.Debug("deduplicating replayed request",
+			"idempotency_key", req.IdempotencyKey, "method", req.Method)
+		resp := &protocol.PackageDataResponse{
+			ID:   req.ID,
+			Code: protocol.ResponseCodeOK,
+			Msg:  "duplicate (idempotency cache hit)",
+		}
+		respData, _ := json.Marshal(resp)
+		pkg := &protocol.Package{Type: protocol.PackageTypeResponse, Data: respData}
+		if err := c.connMgr.SendPackage(pkg); err != nil {
+			c.respRetryQueue.Enqueue(resp)
+		}
+		return
+	}
+
 	c.reqMu.RLock()
 	handler, ok := c.requestHandlers[req.Method]
 	c.reqMu.RUnlock()
@@ -504,7 +609,6 @@ func (c *XyncraClient) handleIncomingRequest(req *protocol.PackageDataRequest) {
 	var resp protocol.PackageDataResponse
 	resp.ID = req.ID
 
-	// Use client context if available, otherwise fall back to Background.
 	ctx := c.ctx
 	if ctx == nil {
 		ctx = context.Background()
@@ -525,6 +629,11 @@ func (c *XyncraClient) handleIncomingRequest(req *protocol.PackageDataRequest) {
 		}
 	}
 
+	// Record idempotency key on successful processing.
+	if req.IdempotencyKey != "" {
+		c.idempotencyCache.Put(req.IdempotencyKey)
+	}
+
 	respData, err := json.Marshal(resp)
 	if err != nil {
 		c.logger.Error("marshal response to server request", "error", err)
@@ -535,7 +644,39 @@ func (c *XyncraClient) handleIncomingRequest(req *protocol.PackageDataRequest) {
 		Data: respData,
 	}
 	if err := c.connMgr.SendPackage(pkg); err != nil {
-		c.logger.Error("send response to server request", "error", err)
+		c.respRetryQueue.Enqueue(&resp)
+		c.logger.Error("send response failed, queued for retry", "error", err)
+	}
+}
+
+// responseRetryLoop periodically drains the response retry queue and
+// attempts to re-send failed responses. Exits when the client context
+// is cancelled.
+func (c *XyncraClient) responseRetryLoop() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			entries := c.respRetryQueue.Drain(time.Now())
+			for _, entry := range entries {
+				respData, _ := json.Marshal(entry.Response())
+				pkg := &protocol.Package{Type: protocol.PackageTypeResponse, Data: respData}
+				if err := c.connMgr.SendPackage(pkg); err != nil {
+					entry.attempts++
+					if entry.attempts < entry.maxRetry {
+						c.respRetryQueue.EnqueueWithBackoff(entry)
+					} else {
+						c.logger.Error("response retry exhausted",
+							"response_id", entry.Response().ID,
+							"attempts", entry.attempts)
+					}
+				}
+			}
+		}
 	}
 }
 

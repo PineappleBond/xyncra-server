@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -434,5 +435,159 @@ func TestIntegration_Adaptive_Timeout_Convergence(t *testing.T) {
 	srtt := client.rttTracker.SRTT()
 	if srtt < 100*time.Millisecond {
 		t.Errorf("expected SRTT > 100ms, got %v", srtt)
+	}
+}
+
+// TestIntegration_Empty_IdempotencyKey verifies that requests with an empty
+// IdempotencyKey are NOT deduplicated — the handler is called every time.
+func TestIntegration_Empty_IdempotencyKey(t *testing.T) {
+	server := newMockWSServer(t)
+
+	server.SetRPCHandler("system.reconnect", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(map[string]any{"status": "ok", "replayed": 0, "total": 0})
+	})
+
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(map[string]any{
+			"updates":    []any{},
+			"has_more":   false,
+			"latest_seq": 0,
+		})
+	})
+
+	client := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	var handlerCallCount atomic.Int32
+	client.RegisterRequestHandler("test_method", func(ctx context.Context, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		handlerCallCount.Add(1)
+		return json.Marshal(map[string]string{"result": "ok"})
+	})
+
+	go func() { _ = client.Start(ctx) }()
+
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("client did not connect: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Send two requests with empty IdempotencyKey and same method.
+	for i := 1; i <= 2; i++ {
+		req := &protocol.PackageDataRequest{
+			ID:             fmt.Sprintf("req-empty-idem-%d", i),
+			Method:         "test_method",
+			IdempotencyKey: "", // empty key — no dedup
+		}
+		reqData, _ := json.Marshal(req)
+		pkg := &protocol.Package{Type: protocol.PackageTypeRequest, Data: reqData}
+		if err := server.SendPackage(pkg); err != nil {
+			t.Fatalf("failed to send request %d: %v", i, err)
+		}
+	}
+
+	// Wait for both handler invocations.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if handlerCallCount.Load() >= 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if got := handlerCallCount.Load(); got != 2 {
+		t.Errorf("expected handler to be called twice (empty IdempotencyKey → no dedup), got %d", got)
+	}
+}
+
+// TestIntegration_Seq_Zero_No_Tracking verifies that requests with Seq=0 do
+// not update the last_seen_seq tracker, so the reconnect handshake reports 0.
+func TestIntegration_Seq_Zero_No_Tracking(t *testing.T) {
+	server := newMockWSServer(t)
+
+	// Track last_seen_seq from reconnect calls using atomic.Value for safety.
+	var lastSeenSeqStore atomic.Value
+	lastSeenSeqStore.Store(&[]uint64{})
+
+	server.SetRPCHandler("system.reconnect", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		var params map[string]uint64
+		if err := json.Unmarshal(req.Params, &params); err == nil {
+			seq := params["last_seen_seq"]
+			ptr := lastSeenSeqStore.Load().(*[]uint64)
+			newSlice := append(*ptr, seq)
+			lastSeenSeqStore.Store(&newSlice)
+		}
+		return json.Marshal(map[string]any{"status": "ok", "replayed": 0, "total": 0})
+	})
+
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(map[string]any{
+			"updates":    []any{},
+			"has_more":   false,
+			"latest_seq": 0,
+		})
+	})
+
+	client := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	client.RegisterRequestHandler("test_method", func(ctx context.Context, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(map[string]string{"result": "ok"})
+	})
+
+	go func() { _ = client.Start(ctx) }()
+
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("client did not connect: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Send a request with Seq=0 — should NOT be tracked.
+	req := &protocol.PackageDataRequest{
+		ID:     "req-seq-zero",
+		Method: "test_method",
+		Seq:    0,
+	}
+	reqData, _ := json.Marshal(req)
+	pkg := &protocol.Package{Type: protocol.PackageTypeRequest, Data: reqData}
+	if err := server.SendPackage(pkg); err != nil {
+		t.Fatalf("failed to send request: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Force disconnect and reconnect.
+	server.mu.Lock()
+	if len(server.conns) > 0 {
+		_ = server.conns[0].Close()
+	}
+	server.mu.Unlock()
+
+	time.Sleep(500 * time.Millisecond)
+	server.RemoveClosedConnections()
+
+	// Wait for reconnect handshake.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		ptr := lastSeenSeqStore.Load().(*[]uint64)
+		if len(*ptr) >= 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The last reconnect should have last_seen_seq = 0 (Seq=0 is not tracked).
+	ptr := lastSeenSeqStore.Load().(*[]uint64)
+	seqs := *ptr
+	if len(seqs) < 2 {
+		t.Fatalf("expected at least 2 reconnect calls, got %d", len(seqs))
+	}
+
+	lastSeq := seqs[len(seqs)-1]
+	if lastSeq != 0 {
+		t.Errorf("expected last_seen_seq = 0 (Seq=0 not tracked), got %d", lastSeq)
 	}
 }
