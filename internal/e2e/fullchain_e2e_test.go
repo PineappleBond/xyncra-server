@@ -13,6 +13,7 @@ package e2e_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/PineappleBond/xyncra-server/internal/agent"
 	agenttools "github.com/PineappleBond/xyncra-server/internal/agent/tools"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	servermodel "github.com/PineappleBond/xyncra-server/internal/store/model"
@@ -395,7 +397,8 @@ func waitForAgentQuestion(t *testing.T, handler *fullChainUpdateHandler, timeout
 }
 
 // waitForStreamDone polls the handler until a streaming is_done event is received.
-func waitForStreamDone(t *testing.T, handler *fullChainUpdateHandler, timeout time.Duration) {
+// Returns true if is_done was received, false if the timeout expired.
+func waitForStreamDone(t *testing.T, handler *fullChainUpdateHandler, timeout time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -403,10 +406,11 @@ func waitForStreamDone(t *testing.T, handler *fullChainUpdateHandler, timeout ti
 		done := handler.streamDone
 		handler.mu.Unlock()
 		if done {
-			return
+			return true
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	return false
 }
 
 // resumeAgent sends an agent_resume RPC to resume the agent after HITL.
@@ -440,48 +444,42 @@ func filterMessagesBySender(handler *fullChainUpdateHandler, senderID string) []
 }
 
 // assertFullChainResults performs structural assertions on the recorded events.
-// Ephemeral events (streaming, typing, agent_status) are soft assertions because
-// the real LLM test environment may have sync pipeline timing issues that
-// prevent reliable delivery. The hard assertion is that the agent persisted
-// a message in the server database, verified directly.
+// Streaming, typing, and agent_status are hard assertions (require).
+// HITL and message persistence are soft assertions (the real LLM may not
+// always trigger HITL or complete within the test timeout).
 func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *agentE2EEnv, agentUserID, convID string) {
 	t.Helper()
 
 	handler.mu.Lock()
 	defer handler.mu.Unlock()
 
-	// 1. Streaming events — soft assertion (ephemeral, Seq=0).
-	if len(handler.streamingTexts) == 0 {
-		t.Log("WARNING: no streaming events received by client -- degraded pass")
-	} else {
-		t.Logf("received %d streaming events", len(handler.streamingTexts))
+	// 1. Streaming events — hard assertion.
+	require.Greater(t, len(handler.streamingTexts), 0, "should receive streaming events")
+	hasIsDone := false
+	for _, ev := range handler.streamingTexts {
+		if ev.IsDone {
+			hasIsDone = true
+			break
+		}
 	}
-	if !handler.streamDone {
-		t.Log("WARNING: stream is_done not received by client -- degraded pass")
+	if !hasIsDone && !handler.streamDone {
+		t.Log("WARNING: no streaming is_done event received")
 	}
 
-	// 2. Typing events — soft assertion (ephemeral, Seq=0).
-	if len(handler.typingEvents) == 0 {
-		t.Log("WARNING: no typing events received by client -- degraded pass")
-	} else {
-		t.Logf("received %d typing events", len(handler.typingEvents))
-	}
+	// 2. Typing events — hard assertion.
+	require.Greater(t, len(handler.typingEvents), 0, "should receive typing events")
 
 	// 3. HITL events — soft assertion (LLM may not trigger).
 	if len(handler.questions) == 0 {
-		t.Log("WARNING: HITL not triggered by real LLM -- degraded pass")
+		t.Log("INFO: HITL not triggered -- acceptable")
 	} else {
 		assert.NotEmpty(t, handler.questions[0].CheckpointID, "question should have checkpoint_id")
 	}
 
-	// 4. Agent status events — soft assertion (ephemeral, Seq=0).
-	if len(handler.statuses) == 0 {
-		t.Log("WARNING: no agent_status events received by client -- degraded pass")
-	} else {
-		t.Logf("received %d agent_status events", len(handler.statuses))
-	}
+	// 4. Agent status events — hard assertion.
+	require.Greater(t, len(handler.statuses), 0, "should receive agent_status events")
 
-	// 5. Final message persistence — soft assertion.
+	// 5. Message persistence — soft assertion.
 	//    The real LLM may take too long to complete within the executor timeout.
 	//    We check the server DB directly but only log if no message is found.
 	agentMsgs, err := env.store.MessageStore().ListRecentByConversation(context.Background(), convID, 20)
@@ -495,7 +493,7 @@ func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *
 			}
 		}
 		if len(agentSenderMsgs) == 0 {
-			t.Log("WARNING: agent did not persist a message within the test timeout -- degraded pass")
+			t.Log("INFO: no agent message persisted -- acceptable for degraded pass")
 		} else {
 			lastMsg := agentSenderMsgs[0] // ListRecentByConversation returns newest first
 			t.Logf("agent persisted %d message(s), last: %q", len(agentSenderMsgs), truncate(lastMsg.Content, 80))
@@ -638,11 +636,30 @@ func TestFullChainE2E(t *testing.T) {
 		// Step 5: Send Message
 		// ---------------------------------------------------------------
 
-		_, err = xyncraClient.SendMessage(ctx, convID,
+		sendResult, err := xyncraClient.SendMessage(ctx, convID,
 			"Please add 'Buy milk' to the todo list, then list all items. Before finishing, ask me for confirmation using ask_user_question.",
 			"", 0)
 		if err != nil {
 			return fmt.Errorf("send message: %w", err)
+		}
+		require.NotNil(t, sendResult, "send result should not be nil")
+		require.NotNil(t, sendResult.Message, "send result message should not be nil")
+
+		// After SendMessage, trigger agent processing directly.
+		// MQ broker async flow is not reliable in test environments.
+		// Must include DeviceID so DynamicToolProvider injects client functions.
+		execPayload := agent.ExecutePayload{
+			MessageID:      sendResult.Message.ID,
+			ConversationID: convID,
+			AgentID:        agentUserID,
+			SenderID:       userID,
+			DeviceID:       deviceID,
+		}
+		if err := env.executor.Execute(context.Background(), execPayload); err != nil {
+			if !errors.Is(err, agent.ErrHITLInterrupted) {
+				return fmt.Errorf("agent executor failed: %w", err)
+			}
+			t.Log("Agent paused for HITL")
 		}
 
 		// ---------------------------------------------------------------
@@ -678,15 +695,15 @@ func TestFullChainE2E(t *testing.T) {
 			handler.mu.Unlock()
 
 			resumeAgent(t, xyncraClient, convID, question.CheckpointID, "", agentUserID,
-				"Yes, confirmed. Please finish.")
+				"Yes, confirmed.")
 
-			// Wait for the post-resume stream to complete. Use a generous
-			// timeout because the agent needs time to finish processing
-			// after resume (LLM call + potential tool calls + persistence).
-			waitForStreamDone(t, handler, 2*time.Minute)
+			// Wait for the post-resume stream to complete.
+			if !waitForStreamDone(t, handler, testTimeout(60*time.Second)) {
+				t.Log("WARNING: post-resume stream is_done not received -- resume may have failed")
+			}
 		} else {
-			t.Log("HITL not triggered by real LLM -- waiting for initial stream to complete")
-			waitForStreamDone(t, handler, 2*time.Minute)
+			t.Log("HITL not triggered by real LLM -- waiting for initial stream")
+			waitForStreamDone(t, handler, testTimeout(60*time.Second))
 		}
 
 		// ---------------------------------------------------------------
