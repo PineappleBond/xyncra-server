@@ -91,6 +91,7 @@
 | D-107 | Replay 请求 ID 使用 `s-replay-{uuid}` 格式 | 扩展 D-097 命名空间，日志中区分原始请求与补发请求 |
 | D-108 | system.reconnect RPC 规范 | 客户端重连后自动补发断连期间的超时请求，fail-open |
 | D-109 | 补发并发与超时策略 | 每请求一 goroutine，10s 超时，超过 MaxRetries 放弃 |
+| D-110 | E2E 测试 MQ 异步任务直接调用策略 | 测试应控制其依赖，MQ 可靠性非 E2E 测试目标 |
 
 ---
 
@@ -2657,10 +2658,33 @@ Replay 请求使用 `s-replay-{uuid}` 格式（如 `s-replay-550e8400-e29b-41d4-
 
 ---
 
+## D-110: E2E 测试 MQ 异步任务直接调用策略
+
+### 决策
+
+E2E 测试中，MQ 异步任务（如 `agent_process`、`agent_resume`）的投递通过直接调用 executor/handler 绕过 MQ，测试业务逻辑而非 MQ 基础设施。测试辅助函数 `triggerAgentProcessing` 和 `triggerAgentResume` 分别对应这两个场景。
+
+### 原因
+
+1. **与 D-049 一致**: 测试应控制其依赖（D-049 使用内联 mock server）
+2. **MQ 可靠性非测试目标**: Asynq worker 的异步投递在 E2E 环境中不可靠，这不是 Xyncra 的测试目标
+3. **代码覆盖等价**: 直接调用路径与 MQ 路径共享相同的 executor/handler 代码
+4. **零生产影响**: 生产代码不变
+
+### 约束
+
+- 直接调用必须包含完整 payload（含 DeviceID，D-102）
+- 生产 `agent_resume` RPC 仍走 MQ（D-085 不变）
+- `triggerAgentResume` 通过 `taskHandler.ProcessTask` 触发（包含锁逻辑，D-084）
+- `triggerAgentProcessing` 通过 `executor.Execute` 直接调用（含完整 pipeline）
+
+---
+
 ## 版本历史
 
 | 日期       | 版本 | 变更                                                                                                 |
 | ---------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| 2026-07-13 | v3.16 | 新增 D-110（E2E 测试 MQ 异步任务直接调用策略） |
 | 2026-07-13 | v3.15 | Phase 5: 新增 D-107（Replay 请求 ID 格式）、D-108（system.reconnect RPC 规范）、D-109（补发并发与超时策略） |
 | 2026-07-13 | v3.14 | Phase 4: 新增 D-103（ReverseRPC Pending Store）、D-104（幂等键与 Seq 协议扩展）、D-105（CancelDevice 不清理 Redis Pending）、D-106（Per-device Seq 计数器策略）；更新 D-092 约束、D-095 约束、D-074 约束 |
 | 2026-07-12 | v3.13 | Phase 3: Send 反馈增强（Send 返回 error）+ 正常断连 fail pending ReverseRPC 请求（CancelDeviceWithReason）；更新 D-092 约束、D-100 补充 |

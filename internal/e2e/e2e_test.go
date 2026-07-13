@@ -70,6 +70,7 @@ type e2eEnv struct {
 	taskHandler  *mq.TaskHandler                // exposed for agent E2E handler registration
 	msgHandler   *server.DefaultMessageHandler  // exposed for agent E2E RPC registration
 	funcRegistry *server.MemoryFunctionRegistry // in-memory function registry for client tools E2E
+	pendingStore *server.RedisPendingStore      // Phase 5: for system.reconnect (D-108)
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +103,14 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 	defer flushCancel()
 	require.NoError(t, redisClient.FlushDB(flushCtx).Err(), "FlushDB should succeed")
 	_ = redisClient.Close()
+
+	// Dedicated Redis client for PendingStore (D-103). Must outlive the test.
+	pendingRedisClient := redis.NewClient(&redis.Options{
+		Addr: e2eRedisAddr,
+		DB:   e2eRedisDB,
+	})
+	t.Cleanup(func() { _ = pendingRedisClient.Close() })
+	pendingStore := server.NewRedisPendingStore(pendingRedisClient, server.PendingStoreConfig{})
 
 	// 3. SQLite in-memory database (each test gets its own named DB).
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared&_pragma=busy_timeout(5000)", t.Name())
@@ -149,6 +158,7 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 		server.WSWithBroker(broker),
 		server.WSWithMessageHandler(msgHandler),
 		server.WSWithFunctionRegistry(funcRegistry),
+		server.WSWithPendingStore(pendingStore), // Phase 5 (D-108)
 		server.WSWithPingPeriod(500*time.Millisecond),
 		server.WSWithPongWait(3*time.Second),
 		server.WSWithWriteWait(3*time.Second),
@@ -162,6 +172,8 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 		Broker:           broker,
 		BroadcastFn:      srv.BroadcastUpdates,
 		FunctionRegistry: funcRegistry,
+		ReverseRPC:       srv.ReverseRPC(), // Phase 5 (D-108)
+		Logger:           srv.Logger(),     // Phase 5 (D-108)
 	})
 
 	// 10. Task handler + Register(TypeSendMessage).
@@ -235,6 +247,7 @@ func setupE2ETest(t *testing.T) *e2eEnv {
 		taskHandler:  taskHandler,
 		msgHandler:   msgHandler,
 		funcRegistry: funcRegistry,
+		pendingStore: pendingStore,
 	}
 }
 

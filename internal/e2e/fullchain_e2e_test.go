@@ -444,9 +444,9 @@ func filterMessagesBySender(handler *fullChainUpdateHandler, senderID string) []
 }
 
 // assertFullChainResults performs structural assertions on the recorded events.
-// Streaming, typing, and agent_status are hard assertions (require).
-// HITL and message persistence are soft assertions (the real LLM may not
-// always trigger HITL or complete within the test timeout).
+// Streaming (including is_done), typing, agent_status, and message persistence
+// are hard assertions (require). HITL question trigger remains a soft assertion
+// because the real LLM may not always trigger ask_user_question.
 func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *agentE2EEnv, agentUserID, convID string) {
 	t.Helper()
 
@@ -462,9 +462,7 @@ func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *
 			break
 		}
 	}
-	if !hasIsDone && !handler.streamDone {
-		t.Log("WARNING: no streaming is_done event received")
-	}
+	require.True(t, hasIsDone || handler.streamDone, "should receive streaming is_done event")
 
 	// 2. Typing events — hard assertion.
 	require.Greater(t, len(handler.typingEvents), 0, "should receive typing events")
@@ -479,29 +477,21 @@ func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *
 	// 4. Agent status events — hard assertion.
 	require.Greater(t, len(handler.statuses), 0, "should receive agent_status events")
 
-	// 5. Message persistence — soft assertion.
-	//    The real LLM may take too long to complete within the executor timeout.
-	//    We check the server DB directly but only log if no message is found.
+	// 5. Message persistence — hard assertion.
 	agentMsgs, err := env.store.MessageStore().ListRecentByConversation(context.Background(), convID, 20)
-	if err != nil {
-		t.Logf("WARNING: could not query server DB: %v", err)
-	} else {
-		var agentSenderMsgs []*servermodel.Message
-		for _, msg := range agentMsgs {
-			if msg.SenderID == agentUserID {
-				agentSenderMsgs = append(agentSenderMsgs, msg)
-			}
-		}
-		if len(agentSenderMsgs) == 0 {
-			t.Log("INFO: no agent message persisted -- acceptable for degraded pass")
-		} else {
-			lastMsg := agentSenderMsgs[0] // ListRecentByConversation returns newest first
-			t.Logf("agent persisted %d message(s), last: %q", len(agentSenderMsgs), truncate(lastMsg.Content, 80))
-			assert.Equal(t, agentUserID, lastMsg.SenderID)
-			assert.Equal(t, convID, lastMsg.ConversationID)
-			assert.NotEmpty(t, lastMsg.Content)
+	require.NoError(t, err, "should query server DB without error")
+	var agentSenderMsgs []*servermodel.Message
+	for _, msg := range agentMsgs {
+		if msg.SenderID == agentUserID {
+			agentSenderMsgs = append(agentSenderMsgs, msg)
 		}
 	}
+	require.Greater(t, len(agentSenderMsgs), 0, "should persist at least 1 agent message")
+	lastMsg := agentSenderMsgs[0] // ListRecentByConversation returns newest first
+	t.Logf("agent persisted %d message(s), last: %q", len(agentSenderMsgs), truncate(lastMsg.Content, 80))
+	assert.Equal(t, agentUserID, lastMsg.SenderID)
+	assert.Equal(t, convID, lastMsg.ConversationID)
+	assert.NotEmpty(t, lastMsg.Content)
 }
 
 // truncate returns the first n chars of s (or s if shorter).
@@ -694,13 +684,15 @@ func TestFullChainE2E(t *testing.T) {
 			handler.streamDone = false
 			handler.mu.Unlock()
 
-			resumeAgent(t, xyncraClient, convID, question.CheckpointID, "", agentUserID,
-				"Yes, confirmed.")
+			err = triggerAgentResume(t, env, convID, question.CheckpointID, "", agentUserID,
+				userID, deviceID, "Yes, confirmed.")
+			if err != nil && !errors.Is(err, agent.ErrHITLInterrupted) {
+				t.Logf("WARNING: triggerAgentResume failed: %v", err)
+			}
 
 			// Wait for the post-resume stream to complete.
-			if !waitForStreamDone(t, handler, testTimeout(60*time.Second)) {
-				t.Log("WARNING: post-resume stream is_done not received -- resume may have failed")
-			}
+			require.True(t, waitForStreamDone(t, handler, testTimeout(60*time.Second)),
+				"post-resume stream should complete with is_done")
 		} else {
 			t.Log("HITL not triggered by real LLM -- waiting for initial stream")
 			waitForStreamDone(t, handler, testTimeout(60*time.Second))

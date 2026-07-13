@@ -17,6 +17,7 @@ import (
 	"github.com/PineappleBond/xyncra-server/internal/agent"
 	agenttools "github.com/PineappleBond/xyncra-server/internal/agent/tools"
 	"github.com/PineappleBond/xyncra-server/internal/handler"
+	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
@@ -180,6 +181,8 @@ func setupAgentE2E(t *testing.T, opts ...agent.ExecutorOption) *agentE2EEnv {
 		BroadcastFn:      base.srv.BroadcastUpdates,
 		AgentRegistry:    agentRegistry,
 		FunctionRegistry: base.funcRegistry,
+		ReverseRPC:       base.srv.ReverseRPC(), // Phase 5 (D-108)
+		Logger:           base.srv.Logger(),     // Phase 5 (D-108)
 	})
 
 	return &agentE2EEnv{
@@ -221,6 +224,38 @@ func setupAgentE2EWeakNet(t *testing.T, cfg llmWeakNetConfig, opts ...agent.Exec
 	}
 
 	return env
+}
+
+// ---------------------------------------------------------------------------
+// HITL resume helper (bypasses MQ)
+// ---------------------------------------------------------------------------
+
+// triggerAgentResume invokes the agent resume handler directly, bypassing MQ
+// task delivery. This tests the HITL resume pipeline: lock acquire → agent
+// build → ResumeWithParams → stream bridge → broadcast → persist.
+// Production uses agent_resume RPC (D-085) which enqueues via MQ.
+func triggerAgentResume(t *testing.T, env *agentE2EEnv, convID, checkpointID, interruptID, agentUserID, senderID, deviceID, answer string) error {
+	t.Helper()
+
+	payload := agent.AgentResumePayload{
+		ConversationID: convID,
+		CheckpointID:   checkpointID,
+		InterruptID:    interruptID,
+		Answer:         answer,
+		SenderID:       senderID,
+		AgentID:        agentUserID,
+		DeviceID:       deviceID,
+	}
+
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "marshal resume payload should succeed")
+
+	task := &mq.Task{
+		Type:    mq.TypeAgentResume,
+		Payload: raw,
+	}
+
+	return env.taskHandler.ProcessTask(context.Background(), task)
 }
 
 // ---------------------------------------------------------------------------
