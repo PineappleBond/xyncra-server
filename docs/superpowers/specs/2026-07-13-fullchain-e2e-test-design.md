@@ -15,6 +15,30 @@ A single integration test that exercises the **entire Xyncra business chain** en
 - `.env.test` with valid DashScope API key (`XYNCRA_TEST_REAL_LLM_ENABLED=true`)
 - Run command: `go test -tags real_llm ./internal/e2e/ -run TestFullChainE2E -v -timeout 300s`
 
+## Implementation Order
+
+**Decision: Fill the client gap first, then write the full chain test.**
+
+The XyncraClient has a real functional gap — it silently drops agent ephemeral events (`agent_question`, `agent_checkpoint_created`, `agent_status`). This is not test scaffolding; it's a legitimate Phase 8 enhancement that the client needs. We fill this gap first because:
+
+1. The full chain test depends on observing HITL events via the client
+2. The gap exists regardless of whether we write this test
+3. The client extension is small and follows existing patterns (`TypingHandler`, `StreamingHandler`)
+
+### Step 1: Client Extension (prerequisite)
+
+Add `AgentQuestionHandler`, `AgentCheckpointHandler`, `AgentStatusHandler` interfaces to `pkg/client/options.go` and extend `notifyHandler()` in `pkg/client/sync.go`. See Section "Client Extension" below.
+
+### Step 2: HITL Tool (test code)
+
+Implement `askUserQuestionTool` using `tool.Interrupt(ctx, info)` in the test file. Register it in `DefaultRegistry`. See Section "HITL Tool" below.
+
+### Step 3: Full Chain Test
+
+Write `TestFullChainE2E` that uses the real `XyncraClient` with the new handler interfaces, exercises the entire chain from connection to final message.
+
+---
+
 ## Architecture Overview
 
 ```
@@ -411,6 +435,19 @@ func (h *fullChainUpdateHandler) OnStreaming(ctx context.Context, userID, convID
 3. Keep responses concise
 
 This guides the real LLM to exercise both the tool call chain and the HITL mechanism.
+
+### D-6: Implementation order — fill client gap first, then write test
+
+**Rationale**: The XyncraClient has a real functional gap — it silently drops agent ephemeral events (`agent_question`, `agent_checkpoint_created`, `agent_status`). This is not test scaffolding; it's a legitimate Phase 8 enhancement that the client needs regardless. We fill this gap first because:
+
+1. The full chain test depends on observing HITL events via the client
+2. The gap exists independently of this test
+3. The client extension is small and follows existing patterns (`TypingHandler`, `StreamingHandler`)
+
+**Decision**: Two-step implementation:
+
+1. **Step 1**: Add `AgentQuestionHandler`, `AgentCheckpointHandler`, `AgentStatusHandler` interfaces to `pkg/client/options.go`, extend `notifyHandler()` in `pkg/client/sync.go`
+2. **Step 2**: Write `TestFullChainE2E` with HITL tool and full chain test
 
 ---
 
