@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -19,6 +20,16 @@ type ReverseRPC struct {
 
 	sendFunc func(userID, deviceID string, pkg *protocol.Package) error
 	logger   Logger
+
+	// Phase 4: pending store for timeout persistence (D-103).
+	pendingStore PendingStore
+
+	// Phase 4: per-device seq counters (D-106).
+	deviceSeqMu sync.Mutex
+	deviceSeq   map[string]uint64 // key: "userID\x00deviceID"
+
+	// Phase 4: max replay retries for persisted requests.
+	maxRetries int
 }
 
 type reverseRPCPending struct {
@@ -26,20 +37,40 @@ type reverseRPCPending struct {
 	cancel   context.CancelFunc
 	userID   string // for CancelDevice cross-user safety
 	deviceID string // for CancelDevice per-device filtering
+
+	// Phase 4: fields for persistence (D-103).
+	reqID          string
+	method         string
+	params         json.RawMessage
+	idempotencyKey string // equals reqID (D-097)
+	seq            uint64 // per-device sequence (D-106)
 }
 
 // ReverseRPCConfig configures a ReverseRPC during construction.
 type ReverseRPCConfig struct {
 	SendFunc func(userID, deviceID string, pkg *protocol.Package) error
 	Logger   Logger
+
+	// Phase 4: PendingStore for request persistence (D-103). nil = no persistence.
+	PendingStore PendingStore
+
+	// Phase 4: max replay retries for persisted requests; default 3.
+	MaxRetries int
 }
 
 // NewReverseRPC creates a new ReverseRPC instance.
 func NewReverseRPC(cfg ReverseRPCConfig) *ReverseRPC {
+	maxRetries := cfg.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = defaultMaxReplayRetries
+	}
 	return &ReverseRPC{
-		pending:  make(map[string]*reverseRPCPending),
-		sendFunc: cfg.SendFunc,
-		logger:   cfg.Logger,
+		pending:      make(map[string]*reverseRPCPending),
+		sendFunc:     cfg.SendFunc,
+		logger:       cfg.Logger,
+		pendingStore: cfg.PendingStore,
+		deviceSeq:    make(map[string]uint64),
+		maxRetries:   maxRetries,
 	}
 }
 
@@ -47,17 +78,27 @@ func NewReverseRPC(cfg ReverseRPCConfig) *ReverseRPC {
 // a response arrives, the context is cancelled, or the timeout expires.
 // If deviceID is empty, the request is broadcast to all connections of the user.
 // Returns error if user has no active connections (or the device is offline).
+//
+// On DeadlineExceeded (timeout), the request is persisted to the PendingStore
+// for later replay if a PendingStore is configured (D-103).
 func (r *ReverseRPC) ServerRequest(ctx context.Context, userID, deviceID string, method string, params json.RawMessage, timeout time.Duration) (*protocol.PackageDataResponse, error) {
 	reqID := fmt.Sprintf("s-%s", uuid.New().String())
+	seq := r.nextSeq(userID, deviceID)
+	idempotencyKey := reqID // D-097: UUID is globally unique
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	pending := &reverseRPCPending{
-		respCh:   make(chan *protocol.PackageDataResponse, 1),
-		cancel:   cancel,
-		userID:   userID,
-		deviceID: deviceID,
+		respCh:         make(chan *protocol.PackageDataResponse, 1),
+		cancel:         cancel,
+		userID:         userID,
+		deviceID:       deviceID,
+		reqID:          reqID,
+		method:         method,
+		params:         params,
+		idempotencyKey: idempotencyKey,
+		seq:            seq,
 	}
 
 	r.mu.Lock()
@@ -71,9 +112,11 @@ func (r *ReverseRPC) ServerRequest(ctx context.Context, userID, deviceID string,
 	}()
 
 	req := &protocol.PackageDataRequest{
-		ID:     reqID,
-		Method: method,
-		Params: params,
+		ID:             reqID,
+		Method:         method,
+		Params:         params,
+		IdempotencyKey: idempotencyKey,
+		Seq:            seq,
 	}
 
 	data, err := json.Marshal(req)
@@ -95,8 +138,50 @@ func (r *ReverseRPC) ServerRequest(ctx context.Context, userID, deviceID string,
 	case resp := <-pending.respCh:
 		return resp, nil
 	case <-ctx.Done():
+		// Phase 4: persist on DeadlineExceeded only (D-103).
+		// CancelDevice goes through respCh branch, not here.
+		// ContextCancel (parent context) is NOT persisted.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && r.pendingStore != nil {
+			r.persistAsync(pending)
+		}
 		return nil, ctx.Err()
 	}
+}
+
+// nextSeq returns the next sequence number for the given device (D-106).
+// Monotonically increasing per (userID, deviceID) pair.
+func (r *ReverseRPC) nextSeq(userID, deviceID string) uint64 {
+	key := userID + "\x00" + deviceID
+	r.deviceSeqMu.Lock()
+	r.deviceSeq[key]++
+	seq := r.deviceSeq[key]
+	r.deviceSeqMu.Unlock()
+	return seq
+}
+
+// persistAsync saves a timed-out request to the PendingStore asynchronously.
+// Errors are logged but do not propagate (fail-open, D-103).
+func (r *ReverseRPC) persistAsync(p *reverseRPCPending) {
+	preq := &PendingRequest{
+		ID:             p.reqID,
+		UserID:         p.userID,
+		DeviceID:       p.deviceID,
+		Method:         p.method,
+		Params:         p.params,
+		IdempotencyKey: p.idempotencyKey,
+		Seq:            p.seq,
+		RetryCount:     0,
+		MaxRetries:     r.maxRetries,
+		CreatedAt:      time.Now(),
+	}
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := r.pendingStore.Save(bgCtx, preq); err != nil {
+			r.logger.Error("reverse_rpc: persist pending request",
+				"reqID", preq.ID, "error", err)
+		}
+	}()
 }
 
 // DispatchResponse routes an incoming response to the matching pending caller.

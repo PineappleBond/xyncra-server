@@ -164,6 +164,37 @@
 // picks up the respCh response deterministically; context cancellation is
 // handled by the deferred cancel() after ServerRequest returns.
 //
+// # Pending Store (Phase 4)
+//
+// The PendingStore interface (D-103) enables timed-out reverse-RPC requests to
+// be persisted for later replay. The Redis-backed implementation,
+// RedisPendingStore, stores requests as JSON in per-device Redis lists under
+// the key "pending:{userID}\x00{deviceID}".
+//
+// When ServerRequest's context expires with DeadlineExceeded and a PendingStore
+// is configured, the request is saved asynchronously via persistAsync. The
+// goroutine uses a 5-second background context so that slow Redis does not
+// block the caller. Errors during Save are logged but never propagated to the
+// ServerRequest caller (fail-open semantics, D-103).
+//
+// The PackageDataRequest protocol message gained two new fields (D-104):
+//
+//   - IdempotencyKey: set to the request UUID (D-097) for exactly-once replay.
+//   - Seq: per-device monotonically increasing sequence number (D-106).
+//
+// Both fields use `omitempty` so older clients ignore them without error.
+//
+// Per-device Seq counters are held in memory (ReverseRPC.deviceSeq). In Phase 5
+// they may be upgraded to Redis INCR for cross-node durability (D-106).
+//
+// Pass a PendingStore via WSWithPendingStore to enable persistence:
+//
+//	ps, _ := server.NewRedisPendingStore(redisClient, server.PendingStoreConfig{})
+//	srv, _ := server.NewWebSocketServer(
+//	    server.WSWithPendingStore(ps),
+//	    // ... other options
+//	)
+//
 // The WebSocketServer automatically subscribes to Pub/Sub on Start and
 // publishes updates via BroadcastUpdates.
 package server

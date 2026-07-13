@@ -175,6 +175,23 @@ func main() {
 	})
 
 	// ---------------------------------------------------------------
+	// Redis client for agent pipeline and pending store (D-074)
+	// ---------------------------------------------------------------
+
+	// Dedicated redis.Client for agent idempotency, conversation lock,
+	// checkpoint store, and pending store (D-074).
+	redisIdempotencyClient := redis.NewClient(&redis.Options{
+		Addr:     *redisAddr,
+		Password: *redisPassword,
+		DB:       *redisDB,
+	})
+	defer redisIdempotencyClient.Close()
+
+	// PendingStore for reverse-RPC request persistence (Phase 4, D-103).
+	// Reuses the same dedicated redis.Client as idempotency (D-074).
+	pendingStore := server.NewRedisPendingStore(redisIdempotencyClient, server.PendingStoreConfig{})
+
+	// ---------------------------------------------------------------
 	// WebSocket Server
 	// ---------------------------------------------------------------
 
@@ -186,6 +203,7 @@ func main() {
 		server.WSWithMessageHandler(msgHandler),
 		server.WSWithNodeBroadcaster(nodeBroadcaster),
 		server.WSWithFunctionRegistry(funcRegistry),
+		server.WSWithPendingStore(pendingStore), // Phase 4 (D-103)
 	)
 	if err != nil {
 		log.Fatalf("failed to create websocket server: %v", err)
@@ -234,13 +252,7 @@ func main() {
 	)
 
 	// Idempotency store for agent task deduplication (D-Phase5-2).
-	// Uses a dedicated redis.Client (D-Phase5-5).
-	redisIdempotencyClient := redis.NewClient(&redis.Options{
-		Addr:     *redisAddr,
-		Password: *redisPassword,
-		DB:       *redisDB,
-	})
-	defer redisIdempotencyClient.Close()
+	// Reuses the dedicated redis.Client created earlier (D-074).
 	idempotencyStore := agent.NewRedisIdempotencyStore(redisIdempotencyClient)
 
 	// Conversation lock for per-conversation serialization (D-075).

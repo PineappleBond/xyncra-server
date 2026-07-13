@@ -50,6 +50,12 @@ type PackageDataRequest struct {
 	Method string `json:"method"`
 	// Params contains the method parameters as JSON.
 	Params json.RawMessage `json:"params"`
+	// IdempotencyKey is a server-generated key (equal to reqID) used for
+	// deduplication during replay of timed-out requests (Phase 4, D-104).
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// Seq is a per-device monotonically increasing sequence number assigned
+	// by the server for ordering reverse-RPC requests (Phase 4, D-104).
+	Seq uint64 `json:"seq,omitempty"`
 }
 
 // ResponseCode indicates the result status of a request. Zero or positive

@@ -73,6 +73,76 @@ func (m *mockSendFunc) waitForCalls(n int, timeout time.Duration) bool {
 	return m.callCount() >= n
 }
 
+// ---------------------------------------------------------------------------
+// Mock PendingStore
+// ---------------------------------------------------------------------------
+
+// mockPendingStore is a mock implementation of PendingStore for testing.
+type mockPendingStore struct {
+	mu        sync.Mutex
+	saved     []*PendingRequest
+	saveErr   error
+	saveDelay time.Duration // simulated delay for Save
+}
+
+func (m *mockPendingStore) Save(ctx context.Context, req *PendingRequest) error {
+	if m.saveDelay > 0 {
+		time.Sleep(m.saveDelay)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.saveErr != nil {
+		return m.saveErr
+	}
+	m.saved = append(m.saved, req)
+	return nil
+}
+
+func (m *mockPendingStore) List(ctx context.Context, userID, deviceID string) ([]*PendingRequest, error) {
+	return nil, nil
+}
+
+func (m *mockPendingStore) Remove(ctx context.Context, userID, deviceID, requestID string) error {
+	return nil
+}
+
+func (m *mockPendingStore) RemoveByDevice(ctx context.Context, userID, deviceID string) error {
+	return nil
+}
+
+func (m *mockPendingStore) savedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.saved)
+}
+
+func (m *mockPendingStore) lastSaved() *PendingRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.saved) == 0 {
+		return nil
+	}
+	return m.saved[len(m.saved)-1]
+}
+
+func (m *mockPendingStore) allSaved() []*PendingRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*PendingRequest, len(m.saved))
+	copy(out, m.saved)
+	return out
+}
+
+// newTestReverseRPCWithStore creates a ReverseRPC wired to the given mockSendFunc
+// and mockPendingStore for testing.
+func newTestReverseRPCWithStore(ms *mockSendFunc, ps *mockPendingStore) *ReverseRPC {
+	return NewReverseRPC(ReverseRPCConfig{
+		SendFunc:     ms.Send,
+		Logger:       noopLogger{},
+		PendingStore: ps,
+	})
+}
+
 // newTestReverseRPC creates a ReverseRPC wired to the given mockSendFunc.
 func newTestReverseRPC(ms *mockSendFunc) *ReverseRPC {
 	return NewReverseRPC(ReverseRPCConfig{
@@ -293,10 +363,14 @@ func TestReverseRPC_RequestIDNamespace(t *testing.T) {
 	ms := &mockSendFunc{}
 	rpc := newTestReverseRPC(ms)
 
-	// Fire three requests to confirm sequential IDs.
+	// Fire three requests with a short timeout so they exit quickly via
+	// DeadlineExceeded. Use a WaitGroup to avoid goroutine leaks.
+	var wg sync.WaitGroup
 	for range 3 {
+		wg.Add(1)
 		go func() {
-			_, _ = rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 5*time.Second)
+			defer wg.Done()
+			_, _ = rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 100*time.Millisecond)
 		}()
 	}
 
@@ -310,6 +384,9 @@ func TestReverseRPC_RequestIDNamespace(t *testing.T) {
 		assert.True(t, strings.HasPrefix(req.ID, "s-"), "expected ID with 's-' prefix, got %q", req.ID)
 		assert.Equal(t, protocol.PackageTypeRequest, call.pkg.Type)
 	}
+
+	// Wait for all goroutines to finish (they will exit via timeout).
+	wg.Wait()
 }
 
 func TestReverseRPC_ServerRequest_ZeroTimeout(t *testing.T) {
@@ -728,4 +805,317 @@ func TestReverseRPC_CancelDeviceWithReason_NormalDisconnect(t *testing.T) {
 		assert.Equal(t, protocol.ResponseCode(-1), result.Code)
 		assert.Equal(t, "device disconnected", result.Msg)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: PendingStore persistence tests (D-103, D-104, D-105, D-106)
+// ---------------------------------------------------------------------------
+
+// TestServerRequest_Timeout_PersistsToPendingStore verifies that a timed-out
+// request is persisted to the PendingStore with correct fields (D-103).
+func TestServerRequest_Timeout_PersistsToPendingStore(t *testing.T) {
+	ms := &mockSendFunc{}
+	ps := &mockPendingStore{}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+
+	params := json.RawMessage(`{"key":"value"}`)
+	_, err := rpc.ServerRequest(context.Background(), "user-1", "device-1", "test.method", params, 50*time.Millisecond)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	// persistAsync runs in a goroutine; wait for Save to be called.
+	require.Eventually(t, func() bool {
+		return ps.savedCount() == 1
+	}, 2*time.Second, 5*time.Millisecond, "Save should be called after timeout")
+
+	saved := ps.lastSaved()
+	require.NotNil(t, saved)
+	assert.Equal(t, "user-1", saved.UserID)
+	assert.Equal(t, "device-1", saved.DeviceID)
+	assert.Equal(t, "test.method", saved.Method)
+	assert.Equal(t, params, saved.Params)
+	assert.Equal(t, saved.ID, saved.IdempotencyKey) // D-097: idempotency key = reqID
+	assert.True(t, saved.Seq > 0, "seq should be > 0, got %d", saved.Seq)
+	assert.Equal(t, 0, saved.RetryCount)
+	assert.Equal(t, defaultMaxReplayRetries, saved.MaxRetries)
+	assert.False(t, saved.CreatedAt.IsZero(), "CreatedAt should be set")
+}
+
+// TestServerRequest_Timeout_PersistsAsync_NonBlocking verifies that a slow Save
+// does not block ServerRequest from returning (D-103 async persistence).
+func TestServerRequest_Timeout_PersistsAsync_NonBlocking(t *testing.T) {
+	ms := &mockSendFunc{}
+	ps := &mockPendingStore{saveDelay: 500 * time.Millisecond}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+
+	start := time.Now()
+	_, err := rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 50*time.Millisecond)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	// ServerRequest should return almost immediately after timeout (well under 500ms).
+	assert.Less(t, elapsed, 1*time.Second, "ServerRequest should not block on Save")
+
+	// Save should still be called eventually.
+	require.Eventually(t, func() bool {
+		return ps.savedCount() == 1
+	}, 2*time.Second, 5*time.Millisecond, "Save should be called asynchronously")
+}
+
+// TestServerRequest_Success_NoPersist verifies that a successful request
+// (response received before timeout) does NOT persist to the PendingStore.
+func TestServerRequest_Success_NoPersist(t *testing.T) {
+	ms := &mockSendFunc{}
+	ps := &mockPendingStore{}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, err := rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 2*time.Second)
+		assert.NoError(t, err)
+		assert.NotNil(t, resp)
+	}()
+
+	require.True(t, ms.waitForCalls(1, time.Second))
+	reqID := extractRequestID(t, ms.lastCall().pkg)
+
+	// Dispatch a response before timeout.
+	rpc.DispatchResponse(&protocol.PackageDataResponse{ID: reqID, Code: 0, Msg: "ok"})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServerRequest did not return")
+	}
+
+	// Give a small window for any spurious async persist.
+	require.Never(t, func() bool {
+		return ps.savedCount() > 0
+	}, 200*time.Millisecond, 10*time.Millisecond, "should not persist")
+}
+
+// TestServerRequest_ContextCanceled_NoPersist verifies that a parent context
+// cancellation (not DeadlineExceeded) does NOT trigger persistence (D-103).
+func TestServerRequest_ContextCanceled_NoPersist(t *testing.T) {
+	ms := &mockSendFunc{}
+	ps := &mockPendingStore{}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, err := rpc.ServerRequest(ctx, "user-1", "device-1", "ping", nil, 5*time.Second)
+		assert.ErrorIs(t, err, context.Canceled)
+	}()
+
+	require.True(t, ms.waitForCalls(1, time.Second))
+
+	// Cancel the parent context.
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServerRequest did not return after context cancellation")
+	}
+
+	require.Never(t, func() bool {
+		return ps.savedCount() > 0
+	}, 200*time.Millisecond, 10*time.Millisecond, "should not persist")
+}
+
+// TestServerRequest_CancelDevice_NoPersist verifies that CancelDevice does NOT
+// trigger persistence (D-105).
+func TestServerRequest_CancelDevice_NoPersist(t *testing.T) {
+	ms := &mockSendFunc{}
+	ps := &mockPendingStore{}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, err := rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 5*time.Second)
+		// CancelDevice delivers a synthetic response via respCh, so err is nil
+		// or context.Canceled in a rare race.
+		_ = err
+	}()
+
+	require.True(t, ms.waitForCalls(1, time.Second))
+
+	// CancelDevice before timeout.
+	rpc.CancelDevice("user-1", "device-1")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServerRequest did not return after CancelDevice")
+	}
+
+	require.Never(t, func() bool {
+		return ps.savedCount() > 0
+	}, 200*time.Millisecond, 10*time.Millisecond, "should not persist")
+}
+
+// TestServerRequest_PendingStoreNil_NoPersist verifies that a nil PendingStore
+// does not cause a panic on timeout (D-103 nil-safe design).
+func TestServerRequest_PendingStoreNil_NoPersist(t *testing.T) {
+	ms := &mockSendFunc{}
+	rpc := newTestReverseRPC(ms) // no PendingStore
+
+	assert.NotPanics(t, func() {
+		_, err := rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 50*time.Millisecond)
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+	})
+
+	// Small delay to ensure no background goroutine panics.
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestServerRequest_PersistError_FailOpen verifies that a Save error does not
+// affect the error returned by ServerRequest (fail-open, D-103).
+func TestServerRequest_PersistError_FailOpen(t *testing.T) {
+	ms := &mockSendFunc{}
+	ps := &mockPendingStore{saveErr: errors.New("redis connection lost")}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+
+	_, err := rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 50*time.Millisecond)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded, "ServerRequest should return DeadlineExceeded even if Save fails")
+
+	// Wait for the async persist attempt to complete.
+	time.Sleep(100 * time.Millisecond)
+	// The Save was called but returned an error; savedCount should remain 0.
+	assert.Equal(t, 0, ps.savedCount(), "failed Save should not add to saved list")
+}
+
+// TestServerRequest_Seq_MonotonicallyIncreasing verifies that seq numbers are
+// strictly increasing for the same (userID, deviceID) pair (D-106).
+func TestServerRequest_Seq_MonotonicallyIncreasing(t *testing.T) {
+	ms := &mockSendFunc{}
+	ps := &mockPendingStore{}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+
+	// Issue 3 sequential timeouts.
+	for range 3 {
+		_, err := rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 50*time.Millisecond)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+
+	// Wait for all 3 async persists.
+	require.Eventually(t, func() bool {
+		return ps.savedCount() == 3
+	}, 2*time.Second, 5*time.Millisecond, "all 3 Saves should be called")
+
+	saved := ps.allSaved()
+	require.Len(t, saved, 3)
+	assert.Equal(t, uint64(1), saved[0].Seq, "first seq should be 1")
+	assert.Equal(t, uint64(2), saved[1].Seq, "second seq should be 2")
+	assert.Equal(t, uint64(3), saved[2].Seq, "third seq should be 3")
+}
+
+// TestServerRequest_Race_TimeoutVsLateResponse exercises the race between
+// timeout-triggered persistence and a late DispatchResponse (D-103/D-105).
+func TestServerRequest_Race_TimeoutVsLateResponse(t *testing.T) {
+	t.Parallel()
+
+	ms := &mockSendFunc{}
+	ps := &mockPendingStore{}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 100*time.Millisecond)
+	}()
+
+	// Wait for the send to happen.
+	require.True(t, ms.waitForCalls(1, time.Second))
+	reqID := extractRequestID(t, ms.lastCall().pkg)
+
+	// Dispatch a late response after the timeout fires.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		rpc.DispatchResponse(&protocol.PackageDataResponse{ID: reqID, Code: 0, Msg: "late"})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ServerRequest did not return")
+	}
+	// No panic under -race.
+}
+
+// TestServerRequest_Race_TimeoutVsCancelDevice exercises the race between
+// timeout-triggered persistence and CancelDevice (D-105).
+func TestServerRequest_Race_TimeoutVsCancelDevice(t *testing.T) {
+	t.Parallel()
+
+	ms := &mockSendFunc{}
+	ps := &mockPendingStore{}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 100*time.Millisecond)
+	}()
+
+	require.True(t, ms.waitForCalls(1, time.Second))
+
+	// CancelDevice after the timeout fires but before/after persist.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		rpc.CancelDevice("user-1", "device-1")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ServerRequest did not return")
+	}
+
+	// Under -race: no panic, no data corruption.
+}
+
+// TestServerRequest_ConcurrentPersist verifies that 10 concurrent timeouts
+// each persist exactly once with unique seq values (D-106).
+func TestServerRequest_ConcurrentPersist(t *testing.T) {
+	ms := &mockSendFunc{}
+	ps := &mockPendingStore{}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+
+	const n = 10
+	var wg sync.WaitGroup
+
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 50*time.Millisecond)
+			assert.ErrorIs(t, err, context.DeadlineExceeded)
+		}()
+	}
+
+	wg.Wait()
+
+	// Wait for all async persists.
+	require.Eventually(t, func() bool {
+		return ps.savedCount() == n
+	}, 3*time.Second, 10*time.Millisecond, "all %d Saves should be called", n)
+
+	saved := ps.allSaved()
+	require.Len(t, saved, n)
+
+	// All seqs should be unique.
+	seqs := make(map[uint64]bool, n)
+	for _, req := range saved {
+		assert.False(t, seqs[req.Seq], "duplicate seq: %d", req.Seq)
+		seqs[req.Seq] = true
+	}
+	assert.Len(t, seqs, n, "should have %d unique seqs", n)
 }

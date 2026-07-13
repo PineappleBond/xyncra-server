@@ -135,6 +135,7 @@ type webSocketServerOptions struct {
 	connectionInfoEnricher func(*ConnectionInfo, *http.Request)
 	nodeBroadcaster        NodeBroadcaster
 	functionRegistry       FunctionRegistry
+	pendingStore           PendingStore // Phase 4: reverse-RPC request persistence (D-103)
 }
 
 // WSWithAddr sets the listen address.
@@ -256,6 +257,14 @@ func WSWithNodeBroadcaster(nb NodeBroadcaster) WebSocketServerOption {
 func WSWithFunctionRegistry(fr FunctionRegistry) WebSocketServerOption {
 	return func(o *webSocketServerOptions) {
 		o.functionRegistry = fr
+	}
+}
+
+// WSWithPendingStore sets the PendingStore for reverse-RPC request persistence (Phase 4, D-103).
+// When not set, timed-out requests are not persisted.
+func WSWithPendingStore(ps PendingStore) WebSocketServerOption {
+	return func(o *webSocketServerOptions) {
+		o.pendingStore = ps
 	}
 }
 
@@ -453,7 +462,8 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 			}
 			return s.sendToUser(userID, pkg)
 		},
-		Logger: s.logger,
+		Logger:       s.logger,
+		PendingStore: o.pendingStore, // Phase 4 (D-103)
 	})
 
 	// Auto-wire ReverseRPC to the message handler if it's a DefaultMessageHandler (D-092).
