@@ -62,6 +62,11 @@ type AgentConfig struct {
 	Parameters   AgentParameters   `yaml:"parameters" json:"parameters"`
 	Context      AgentContext      `yaml:"context" json:"context"`
 	Tools        []string          `yaml:"tools" json:"tools"`
+	// DynamicTools lists tool names that should be resolved from the tool
+	// registry at runtime (per-execution) instead of at build time. This
+	// enables the Eino framework's 0->nonzero tool transition, which triggers
+	// graph rebuild and ensures tools are indexed in the ToolNode.
+	DynamicTools []string          `yaml:"dynamic_tools" json:"dynamic_tools"`
 	ToolConfig   map[string]any    `yaml:"tool_config" json:"tool_config"` // per-tool config passed to tool factories
 	Middleware   MiddlewareConfig  `yaml:"middleware" json:"middleware"`   // middleware toggles (D-079)
 	SubAgents    []string          `yaml:"sub_agents" json:"sub_agents"`   // Phase 8B placeholder (D-081)

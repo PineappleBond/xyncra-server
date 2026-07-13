@@ -66,6 +66,8 @@ func TestDynamicToolProvider_InjectsTools(t *testing.T) {
 		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{},
 		discardLogger(),
+		nil,
+		nil,
 	)
 	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
@@ -86,6 +88,8 @@ func TestDynamicToolProvider_NoCallerDevice_NoOp(t *testing.T) {
 		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{},
 		discardLogger(),
+		nil,
+		nil,
 	)
 	ctx := context.Background() // no CallerDevice
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
@@ -105,6 +109,8 @@ func TestDynamicToolProvider_EmptyFunctions_NoInjection(t *testing.T) {
 		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{},
 		discardLogger(),
+		nil,
+		nil,
 	)
 	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
@@ -124,6 +130,8 @@ func TestDynamicToolProvider_GetFunctionsError_FailOpen(t *testing.T) {
 		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{},
 		discardLogger(),
+		nil,
+		nil,
 	)
 	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
@@ -151,6 +159,8 @@ func TestDynamicToolProvider_FunctionTagsFilter(t *testing.T) {
 		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{FunctionTags: []string{"filesystem"}},
 		discardLogger(),
+		nil,
+		nil,
 	)
 	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
@@ -177,6 +187,8 @@ func TestDynamicToolProvider_ExcludedFunctions(t *testing.T) {
 		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{ExcludedFunctions: []string{"fn2"}},
 		discardLogger(),
+		nil,
+		nil,
 	)
 	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
@@ -208,6 +220,8 @@ func TestDynamicToolProvider_TagsAndExcluded(t *testing.T) {
 			ExcludedFunctions: []string{"fn1"},
 		},
 		discardLogger(),
+		nil,
+		nil,
 	)
 	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
@@ -236,6 +250,8 @@ func TestDynamicToolProvider_ConcurrentBeforeAgent(t *testing.T) {
 		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{},
 		discardLogger(),
+		nil,
+		nil,
 	)
 
 	const goroutines = 10

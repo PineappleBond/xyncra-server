@@ -8,6 +8,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
 
+	agenttools "github.com/PineappleBond/xyncra-server/internal/agent/tools"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
 
@@ -35,14 +36,21 @@ type DynamicToolProvider struct {
 	caller       ClientCaller
 	config       ClientToolsConfig
 	logger       Logger
+	toolRegistry *agenttools.Registry // for resolving dynamic_tools from agent config
+	dynamicTools []string             // tool names to resolve from registry at runtime
 }
 
 // NewDynamicToolProvider creates a DynamicToolProvider.
+// toolRegistry and dynamicTools enable resolution of static tools from the
+// registry at runtime (per-execution), which is required for the Eino
+// framework's 0->nonzero tool transition to trigger a graph rebuild.
 func NewDynamicToolProvider(
 	registry ClientFunctionProvider,
 	caller ClientCaller,
 	cfg ClientToolsConfig,
 	logger Logger,
+	toolRegistry *agenttools.Registry,
+	dynamicTools []string,
 ) *DynamicToolProvider {
 	if logger == nil {
 		logger = noopLogger{}
@@ -52,64 +60,74 @@ func NewDynamicToolProvider(
 		caller:       caller,
 		config:       cfg,
 		logger:       logger,
+		toolRegistry: toolRegistry,
+		dynamicTools: dynamicTools,
 	}
 }
 
 // BeforeAgent implements the Eino middleware hook. It queries the calling
 // device's registered functions and appends them as tools to runCtx.Tools.
+// It also resolves dynamic_tools from the tool registry. Both injection
+// paths are independent: dynamic_tools are injected even when no device
+// context or client functions are available.
 // Fail-open (D-072 spirit): errors in GetFunctions or tool creation are
 // logged and skipped, never blocking agent execution.
 func (d *DynamicToolProvider) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
-	// 1. Extract caller device from context.
-	device, ok := CallerDeviceFromContext(ctx)
-	if !ok {
-		// No device info (e.g. MQ task without DeviceID) -- skip injection.
-		return ctx, runCtx, nil
-	}
+	var merged []tool.BaseTool
 
-	// 2. Get registered functions for this device (fail-open).
-	funcs, err := d.funcRegistry.GetFunctions(ctx, device.UserID, device.DeviceID)
-	if err != nil {
-		d.logger.Error("DynamicToolProvider: GetFunctions failed", "user", device.UserID, "device", device.DeviceID, "error", err)
-		return ctx, runCtx, nil // fail-open
-	}
-	if len(funcs) == 0 {
-		return ctx, runCtx, nil
-	}
-
-	// 3. Apply filters.
-	funcs = d.applyFilters(funcs)
-	if len(funcs) == 0 {
-		return ctx, runCtx, nil
-	}
-
-	// 4. Create tools for each function.
-	defaultTimeout := d.config.CallTimeout
-	if defaultTimeout <= 0 {
-		defaultTimeout = 30 * time.Second
-	}
-
-	var tools []tool.BaseTool
-	for _, fn := range funcs {
-		t, err := newClientFunctionTool(fn, d.caller, device.UserID, device.DeviceID, defaultTimeout)
+	// --- Client function tools (require device context) ---
+	device, hasDevice := CallerDeviceFromContext(ctx)
+	if hasDevice {
+		// 2. Get registered functions for this device (fail-open).
+		funcs, err := d.funcRegistry.GetFunctions(ctx, device.UserID, device.DeviceID)
 		if err != nil {
-			d.logger.Error("DynamicToolProvider: failed to create tool", "function", fn.Name, "error", err)
-			continue // fail-open per function
+			d.logger.Error("DynamicToolProvider: GetFunctions failed", "user", device.UserID, "device", device.DeviceID, "error", err)
+		} else {
+			funcs = d.applyFilters(funcs)
+			if len(funcs) > 0 {
+				// 4. Create tools for each function.
+				defaultTimeout := d.config.CallTimeout
+				if defaultTimeout <= 0 {
+					defaultTimeout = 30 * time.Second
+				}
+
+				var tools []tool.BaseTool
+				for _, fn := range funcs {
+					t, err := newClientFunctionTool(fn, d.caller, device.UserID, device.DeviceID, defaultTimeout)
+					if err != nil {
+						d.logger.Error("DynamicToolProvider: failed to create tool", "function", fn.Name, "error", err)
+						continue // fail-open per function
+					}
+					tools = append(tools, t)
+				}
+
+				if len(tools) > 0 {
+					merged = append(merged, tools...)
+					d.logger.Info("DynamicToolProvider: injected client tools", "count", len(tools), "device", device.DeviceID)
+				}
+			}
 		}
-		tools = append(tools, t)
 	}
 
-	if len(tools) == 0 {
-		return ctx, runCtx, nil
+	// --- Dynamic tools from registry (device-independent) ---
+	if d.toolRegistry != nil && len(d.dynamicTools) > 0 {
+		staticTools, err := d.toolRegistry.Create(ctx, d.dynamicTools, nil)
+		if err != nil {
+			d.logger.Error("DynamicToolProvider: failed to create dynamic tools", "error", err)
+		}
+		if len(staticTools) > 0 {
+			merged = append(merged, staticTools...)
+			d.logger.Info("DynamicToolProvider: injected registry tools", "count", len(staticTools), "tools", d.dynamicTools)
+		}
 	}
 
-	// 5. Append tools to runCtx.Tools (allocate new slice to avoid aliasing).
-	merged := make([]tool.BaseTool, 0, len(runCtx.Tools)+len(tools))
-	merged = append(merged, runCtx.Tools...)
-	merged = append(merged, tools...)
-	runCtx.Tools = merged
-
-	d.logger.Info("DynamicToolProvider: injected client tools", "count", len(tools), "device", device.DeviceID)
+	// Append all injected tools to runCtx.Tools (allocate new slice to avoid aliasing).
+	if len(merged) > 0 {
+		newTools := make([]tool.BaseTool, 0, len(runCtx.Tools)+len(merged))
+		newTools = append(newTools, runCtx.Tools...)
+		newTools = append(newTools, merged...)
+		runCtx.Tools = newTools
+	}
 
 	return ctx, runCtx, nil
 }

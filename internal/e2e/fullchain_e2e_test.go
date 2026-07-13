@@ -258,7 +258,8 @@ parameters:
 context:
   max_tokens: 8000
   max_messages: 20
-tools:
+tools: []
+dynamic_tools:
   - ask_user_question
 middleware:
   enable_client_tools: true
