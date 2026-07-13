@@ -706,6 +706,25 @@ func TestFullChainE2E(t *testing.T) {
 		require.NotNil(t, convResult.Conversation, "conversation should be created")
 		convID := convResult.Conversation.ID
 
+		// Checkpoint A: verify conversation exists in Server DB and Client DB.
+		t.Log("Checkpoint A: verifying conversation in Server DB and Client DB")
+
+		// Server DB: conversation should exist synchronously after RPC returns.
+		serverConv, err := env.store.ConversationStore().Get(ctx, convID)
+		require.NoError(t, err, "server DB should have conversation after create")
+		require.NotNil(t, serverConv, "conversation should not be nil")
+		require.Equal(t, convID, serverConv.ID, "server conversation ID should match")
+		t.Logf("Checkpoint A: Server DB conversation %s verified", convID)
+
+		// Client DB: conversation should be cached via sync pipeline (async).
+		// Soft check — sync pipeline is async; hard check is after FullSync.
+		clientConvEarly, _ := clientDB.Conversations.Get(ctx, convID)
+		if clientConvEarly != nil {
+			t.Log("Checkpoint A: Client DB conversation cached -- verified")
+		} else {
+			t.Log("Checkpoint A: Client DB conversation not yet cached (sync pending) -- will verify after FullSync")
+		}
+
 		// ---------------------------------------------------------------
 		// Step 5: Send Message
 		// ---------------------------------------------------------------
@@ -718,6 +737,37 @@ func TestFullChainE2E(t *testing.T) {
 		}
 		require.NotNil(t, sendResult, "send result should not be nil")
 		require.NotNil(t, sendResult.Message, "send result message should not be nil")
+
+		// Checkpoint B: verify user message in Server DB and Client DB.
+		t.Log("Checkpoint B: verifying user message in Server DB and Client DB")
+
+		// Server DB: user message should be persisted synchronously after RPC.
+		serverMsgsAfterSend, err := env.store.MessageStore().ListRecentByConversation(ctx, convID, 10)
+		require.NoError(t, err, "server DB should be queryable after send")
+		var userSenderMsgs []*servermodel.Message
+		for _, m := range serverMsgsAfterSend {
+			if m.SenderID == userID {
+				userSenderMsgs = append(userSenderMsgs, m)
+			}
+		}
+		require.Greater(t, len(userSenderMsgs), 0,
+			"server DB should have user's message after send")
+		t.Logf("Checkpoint B: Server DB has %d user message(s) -- verified", len(userSenderMsgs))
+
+		// Client DB: user message should be cached via sync pipeline (async).
+		// Soft check — sync pipeline is async; hard check is after FullSync.
+		clientMsgsEarly, _ := clientDB.Messages.ListRecentByConversation(ctx, convID, 10)
+		var clientUserMsgsEarly []*model.Message
+		for _, m := range clientMsgsEarly {
+			if m.SenderID == userID {
+				clientUserMsgsEarly = append(clientUserMsgsEarly, m)
+			}
+		}
+		if len(clientUserMsgsEarly) > 0 {
+			t.Logf("Checkpoint B: Client DB user message cached (%d msg) -- verified", len(clientUserMsgsEarly))
+		} else {
+			t.Log("Checkpoint B: Client DB user message not yet cached (sync pending) -- will verify after FullSync")
+		}
 
 		// After SendMessage, trigger agent processing directly.
 		// MQ broker async flow is not reliable in test environments.
@@ -735,6 +785,22 @@ func TestFullChainE2E(t *testing.T) {
 			}
 			t.Log("Agent paused for HITL")
 		}
+
+		// Checkpoint C: verify agent message does NOT exist in Server DB after
+		// HITL interrupt (agent paused before persisting).
+		t.Log("Checkpoint C: verifying no agent message in Server DB after HITL interrupt")
+
+		agentMsgsAfterExec, err := env.store.MessageStore().ListRecentByConversation(ctx, convID, 10)
+		require.NoError(t, err, "server DB should be queryable after execute")
+		var agentSenderMsgs []*servermodel.Message
+		for _, m := range agentMsgsAfterExec {
+			if m.SenderID == agentUserID {
+				agentSenderMsgs = append(agentSenderMsgs, m)
+			}
+		}
+		require.Equal(t, 0, len(agentSenderMsgs),
+			"server DB should NOT have agent message after HITL interrupt (agent paused)")
+		t.Log("Checkpoint C: Server DB has no agent message (HITL paused) -- verified")
 
 		// ---------------------------------------------------------------
 		// Step 6-7: Wait for Agent Processing and HITL
@@ -755,6 +821,20 @@ func TestFullChainE2E(t *testing.T) {
 
 		// Wait for agent_question (HITL) — this is a soft wait.
 		question := waitForAgentQuestion(t, handler, testTimeout(60*time.Second))
+
+		// Checkpoint D: if HITL was triggered, verify checkpoint event arrived.
+		// This indirectly confirms Redis checkpoint creation via the broadcast event.
+		t.Log("Checkpoint D: verifying Redis checkpoint via broadcast events")
+		if question != nil {
+			handler.mu.Lock()
+			checkpointCount := len(handler.checkpoints)
+			handler.mu.Unlock()
+			require.Greater(t, checkpointCount, 0,
+				"Redis: checkpoint_created event should have been received for HITL")
+			t.Logf("Checkpoint D: %d checkpoint event(s) received -- Redis HITL verified", checkpointCount)
+		} else {
+			t.Log("Checkpoint D: HITL not triggered -- skipping Redis checkpoint verification")
+		}
 
 		// ---------------------------------------------------------------
 		// Step 8: HITL Resume (if HITL was triggered)
