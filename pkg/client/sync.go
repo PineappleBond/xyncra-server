@@ -78,6 +78,33 @@ type streamingUpdatePayload struct {
 	Timestamp      int64  `json:"timestamp"`
 }
 
+// agentQuestionPayload is the JSON structure of an "agent_question" ephemeral update (D-087).
+type agentQuestionPayload struct {
+	UserID         string `json:"user_id"`
+	ConversationID string `json:"conversation_id"`
+	Question       string `json:"question"`
+	CheckpointID   string `json:"checkpoint_id"`
+	InterruptID    string `json:"interrupt_id"`
+	Timestamp      int64  `json:"timestamp"`
+}
+
+// agentCheckpointCreatedPayload is the JSON structure of an
+// "agent_checkpoint_created" ephemeral update (D-087).
+type agentCheckpointCreatedPayload struct {
+	UserID         string `json:"user_id"`
+	ConversationID string `json:"conversation_id"`
+	CheckpointID   string `json:"checkpoint_id"`
+	Timestamp      int64  `json:"timestamp"`
+}
+
+// agentStatusPayload is the JSON structure of an "agent_status" ephemeral update (D-087).
+type agentStatusPayload struct {
+	UserID         string `json:"user_id"`
+	ConversationID string `json:"conversation_id"`
+	Status         string `json:"status"`
+	Timestamp      int64  `json:"timestamp"`
+}
+
 // syncUpdatesResponse is the JSON structure returned by the sync_updates RPC.
 type syncUpdatesResponse struct {
 	Updates   []protocol.PackageDataUpdate `json:"updates"`
@@ -268,6 +295,12 @@ func (sm *syncManager) dispatchUpdateTx(ctx context.Context, tx *gorm.DB, update
 		// Defense-in-depth: reachable only if a streaming update with Seq > 0 is
 		// received (should never happen per D-051). Returns nil for graceful
 		// degradation rather than erroring on an unknown type.
+		return nil
+	case protocol.UpdateTypeAgentQuestion,
+		protocol.UpdateTypeAgentCheckpointCreated,
+		protocol.UpdateTypeAgentStatus,
+		protocol.UpdateTypeAgentTimeout:
+		// Defense-in-depth: ephemeral agent updates should never have Seq > 0.
 		return nil
 	default:
 		return fmt.Errorf("unknown update type: %s", update.Type)
@@ -463,6 +496,27 @@ func (sm *syncManager) notifyHandler(ctx context.Context, update *protocol.Packa
 		if err := json.Unmarshal(update.Payload, &sp); err == nil {
 			if sh, ok := sm.handler.(StreamingHandler); ok {
 				_ = sh.OnStreaming(ctx, sp.UserID, sp.ConversationID, sp.StreamID, sp.Text, sp.IsDone)
+			}
+		}
+	case protocol.UpdateTypeAgentQuestion:
+		var qp agentQuestionPayload
+		if err := json.Unmarshal(update.Payload, &qp); err == nil {
+			if qh, ok := sm.handler.(AgentQuestionHandler); ok {
+				_ = qh.OnAgentQuestion(ctx, qp.UserID, qp.ConversationID, qp.Question, qp.CheckpointID, qp.InterruptID)
+			}
+		}
+	case protocol.UpdateTypeAgentCheckpointCreated:
+		var cp agentCheckpointCreatedPayload
+		if err := json.Unmarshal(update.Payload, &cp); err == nil {
+			if ch, ok := sm.handler.(AgentCheckpointHandler); ok {
+				_ = ch.OnAgentCheckpointCreated(ctx, cp.UserID, cp.ConversationID, cp.CheckpointID)
+			}
+		}
+	case protocol.UpdateTypeAgentStatus:
+		var sp agentStatusPayload
+		if err := json.Unmarshal(update.Payload, &sp); err == nil {
+			if sh, ok := sm.handler.(AgentStatusHandler); ok {
+				_ = sh.OnAgentStatus(ctx, sp.UserID, sp.ConversationID, sp.Status)
 			}
 		}
 	case protocol.UpdateTypeGap:

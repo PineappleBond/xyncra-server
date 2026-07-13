@@ -72,7 +72,10 @@ func NewAgentResumeHandler(
 		}
 
 		// 3. Acquire per-conversation lock (D-084).
-		// For HITL re-interrupts the lock is NOT released.
+		// For HITL, the initial execution's lock is NOT released. The resume
+		// task reuses the same lock. If the lock is still held (expected for
+		// HITL), we proceed without failing. If it's not held (e.g. TTL
+		// expired), we acquire a new one.
 		lockHeld := false
 		if lock != nil {
 			acquired, err := lock.Acquire(ctx, payload.ConversationID, 130*time.Second)
@@ -80,9 +83,10 @@ func NewAgentResumeHandler(
 				logger.Error("agent resume: lock acquire failed",
 					"conversation_id", payload.ConversationID, "error", err)
 			} else if !acquired {
-				logger.Info("agent resume: lock already held, skipping",
+				// Lock already held by the initial HITL execution — this is
+				// expected (D-084). Proceed without acquiring a new lock.
+				logger.Debug("agent resume: lock already held (HITL in progress)",
 					"conversation_id", payload.ConversationID)
-				return nil
 			} else {
 				lockHeld = true
 			}
