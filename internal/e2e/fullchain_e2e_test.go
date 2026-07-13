@@ -716,14 +716,14 @@ func TestFullChainE2E(t *testing.T) {
 		require.Equal(t, convID, serverConv.ID, "server conversation ID should match")
 		t.Logf("Checkpoint A: Server DB conversation %s verified", convID)
 
-		// Client DB: conversation should be cached via sync pipeline (async).
-		// Soft check — sync pipeline is async; hard check is after FullSync.
-		clientConvEarly, _ := clientDB.Conversations.Get(ctx, convID)
-		if clientConvEarly != nil {
-			t.Log("Checkpoint A: Client DB conversation cached -- verified")
-		} else {
-			t.Log("Checkpoint A: Client DB conversation not yet cached (sync pending) -- will verify after FullSync")
-		}
+		// Force sync to ensure Client DB is up-to-date.
+		require.NoError(t, xyncraClient.FullSync(ctx), "FullSync after CreateConversation should succeed")
+
+		// Client DB: conversation should now be cached (synchronous after FullSync).
+		clientConvA, err := clientDB.Conversations.Get(ctx, convID)
+		require.NoError(t, err, "client DB query should succeed after FullSync")
+		require.NotNil(t, clientConvA, "client DB should have conversation after FullSync")
+		t.Log("Checkpoint A: Client DB conversation cached -- verified")
 
 		// ---------------------------------------------------------------
 		// Step 5: Send Message
@@ -754,20 +754,20 @@ func TestFullChainE2E(t *testing.T) {
 			"server DB should have user's message after send")
 		t.Logf("Checkpoint B: Server DB has %d user message(s) -- verified", len(userSenderMsgs))
 
-		// Client DB: user message should be cached via sync pipeline (async).
-		// Soft check — sync pipeline is async; hard check is after FullSync.
-		clientMsgsEarly, _ := clientDB.Messages.ListRecentByConversation(ctx, convID, 10)
-		var clientUserMsgsEarly []*model.Message
-		for _, m := range clientMsgsEarly {
+		// Force sync to ensure Client DB has the sent message.
+		require.NoError(t, xyncraClient.FullSync(ctx), "FullSync after SendMessage should succeed")
+
+		// Client DB: user message should now be cached.
+		clientMsgsB, err := clientDB.Messages.ListRecentByConversation(ctx, convID, 10)
+		require.NoError(t, err, "client DB query should succeed")
+		var clientUserMsgsB []*model.Message
+		for _, m := range clientMsgsB {
 			if m.SenderID == userID {
-				clientUserMsgsEarly = append(clientUserMsgsEarly, m)
+				clientUserMsgsB = append(clientUserMsgsB, m)
 			}
 		}
-		if len(clientUserMsgsEarly) > 0 {
-			t.Logf("Checkpoint B: Client DB user message cached (%d msg) -- verified", len(clientUserMsgsEarly))
-		} else {
-			t.Log("Checkpoint B: Client DB user message not yet cached (sync pending) -- will verify after FullSync")
-		}
+		require.Greater(t, len(clientUserMsgsB), 0, "client DB should have user message after FullSync")
+		t.Logf("Checkpoint B: Client DB user message cached (%d) -- verified", len(clientUserMsgsB))
 
 		// After SendMessage, trigger agent processing directly.
 		// MQ broker async flow is not reliable in test environments.
