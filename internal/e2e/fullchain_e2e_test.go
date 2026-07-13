@@ -588,8 +588,21 @@ func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *
 	}
 
 	// -----------------------------------------------------------------------
-	// 8. Client DB assertions — soft (MQ push may not deliver in test env)
+	// 8. Client DB assertions — soft (MQ push does not deliver in test env)
 	// -----------------------------------------------------------------------
+	//
+	// WHY SOFT: The Asynq MQ broker does not deliver tasks to handlers registered
+	// after broker.Start() (see mq_diagnostic_test.go for root cause analysis).
+	// The Client DB is populated by the syncManager via MQ push broadcasts.
+	// Since MQ push doesn't deliver in the E2E environment, Client DB remains
+	// empty. This is a known limitation (D-110), NOT a bug in the Client DB logic.
+	//
+	// UPGRADE PATH: When the MQ handler registration timing issue is fixed,
+	// these soft assertions can be upgraded to hard assertions by:
+	//   1. Replacing t.Log with require.NoError / require.NotNil
+	//   2. Using channel-based waiting (fullChainUpdateHandler.messageCh)
+	//      instead of polling
+	//   3. Removing the "WARNING" prefix from log messages
 
 	// 8a. Check if messages are cached in client DB (MQ-dependent).
 	clientMsgs, _ := clientDB.Messages.ListRecentByConversation(context.Background(), convID, 50)
@@ -605,10 +618,10 @@ func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *
 		if len(clientUserMsgs) > 0 {
 			t.Logf("Client DB: %d user message(s) cached -- verified", len(clientUserMsgs))
 		} else {
-			t.Log("Client DB: user message not cached (MQ push limitation)")
+			t.Log("WARNING: Client DB: user message not cached — MQ push not delivered (D-110)")
 		}
 	} else {
-		t.Log("Client DB: no messages cached (MQ push not delivered) -- known limitation, see known-issues.md")
+		t.Log("WARNING: Client DB: no messages cached — MQ push not delivered (D-110, see mq_diagnostic_test.go for root cause)")
 	}
 
 	// 8c. Check if conversation is cached in client DB.
@@ -616,7 +629,7 @@ func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *
 	if clientConv != nil {
 		t.Logf("Client DB: conversation %s cached locally -- verified", clientConv.ID)
 	} else {
-		t.Log("Client DB: conversation not cached (MQ push limitation)")
+		t.Log("WARNING: Client DB: conversation not cached — MQ push not delivered (D-110)")
 	}
 }
 
@@ -762,12 +775,12 @@ func TestFullChainE2E(t *testing.T) {
 		t.Logf("Checkpoint A: Server DB conversation %s verified", convID)
 
 		// Client DB: conversation update arrives via MQ push broadcast.
-		// MQ broker does not deliver in test environments (known limitation).
-		// Soft check — logs result without failing.
+		// WARNING: MQ broker does not deliver to handlers registered after
+		// broker.Start() (D-110, see mq_diagnostic_test.go). Soft check.
 		if c, err := clientDB.Conversations.Get(ctx, convID); err == nil && c != nil {
 			t.Log("Checkpoint A: Client DB conversation cached -- verified via async MQ push")
 		} else {
-			t.Log("Checkpoint A: Client DB conversation not cached (MQ push not delivered) -- known limitation")
+			t.Log("WARNING: Checkpoint A: Client DB conversation not cached — MQ push not delivered (D-110)")
 		}
 
 		// ---------------------------------------------------------------
@@ -800,9 +813,8 @@ func TestFullChainE2E(t *testing.T) {
 		t.Logf("Checkpoint B: Server DB has %d user message(s) -- verified", len(userSenderMsgs))
 
 		// Client DB: user message should arrive via MQ push broadcast.
-		// NOTE: MQ broker may not deliver in test environments. Use soft check
-		// with Eventually — if MQ works, this will pass; if not, log and continue.
-		// See .claude/docs/fullchain-e2e-known-issues.md Problem 3.
+		// WARNING: MQ broker does not deliver in test environments (D-110).
+		// Soft check with Eventually — if MQ works, this passes; otherwise log.
 		var clientUserMsgsB []*model.Message
 		clientSyncOK := false
 		deadline := time.Now().Add(testTimeout(15 * time.Second))
@@ -824,11 +836,13 @@ func TestFullChainE2E(t *testing.T) {
 		if clientSyncOK {
 			t.Logf("Checkpoint B: Client DB user message cached (%d) -- verified via async MQ push", len(clientUserMsgsB))
 		} else {
-			t.Log("Checkpoint B: Client DB user message not cached (MQ push not delivered) -- known limitation, see known-issues.md")
+			t.Log("WARNING: Checkpoint B: Client DB user message not cached — MQ push not delivered (D-110, see mq_diagnostic_test.go)")
 		}
 
 		// After SendMessage, trigger agent processing directly.
-		// MQ broker async flow is not reliable in test environments.
+		// NOTE: MQ broker does not deliver mq:agent_process tasks to handlers
+		// registered after broker.Start() (see mq_diagnostic_test.go for root cause).
+		// We bypass MQ by calling executor.Execute directly (D-110).
 		// Must include DeviceID so DynamicToolProvider injects client functions.
 		execPayload := agent.ExecutePayload{
 			MessageID:      sendResult.Message.ID,

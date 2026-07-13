@@ -35,7 +35,9 @@ const (
 	// realLLMTimeout is used for agent processing with a real LLM provider.
 	realLLMTimeout = 60 * time.Second
 
-	// mqTimeout is used for MQ task completion waiting.
+	// mqTimeout is used for MQ task completion waiting. Reserved as shared
+	// infrastructure for future real_llm tests (Phase 2b/3a/3b) that will
+	// exercise the full MQ delivery path.
 	mqTimeout = 20 * time.Second
 )
 
@@ -45,6 +47,8 @@ const (
 
 // channelWaiter provides generic channel-based waiting for async events.
 // Use this instead of time.Sleep or require.Eventually for MQ-driven updates.
+// Reserved as shared infrastructure for future real_llm tests (Phase 2b/3a/3b)
+// that will exercise the full MQ delivery path with deterministic synchronization.
 type channelWaiter struct {
 	ch   chan struct{}
 	name string
@@ -122,6 +126,20 @@ func (l *testStepLogger) Checkpoint(name string, layer string, details string) {
 func (l *testStepLogger) FailCheckpoint(name string, layer string, err error) {
 	l.t.Helper()
 	l.t.Logf("[FAIL-CHECKPOINT] %s | %s | %v", name, layer, err)
+}
+
+// ---------------------------------------------------------------------------
+// Redis client helper
+// ---------------------------------------------------------------------------
+
+// newAgentRedisClient creates a Redis client for lock assertions in tests.
+// Uses the E2E Redis address and DB (D-043). Defined here (rather than in a
+// specific test file) so all e2e test files can share it.
+func newAgentRedisClient(t *testing.T) *redis.Client {
+	t.Helper()
+	c := redis.NewClient(&redis.Options{Addr: e2eRedisAddr, DB: e2eRedisDB})
+	t.Cleanup(func() { _ = c.Close() })
+	return c
 }
 
 // ---------------------------------------------------------------------------

@@ -81,6 +81,13 @@ type e2eEnv struct {
 // Redis connection store, AsynqBroker, message handlers, and WebSocket server.
 // It registers a t.Cleanup that tears everything down in reverse order.
 //
+// ROOT CAUSE NOTE (D-110 diagnostic): Agent-specific task handlers
+// (mq:agent_process, mq:agent_resume) are registered in setupAgentE2E AFTER
+// this function returns (and after broker.Start has been called). Asynq v0.26
+// appears to not resolve handlers registered after Start(), causing agent
+// tasks enqueued via broker to remain in "retry" state indefinitely.
+// This is why agent E2E tests bypass MQ via triggerAgentProcessing (D-110).
+//
 // If Redis is unreachable the test is skipped (not failed), because Redis may
 // not be available in all CI environments.
 func setupE2ETest(t *testing.T) *e2eEnv {

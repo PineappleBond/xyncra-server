@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -40,8 +39,7 @@ func TestFullChainBoundary_MessageBurst(t *testing.T) {
 
 	logger := newTestStepLogger(t)
 	check := newThreeLayerCheck(t, logger)
-	redisClient := redis.NewClient(&redis.Options{Addr: e2eRedisAddr, DB: e2eRedisDB})
-	defer redisClient.Close()
+	redisClient := newAgentRedisClient(t)
 
 	userID := "user-burst-boundary"
 	agentUserID := "agent/test-bot"
@@ -101,17 +99,19 @@ func TestFullChainBoundary_MessageBurst(t *testing.T) {
 
 	// --- Step 4: Wait for agent replies (serial processing, D-075) ---
 	logger.Step("wait-for-agent-replies")
-	deadline := time.Now().Add(25 * time.Second)
-	var agentMsgs []*model.Message
-	for {
+	require.Eventually(t, func() bool {
+		var msgs []*model.Message
 		env.db.DB().WithContext(context.Background()).
 			Where("conversation_id = ? AND sender_id = ?", conv.ID, agentUserID).
-			Find(&agentMsgs)
-		if len(agentMsgs) >= 8 || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+			Find(&msgs)
+		return len(msgs) >= 8
+	}, 25*time.Second, 200*time.Millisecond,
+		"at least 8 of 10 burst messages should produce agent replies (D-075 serial processing)")
+
+	var agentMsgs []*model.Message
+	env.db.DB().WithContext(context.Background()).
+		Where("conversation_id = ? AND sender_id = ?", conv.ID, agentUserID).
+		Find(&agentMsgs)
 	assert.GreaterOrEqual(t, len(agentMsgs), 8,
 		"at least 8 of 10 burst messages should produce agent replies (D-075 serial processing)")
 
@@ -129,14 +129,16 @@ func TestFullChainBoundary_MessageBurst(t *testing.T) {
 //  1. BEFORE: 0 agent messages in Server DB
 //  2. ACTION: executor processes the super-long input without crash
 //  3. AFTER: agent reply persisted, Redis lock released
+//
+// See also TestFullChainDelivery_LargeMessage for WebSocket-level large
+// message delivery (D-008).
 // ---------------------------------------------------------------------------
 func TestFullChainBoundary_LongInput_ThreeLayer(t *testing.T) {
 	env := setupAgentE2E(t)
 
 	logger := newTestStepLogger(t)
 	check := newThreeLayerCheck(t, logger)
-	redisClient := redis.NewClient(&redis.Options{Addr: e2eRedisAddr, DB: e2eRedisDB})
-	defer redisClient.Close()
+	redisClient := newAgentRedisClient(t)
 
 	userID := "user-longinput-boundary"
 	agentUserID := "agent/test-bot"
@@ -202,8 +204,7 @@ func TestFullChainBoundary_SpecialChars_ThreeLayer(t *testing.T) {
 
 	logger := newTestStepLogger(t)
 	check := newThreeLayerCheck(t, logger)
-	redisClient := redis.NewClient(&redis.Options{Addr: e2eRedisAddr, DB: e2eRedisDB})
-	defer redisClient.Close()
+	redisClient := newAgentRedisClient(t)
 
 	userID := "user-specialchars-boundary"
 	agentUserID := "agent/test-bot"
@@ -250,11 +251,14 @@ func TestFullChainBoundary_SpecialChars_ThreeLayer(t *testing.T) {
 	// --- Step 3: AFTER — verify agent reply and lock release ---
 	logger.Step("after-special-chars")
 	check.VerifyServerDB("agent-handled-special-chars", func() error {
-		// Check if an agent message exists (success or error message).
+		// Smoke test: verify the executor processed the special chars without
+		// crashing. The agent may or may not produce a reply depending on how
+		// the mock LLM handles unusual input — both outcomes are acceptable.
+		// The real verification is that execution completed without panic,
+		// confirmed by reaching this checkpoint and the subsequent
+		// "original-message-not-corrupted" check below.
 		agentCount := countAgentMessages(t, env, conv.ID, agentUserID)
-		// Agent may or may not produce a reply for special chars — both are
-		// acceptable as long as no crash occurred.
-		t.Logf("agent messages after special chars: %d", agentCount)
+		t.Logf("agent messages after special chars: %d (smoke test — no crash)", agentCount)
 		return nil
 	})
 	check.VerifyRedis("lock-released", func() error {
@@ -291,8 +295,7 @@ func TestFullChainBoundary_EmptyMessage_ThreeLayer(t *testing.T) {
 
 	logger := newTestStepLogger(t)
 	check := newThreeLayerCheck(t, logger)
-	redisClient := redis.NewClient(&redis.Options{Addr: e2eRedisAddr, DB: e2eRedisDB})
-	defer redisClient.Close()
+	redisClient := newAgentRedisClient(t)
 
 	userID := "user-emptymsg-boundary"
 	agentUserID := "agent/test-bot"
