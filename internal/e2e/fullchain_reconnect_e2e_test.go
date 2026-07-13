@@ -5,7 +5,7 @@
 // Tests cover:
 //  1. Agent processing completes during client disconnect - reconnect pulls reply
 //  2. Offline messages delivered via sync_updates after reconnect
-//  3. HITL during disconnect (soft assertion)
+//  3. Multiple disconnect/reconnect cycles with accumulating messages
 //
 // Verifies: D-044 (connection resilience), D-050 (ephemeral push),
 //
