@@ -315,4 +315,3 @@ func (c *threeLayerCheck) VerifyClientDB(name string, fn func() error, soft bool
 	}
 	c.logger.Checkpoint(name, "ClientDB", "verified")
 }
-

@@ -370,7 +370,8 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 		return NewIPCResponse(req.ID, result)
 	})
 
-	// delete_conversation soft-deletes a conversation (void RPC).
+	// delete_conversation soft-deletes a conversation and returns the count of
+	// cascade-deleted messages (D-013).
 	s.Register("delete_conversation", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
 		var params struct {
 			ConversationID string `json:"conversation_id"`
@@ -378,7 +379,8 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil
 		}
-		if err := xc.DeleteConversation(ctx, params.ConversationID); err != nil {
+		result, err := xc.DeleteConversation(ctx, params.ConversationID)
+		if err != nil {
 			if ce, ok := errors.AsType[*client.ClientError](err); ok {
 				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
 			}
@@ -392,10 +394,11 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 			}
 		}
 
-		return NewIPCResponse(req.ID, nil)
+		return NewIPCResponse(req.ID, result)
 	})
 
-	// restore_conversation restores a previously soft-deleted conversation (void RPC).
+	// restore_conversation restores a previously soft-deleted conversation and
+	// returns the count of cascade-restored messages.
 	s.Register("restore_conversation", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
 		var params struct {
 			ConversationID string `json:"conversation_id"`
@@ -403,7 +406,8 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil
 		}
-		if err := xc.RestoreConversation(ctx, params.ConversationID); err != nil {
+		result, err := xc.RestoreConversation(ctx, params.ConversationID)
+		if err != nil {
 			if ce, ok := errors.AsType[*client.ClientError](err); ok {
 				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
 			}
@@ -412,12 +416,25 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 
 		// Cascade restore conversation in local DB (D-035, D-015).
 		if db != nil {
-			if err := db.Conversations.Restore(ctx, params.ConversationID); err != nil && !errors.Is(err, store.ErrNotFound) {
-				fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to restore conversation locally: %v\n", err)
+			if err := db.Conversations.Restore(ctx, params.ConversationID); err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					// Local record doesn't exist (e.g. initiator's DB). Fetch
+					// from server and upsert so the local DB is consistent.
+					fetchResult, fetchErr := xc.GetConversation(ctx, params.ConversationID)
+					if fetchErr != nil {
+						fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to fetch conversation after local restore miss: %v\n", fetchErr)
+					} else if fetchResult != nil && fetchResult.Conversation != nil {
+						if upsertErr := db.Conversations.Upsert(ctx, fetchResult.Conversation); upsertErr != nil {
+							fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to upsert fetched conversation locally: %v\n", upsertErr)
+						}
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to restore conversation locally: %v\n", err)
+				}
 			}
 		}
 
-		return NewIPCResponse(req.ID, nil)
+		return NewIPCResponse(req.ID, result)
 	})
 
 	// delete_message soft-deletes a message (void RPC).

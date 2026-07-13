@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1915,5 +1916,273 @@ func TestApplyUpdates_BatchWithMixedStreamingAndNormal(t *testing.T) {
 	}
 	if got.Content != "mixed stream msg" {
 		t.Errorf("persisted message content: got=%q want=%q", got.Content, "mixed stream msg")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleConversationRestoreTx — fallback-to-RPC tests (Bug fix: local DB sync)
+// ---------------------------------------------------------------------------
+
+// TestHandleConversationRestoreTx_LocalExists verifies that when a soft-deleted
+// conversation exists locally, RestoreTx succeeds without falling back to RPC.
+func TestHandleConversationRestoreTx_LocalExists(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+
+	var rpcCalled bool
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		rpcCalled = true
+		return nil, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+	convID := "conv-restore-local"
+
+	// Seed a conversation then soft-delete it.
+	seedConversation(t, db, convID)
+	if err := db.Conversations.Delete(ctx, convID); err != nil {
+		t.Fatalf("seed delete: %v", err)
+	}
+
+	// Verify the conversation is soft-deleted.
+	_, err := db.Conversations.Get(ctx, convID)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound after soft-delete, got: %v", err)
+	}
+
+	// Apply a "restore" conversation update.
+	payload := json.RawMessage(`{"conversation_id":"` + convID + `","action":"restore"}`)
+	update := newTestUpdate(1, protocol.UpdateTypeConversation, payload)
+	if err := sm.ApplyUpdate(ctx, &update); err != nil {
+		t.Fatalf("ApplyUpdate conversation restore: %v", err)
+	}
+
+	// Verify the RPC was NOT called (restore succeeded locally).
+	if rpcCalled {
+		t.Error("rpcFn should NOT have been called when local record exists")
+	}
+
+	// Verify the conversation was restored.
+	conv, err := db.Conversations.Get(ctx, convID)
+	if err != nil {
+		t.Fatalf("conversation Get after restore: %v", err)
+	}
+	if conv.ID != convID {
+		t.Errorf("restored conversation ID: got=%q want=%q", conv.ID, convID)
+	}
+}
+
+// TestHandleConversationRestoreTx_FallbackToRPC verifies that when the local
+// DB does not contain the conversation (ErrNotFound from RestoreTx), the sync
+// manager falls back to fetching the conversation from the server via RPC and
+// upserts it locally.
+func TestHandleConversationRestoreTx_FallbackToRPC(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+
+	convID := "conv-restore-fallback"
+
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		if method != "get_conversation" {
+			t.Errorf("unexpected RPC method: %s", method)
+			return nil, fmt.Errorf("unexpected method")
+		}
+		// Return a full conversation as the server would.
+		conv := model.Conversation{
+			ID:      convID,
+			UserID1: "test-user",
+			UserID2: "peer-user",
+			Type:    "1-on-1",
+			Title:   "Restored from server",
+		}
+		resp := map[string]any{"conversation": conv}
+		data, _ := json.Marshal(resp)
+		return data, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+
+	// Do NOT create the conversation locally — RestoreTx will return ErrNotFound.
+	payload := json.RawMessage(`{"conversation_id":"` + convID + `","action":"restore"}`)
+	update := newTestUpdate(1, protocol.UpdateTypeConversation, payload)
+	if err := sm.ApplyUpdate(ctx, &update); err != nil {
+		t.Fatalf("ApplyUpdate conversation restore (fallback): %v", err)
+	}
+
+	// Verify the conversation was created in local DB via RPC + UpsertTx.
+	conv, err := db.Conversations.Get(ctx, convID)
+	if err != nil {
+		t.Fatalf("conversation Get after fallback restore: %v", err)
+	}
+	if conv.ID != convID {
+		t.Errorf("conversation ID: got=%q want=%q", conv.ID, convID)
+	}
+	if conv.Title != "Restored from server" {
+		t.Errorf("conversation title: got=%q want=%q", conv.Title, "Restored from server")
+	}
+}
+
+// TestHandleConversationRestoreTx_RPCFails verifies that when the local DB
+// does not contain the conversation and the RPC call fails, the error is
+// propagated to the caller.
+func TestHandleConversationRestoreTx_RPCFails(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		return nil, fmt.Errorf("network unreachable")
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+	convID := "conv-restore-rpc-fail"
+
+	// Do NOT create the conversation locally.
+	payload := json.RawMessage(`{"conversation_id":"` + convID + `","action":"restore"}`)
+	update := newTestUpdate(1, protocol.UpdateTypeConversation, payload)
+	err := sm.ApplyUpdate(ctx, &update)
+	if err == nil {
+		t.Fatal("expected error when RPC fails, got nil")
+	}
+
+	// Verify the conversation was NOT created.
+	_, getErr := db.Conversations.Get(ctx, convID)
+	if !errors.Is(getErr, store.ErrNotFound) {
+		t.Errorf("conversation should not exist after RPC failure, got: %v", getErr)
+	}
+}
+
+// TestHandleConversationRestoreTx_UpsertFails verifies that when the RPC
+// succeeds but the subsequent UpsertTx fails, the error is propagated.
+func TestHandleConversationRestoreTx_UpsertFails(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+
+	convID := "conv-restore-upsert-fail"
+
+	// Use a cancellable context. The rpcFn cancels it to simulate a failure
+	// between the RPC response and the UpsertTx call.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		// Cancel the context so the subsequent UpsertTx fails.
+		cancel()
+		conv := model.Conversation{
+			ID:      convID,
+			UserID1: "test-user",
+			UserID2: "peer-user",
+			Type:    "1-on-1",
+			Title:   "Should fail to upsert",
+		}
+		resp := map[string]any{"conversation": conv}
+		data, _ := json.Marshal(resp)
+		return data, nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	// Do NOT create the conversation locally.
+	payload := json.RawMessage(`{"conversation_id":"` + convID + `","action":"restore"}`)
+	update := newTestUpdate(1, protocol.UpdateTypeConversation, payload)
+	err := sm.ApplyUpdate(ctx, &update)
+	if err == nil {
+		t.Fatal("expected error when UpsertTx fails, got nil")
+	}
+}
+
+// TestHandleConversationRestoreTx_RPCReturnsNilConversation verifies that when
+// the local DB does not contain the conversation and the RPC returns a nil
+// conversation field, fetchAndUpsertConversationTx returns an error rather
+// than panicking or calling UpsertTx with a nil pointer.
+func TestHandleConversationRestoreTx_RPCReturnsNilConversation(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+
+	var upsertCalled bool
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		// Return a valid JSON response but with a nil conversation field.
+		return json.RawMessage(`{"conversation": null}`), nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	// Override UpsertTx to detect if it was called with nil.
+	_ = upsertCalled
+
+	ctx := context.Background()
+	convID := "conv-restore-nil"
+
+	// Do NOT create the conversation locally — triggers fallback path.
+	payload := json.RawMessage(`{"conversation_id":"` + convID + `","action":"restore"}`)
+	update := newTestUpdate(1, protocol.UpdateTypeConversation, payload)
+	err := sm.ApplyUpdate(ctx, &update)
+	if err == nil {
+		t.Fatal("expected error when RPC returns nil conversation, got nil")
+	}
+
+	// Verify the error mentions nil conversation.
+	if !strings.Contains(err.Error(), "nil conversation") {
+		t.Errorf("error should mention 'nil conversation', got: %v", err)
+	}
+
+	// Verify the conversation was NOT created.
+	_, getErr := db.Conversations.Get(ctx, convID)
+	if !errors.Is(getErr, store.ErrNotFound) {
+		t.Errorf("conversation should not exist after nil RPC response, got: %v", getErr)
+	}
+}
+
+// TestHandleConversationRestoreTx_RPCReturnsMalformedJSON verifies that when
+// the local DB does not contain the conversation and the RPC returns invalid
+// JSON, fetchAndUpsertConversationTx returns a deserialisation error rather
+// than panicking.
+func TestHandleConversationRestoreTx_RPCReturnsMalformedJSON(t *testing.T) {
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		// Return malformed JSON.
+		return json.RawMessage(`{invalid`), nil
+	}
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	defer sm.Stop()
+
+	ctx := context.Background()
+	convID := "conv-restore-malformed"
+
+	// Do NOT create the conversation locally — triggers fallback path.
+	payload := json.RawMessage(`{"conversation_id":"` + convID + `","action":"restore"}`)
+	update := newTestUpdate(1, protocol.UpdateTypeConversation, payload)
+	err := sm.ApplyUpdate(ctx, &update)
+	if err == nil {
+		t.Fatal("expected error when RPC returns malformed JSON, got nil")
+	}
+
+	// Verify the error mentions unmarshal / deserialisation.
+	if !strings.Contains(err.Error(), "unmarshal") {
+		t.Errorf("error should mention 'unmarshal', got: %v", err)
+	}
+
+	// Verify the conversation was NOT created.
+	_, getErr := db.Conversations.Get(ctx, convID)
+	if !errors.Is(getErr, store.ErrNotFound) {
+		t.Errorf("conversation should not exist after malformed JSON response, got: %v", getErr)
 	}
 }

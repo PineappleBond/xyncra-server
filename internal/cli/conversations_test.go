@@ -176,13 +176,16 @@ func TestDeleteConversationViaIPC_Success(t *testing.T) {
 	cliCtx := newTestCLIContext(t)
 	startIPCServer(t, cliCtx.SocketPath(), map[string]func(ctx context.Context, req *IPCRequest) (*IPCResponse, error){
 		"delete_conversation": func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
-			return NewIPCResponse(req.ID, nil)
+			return NewIPCResponse(req.ID, client.DeleteConversationResult{Status: "ok", DeletedMessageCount: 3})
 		},
 	})
 
-	err := deleteConversationViaIPC(context.Background(), cliCtx, "conv-1")
+	result, err := deleteConversationViaIPC(context.Background(), cliCtx, "conv-1")
 	if err != nil {
 		t.Fatalf("deleteConversationViaIPC() error: %v", err)
+	}
+	if result.DeletedMessageCount != 3 {
+		t.Errorf("DeletedMessageCount = %d, want 3", result.DeletedMessageCount)
 	}
 }
 
@@ -191,7 +194,7 @@ func TestDeleteConversationStandalone_Success(t *testing.T) {
 		respData, _ := json.Marshal(protocol.PackageDataResponse{
 			ID:   "1",
 			Code: protocol.ResponseCodeOK,
-			Data: json.RawMessage(`{}`),
+			Data: json.RawMessage(`{"status":"ok","deleted_message_count":5}`),
 		})
 		return protocol.Package{Version: 1, Type: protocol.PackageTypeResponse, Data: json.RawMessage(respData)}, true
 	})
@@ -199,9 +202,12 @@ func TestDeleteConversationStandalone_Success(t *testing.T) {
 	cliCtx := newTestCLIContext(t)
 	cliCtx.ServerURL = wsURL(ts)
 
-	err := deleteConversationStandalone(context.Background(), cliCtx, "conv-1")
+	result, err := deleteConversationStandalone(context.Background(), cliCtx, "conv-1")
 	if err != nil {
 		t.Fatalf("deleteConversationStandalone() error: %v", err)
+	}
+	if result.DeletedMessageCount != 5 {
+		t.Errorf("DeletedMessageCount = %d, want 5", result.DeletedMessageCount)
 	}
 }
 
@@ -213,13 +219,16 @@ func TestRestoreConversationViaIPC_Success(t *testing.T) {
 	cliCtx := newTestCLIContext(t)
 	startIPCServer(t, cliCtx.SocketPath(), map[string]func(ctx context.Context, req *IPCRequest) (*IPCResponse, error){
 		"restore_conversation": func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
-			return NewIPCResponse(req.ID, nil)
+			return NewIPCResponse(req.ID, client.RestoreConversationResult{Conversation: &model.Conversation{ID: "conv-1"}, RestoredMessageCount: 4})
 		},
 	})
 
-	err := restoreConversationViaIPC(context.Background(), cliCtx, "conv-1")
+	result, err := restoreConversationViaIPC(context.Background(), cliCtx, "conv-1")
 	if err != nil {
 		t.Fatalf("restoreConversationViaIPC() error: %v", err)
+	}
+	if result.RestoredMessageCount != 4 {
+		t.Errorf("RestoredMessageCount = %d, want 4", result.RestoredMessageCount)
 	}
 }
 
@@ -228,7 +237,7 @@ func TestRestoreConversationStandalone_Success(t *testing.T) {
 		respData, _ := json.Marshal(protocol.PackageDataResponse{
 			ID:   "1",
 			Code: protocol.ResponseCodeOK,
-			Data: json.RawMessage(`{}`),
+			Data: json.RawMessage(`{"conversation":{"id":"conv-1"},"restored_message_count":7}`),
 		})
 		return protocol.Package{Version: 1, Type: protocol.PackageTypeResponse, Data: json.RawMessage(respData)}, true
 	})
@@ -236,9 +245,12 @@ func TestRestoreConversationStandalone_Success(t *testing.T) {
 	cliCtx := newTestCLIContext(t)
 	cliCtx.ServerURL = wsURL(ts)
 
-	err := restoreConversationStandalone(context.Background(), cliCtx, "conv-1")
+	result, err := restoreConversationStandalone(context.Background(), cliCtx, "conv-1")
 	if err != nil {
 		t.Fatalf("restoreConversationStandalone() error: %v", err)
+	}
+	if result.RestoredMessageCount != 7 {
+		t.Errorf("RestoredMessageCount = %d, want 7", result.RestoredMessageCount)
 	}
 }
 

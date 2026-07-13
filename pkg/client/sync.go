@@ -411,12 +411,43 @@ func (sm *syncManager) handleConversationDeleteTx(ctx context.Context, tx *gorm.
 
 // handleConversationRestoreTx cascade restores a previously soft-deleted
 // conversation and its messages within the given transaction (D-015).
+// When the local record does not exist at all (ErrNotFound), it falls back to
+// fetching the full conversation from the server via RPC and upserting it
+// locally, so that the initiator's local DB is correctly synchronised.
 func (sm *syncManager) handleConversationRestoreTx(ctx context.Context, tx *gorm.DB, convID string) error {
 	if err := sm.db.Conversations.RestoreTx(ctx, tx, convID); err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("restore conversation locally: %w", err)
+		if errors.Is(err, store.ErrNotFound) {
+			// Local record doesn't exist — fetch from server and create.
+			return sm.fetchAndUpsertConversationTx(ctx, tx, convID)
 		}
-		sm.logger.Debug("conversation restore: not found locally, skipping", "conversation_id", convID)
+		return fmt.Errorf("restore conversation locally: %w", err)
+	}
+	return nil
+}
+
+// fetchAndUpsertConversationTx fetches a conversation from the server via the
+// get_conversation RPC and upserts it into the local database. This is used as
+// a fallback when a restore update arrives but the local record does not exist.
+func (sm *syncManager) fetchAndUpsertConversationTx(ctx context.Context, tx *gorm.DB, convID string) error {
+	data, err := sm.rpcFn(ctx, "get_conversation", map[string]any{
+		"conversation_id": convID,
+	})
+	if err != nil {
+		return fmt.Errorf("fetch conversation from server: %w", err)
+	}
+
+	var result struct {
+		Conversation *model.Conversation `json:"conversation"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return fmt.Errorf("unmarshal get_conversation response: %w", err)
+	}
+	if result.Conversation == nil {
+		return fmt.Errorf("get_conversation returned nil conversation for %s", convID)
+	}
+
+	if err := sm.db.Conversations.UpsertTx(ctx, tx, result.Conversation); err != nil {
+		return fmt.Errorf("upsert fetched conversation: %w", err)
 	}
 	return nil
 }

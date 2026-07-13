@@ -33,6 +33,7 @@ import (
 //  1. All 10 messages are persisted to Server DB
 //  2. Agent processes serially via per-conversation lock
 //  3. Redis lock is released after all processing completes
+//
 // ---------------------------------------------------------------------------
 func TestFullChainBoundary_MessageBurst(t *testing.T) {
 	env := setupAgentE2E(t)
@@ -198,6 +199,7 @@ func TestFullChainBoundary_LongInput_ThreeLayer(t *testing.T) {
 //  1. Message with mixed special chars is stored without truncation
 //  2. Agent produces a reply without crash
 //  3. Redis lock is released
+//
 // ---------------------------------------------------------------------------
 func TestFullChainBoundary_SpecialChars_ThreeLayer(t *testing.T) {
 	env := setupAgentE2E(t)
@@ -289,6 +291,7 @@ func TestFullChainBoundary_SpecialChars_ThreeLayer(t *testing.T) {
 //  1. BEFORE: 0 agent messages, lock released
 //  2. ACTION: executor rejects the empty message with error
 //  3. AFTER: error message persisted (containing "抱歉"), lock released
+//
 // ---------------------------------------------------------------------------
 func TestFullChainBoundary_EmptyMessage_ThreeLayer(t *testing.T) {
 	env := setupAgentE2E(t)

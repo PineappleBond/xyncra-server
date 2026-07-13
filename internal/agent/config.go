@@ -53,15 +53,15 @@ type MCPServerConfig struct {
 // AgentConfig represents the configuration for an AI agent.
 // Parsed from YAML front matter in agent definition files.
 type AgentConfig struct {
-	ID           string            `yaml:"id" json:"id"`
-	Name         string            `yaml:"name" json:"name"`
-	Description  string            `yaml:"description" json:"description"`
-	Model        string            `yaml:"model" json:"model"`
-	APIKeyEnv    string            `yaml:"api_key_env" json:"api_key_env"`
-	BaseURL      string            `yaml:"base_url" json:"base_url"`
-	Parameters   AgentParameters   `yaml:"parameters" json:"parameters"`
-	Context      AgentContext      `yaml:"context" json:"context"`
-	Tools        []string          `yaml:"tools" json:"tools"`
+	ID          string          `yaml:"id" json:"id"`
+	Name        string          `yaml:"name" json:"name"`
+	Description string          `yaml:"description" json:"description"`
+	Model       string          `yaml:"model" json:"model"`
+	APIKeyEnv   string          `yaml:"api_key_env" json:"api_key_env"`
+	BaseURL     string          `yaml:"base_url" json:"base_url"`
+	Parameters  AgentParameters `yaml:"parameters" json:"parameters"`
+	Context     AgentContext    `yaml:"context" json:"context"`
+	Tools       []string        `yaml:"tools" json:"tools"`
 	// DynamicTools lists tool names that should be resolved from the tool
 	// registry at runtime (per-execution) instead of at build time. This
 	// enables the Eino framework's 0->nonzero tool transition, which triggers

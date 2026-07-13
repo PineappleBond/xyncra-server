@@ -8,18 +8,18 @@
 //
 // Root Cause: Handler registration timing relative to broker.Start().
 //
-//   In setupE2ETest, the broker is started (broker.Start) BEFORE agent-specific
-//   handlers are registered in setupAgentE2E. Asynq v0.26's server does not
-//   re-resolve handlers from the TaskHandler's map after Start() returns.
-//   Handlers registered after Start() are invisible to the Asynq worker.
+//	In setupE2ETest, the broker is started (broker.Start) BEFORE agent-specific
+//	handlers are registered in setupAgentE2E. Asynq v0.26's server does not
+//	re-resolve handlers from the TaskHandler's map after Start() returns.
+//	Handlers registered after Start() are invisible to the Asynq worker.
 //
 // Diagnostic evidence:
 //
-//   TestMQDiagnostic_HandlerBeforeStart:  PASS — handler registered before Start()
-//   TestMQDiagnostic_HandlerAfterStart:   PASS — handler registered before Start()
-//   TestMQDiagnostic_DirectProcessTask:   PASS — bypasses Asynq, calls handler directly
-//   TestMQDiagnostic_DirectExecute:       PASS — bypasses handler, calls executor directly
-//   broker.Enqueue → agent task:          FAIL — task stays in "retry" (handler not found)
+//	TestMQDiagnostic_HandlerBeforeStart:  PASS — handler registered before Start()
+//	TestMQDiagnostic_HandlerAfterStart:   PASS — handler registered before Start()
+//	TestMQDiagnostic_DirectProcessTask:   PASS — bypasses Asynq, calls handler directly
+//	TestMQDiagnostic_DirectExecute:       PASS — bypasses handler, calls executor directly
+//	broker.Enqueue → agent task:          FAIL — task stays in "retry" (handler not found)
 //
 // Impact: All agent E2E tests bypass MQ via triggerAgentProcessing (direct executor
 // call) or triggerAgentResume (direct ProcessTask call). This is consistent with

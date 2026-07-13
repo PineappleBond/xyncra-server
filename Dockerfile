@@ -19,6 +19,7 @@ RUN apk --no-cache add ca-certificates curl && \
 
 WORKDIR /app
 COPY --from=builder /xyncra-server .
+COPY --from=builder /build/agents ./agents
 
 USER xyncra
 

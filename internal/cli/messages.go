@@ -156,9 +156,9 @@ func runMarkAsRead(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	wsErr := markAsReadStandalone(ctx, cliCtx, convID, msgID)
+	confirmedID, wsErr := markAsReadStandalone(ctx, cliCtx, convID, msgID)
 	if wsErr == nil {
-		fmt.Printf("Marked as read up to message #%d.\n", msgID)
+		fmt.Printf("Marked as read up to message #%d.\n", confirmedID)
 		return nil
 	}
 
@@ -219,16 +219,25 @@ func markAsReadViaIPC(ctx context.Context, cliCtx *CLIContext, convID string, ms
 
 // markAsReadStandalone marks messages as read directly over a fresh WebSocket
 // connection, bypassing the daemon. This is the fallback when the IPC channel
-// is unavailable (D-032).
-func markAsReadStandalone(ctx context.Context, cliCtx *CLIContext, convID string, msgID uint32) error {
-	_, err := standaloneRPC(ctx, cliCtx, "mark_as_read", map[string]any{
+// is unavailable (D-032). It returns the server-confirmed last_read_message_id
+// so the CLI can display the actual cursor value (D-047).
+func markAsReadStandalone(ctx context.Context, cliCtx *CLIContext, convID string, msgID uint32) (uint32, error) {
+	raw, err := standaloneRPC(ctx, cliCtx, "mark_as_read", map[string]any{
 		"conversation_id": convID,
 		"message_id":      msgID,
 	})
 	if err != nil {
-		return fmt.Errorf("standalone mark-as-read: %w", err)
+		return 0, fmt.Errorf("standalone mark-as-read: %w", err)
 	}
-	return nil
+
+	// Parse the server-confirmed cursor from the response (D-047).
+	var result struct {
+		LastReadMessageID uint32 `json:"last_read_message_id"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return 0, fmt.Errorf("standalone mark-as-read unmarshal result: %w", err)
+	}
+	return result.LastReadMessageID, nil
 }
 
 // ---------------------------------------------------------------------------

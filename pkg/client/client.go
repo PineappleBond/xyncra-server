@@ -727,6 +727,18 @@ type GetConversationResult struct {
 	UnreadCount  int64               `json:"unread_count"`
 }
 
+// DeleteConversationResult holds the result of a delete_conversation RPC.
+type DeleteConversationResult struct {
+	Status              string `json:"status"`
+	DeletedMessageCount int64  `json:"deleted_message_count"`
+}
+
+// RestoreConversationResult holds the result of a restore_conversation RPC.
+type RestoreConversationResult struct {
+	Conversation         *model.Conversation `json:"conversation"`
+	RestoredMessageCount int64               `json:"restored_message_count"`
+}
+
 // ---------------------------------------------------------------------------
 // RPC convenience methods
 // ---------------------------------------------------------------------------
@@ -870,22 +882,38 @@ func (c *XyncraClient) GetConversation(ctx context.Context, convID string) (*Get
 	return &result, nil
 }
 
-// DeleteConversation soft-deletes the conversation identified by convID.
-func (c *XyncraClient) DeleteConversation(ctx context.Context, convID string) error {
+// DeleteConversation soft-deletes the conversation identified by convID and
+// returns the number of messages that were cascade-deleted.
+func (c *XyncraClient) DeleteConversation(ctx context.Context, convID string) (*DeleteConversationResult, error) {
 	params := map[string]any{
 		"conversation_id": convID,
 	}
-	_, err := c.Call(ctx, "delete_conversation", params)
-	return err
+	data, err := c.Call(ctx, "delete_conversation", params)
+	if err != nil {
+		return nil, err
+	}
+	var result DeleteConversationResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("client: unmarshal delete_conversation result: %w", err)
+	}
+	return &result, nil
 }
 
-// RestoreConversation restores a previously soft-deleted conversation.
-func (c *XyncraClient) RestoreConversation(ctx context.Context, convID string) error {
+// RestoreConversation restores a previously soft-deleted conversation and
+// returns the number of messages that were cascade-restored.
+func (c *XyncraClient) RestoreConversation(ctx context.Context, convID string) (*RestoreConversationResult, error) {
 	params := map[string]any{
 		"conversation_id": convID,
 	}
-	_, err := c.Call(ctx, "restore_conversation", params)
-	return err
+	data, err := c.Call(ctx, "restore_conversation", params)
+	if err != nil {
+		return nil, err
+	}
+	var result RestoreConversationResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("client: unmarshal restore_conversation result: %w", err)
+	}
+	return &result, nil
 }
 
 // DeleteMessage soft-deletes the message identified by messageID.

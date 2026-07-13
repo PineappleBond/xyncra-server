@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestConversationStore_Create_Success(t *testing.T) {
@@ -467,4 +468,52 @@ func TestConversationStore_Upsert_Idempotent(t *testing.T) {
 	got, err := db.Conversations.Get(ctx, conv.ID)
 	require.NoError(t, err)
 	assert.Equal(t, conv.ID, got.ID)
+}
+
+// ---------------------------------------------------------------------------
+// UpsertTx with soft-deleted records (Bug fix: Unscoped restore)
+// ---------------------------------------------------------------------------
+
+// TestConversationStore_UpsertTx_SoftDeletedConversation verifies that UpsertTx
+// can find and restore a soft-deleted conversation record. The Unscoped() query
+// ensures that soft-deleted records are found and updated (clearing deleted_at)
+// rather than attempting a duplicate insert.
+func TestConversationStore_UpsertTx_SoftDeletedConversation(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	convID := uid()
+	original := newTestConv(convID, "alice", "bob", "direct", "Original Title")
+	require.NoError(t, db.Conversations.Create(ctx, original))
+
+	// Soft-delete the conversation.
+	require.NoError(t, db.Conversations.Delete(ctx, convID))
+
+	// Verify it is soft-deleted (regular Get returns ErrNotFound).
+	_, err := db.Conversations.Get(ctx, convID)
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	// Verify the soft-deleted record still exists via GetUnscoped.
+	unscoped, err := db.Conversations.GetUnscoped(ctx, convID)
+	require.NoError(t, err)
+	assert.NotNil(t, unscoped.DeletedAt)
+	assert.False(t, unscoped.DeletedAt.Time.IsZero())
+
+	// Now call UpsertTx with the same ID but updated fields.
+	updated := newTestConv(convID, "alice", "bob", "direct", "Restored Title")
+	updated.Pinned = true
+
+	txErr := db.Transaction(ctx, func(tx *gorm.DB) error {
+		return db.Conversations.UpsertTx(ctx, tx, updated)
+	})
+	require.NoError(t, txErr)
+
+	// Verify the conversation is restored (deleted_at is NULL).
+	got, err := db.Conversations.Get(ctx, convID)
+	require.NoError(t, err)
+	assert.Equal(t, convID, got.ID)
+	assert.Equal(t, "Restored Title", got.Title)
+	assert.True(t, got.Pinned)
+	assert.True(t, got.DeletedAt.Time.IsZero(), "deleted_at should be NULL after UpsertTx restore")
 }

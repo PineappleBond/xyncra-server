@@ -81,8 +81,10 @@ func (cs *ConversationStore) GetByUser(ctx context.Context, userID string, offse
 }
 
 // Update saves all fields of the conversation back to the database.
+// It uses Unscoped() so that soft-deleted records can be updated (including
+// clearing deleted_at to NULL when restoring a conversation).
 func (cs *ConversationStore) Update(ctx context.Context, conv *model.Conversation) error {
-	if err := cs.db.WithContext(ctx).Save(conv).Error; err != nil {
+	if err := cs.db.WithContext(ctx).Unscoped().Save(conv).Error; err != nil {
 		return classifyError(err)
 	}
 	return nil
@@ -91,11 +93,13 @@ func (cs *ConversationStore) Update(ctx context.Context, conv *model.Conversatio
 // Upsert creates the conversation if it does not exist, or saves (overwrites)
 // it if it already exists. This is used by the client sync pipeline to apply
 // conversation create events idempotently (D-045).
+// It uses Unscoped() to also find soft-deleted records, so that restoring a
+// previously deleted conversation correctly transitions it back to active.
 // If a concurrent insert causes a duplicate key error, the operation retries
 // as an update to handle the TOCTOU race between SELECT and INSERT.
 func (cs *ConversationStore) Upsert(ctx context.Context, conv *model.Conversation) error {
 	var existing model.Conversation
-	err := cs.db.WithContext(ctx).Where("id = ?", conv.ID).First(&existing).Error
+	err := cs.db.WithContext(ctx).Unscoped().Where("id = ?", conv.ID).First(&existing).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			if createErr := cs.db.WithContext(ctx).Create(conv).Error; createErr != nil {
@@ -293,11 +297,13 @@ func (cs *ConversationStore) UpdateLastReadTx(ctx context.Context, tx *gorm.DB, 
 }
 
 // UpsertTx creates or updates a conversation within the given transaction.
+// It uses Unscoped() to also find soft-deleted records, so that restoring a
+// previously deleted conversation correctly transitions it back to active.
 // If a concurrent insert causes a duplicate key error, the operation retries
 // as an update to handle the TOCTOU race between SELECT and INSERT.
 func (cs *ConversationStore) UpsertTx(ctx context.Context, tx *gorm.DB, conv *model.Conversation) error {
 	var existing model.Conversation
-	err := tx.WithContext(ctx).Where("id = ?", conv.ID).First(&existing).Error
+	err := tx.WithContext(ctx).Unscoped().Where("id = ?", conv.ID).First(&existing).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			if createErr := tx.WithContext(ctx).Create(conv).Error; createErr != nil {
@@ -316,8 +322,10 @@ func (cs *ConversationStore) UpsertTx(ctx context.Context, tx *gorm.DB, conv *mo
 }
 
 // updateExistingTx saves the conversation record, preserving server-controlled fields.
+// It uses Unscoped() so that soft-deleted records can be updated (including
+// clearing deleted_at to NULL when restoring a conversation).
 func (cs *ConversationStore) updateExistingTx(ctx context.Context, tx *gorm.DB, conv *model.Conversation) error {
-	if err := tx.WithContext(ctx).Save(conv).Error; err != nil {
+	if err := tx.WithContext(ctx).Unscoped().Save(conv).Error; err != nil {
 		return classifyError(fmt.Errorf("store: upsert update tx: %w", err))
 	}
 	return nil

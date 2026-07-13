@@ -828,7 +828,7 @@ func TestDeleteConversation_CorrectParams(t *testing.T) {
 	}
 	time.Sleep(200 * time.Millisecond)
 
-	err := c.DeleteConversation(context.Background(), "conv-del")
+	_, err := c.DeleteConversation(context.Background(), "conv-del")
 	if err != nil {
 		t.Fatalf("DeleteConversation failed: %v", err)
 	}
@@ -869,7 +869,7 @@ func TestRestoreConversation_CorrectParams(t *testing.T) {
 	}
 	time.Sleep(200 * time.Millisecond)
 
-	err := c.RestoreConversation(context.Background(), "conv-restore")
+	_, err := c.RestoreConversation(context.Background(), "conv-restore")
 	if err != nil {
 		t.Fatalf("RestoreConversation failed: %v", err)
 	}
@@ -883,6 +883,154 @@ func TestRestoreConversation_CorrectParams(t *testing.T) {
 	}
 	if params["conversation_id"] != "conv-restore" {
 		t.Errorf("expected conversation_id=conv-restore, got %v", params["conversation_id"])
+	}
+}
+
+// TestDeleteConversation_ReturnsResult verifies that DeleteConversation correctly
+// parses the server response including the deleted_message_count field (P3 fix).
+func TestDeleteConversation_ReturnsResult(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+
+	server.SetRPCHandler("delete_conversation", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.RawMessage(`{"status":"ok","deleted_message_count":5}`), nil
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	result, err := c.DeleteConversation(context.Background(), "conv-del-result")
+	if err != nil {
+		t.Fatalf("DeleteConversation failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Status != "ok" {
+		t.Errorf("Status: got=%q want=%q", result.Status, "ok")
+	}
+	if result.DeletedMessageCount != 5 {
+		t.Errorf("DeletedMessageCount: got=%d want=5", result.DeletedMessageCount)
+	}
+}
+
+// TestRestoreConversation_ReturnsResult verifies that RestoreConversation
+// correctly parses the server response including the restored_message_count
+// field (P3 fix).
+func TestRestoreConversation_ReturnsResult(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+
+	server.SetRPCHandler("restore_conversation", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.RawMessage(`{"conversation":{"id":"conv-restore-result"},"restored_message_count":3}`), nil
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	result, err := c.RestoreConversation(context.Background(), "conv-restore-result")
+	if err != nil {
+		t.Fatalf("RestoreConversation failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Conversation == nil {
+		t.Fatal("expected non-nil Conversation")
+	}
+	if result.Conversation.ID != "conv-restore-result" {
+		t.Errorf("Conversation.ID: got=%q want=%q", result.Conversation.ID, "conv-restore-result")
+	}
+	if result.RestoredMessageCount != 3 {
+		t.Errorf("RestoredMessageCount: got=%d want=3", result.RestoredMessageCount)
+	}
+}
+
+// TestDeleteConversation_ZeroDeletedCount verifies that DeleteConversation
+// correctly parses a server response with deleted_message_count=0 (empty
+// conversation or already-deleted scenario).
+func TestDeleteConversation_ZeroDeletedCount(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+
+	server.SetRPCHandler("delete_conversation", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.RawMessage(`{"status":"ok","deleted_message_count":0}`), nil
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	result, err := c.DeleteConversation(context.Background(), "conv-empty")
+	if err != nil {
+		t.Fatalf("DeleteConversation failed: %v", err)
+	}
+	if result.Status != "ok" {
+		t.Errorf("Status: got=%q want=%q", result.Status, "ok")
+	}
+	if result.DeletedMessageCount != 0 {
+		t.Errorf("DeletedMessageCount: got=%d want=0", result.DeletedMessageCount)
+	}
+}
+
+// TestRestoreConversation_ZeroRestoredCount verifies that RestoreConversation
+// correctly parses a server response with restored_message_count=0 (empty
+// conversation or idempotent restore scenario).
+func TestRestoreConversation_ZeroRestoredCount(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+
+	server.SetRPCHandler("restore_conversation", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.RawMessage(`{"conversation":{"id":"conv-empty"},"restored_message_count":0}`), nil
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	result, err := c.RestoreConversation(context.Background(), "conv-empty")
+	if err != nil {
+		t.Fatalf("RestoreConversation failed: %v", err)
+	}
+	if result.Conversation == nil {
+		t.Fatal("expected non-nil Conversation")
+	}
+	if result.RestoredMessageCount != 0 {
+		t.Errorf("RestoredMessageCount: got=%d want=0", result.RestoredMessageCount)
 	}
 }
 

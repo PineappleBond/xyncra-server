@@ -96,6 +96,7 @@ func countAgentMessages(t *testing.T, env *agentE2EEnv, convID, agentUserID stri
 //  2. Server DB has error message containing "暂时无法回复" (D-067)
 //  3. Redis lock is released after error (D-075)
 //  4. Second request succeeds (no deadlock)
+//
 // ---------------------------------------------------------------------------
 func TestFullChainError_LLMRateLimited(t *testing.T) {
 	// Setup with weak net: first request returns 429.
@@ -185,6 +186,7 @@ func TestFullChainError_LLMRateLimited(t *testing.T) {
 //  2. Server DB has an error message persisted (D-067)
 //  3. ExecuteWithErrorMessage returns an error
 //  4. No stale Redis lock (D-075)
+//
 // ---------------------------------------------------------------------------
 func TestFullChainError_LLMTimeout(t *testing.T) {
 	// Setup with weak net: black hole (accept connection, close immediately).
@@ -308,6 +310,7 @@ func TestFullChainError_ThreeLayerVerification(t *testing.T) {
 //  1. First request: mock LLM returns HTTP 500 → error message persisted
 //  2. Second request (with cache invalidated): agent produces a successful reply
 //  3. Error does not block subsequent processing (D-073, D-075)
+//
 // ---------------------------------------------------------------------------
 func TestFullChainError_RecoveryAfterError(t *testing.T) {
 	env := setupAgentE2E(t)
@@ -401,6 +404,7 @@ func TestFullChainError_RecoveryAfterError(t *testing.T) {
 //  2. User B's task (same conversation) is skipped while lock is held (D-075)
 //  3. After User A completes, lock is released
 //  4. User B can be retried successfully after lock release
+//
 // ---------------------------------------------------------------------------
 func TestFullChainError_ConcurrentLockContention(t *testing.T) {
 	// Setup with a short delay so User A's task takes some time.

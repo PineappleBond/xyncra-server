@@ -93,7 +93,7 @@ func TestMarkAsReadStandalone_Success(t *testing.T) {
 		respData, _ := json.Marshal(protocol.PackageDataResponse{
 			ID:   "1",
 			Code: protocol.ResponseCodeOK,
-			Data: json.RawMessage(`{}`),
+			Data: json.RawMessage(`{"last_read_message_id": 42}`),
 		})
 		return protocol.Package{Version: 1, Type: protocol.PackageTypeResponse, Data: json.RawMessage(respData)}, true
 	})
@@ -101,15 +101,100 @@ func TestMarkAsReadStandalone_Success(t *testing.T) {
 	cliCtx := newTestCLIContext(t)
 	cliCtx.ServerURL = wsURL(ts)
 
-	err := markAsReadStandalone(context.Background(), cliCtx, "conv-1", 42)
+	got, err := markAsReadStandalone(context.Background(), cliCtx, "conv-1", 42)
 	if err != nil {
 		t.Fatalf("markAsReadStandalone() error: %v", err)
 	}
+	if got != 42 {
+		t.Errorf("got = %d, want 42", got)
+	}
 }
 
-// ---------------------------------------------------------------------------
-// resolveLastProcessedMessageID
-// ---------------------------------------------------------------------------
+// TestMarkAsReadStandalone_ShowsServerCursor verifies that the standalone
+// mark-as-read path returns the server-confirmed cursor value (D-047), not
+// the client-requested value. Under MAX semantics (D-012), if the server
+// cursor is already ahead of the request, the server returns the higher value.
+func TestMarkAsReadStandalone_ShowsServerCursor(t *testing.T) {
+	ts := startMockWSServer(t, func(t *testing.T, pkg protocol.Package) (protocol.Package, bool) {
+		// Server returns cursor at #42 (MAX semantics: the cursor was already
+		// at #42, so the request for #10 is silently ignored).
+		respData, _ := json.Marshal(protocol.PackageDataResponse{
+			ID:   "1",
+			Code: protocol.ResponseCodeOK,
+			Data: json.RawMessage(`{"last_read_message_id": 42}`),
+		})
+		return protocol.Package{Version: 1, Type: protocol.PackageTypeResponse, Data: json.RawMessage(respData)}, true
+	})
+
+	cliCtx := newTestCLIContext(t)
+	cliCtx.ServerURL = wsURL(ts)
+
+	// Request to mark as read up to #10, but the server confirms #42.
+	got, err := markAsReadStandalone(context.Background(), cliCtx, "conv-1", 10)
+	if err != nil {
+		t.Fatalf("markAsReadStandalone() error: %v", err)
+	}
+	// The returned value should be the server-confirmed cursor (42), not the
+	// client-requested value (10).
+	if got != 42 {
+		t.Errorf("got = %d, want 42 (server-confirmed cursor, D-047)", got)
+	}
+}
+
+// TestMarkAsReadStandalone_CursorEqualsRequested verifies that the standalone
+// mark-as-read path correctly handles the boundary case where the server
+// returns the exact value that was requested (MAX semantics: the cursor was
+// exactly at the requested position).
+func TestMarkAsReadStandalone_CursorEqualsRequested(t *testing.T) {
+	ts := startMockWSServer(t, func(t *testing.T, pkg protocol.Package) (protocol.Package, bool) {
+		// Server returns the same cursor that was requested (42 == 42).
+		respData, _ := json.Marshal(protocol.PackageDataResponse{
+			ID:   "1",
+			Code: protocol.ResponseCodeOK,
+			Data: json.RawMessage(`{"last_read_message_id": 42}`),
+		})
+		return protocol.Package{Version: 1, Type: protocol.PackageTypeResponse, Data: json.RawMessage(respData)}, true
+	})
+
+	cliCtx := newTestCLIContext(t)
+	cliCtx.ServerURL = wsURL(ts)
+
+	// Request to mark as read up to #42; server confirms #42.
+	got, err := markAsReadStandalone(context.Background(), cliCtx, "conv-1", 42)
+	if err != nil {
+		t.Fatalf("markAsReadStandalone() error: %v", err)
+	}
+	if got != 42 {
+		t.Errorf("got = %d, want 42 (cursor equals requested)", got)
+	}
+}
+
+// TestMarkAsReadStandalone_ServerReturnsZero verifies that the standalone
+// mark-as-read path correctly handles the boundary case where the server
+// returns 0 (e.g. a new conversation with no messages yet).
+func TestMarkAsReadStandalone_ServerReturnsZero(t *testing.T) {
+	ts := startMockWSServer(t, func(t *testing.T, pkg protocol.Package) (protocol.Package, bool) {
+		// Server returns 0 — conversation has no messages yet.
+		respData, _ := json.Marshal(protocol.PackageDataResponse{
+			ID:   "1",
+			Code: protocol.ResponseCodeOK,
+			Data: json.RawMessage(`{"last_read_message_id": 0}`),
+		})
+		return protocol.Package{Version: 1, Type: protocol.PackageTypeResponse, Data: json.RawMessage(respData)}, true
+	})
+
+	cliCtx := newTestCLIContext(t)
+	cliCtx.ServerURL = wsURL(ts)
+
+	got, err := markAsReadStandalone(context.Background(), cliCtx, "conv-empty", 5)
+	if err != nil {
+		t.Fatalf("markAsReadStandalone() error: %v", err)
+	}
+	// Server returned 0 — the actual cursor value, not the requested 5.
+	if got != 0 {
+		t.Errorf("got = %d, want 0 (server boundary value, D-047)", got)
+	}
+}
 
 func TestResolveLastProcessedMessageID_Found(t *testing.T) {
 	cliCtx := newTestCLIContext(t)

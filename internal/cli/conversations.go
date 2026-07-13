@@ -171,15 +171,15 @@ func runDeleteConversation(cmd *cobra.Command, args []string) error {
 		return errors.New("delete-conversation: --conversation-id is required")
 	}
 
-	ipcErr := deleteConversationViaIPC(ctx, cliCtx, convID)
+	result, ipcErr := deleteConversationViaIPC(ctx, cliCtx, convID)
 	if ipcErr == nil {
-		fmt.Println("Conversation deleted.")
+		printDeleteConversationResult(result)
 		return nil
 	}
 
-	wsErr := deleteConversationStandalone(ctx, cliCtx, convID)
+	wsResult, wsErr := deleteConversationStandalone(ctx, cliCtx, convID)
 	if wsErr == nil {
-		fmt.Println("Conversation deleted.")
+		printDeleteConversationResult(wsResult)
 		return nil
 	}
 
@@ -191,9 +191,15 @@ func runDeleteConversation(cmd *cobra.Command, args []string) error {
 	return errors.New("delete-conversation: all delivery methods failed")
 }
 
+// printDeleteConversationResult prints the result of a successful
+// delete-conversation operation, including the cascade-deleted message count.
+func printDeleteConversationResult(result *client.DeleteConversationResult) {
+	fmt.Printf("Conversation deleted. %d message(s) removed.\n", result.DeletedMessageCount)
+}
+
 // deleteConversationViaIPC attempts to delete a conversation through the
 // running daemon via the Unix socket IPC channel (D-030).
-func deleteConversationViaIPC(ctx context.Context, cliCtx *CLIContext, convID string) error {
+func deleteConversationViaIPC(ctx context.Context, cliCtx *CLIContext, convID string) (*client.DeleteConversationResult, error) {
 	ipcClient := NewIPCClient(cliCtx.SocketPath(), 5*time.Second)
 
 	params := map[string]any{
@@ -202,27 +208,35 @@ func deleteConversationViaIPC(ctx context.Context, cliCtx *CLIContext, convID st
 
 	resp, err := ipcClient.Call(ctx, "delete_conversation", params)
 	if err != nil {
-		return fmt.Errorf("ipc delete-conversation: %w", err)
+		return nil, fmt.Errorf("ipc delete-conversation: %w", err)
 	}
 
 	if resp.Error != nil {
-		return fmt.Errorf("ipc delete-conversation: %s", resp.Error.Message)
+		return nil, fmt.Errorf("ipc delete-conversation: %s", resp.Error.Message)
 	}
 
-	return nil
+	var result client.DeleteConversationResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("ipc delete-conversation unmarshal result: %w", err)
+	}
+	return &result, nil
 }
 
 // deleteConversationStandalone deletes a conversation directly over a fresh
 // WebSocket connection, bypassing the daemon. This is the fallback when the
-// IPC channel is unavailable (D-032). The void RPC response is ignored.
-func deleteConversationStandalone(ctx context.Context, cliCtx *CLIContext, convID string) error {
-	_, err := standaloneRPC(ctx, cliCtx, "delete_conversation", map[string]any{
+// IPC channel is unavailable (D-032).
+func deleteConversationStandalone(ctx context.Context, cliCtx *CLIContext, convID string) (*client.DeleteConversationResult, error) {
+	data, err := standaloneRPC(ctx, cliCtx, "delete_conversation", map[string]any{
 		"conversation_id": convID,
 	})
 	if err != nil {
-		return fmt.Errorf("standalone delete-conversation: %w", err)
+		return nil, fmt.Errorf("standalone delete-conversation: %w", err)
 	}
-	return nil
+	var result client.DeleteConversationResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("standalone delete-conversation unmarshal result: %w", err)
+	}
+	return &result, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -261,15 +275,15 @@ func runRestoreConversation(cmd *cobra.Command, args []string) error {
 		return errors.New("restore-conversation: --conversation-id is required")
 	}
 
-	ipcErr := restoreConversationViaIPC(ctx, cliCtx, convID)
+	result, ipcErr := restoreConversationViaIPC(ctx, cliCtx, convID)
 	if ipcErr == nil {
-		fmt.Println("Conversation restored.")
+		printRestoreConversationResult(result)
 		return nil
 	}
 
-	wsErr := restoreConversationStandalone(ctx, cliCtx, convID)
+	wsResult, wsErr := restoreConversationStandalone(ctx, cliCtx, convID)
 	if wsErr == nil {
-		fmt.Println("Conversation restored.")
+		printRestoreConversationResult(wsResult)
 		return nil
 	}
 
@@ -281,9 +295,15 @@ func runRestoreConversation(cmd *cobra.Command, args []string) error {
 	return errors.New("restore-conversation: all delivery methods failed")
 }
 
+// printRestoreConversationResult prints the result of a successful
+// restore-conversation operation, including the cascade-restored message count.
+func printRestoreConversationResult(result *client.RestoreConversationResult) {
+	fmt.Printf("Conversation restored. %d message(s) recovered.\n", result.RestoredMessageCount)
+}
+
 // restoreConversationViaIPC attempts to restore a conversation through the
 // running daemon via the Unix socket IPC channel (D-030).
-func restoreConversationViaIPC(ctx context.Context, cliCtx *CLIContext, convID string) error {
+func restoreConversationViaIPC(ctx context.Context, cliCtx *CLIContext, convID string) (*client.RestoreConversationResult, error) {
 	ipcClient := NewIPCClient(cliCtx.SocketPath(), 5*time.Second)
 
 	params := map[string]any{
@@ -292,27 +312,35 @@ func restoreConversationViaIPC(ctx context.Context, cliCtx *CLIContext, convID s
 
 	resp, err := ipcClient.Call(ctx, "restore_conversation", params)
 	if err != nil {
-		return fmt.Errorf("ipc restore-conversation: %w", err)
+		return nil, fmt.Errorf("ipc restore-conversation: %w", err)
 	}
 
 	if resp.Error != nil {
-		return fmt.Errorf("ipc restore-conversation: %s", resp.Error.Message)
+		return nil, fmt.Errorf("ipc restore-conversation: %s", resp.Error.Message)
 	}
 
-	return nil
+	var result client.RestoreConversationResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("ipc restore-conversation unmarshal result: %w", err)
+	}
+	return &result, nil
 }
 
 // restoreConversationStandalone restores a conversation directly over a fresh
 // WebSocket connection, bypassing the daemon. This is the fallback when the
-// IPC channel is unavailable (D-032). The void RPC response is ignored.
-func restoreConversationStandalone(ctx context.Context, cliCtx *CLIContext, convID string) error {
-	_, err := standaloneRPC(ctx, cliCtx, "restore_conversation", map[string]any{
+// IPC channel is unavailable (D-032).
+func restoreConversationStandalone(ctx context.Context, cliCtx *CLIContext, convID string) (*client.RestoreConversationResult, error) {
+	data, err := standaloneRPC(ctx, cliCtx, "restore_conversation", map[string]any{
 		"conversation_id": convID,
 	})
 	if err != nil {
-		return fmt.Errorf("standalone restore-conversation: %w", err)
+		return nil, fmt.Errorf("standalone restore-conversation: %w", err)
 	}
-	return nil
+	var result client.RestoreConversationResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("standalone restore-conversation unmarshal result: %w", err)
+	}
+	return &result, nil
 }
 
 // ---------------------------------------------------------------------------

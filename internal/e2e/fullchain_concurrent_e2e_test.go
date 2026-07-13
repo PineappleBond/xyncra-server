@@ -434,4 +434,3 @@ func basicAgentConfigWithID(mockURL, id, name string) *agent.AgentConfig {
 	cfg.Description = name + " for concurrent test"
 	return cfg
 }
-

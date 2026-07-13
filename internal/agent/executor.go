@@ -53,7 +53,7 @@ type AgentExecutor struct {
 	logger         Logger
 	totalTimeout   time.Duration // default 120s
 	typingTimeout  time.Duration // default 60s
-	metrics        LLMMetrics // optional LLM call metrics recorder (nil = disabled)
+	metrics        LLMMetrics    // optional LLM call metrics recorder (nil = disabled)
 
 	// interruptIDs maps checkpointID -> []interruptID. Populated when an
 	// interrupt event is detected; consumed during resume to build the

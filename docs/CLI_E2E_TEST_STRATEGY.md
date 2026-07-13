@@ -71,7 +71,7 @@
 | CLI-E2E-043 | restore-conversation standalone 模式 | D-032 | 无 daemon 时通过 WebSocket 恢复 conversation | P1 |
 | CLI-E2E-044 | delete-message standalone 模式 | D-032 | 无 daemon 时通过 WebSocket 删除 message | P1 |
 | CLI-E2E-045 | mark-as-read standalone 模式 | D-032 | 无 daemon 时通过 WebSocket 标记已读 | P1 |
-| CLI-E2E-046 | sync-updates 无 fallback（daemon 未运行报错） | D-036 | 退出码 1，stderr 输出 "daemon not running" | P0 |
+| CLI-E2E-046 | sync-updates 无 fallback（daemon 未运行报错） | D-036 | 退出码 2，stderr 输出 "daemon not running" | P0 |
 | CLI-E2E-047 | IPC 和 WS 均失败 | D-032 | 输出统一错误信息（两个原因 + hint） | P1 |
 | CLI-E2E-048 | standalone 服务器不可达 | - | 退出码 1，错误信息包含连接失败详情 | P1 |
 
@@ -128,7 +128,7 @@
 | 场景 ID | 场景名称 | 验证决策 | 预期行为 | 优先级 |
 |---------|---------|---------|---------|--------|
 | CLI-E2E-150 | sync-updates 触发 FullSync | D-036 | 输出 "Sync complete."；本地 DB 数据与服务器同步 | P0 |
-| CLI-E2E-151 | sync-updates daemon 未运行 | D-036 | 退出码 1，提示启动 daemon | P0 |
+| CLI-E2E-151 | sync-updates daemon 未运行 | D-036 | 退出码 2，提示启动 daemon | P0 |
 | CLI-E2E-152 | sync-updates daemon 无新数据 | D-036 | 输出 "Sync complete."（幂等） | P1 |
 | CLI-E2E-153 | sync-updates 大量数据分页 | D-029 | 多批次拉取直到 has_more=false；gap 填充正确 | P1 |
 | CLI-E2E-154 | listen 连接后自动初始同步 | - | daemon 启动后自动执行初始 FullSync，本地 DB 填充数据 | P0 |
