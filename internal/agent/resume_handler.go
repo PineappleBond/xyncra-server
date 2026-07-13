@@ -15,6 +15,7 @@ import (
 
 	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
 
 // AgentResumePayload is the MQ task payload for TypeAgentResume.
@@ -76,7 +77,7 @@ func NewAgentResumeHandler(
 		// task reuses the same lock. If the lock is still held (expected for
 		// HITL), we proceed without failing. If it's not held (e.g. TTL
 		// expired), we acquire a new one.
-		lockHeld := false
+		lockExists := false
 		if lock != nil {
 			acquired, err := lock.Acquire(ctx, payload.ConversationID, 130*time.Second)
 			if err != nil {
@@ -84,16 +85,17 @@ func NewAgentResumeHandler(
 					"conversation_id", payload.ConversationID, "error", err)
 			} else if !acquired {
 				// Lock already held by the initial HITL execution — this is
-				// expected (D-084). Proceed without acquiring a new lock.
+				// expected (D-084). We still own it and must release on completion.
+				lockExists = true
 				logger.Debug("agent resume: lock already held (HITL in progress)",
 					"conversation_id", payload.ConversationID)
 			} else {
-				lockHeld = true
+				lockExists = true
 			}
 		}
 
 		releaseLock := func() {
-			if lockHeld && lock != nil {
+			if lockExists && lock != nil {
 				if err := lock.Release(ctx, payload.ConversationID); err != nil {
 					logger.Error("agent resume: lock release failed",
 						"conversation_id", payload.ConversationID, "error", err)
@@ -149,12 +151,25 @@ func NewAgentResumeHandler(
 		defer clearTyping()
 
 		// ResumeWithParams passes the user's answer back to the interrupted agent.
+		// Build the Targets map: when the client provides a specific interrupt ID,
+		// use it directly. Otherwise use the interrupt IDs registered during the
+		// original interrupt so every interrupted component receives the answer.
+		targets := make(map[string]any)
+		if payload.InterruptID != "" {
+			targets[payload.InterruptID] = payload.Answer
+		} else {
+			for _, id := range executor.getInterruptIDs(payload.CheckpointID) {
+				targets[id] = payload.Answer
+			}
+		}
 		params := &adk.ResumeParams{
-			Targets: map[string]any{
-				payload.InterruptID: payload.Answer,
-			},
+			Targets: targets,
 		}
 
+		// Note: Eino's resume path saves re-interrupt checkpoints under the
+		// original checkPointID (the function parameter), ignoring the
+		// WithCheckPointID option. We therefore broadcast payload.CheckpointID
+		// to clients for subsequent resumes.
 		iter, err := builtAgent.Runner.ResumeWithParams(ctx, payload.CheckpointID, params)
 		if err != nil {
 			logger.Error("agent resume: resume failed",
@@ -217,11 +232,14 @@ func NewAgentResumeHandler(
 
 		// 10. Check for another interrupt (multi-turn HITL).
 		if info, ok := <-interruptCh; ok && info != nil {
-			checkpointID := uuid.New().String()
+			// Register interrupt IDs for the next resume.
+			if info.InterruptID != "" {
+				executor.registerInterruptIDs(payload.CheckpointID, []string{info.InterruptID})
+			}
 			executor.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")
 			executor.broadcaster.SendAgentQuestion(ctx, payload.SenderID, payload.AgentID, payload.ConversationID,
-				info.Question, checkpointID, "")
-			executor.broadcaster.SendAgentCheckpointCreated(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, checkpointID)
+				info.Question, payload.CheckpointID, info.InterruptID)
+			executor.broadcaster.SendAgentCheckpointCreated(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, payload.CheckpointID)
 			// D-084: Do NOT release lock on HITL re-interrupt.
 			return nil
 		}
@@ -241,8 +259,28 @@ func NewAgentResumeHandler(
 				Status:          "sent",
 				CreatedAt:       time.Now(),
 			}
-			if _, err := executor.store.SendMessage(ctx, msg, []string{payload.SenderID, payload.AgentID}); err != nil {
+			result, err := executor.store.SendMessage(ctx, msg, []string{payload.SenderID, payload.AgentID})
+			if err != nil {
 				logger.Error("agent resume: persist failed", "error", err)
+			} else if result != nil {
+				// Broadcast the message update to each recipient so the
+				// WebSocket client receives the new message in real-time.
+				for _, u := range result.Updates {
+					updates := &protocol.PackageDataUpdates{
+						Updates: []protocol.PackageDataUpdate{
+							{
+								Seq:       u.Seq,
+								Type:      protocol.UpdateTypeMessage,
+								Payload:   u.Payload,
+								CreatedAt: u.CreatedAt,
+							},
+						},
+					}
+					if broadcastErr := executor.broadcaster.BroadcastRaw(u.UserID, updates); broadcastErr != nil {
+						logger.Error("agent resume: broadcast message update failed",
+							"user_id", u.UserID, "error", broadcastErr)
+					}
+				}
 			}
 		}
 

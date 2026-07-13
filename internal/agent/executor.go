@@ -53,7 +53,32 @@ type AgentExecutor struct {
 	logger         Logger
 	totalTimeout   time.Duration // default 120s
 	typingTimeout  time.Duration // default 60s
-	metrics        LLMMetrics    // optional LLM call metrics recorder (nil = disabled)
+	metrics        LLMMetrics // optional LLM call metrics recorder (nil = disabled)
+
+	// interruptIDs maps checkpointID -> []interruptID. Populated when an
+	// interrupt event is detected; consumed during resume to build the
+	// correct ResumeParams.Targets when the client does not supply an
+	// explicit interrupt ID.
+	interruptIDs sync.Map // map[string][]string
+}
+
+// registerInterruptIDs stores interrupt IDs for a checkpoint so they can be
+// retrieved during resume.
+func (e *AgentExecutor) registerInterruptIDs(checkpointID string, ids []string) {
+	if checkpointID == "" || len(ids) == 0 {
+		return
+	}
+	e.interruptIDs.Store(checkpointID, ids)
+}
+
+// getInterruptIDs retrieves previously registered interrupt IDs for a checkpoint.
+func (e *AgentExecutor) getInterruptIDs(checkpointID string) []string {
+	v, ok := e.interruptIDs.Load(checkpointID)
+	if !ok {
+		return nil
+	}
+	ids, _ := v.([]string)
+	return ids
 }
 
 // ExecutorOption configures an AgentExecutor.
@@ -312,6 +337,10 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 			"conversation_id", payload.ConversationID,
 			"checkpoint_id", checkpointID,
 		)
+		// Register interrupt IDs for later resume (multi-turn HITL).
+		if info.InterruptID != "" {
+			e.registerInterruptIDs(checkpointID, []string{info.InterruptID})
+		}
 		// Close the stream (D-052) so clients exit the streaming state.
 		partialText := fullResponse.String()
 		e.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, partialText, true)
@@ -319,7 +348,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 		e.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")
 		// Broadcast the question to the human user.
 		e.broadcaster.SendAgentQuestion(ctx, payload.SenderID, payload.AgentID, payload.ConversationID,
-			info.Question, checkpointID, "")
+			info.Question, checkpointID, info.InterruptID)
 		// Broadcast checkpoint created.
 		e.broadcaster.SendAgentCheckpointCreated(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, checkpointID)
 		// Do NOT persist a message — the agent is paused, not done.

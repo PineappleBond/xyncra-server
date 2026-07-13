@@ -26,6 +26,10 @@ type InterruptInfo struct {
 	// Question is the human-readable question the agent is asking.
 	// Derived from InterruptInfo.Data when the interrupt data is a string.
 	Question string
+
+	// InterruptID is the Eino interrupt address ID that should be used as the
+	// key in ResumeParams.Targets when resuming this interrupt.
+	InterruptID string
 }
 
 // StreamBridge converts Eino's streaming output into Xyncra StreamChunks,
@@ -217,6 +221,34 @@ func (sb *StreamBridge) BridgeWithInterrupt(
 					if ii.Data != nil {
 						if s, ok := ii.Data.(string); ok {
 							info.Question = s
+						}
+					}
+					// Eino >= v0.9 places interrupt data in InterruptContexts
+					// rather than the legacy Data field. Extract from the
+					// first root-cause context when Data is empty.
+					if len(ii.InterruptContexts) > 0 {
+						// Find the root-cause interrupt context for question
+						// text and interrupt ID.
+						var chosen *adk.InterruptCtx
+						for _, ic := range ii.InterruptContexts {
+							if ic.IsRootCause {
+								chosen = ic
+								break
+							}
+						}
+						// Fallback: use the first context if no root-cause.
+						if chosen == nil {
+							chosen = ii.InterruptContexts[0]
+						}
+						if chosen != nil {
+							if info.Question == "" && chosen.Info != nil {
+								if s, ok := chosen.Info.(string); ok {
+									info.Question = s
+								}
+							}
+							if info.InterruptID == "" {
+								info.InterruptID = chosen.ID
+							}
 						}
 					}
 					textCh <- textEvent{interrupt: info}

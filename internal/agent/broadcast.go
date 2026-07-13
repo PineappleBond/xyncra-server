@@ -241,3 +241,9 @@ func (bh *BroadcastHelper) broadcastEphemeral(targetUserID, updateType string, p
 		bh.logger.Error("broadcast: ephemeral update failed", "user_id", targetUserID, "type", updateType, "error", err)
 	}
 }
+
+// BroadcastRaw sends a pre-built PackageDataUpdates to the given user.
+// Used by the resume handler to deliver persisted message updates in real-time.
+func (bh *BroadcastHelper) BroadcastRaw(targetUserID string, updates *protocol.PackageDataUpdates) error {
+	return bh.wsServer.BroadcastUpdates(targetUserID, updates)
+}

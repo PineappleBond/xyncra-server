@@ -318,6 +318,11 @@ func (b *AgentBuilder) SetCheckPointStore(store compose.CheckPointStore) {
 	b.checkpointStore = store
 }
 
+// CheckPointStore returns the checkpoint store, or nil if not set.
+func (b *AgentBuilder) CheckPointStore() compose.CheckPointStore {
+	return b.checkpointStore
+}
+
 // SetMCPBridge sets the MCP bridge used to connect to MCP servers during Build (D-086).
 // If not set, MCP servers configured in AgentConfig are ignored.
 func (b *AgentBuilder) SetMCPBridge(bridge *agenttools.MCPBridge) {
