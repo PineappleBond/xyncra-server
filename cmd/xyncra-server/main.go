@@ -34,6 +34,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -229,8 +230,31 @@ func main() {
 	// Agent Execution Pipeline
 	// ---------------------------------------------------------------
 
+	// LLM call logger — dedicated file for LLM request/response observability.
+	// Logs are written in JSONL format (one JSON record per line).
+	// Opt-in via XYNCRA_LLM_LOG_DIR; when unset, no file is opened (zero overhead).
+	var llmLogger *agent.LLMLogger
+	if llmLogDir := os.Getenv("XYNCRA_LLM_LOG_DIR"); llmLogDir != "" {
+		if err := os.MkdirAll(llmLogDir, 0755); err == nil {
+			logPath := filepath.Join(llmLogDir, "llm-calls.log")
+			f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				log.Printf("[WARN] failed to open LLM log file %s: %v", logPath, err)
+			} else {
+				llmLogger = agent.NewLLMLogger(f, false)
+				defer f.Close()
+				log.Printf("[INFO] LLM call logging enabled: %s", logPath)
+			}
+		} else {
+			log.Printf("[WARN] failed to create LLM log dir %s: %v", llmLogDir, err)
+		}
+	}
+
 	llmFactory := agent.NewLLMClientFactory()
 	agentBuilder := agent.NewAgentBuilder(llmFactory)
+	if llmLogger != nil {
+		agentBuilder.SetLLMLogger(llmLogger)
+	}
 	// Wire the default tool registry (D-078). Built-in tools are registered
 	// via init() in the tools package; custom tools can be added here.
 	agentBuilder.SetToolRegistry(agenttools.DefaultRegistry)

@@ -292,6 +292,7 @@ type AgentBuilder struct {
 	mcpBridge              *agenttools.MCPBridge   // for MCP server connections (D-086)
 	clientFunctionProvider ClientFunctionProvider  // Phase 6 (D-101)
 	clientCaller           ClientCaller            // Phase 6 (D-101)
+	llmLogger              *LLMLogger              // optional: dedicated LLM call logger
 }
 
 // NewAgentBuilder creates an AgentBuilder backed by the given LLM factory.
@@ -335,6 +336,14 @@ func (b *AgentBuilder) SetClientFunctionProvider(provider ClientFunctionProvider
 // If not set, client tools are not available.
 func (b *AgentBuilder) SetClientCaller(caller ClientCaller) {
 	b.clientCaller = caller
+}
+
+// SetLLMLogger sets the dedicated LLM call logger. When set, a LoggingMiddleware
+// is appended to the middleware chain in Build(), recording all LLM requests,
+// responses, tool calls, and agent events to the logger's output.
+// When nil, no LLM logging middleware is added (default).
+func (b *AgentBuilder) SetLLMLogger(logger *LLMLogger) {
+	b.llmLogger = logger
 }
 
 // BuiltAgent wraps an Eino Runner together with the config it was built from.

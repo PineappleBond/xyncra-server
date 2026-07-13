@@ -44,13 +44,21 @@ type agentE2EEnv struct {
 // setupAgentE2E — full agent test environment setup
 // ---------------------------------------------------------------------------
 
-// testLogger is a no-op logger for agent components in E2E tests.
-// agent.Logger and server.Logger are structurally identical interfaces.
-type testLogger struct{}
+// testLogger adapts testing.T to the agent.Logger interface.
+// Error-level messages are always logged; Info/Debug only in verbose mode.
+type testLogger struct {
+	t *testing.T
+}
 
-func (testLogger) Info(string, ...any)  {}
-func (testLogger) Error(string, ...any) {}
-func (testLogger) Debug(string, ...any) {}
+func (l testLogger) Info(msg string, args ...any) {
+	l.t.Logf("[INFO] "+msg, args...)
+}
+func (l testLogger) Error(msg string, args ...any) {
+	l.t.Logf("[ERROR] "+msg, args...)
+}
+func (l testLogger) Debug(msg string, args ...any) {
+	l.t.Logf("[DEBUG] "+msg, args...)
+}
 
 // setupAgentE2E creates a complete agent E2E test environment. It supports
 // two LLM modes:
@@ -123,6 +131,15 @@ func setupAgentE2E(t *testing.T, opts ...agent.ExecutorOption) *agentE2EEnv {
 	agentBuilder.SetClientFunctionProvider(base.funcRegistry)
 	agentBuilder.SetClientCaller(base.srv)
 
+	// LLM call logger for E2E debugging — writes to a temp file.
+	llmLogPath := filepath.Join(t.TempDir(), "llm-calls.log")
+	llmLogFile, err := os.Create(llmLogPath)
+	require.NoError(t, err, "create LLM log file")
+	t.Cleanup(func() { _ = llmLogFile.Close() })
+	llmLogger := agent.NewLLMLogger(llmLogFile, true) // indent=true for readability
+	agentBuilder.SetLLMLogger(llmLogger)
+	t.Logf("LLM call log: %s", llmLogPath)
+
 	// 6. Redis client for idempotency, conversation lock, and checkpoints.
 	//    Uses a dedicated client (same pattern as production main.go, D-074).
 	redisAgentClient := redis.NewClient(&redis.Options{
@@ -153,7 +170,7 @@ func setupAgentE2E(t *testing.T, opts ...agent.ExecutorOption) *agentE2EEnv {
 		broadcastHelper,
 		base.store,
 		5, // maxConcurrent: lower for tests
-		testLogger{},
+		testLogger{t: t},
 		opts...,
 	)
 
@@ -164,10 +181,10 @@ func setupAgentE2E(t *testing.T, opts ...agent.ExecutorOption) *agentE2EEnv {
 	conversationLock := agent.NewRedisConversationLock(redisAgentClient)
 
 	// 14. Register agent task handlers on the existing task handler.
-	agentTaskHandler := agent.NewAgentTaskHandler(agentExecutor, idempotencyStore, conversationLock, testLogger{})
+	agentTaskHandler := agent.NewAgentTaskHandler(agentExecutor, idempotencyStore, conversationLock, testLogger{t: t})
 	base.taskHandler.Register("mq:agent_process", agentTaskHandler)
 
-	agentResumeHandler := agent.NewAgentResumeHandler(agentExecutor, agentRegistry, conversationLock, testLogger{})
+	agentResumeHandler := agent.NewAgentResumeHandler(agentExecutor, agentRegistry, conversationLock, testLogger{t: t})
 	base.taskHandler.Register("mq:agent_resume", agentResumeHandler)
 
 	// 15. Register agent RPC handlers on the existing message handler.

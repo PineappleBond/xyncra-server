@@ -85,5 +85,10 @@ func (b *AgentBuilder) buildMiddleware(
 		}
 	}
 
+	// N. LLM logging middleware (must be last — observes all prior middleware effects)
+	if b.llmLogger != nil {
+		mws = append(mws, NewLoggingMiddleware(b.llmLogger, config.ID, config.Model))
+	}
+
 	return mws
 }
