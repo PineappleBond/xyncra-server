@@ -148,6 +148,64 @@ func (s *RedisPendingStore) Remove(ctx context.Context, userID, deviceID, reques
 	return nil
 }
 
+// Update replaces an existing pending request (matched by ID) with the
+// provided version. This is used to update mutable fields like RetryCount.
+// No-op if the request does not exist.
+//
+// NOTE: Del+RPush in a pipeline is not a true transaction. If the process
+// crashes between the two commands, entries may be lost. This is acceptable
+// for a pending store (fail-open semantics, D-103).
+func (s *RedisPendingStore) Update(ctx context.Context, req *PendingRequest) error {
+	key := s.deviceKey(req.UserID, req.DeviceID)
+
+	newData, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("pending store: update: marshal request: %w", err)
+	}
+
+	// Read all entries, replace the target, and rewrite.
+	strs, err := s.client.LRange(ctx, key, 0, -1).Result()
+	if err != nil {
+		return fmt.Errorf("pending store: update (read): %w", err)
+	}
+
+	var kept []string
+	found := false
+	for _, raw := range strs {
+		var existing PendingRequest
+		if err := json.Unmarshal([]byte(raw), &existing); err != nil {
+			// Skip corrupted entries.
+			continue
+		}
+		if existing.ID == req.ID {
+			found = true
+			kept = append(kept, string(newData))
+			continue
+		}
+		kept = append(kept, raw)
+	}
+
+	if !found {
+		return nil // no-op
+	}
+
+	// Rewrite the list using a pipeline.
+	pipe := s.client.Pipeline()
+	pipe.Del(ctx, key)
+	if len(kept) > 0 {
+		vals := make([]any, len(kept))
+		for i, v := range kept {
+			vals[i] = v
+		}
+		pipe.RPush(ctx, key, vals...)
+		pipe.Expire(ctx, key, s.cfg.RequestTTL)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("pending store: update (write): %w", err)
+	}
+	return nil
+}
+
 // RemoveByDevice deletes all pending requests for a device.
 func (s *RedisPendingStore) RemoveByDevice(ctx context.Context, userID, deviceID string) error {
 	key := s.deviceKey(userID, deviceID)

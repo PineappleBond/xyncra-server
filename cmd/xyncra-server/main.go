@@ -221,6 +221,8 @@ func main() {
 		BroadcastFn:      srv.BroadcastUpdates,
 		AgentRegistry:    agentRegistry,
 		FunctionRegistry: funcRegistry,
+		ReverseRPC:       srv.ReverseRPC(), // Phase 5 (D-108)
+		Logger:           srv.Logger(),     // Phase 5 (D-108)
 	})
 
 	// ---------------------------------------------------------------

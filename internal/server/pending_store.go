@@ -107,4 +107,9 @@ type PendingStore interface {
 
 	// RemoveByDevice deletes all pending requests for a device.
 	RemoveByDevice(ctx context.Context, userID, deviceID string) error
+
+	// Update replaces an existing pending request (matched by ID) with the
+	// provided version. This is used to update mutable fields like RetryCount.
+	// No-op if the request does not exist.
+	Update(ctx context.Context, req *PendingRequest) error
 }

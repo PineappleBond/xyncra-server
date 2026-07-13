@@ -110,6 +110,10 @@ func (m *mockPendingStore) RemoveByDevice(ctx context.Context, userID, deviceID 
 	return nil
 }
 
+func (m *mockPendingStore) Update(ctx context.Context, req *PendingRequest) error {
+	return nil
+}
+
 func (m *mockPendingStore) savedCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1118,4 +1122,292 @@ func TestServerRequest_ConcurrentPersist(t *testing.T) {
 		seqs[req.Seq] = true
 	}
 	assert.Len(t, seqs, n, "should have %d unique seqs", n)
+}
+
+// ---------------------------------------------------------------------------
+// ReplayRequest tests (Phase 5, D-107, D-108)
+// ---------------------------------------------------------------------------
+
+// TestReverseRPC_ReplayRequest_Success verifies basic replay flow.
+func TestReverseRPC_ReplayRequest_Success(t *testing.T) {
+	ms := &mockSendFunc{}
+	rpc := newTestReverseRPC(ms)
+
+	preq := &PendingRequest{
+		ID:             "s-orig-uuid",
+		UserID:         "user-1",
+		DeviceID:       "device-1",
+		Method:         "test.method",
+		Params:         json.RawMessage(`{"key":"value"}`),
+		IdempotencyKey: "s-orig-uuid",
+		Seq:            5,
+		RetryCount:     0,
+		MaxRetries:     3,
+	}
+
+	var result *protocol.PackageDataResponse
+	var reqErr error
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		result, reqErr = rpc.ReplayRequest(context.Background(), preq, 2*time.Second)
+	}()
+
+	require.True(t, ms.waitForCalls(1, time.Second), "sendFunc was not called")
+
+	// Extract the replay request ID.
+	call := ms.lastCall()
+	var req protocol.PackageDataRequest
+	require.NoError(t, json.Unmarshal(call.pkg.Data, &req))
+
+	// Verify it has s-replay- prefix.
+	assert.True(t, strings.HasPrefix(req.ID, "s-replay-"), "expected s-replay- prefix, got %q", req.ID)
+
+	// Dispatch response using the replay ID.
+	rpc.DispatchResponse(&protocol.PackageDataResponse{
+		ID:   req.ID,
+		Code: 0,
+		Msg:  "replayed",
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReplayRequest did not return")
+	}
+
+	require.NoError(t, reqErr)
+	require.NotNil(t, result)
+	assert.Equal(t, "replayed", result.Msg)
+}
+
+// TestReverseRPC_ReplayRequest_Timeout verifies timeout returns DeadlineExceeded.
+func TestReverseRPC_ReplayRequest_Timeout(t *testing.T) {
+	ms := &mockSendFunc{}
+	rpc := newTestReverseRPC(ms)
+
+	preq := &PendingRequest{
+		ID:       "s-orig-1",
+		UserID:   "user-1",
+		DeviceID: "device-1",
+		Method:   "ping",
+	}
+
+	_, err := rpc.ReplayRequest(context.Background(), preq, 100*time.Millisecond)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+// TestReverseRPC_ReplayRequest_SendFuncError verifies send error propagation.
+func TestReverseRPC_ReplayRequest_SendFuncError(t *testing.T) {
+	expectedErr := errors.New("send failed")
+	ms := &mockSendFunc{err: expectedErr}
+	rpc := newTestReverseRPC(ms)
+
+	preq := &PendingRequest{
+		ID:       "s-orig-2",
+		UserID:   "user-1",
+		DeviceID: "device-1",
+		Method:   "ping",
+	}
+
+	_, err := rpc.ReplayRequest(context.Background(), preq, time.Second)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "send replay request")
+	assert.ErrorIs(t, err, expectedErr)
+}
+
+// TestReverseRPC_ReplayRequest_NewReqID verifies unique s-replay- IDs.
+func TestReverseRPC_ReplayRequest_NewReqID(t *testing.T) {
+	ms := &mockSendFunc{}
+	rpc := newTestReverseRPC(ms)
+
+	preq := &PendingRequest{
+		ID:       "s-orig-3",
+		UserID:   "user-1",
+		DeviceID: "device-1",
+		Method:   "ping",
+	}
+
+	ids := make(map[string]bool)
+	for range 5 {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = rpc.ReplayRequest(context.Background(), preq, 2*time.Second)
+		}()
+
+		require.True(t, ms.waitForCalls(1, time.Second))
+		call := ms.lastCall()
+		var req protocol.PackageDataRequest
+		require.NoError(t, json.Unmarshal(call.pkg.Data, &req))
+		assert.True(t, strings.HasPrefix(req.ID, "s-replay-"))
+		assert.False(t, ids[req.ID], "duplicate replay ID: %s", req.ID)
+		ids[req.ID] = true
+
+		// Clean up by dispatching response.
+		rpc.DispatchResponse(&protocol.PackageDataResponse{ID: req.ID, Code: 0})
+		<-done
+
+		// Reset mock for next iteration.
+		ms.mu.Lock()
+		ms.calls = nil
+		ms.mu.Unlock()
+	}
+}
+
+// TestReverseRPC_ReplayRequest_PreservesIdempotencyKey verifies fields preserved.
+func TestReverseRPC_ReplayRequest_PreservesIdempotencyKey(t *testing.T) {
+	ms := &mockSendFunc{}
+	rpc := newTestReverseRPC(ms)
+
+	preq := &PendingRequest{
+		ID:             "s-orig-4",
+		UserID:         "user-1",
+		DeviceID:       "device-1",
+		Method:         "my.method",
+		Params:         json.RawMessage(`{"hello":"world"}`),
+		IdempotencyKey: "original-idempotency-key",
+		Seq:            99,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = rpc.ReplayRequest(context.Background(), preq, 2*time.Second)
+	}()
+
+	require.True(t, ms.waitForCalls(1, time.Second))
+
+	var req protocol.PackageDataRequest
+	require.NoError(t, json.Unmarshal(ms.lastCall().pkg.Data, &req))
+
+	assert.Equal(t, "my.method", req.Method)
+	assert.Equal(t, "original-idempotency-key", req.IdempotencyKey)
+	assert.Equal(t, uint64(99), req.Seq)
+	assert.Equal(t, json.RawMessage(`{"hello":"world"}`), req.Params)
+	assert.True(t, strings.HasPrefix(req.ID, "s-replay-"), "reqID should be new replay ID")
+	assert.NotEqual(t, "s-orig-4", req.ID, "replay ID should differ from original")
+
+	// Clean up.
+	rpc.DispatchResponse(&protocol.PackageDataResponse{ID: req.ID, Code: 0})
+	<-done
+}
+
+// TestReverseRPC_ReplayRequest_DispatchResponseRouting verifies correct routing.
+func TestReverseRPC_ReplayRequest_DispatchResponseRouting(t *testing.T) {
+	ms := &mockSendFunc{}
+	rpc := newTestReverseRPC(ms)
+
+	preq1 := &PendingRequest{ID: "orig-1", UserID: "user-1", DeviceID: "device-1", Method: "m1"}
+	preq2 := &PendingRequest{ID: "orig-2", UserID: "user-1", DeviceID: "device-1", Method: "m2"}
+
+	var result1, result2 *protocol.PackageDataResponse
+	done1 := make(chan struct{})
+	done2 := make(chan struct{})
+
+	go func() {
+		defer close(done1)
+		result1, _ = rpc.ReplayRequest(context.Background(), preq1, 5*time.Second)
+	}()
+	go func() {
+		defer close(done2)
+		result2, _ = rpc.ReplayRequest(context.Background(), preq2, 5*time.Second)
+	}()
+
+	require.True(t, ms.waitForCalls(2, time.Second))
+
+	// Extract both replay IDs.
+	ms.mu.Lock()
+	var id1, id2 string
+	for _, call := range ms.calls {
+		var req protocol.PackageDataRequest
+		require.NoError(t, json.Unmarshal(call.pkg.Data, &req))
+		var req2 protocol.PackageDataRequest
+		require.NoError(t, json.Unmarshal(call.pkg.Data, &req2))
+		if req.Method == "m1" {
+			id1 = req.ID
+		} else {
+			id2 = req.ID
+		}
+	}
+	ms.mu.Unlock()
+
+	require.NotEmpty(t, id1)
+	require.NotEmpty(t, id2)
+	require.NotEqual(t, id1, id2)
+
+	// Dispatch responses — routing should be correct.
+	rpc.DispatchResponse(&protocol.PackageDataResponse{ID: id2, Code: 0, Msg: "resp-2"})
+	rpc.DispatchResponse(&protocol.PackageDataResponse{ID: id1, Code: 0, Msg: "resp-1"})
+
+	select {
+	case <-done1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("replay 1 did not return")
+	}
+	select {
+	case <-done2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("replay 2 did not return")
+	}
+
+	require.NotNil(t, result1)
+	require.NotNil(t, result2)
+	assert.Equal(t, "resp-1", result1.Msg)
+	assert.Equal(t, "resp-2", result2.Msg)
+}
+
+// TestReverseRPC_ReplayRequest_CancelDevice verifies CancelDevice cancels replay.
+func TestReverseRPC_ReplayRequest_CancelDevice(t *testing.T) {
+	ms := &mockSendFunc{}
+	rpc := newTestReverseRPC(ms)
+
+	preq := &PendingRequest{
+		ID:       "orig-cancel",
+		UserID:   "user-1",
+		DeviceID: "device-1",
+		Method:   "ping",
+	}
+
+	var reqErr error
+	var result *protocol.PackageDataResponse
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		result, reqErr = rpc.ReplayRequest(context.Background(), preq, 5*time.Second)
+	}()
+
+	require.True(t, ms.waitForCalls(1, time.Second))
+
+	rpc.CancelDevice("user-1", "device-1")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReplayRequest did not return after CancelDevice")
+	}
+
+	// CancelDevice delivers Code=-1 via respCh.
+	if reqErr != nil {
+		assert.ErrorIs(t, reqErr, context.Canceled)
+	} else {
+		require.NotNil(t, result)
+		assert.Equal(t, protocol.ResponseCode(-1), result.Code)
+	}
+}
+
+// TestReverseRPC_PendingStore_Accessor verifies the PendingStore() accessor.
+func TestReverseRPC_PendingStore_Accessor(t *testing.T) {
+	// With store.
+	ps := &mockPendingStore{}
+	ms := &mockSendFunc{}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+	assert.NotNil(t, rpc.PendingStore())
+
+	// Without store.
+	rpc2 := newTestReverseRPC(ms)
+	assert.Nil(t, rpc2.PendingStore())
 }

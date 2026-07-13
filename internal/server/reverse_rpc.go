@@ -148,6 +148,77 @@ func (r *ReverseRPC) ServerRequest(ctx context.Context, userID, deviceID string,
 	}
 }
 
+// ReplayRequest sends a previously-persisted request to the client and
+// blocks until a response arrives or the timeout expires. It uses a new
+// reqID ("s-replay-{uuid}") for response tracking but preserves the
+// original IdempotencyKey for client-side deduplication (Phase 5, D-107).
+//
+// On timeout, the caller is responsible for updating the PendingStore
+// (increment RetryCount or remove if over limit).
+func (r *ReverseRPC) ReplayRequest(ctx context.Context, preq *PendingRequest, timeout time.Duration) (*protocol.PackageDataResponse, error) {
+	replayID := fmt.Sprintf("s-replay-%s", uuid.New().String())
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	pending := &reverseRPCPending{
+		respCh:         make(chan *protocol.PackageDataResponse, 1),
+		cancel:         cancel,
+		userID:         preq.UserID,
+		deviceID:       preq.DeviceID,
+		reqID:          replayID,
+		method:         preq.Method,
+		params:         preq.Params,
+		idempotencyKey: preq.IdempotencyKey,
+		seq:            preq.Seq,
+	}
+
+	r.mu.Lock()
+	r.pending[replayID] = pending
+	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		delete(r.pending, replayID)
+		r.mu.Unlock()
+	}()
+
+	req := &protocol.PackageDataRequest{
+		ID:             replayID,
+		Method:         preq.Method,
+		Params:         preq.Params,
+		IdempotencyKey: preq.IdempotencyKey,
+		Seq:            preq.Seq,
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal replay request: %w", err)
+	}
+
+	pkg := &protocol.Package{
+		Version: 1,
+		Type:    protocol.PackageTypeRequest,
+		Data:    data,
+	}
+
+	if err := r.sendFunc(preq.UserID, preq.DeviceID, pkg); err != nil {
+		return nil, fmt.Errorf("send replay request: %w", err)
+	}
+
+	select {
+	case resp := <-pending.respCh:
+		return resp, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// PendingStore returns the configured PendingStore, or nil if not configured.
+func (r *ReverseRPC) PendingStore() PendingStore {
+	return r.pendingStore
+}
+
 // nextSeq returns the next sequence number for the given device (D-106).
 // Monotonically increasing per (userID, deviceID) pair.
 func (r *ReverseRPC) nextSeq(userID, deviceID string) uint64 {
