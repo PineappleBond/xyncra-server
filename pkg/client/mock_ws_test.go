@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -269,4 +270,42 @@ func (m *mockWSServer) MessageCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.msgCount
+}
+
+// RemoveClosedConnections removes closed connections from the conns array.
+// This is useful after a disconnect/reconnect cycle to ensure SendPackage
+// sends to the active connection rather than a stale closed one.
+func (m *mockWSServer) RemoveClosedConnections() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	active := make([]*websocket.Conn, 0, len(m.conns))
+	for _, conn := range m.conns {
+		// Try to detect if the connection is closed by checking if we can
+		// set a read deadline. Closed connections will return an error.
+		if conn != nil {
+			// Check if connection is still alive by attempting to set a deadline.
+			err := conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+			if err == nil {
+				active = append(active, conn)
+			}
+		}
+	}
+	m.conns = active
+}
+
+// WaitForConnectionCount waits until the number of connections equals the
+// expected count or the timeout expires. Useful for waiting for reconnections.
+func (m *mockWSServer) WaitForConnectionCount(expected int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		n := len(m.conns)
+		m.mu.Unlock()
+		if n >= expected {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for %d connections, got %d", expected, m.ConnectionCount())
 }
