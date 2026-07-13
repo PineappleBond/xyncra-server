@@ -334,17 +334,9 @@ func (c *Client) writePump() {
 			if err != nil {
 				return
 			}
-			_, _ = w.Write(msg)
-
-			// Drain queued messages into the same write for efficiency.
-			n := len(c.send)
-			for i := 0; i < n; i++ {
-				if _, writeErr := w.Write(<-c.send); writeErr != nil {
-					// Stop draining on first write error; the connection is broken.
-					return
-				}
+			if _, err := w.Write(msg); err != nil {
+				return
 			}
-
 			if err := w.Close(); err != nil {
 				return
 			}
