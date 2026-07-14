@@ -675,3 +675,43 @@ func TestExecute_EmptyDeviceID_NoCallerDeviceInContext(t *testing.T) {
 	_, ok := CallerDeviceFromContext(ccMgr.capturedCtx)
 	assert.False(t, ok, "CallerDevice should NOT be in context when DeviceID is empty")
 }
+
+// ---------------------------------------------------------------------------
+// cleanupAfterResume: spy logger verifies error is logged when Delete fails
+// (D-112: Delete failure must not block resume, but should be logged)
+// ---------------------------------------------------------------------------
+
+// TestCleanupAfterResume_DeleteFails_LogsError verifies that when
+// checkpointStore.Delete returns an error, cleanupAfterResume logs the event
+// via the logger. The log is at Info level because the failure is non-fatal
+// (D-112: TTL 24h safety net will eventually clean up the checkpoint).
+func TestCleanupAfterResume_DeleteFails_LogsError(t *testing.T) {
+	fs := newFakeDeletableStore()
+	fs.deleteErr = fmt.Errorf("simulated redis connection lost")
+
+	e := &AgentExecutor{}
+	e.checkpointStore = fs
+	e.registerInterruptIDs("cp-log", []string{"intr-log"})
+
+	// Use a captureLogger to verify the log output.
+	logger := &captureLogger{}
+	e.cleanupAfterResume(context.Background(), "cp-log", logger)
+
+	// An info-level log should have been recorded (non-fatal per D-112).
+	require.Equal(t, 1, logger.infoCount(), "exactly one Info() call expected")
+
+	// Verify the log message mentions checkpoint cleanup failure.
+	lastInfo := logger.lastInfo()
+	assert.Contains(t, lastInfo.msg, "checkpoint cleanup failed",
+		"log should mention checkpoint cleanup failure")
+
+	// Verify structured fields: checkpoint_id and error.
+	assert.True(t, argsContains(lastInfo.args, "checkpoint_id", "cp-log"),
+		"log should contain checkpoint_id field")
+	assert.True(t, argsContains(lastInfo.args, "error", fs.deleteErr),
+		"log should contain the original error")
+
+	// Despite the Delete failure, interruptIDs should still be cleaned (D-113).
+	assert.Nil(t, e.getInterruptIDs("cp-log"),
+		"interruptIDs should be deleted even when store.Delete fails")
+}
