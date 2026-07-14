@@ -31,7 +31,9 @@ type connectionCallbacks struct {
 	// onConnect is called after a WebSocket connection has been successfully established.
 	onConnect func()
 	// onDisconnect is called when an active WebSocket connection is lost unexpectedly.
-	onDisconnect func()
+	// The replaced parameter is true when the disconnect was caused by the server
+	// sending a 4001 close frame (device replacement, D-095/D-111).
+	onDisconnect func(replaced bool)
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +81,10 @@ type connectionManager struct {
 	connected bool
 	// closing indicates that Close has been called; no reconnect should occur.
 	closing bool
+	// replaced is set to true when the server sends a 4001 close frame,
+	// indicating this connection was replaced by a new one from the same
+	// device. When set, the reconnect loop should NOT retry (D-095, D-111).
+	replaced bool
 	// attempt is the current reconnect attempt counter (reset to 0 on success).
 	attempt int
 
@@ -160,6 +166,7 @@ func (cm *connectionManager) Connect(ctx context.Context) error {
 	cm.pumpsDone = pumpsDone
 	cm.connected = true
 	cm.closing = false
+	cm.replaced = false
 	cm.attempt = 0
 	cm.ctx = sessionCtx
 	cm.cancel = sessionCancel
@@ -318,6 +325,15 @@ func (cm *connectionManager) DeviceID() string {
 	return cm.deviceID
 }
 
+// Replaced reports whether this connection was replaced by a newer one from
+// the same device (server sent 4001 close frame). When true, the caller should
+// not attempt to reconnect (D-095, D-111).
+func (cm *connectionManager) Replaced() bool {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	return cm.replaced
+}
+
 // Disconnected returns a receive-only channel that is closed when an unexpected
 // disconnection occurs. The connectionMonitor in client.go selects on this
 // channel to trigger automatic reconnection. A new channel is created after
@@ -350,6 +366,13 @@ func (cm *connectionManager) readPump(conn *websocket.Conn, disconnectCh chan st
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
+			// Detect 4001 close frame: server is replacing this connection
+			// with a newer one from the same device (D-095, D-111).
+			if closeErr, ok := err.(*websocket.CloseError); ok && closeErr.Code == 4001 {
+				cm.mu.Lock()
+				cm.replaced = true
+				cm.mu.Unlock()
+			}
 			if websocket.IsUnexpectedCloseError(err,
 				websocket.CloseGoingAway,
 				websocket.CloseNormalClosure,
@@ -464,14 +487,18 @@ func (cm *connectionManager) handleDisconnect(disconnectCh chan struct{}) {
 	wasConnected := cm.connected
 	cm.connected = false
 	isClosing := cm.closing
+	isReplaced := cm.replaced
 	cm.mu.Unlock()
 
 	if wasConnected && !isClosing {
+		// Always close disconnectCh so the connectionMonitor wakes up.
+		// The monitor decides whether to reconnect based on the replaced flag
+		// passed to the onDisconnect callback (D-111).
 		if disconnectCh != nil {
 			close(disconnectCh)
 		}
 		if cm.callbacks.onDisconnect != nil {
-			cm.callbacks.onDisconnect()
+			cm.callbacks.onDisconnect(isReplaced)
 		}
 	}
 }

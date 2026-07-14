@@ -583,52 +583,26 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Device replacement: if there is an existing connection for the same
-	// (userID, deviceID), close it with a 4001 frame and fail its pending
-	// reverse-RPC requests (D-095).
+	// Capture existing connections for the same (userID, deviceID). All
+	// entries in clientsByDevice[deviceKey] are old connections that must be
+	// replaced by the new one (D-095).
 	deviceKey := userID + "\x00" + deviceID
 	s.mu.Lock()
-	existingClients := s.clientsByDevice[deviceKey]
-	var oldClient *Client
-	for _, c := range existingClients {
-		oldClient = c
-		break
+	oldClients := make(map[string]*Client)
+	for id, c := range s.clientsByDevice[deviceKey] {
+		oldClients[id] = c
 	}
 	s.mu.Unlock()
 
-	if oldClient != nil {
-		// Send Close Frame (4001) outside the lock.
-		s.logger.Info("websocket: device replacement detected [userID=%s, deviceID=%s, oldConnID=%s]",
-			userID, deviceID, oldClient.ConnID())
-		closeMsg := websocket.FormatCloseMessage(4001, "replaced by new connection from same device")
-		if writeErr := oldClient.conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(5*time.Second)); writeErr != nil {
-			s.logger.Error("websocket: failed to send 4001 close frame [oldConnID=%s]: %v",
-				oldClient.ConnID(), writeErr)
-		}
-		// WriteControl writes the close frame to the kernel TCP send buffer,
-		// but conn.Close() (called inside oldClient.Close below) sends a TCP
-		// FIN immediately. Without a brief pause, the FIN can race ahead of
-		// the close-frame data, causing the client to see a TCP reset or EOF
-		// instead of the 4001 close frame. The 100 ms delay gives the kernel
-		// enough time to flush the frame to the wire (D-095).
-		time.Sleep(100 * time.Millisecond)
-		oldClient.Close()
-
-		// Wait for old connection to finish cleanup (at most 2s).
-		select {
-		case <-oldClient.Done():
-		case <-time.After(2 * time.Second):
-		}
-
-		// Clean up old indexes.
-		s.removeClient(oldClient.ConnID(), userID, oldClient.DeviceID())
-
-		// Remove from ConnectionStore.
-		cleanupOldCtx, cleanupOldCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		s.ConnectionStore().Remove(cleanupOldCtx, oldClient.ConnID())
-		cleanupOldCancel()
+	// CancelDevice before Upgrade: fail pending reverse-RPC requests for
+	// this device immediately (D-095). Moved here (before Upgrade) so that
+	// the async cleanup goroutine cannot cancel requests that belong to the
+	// new connection after it registers.
+	if len(oldClients) > 0 && s.reverseRPC != nil {
+		s.reverseRPC.CancelDevice(userID, deviceID)
 	}
 
+	// Upgrade first — zero blocking from device replacement.
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		s.logger.Error("websocket: upgrade: %v", err)
@@ -639,21 +613,14 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 
 	client := NewClient(conn, userID, deviceID, connID, s.clientOptions...)
 
-	// CancelDevice: fail pending reverse-RPC requests for this device.
-	// Moved here (after Upgrade succeeds) so that if Upgrade fails, the
-	// old connection's pending requests are not prematurely cancelled (D-095).
-	if s.reverseRPC != nil && oldClient != nil {
-		s.reverseRPC.CancelDevice(userID, deviceID)
-	}
-
-	// Register the client in the local map, per-user index, and per-device
-	// index atomically.
-	// Intentional design: registering locally first (before the
-	// ConnectionStore) minimizes latency for the client. If the
-	// ConnectionStore registration fails, we clean up the local state
-	// below. This brief inconsistency window is acceptable because the
-	// local map is only used for message routing, not persistence (P1-06).
+	// Atomically register the new connection and remove old connections from
+	// the device index. The new connID is different from all old connIDs, so
+	// subsequent removeClient calls on old connIDs cannot affect the new
+	// connection (D-095).
 	s.mu.Lock()
+	for id := range oldClients {
+		delete(s.clientsByDevice[deviceKey], id)
+	}
 	s.clients[connID] = client
 	userClients, ok := s.clientsByUser[userID]
 	if !ok {
@@ -666,6 +633,15 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 	}
 	s.clientsByDevice[deviceKey][connID] = client
 	s.mu.Unlock()
+
+	// Asynchronously clean up old connections (D-095).
+	// Note: this goroutine is not tracked by a WaitGroup — async cleanup is
+	// best-effort and may not complete during graceful shutdown. This is
+	// acceptable because the local map is the routing source of truth and
+	// ConnectionStore inconsistency is transient (eventual consistency).
+	if len(oldClients) > 0 {
+		go s.performDeviceReplacement(oldClients, userID, deviceID)
+	}
 
 	// Register in the ConnectionStore.
 	ip := extractIP(r)
@@ -762,6 +738,59 @@ func (s *WebSocketServer) removeClient(connID, userID, deviceID string) {
 			delete(s.clientsByDevice, deviceKey)
 		}
 	}
+}
+
+// performDeviceReplacement asynchronously handles the cleanup of old
+// connections when a new connection replaces them (D-095). This runs in a
+// separate goroutine so that the HTTP handler is not blocked by TCP flush
+// waits, goroutine shutdown, or Redis calls.
+//
+// Safety: removeClient deletes by connID, and the new connection has a
+// different connID, so there is no risk of removing the replacement.
+func (s *WebSocketServer) performDeviceReplacement(
+	oldClients map[string]*Client,
+	userID, deviceID string,
+) {
+	for connID, oldClient := range oldClients {
+		s.logger.Info("websocket: device replacement detected [userID=%s, deviceID=%s, oldConnID=%s]",
+			userID, deviceID, connID)
+
+		// 1. Send 4001 close frame to the old connection.
+		closeMsg := websocket.FormatCloseMessage(4001, "replaced by new connection from same device")
+		if writeErr := oldClient.conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(5*time.Second)); writeErr != nil {
+			s.logger.Error("websocket: failed to send 4001 close frame [oldConnID=%s]: %v",
+				connID, writeErr)
+		}
+
+		// 2. Brief pause for TCP send buffer flush. WriteControl writes the
+		//    close frame to the kernel TCP send buffer, but conn.Close() sends
+		//    a TCP FIN immediately. Without this pause the FIN can race ahead
+		//    of the close-frame data, causing the client to see a TCP reset
+		//    instead of the 4001 close frame (D-095).
+		time.Sleep(10 * time.Millisecond)
+
+		// 3. Close the old client.
+		oldClient.Close()
+
+		// 4. Wait for old goroutines to exit (bounded).
+		select {
+		case <-oldClient.Done():
+		case <-time.After(500 * time.Millisecond):
+		}
+
+		// 5. Clean up local indexes. removeClient is safe: it deletes by
+		//    connID, and the new connection has a different connID.
+		s.removeClient(connID, userID, deviceID)
+
+		// 6. ConnectionStore.Remove is intentionally skipped here — the old
+		//    connection's own handleWebSocket handler (after client.Run()
+		//    returns) will remove it from ConnectionStore. This avoids a
+		//    redundant Redis call.
+	}
+
+	// Note: CancelDevice is called in handleWebSocket before Upgrade (not here)
+	// to avoid canceling pending requests that arrive on the new connection
+	// during the async cleanup window (D-095).
 }
 
 // closeAllClients sends a close frame to every active client and waits up to

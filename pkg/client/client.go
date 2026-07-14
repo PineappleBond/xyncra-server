@@ -63,6 +63,14 @@ type XyncraClient struct {
 	muState sync.Mutex
 	closed  bool
 
+	// replacedWake is closed by Reconnect() to wake the connection monitor
+	// from its dormant state after a device replacement (D-111). When the
+	// monitor detects replaced=true, it waits on this channel instead of
+	// returning, allowing the daemon to resume connectivity when triggered
+	// by an IPC command.
+	replacedWake   chan struct{}
+	replacedWakeMu sync.Mutex
+
 	logger Logger
 }
 
@@ -112,6 +120,7 @@ func New(opts ...ClientOption) (*XyncraClient, error) {
 		pending:         make(map[string]chan *protocol.PackageDataResponse),
 		requestHandlers: make(map[string]RequestHandlerFunc),
 		done:            make(chan struct{}),
+		replacedWake:    make(chan struct{}),
 		logger:          o.logger,
 	}
 
@@ -121,11 +130,17 @@ func New(opts ...ClientOption) (*XyncraClient, error) {
 
 	// Connection manager with callbacks wired into the dispatch layer.
 	c.connMgr = newConnectionManager(o, connectionCallbacks{
-		onResponse:   c.dispatchResponse,
-		onUpdates:    c.dispatchUpdates,
-		onRequest:    func(req *protocol.PackageDataRequest) { c.handleIncomingRequest(req) },
-		onConnect:    func() { c.logger.Info("connection established") },
-		onDisconnect: func() { c.logger.Info("connection lost") },
+		onResponse: c.dispatchResponse,
+		onUpdates:  c.dispatchUpdates,
+		onRequest:  func(req *protocol.PackageDataRequest) { c.handleIncomingRequest(req) },
+		onConnect:  func() { c.logger.Info("connection established") },
+		onDisconnect: func(replaced bool) {
+			if replaced {
+				c.logger.Info("connection replaced by newer instance (4001)")
+			} else {
+				c.logger.Info("connection lost")
+			}
+		},
 	})
 
 	// Sync manager — uses Call via a typed wrapper.
@@ -219,6 +234,29 @@ func (c *XyncraClient) Stop() {
 // Close is an alias for Stop.
 func (c *XyncraClient) Close() {
 	c.Stop()
+}
+
+// Reconnect wakes the connection monitor from its dormant state after a device
+// replacement (D-111). When the connection was replaced (4001), the monitor
+// enters a dormant state; calling Reconnect triggers it to re-establish the
+// WebSocket connection. This is safe to call even when already connected — it
+// is a no-op if the connection is active.
+//
+// It is typically called by IPC handlers (e.g. sync_updates) that need an
+// active server connection.
+func (c *XyncraClient) Reconnect() {
+	c.replacedWakeMu.Lock()
+	defer c.replacedWakeMu.Unlock()
+	select {
+	case <-c.replacedWake:
+		// Already closed and reset — nothing to do.
+	default:
+		// Close to wake the monitor, then create a fresh channel for the
+		// next dormancy cycle. This ensures the channel lifecycle:
+		// open → closed → new open → closed → new open ...
+		close(c.replacedWake)
+		c.replacedWake = make(chan struct{})
+	}
 }
 
 // DeviceID returns the device identifier used by this client.
@@ -332,6 +370,27 @@ func (c *XyncraClient) connectionMonitorWithInitialConnect() {
 		case <-c.ctx.Done():
 			return
 		case <-c.connMgr.Disconnected():
+			// If this connection was replaced by a newer instance from the
+			// same device (server sent 4001), enter dormant state — do not
+			// reconnect immediately. The daemon stays alive with IPC
+			// available (D-044, D-111). When an IPC command triggers
+			// Reconnect(), the monitor wakes up and resumes connectivity.
+			if c.connMgr.Replaced() {
+				c.logger.Info("connection replaced by newer device instance, entering dormant state (D-111)")
+				// Capture the wake channel reference under the lock so that
+				// Reconnect() (which closes + replaces the channel) cannot
+				// race with the select below.
+				c.replacedWakeMu.Lock()
+				wakeCh := c.replacedWake
+				c.replacedWakeMu.Unlock()
+				select {
+				case <-c.ctx.Done():
+					return
+				case <-wakeCh:
+					c.logger.Info("woken up for reconnection after replacement")
+					// Fall through to the reconnect loop below.
+				}
+			}
 			c.logger.Info("connection lost, reconnecting...")
 			for {
 				if c.ctx.Err() != nil {

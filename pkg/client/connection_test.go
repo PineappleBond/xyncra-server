@@ -3,6 +3,8 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -439,7 +441,7 @@ func TestDisconnected_Channel(t *testing.T) {
 		logger:              &testLogger{t: t},
 	}
 	cm := newConnectionManager(opts, connectionCallbacks{
-		onDisconnect: func() {
+		onDisconnect: func(replaced bool) {
 			close(disconnected)
 		},
 	})
@@ -696,4 +698,184 @@ func TestReconnect_ContextCancelled(t *testing.T) {
 		t.Fatal("expected error from cancelled context, got nil")
 	}
 	// The error should be context.Canceled or a connection error wrapping it.
+}
+
+// ---------------------------------------------------------------------------
+// 4001 semantic awareness (D-095, D-111)
+// ---------------------------------------------------------------------------
+
+// TestConnectionManager_4001_NoReconnect verifies that receiving a 4001 close
+// frame from the server sets the replaced flag and passes replaced=true to the
+// onDisconnect callback.
+func TestConnectionManager_4001_NoReconnect(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		msg := websocket.FormatCloseMessage(4001, "replaced by newer device")
+		_ = conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
+		// Keep the handler alive briefly so the client can receive the close frame.
+		time.Sleep(200 * time.Millisecond)
+	}))
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	var gotReplaced bool
+	var disconnectCalled sync.WaitGroup
+	disconnectCalled.Add(1)
+
+	opts := clientOptions{
+		serverURL:           wsURL,
+		userID:              "test-user",
+		reconnectBaseDelay:  defaultReconnectBaseDelay,
+		reconnectMaxDelay:   defaultReconnectMaxDelay,
+		reconnectMaxRetries: defaultReconnectMaxRetries,
+		logger:              &testLogger{t: t},
+	}
+	cm := newConnectionManager(opts, connectionCallbacks{
+		onDisconnect: func(replaced bool) {
+			gotReplaced = replaced
+			disconnectCalled.Done()
+		},
+	})
+
+	if err := cm.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	t.Cleanup(func() { safeCloseCM(cm) })
+
+	// Wait for the onDisconnect callback to fire.
+	done := make(chan struct{})
+	go func() {
+		disconnectCalled.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("onDisconnect was not called within timeout")
+	}
+
+	// Verify replaced flag was set.
+	if !cm.Replaced() {
+		t.Error("Replaced() = false, want true after 4001 close frame")
+	}
+	if !gotReplaced {
+		t.Error("onDisconnect received replaced=false, want true")
+	}
+}
+
+// TestConnectionManager_OtherClose_Reconnect verifies that a non-4001 close
+// frame (e.g., 1000 Normal Closure) does NOT set the replaced flag, allowing
+// normal reconnection behavior.
+func TestConnectionManager_OtherClose_Reconnect(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		msg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "normal closure")
+		_ = conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
+		time.Sleep(200 * time.Millisecond)
+	}))
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	var gotReplaced bool = true // initialize to true to detect if callback fires with false
+	var disconnectCalled sync.WaitGroup
+	disconnectCalled.Add(1)
+
+	opts := clientOptions{
+		serverURL:           wsURL,
+		userID:              "test-user",
+		reconnectBaseDelay:  defaultReconnectBaseDelay,
+		reconnectMaxDelay:   defaultReconnectMaxDelay,
+		reconnectMaxRetries: defaultReconnectMaxRetries,
+		logger:              &testLogger{t: t},
+	}
+	cm := newConnectionManager(opts, connectionCallbacks{
+		onDisconnect: func(replaced bool) {
+			gotReplaced = replaced
+			disconnectCalled.Done()
+		},
+	})
+
+	if err := cm.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	t.Cleanup(func() { safeCloseCM(cm) })
+
+	// Wait for the onDisconnect callback.
+	done := make(chan struct{})
+	go func() {
+		disconnectCalled.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("onDisconnect was not called within timeout")
+	}
+
+	// Verify replaced flag was NOT set.
+	if cm.Replaced() {
+		t.Error("Replaced() = true, want false after non-4001 close frame")
+	}
+	if gotReplaced {
+		t.Error("onDisconnect received replaced=true, want false")
+	}
+}
+
+// TestConnectionManager_Replaced_ResetOnConnect verifies that calling Connect
+// resets the replaced flag to false, allowing a fresh connection attempt.
+func TestConnectionManager_Replaced_ResetOnConnect(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Keep connection alive for the duration of the test.
+		time.Sleep(500 * time.Millisecond)
+	}))
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	opts := clientOptions{
+		serverURL:           wsURL,
+		userID:              "test-user",
+		reconnectBaseDelay:  defaultReconnectBaseDelay,
+		reconnectMaxDelay:   defaultReconnectMaxDelay,
+		reconnectMaxRetries: defaultReconnectMaxRetries,
+		logger:              &testLogger{t: t},
+	}
+	cm := newConnectionManager(opts, connectionCallbacks{})
+
+	// Manually set replaced=true to simulate a previous 4001 event.
+	cm.mu.Lock()
+	cm.replaced = true
+	cm.mu.Unlock()
+
+	if !cm.Replaced() {
+		t.Fatal("precondition: Replaced() should be true before Connect")
+	}
+
+	// Connect should reset replaced to false.
+	if err := cm.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	t.Cleanup(func() { safeCloseCM(cm) })
+
+	if cm.Replaced() {
+		t.Error("Replaced() = true after Connect, want false (should be reset)")
+	}
 }
