@@ -408,7 +408,7 @@ func TestMessageCRUD(t *testing.T) {
 		}
 
 		// GetByClientMessageID
-		got2, err := s.Messages.GetByClientMessageID(ctx, "client-msg-001")
+		got2, err := s.Messages.GetByClientMessageID(ctx, "client-msg-001", "alice")
 		if err != nil {
 			t.Fatalf("get by client_message_id failed: %v", err)
 		}

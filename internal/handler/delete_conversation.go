@@ -99,14 +99,22 @@ func (h *deleteConversationHandler) HandleRequest(ctx context.Context, client *s
 
 	// 5. Cascade soft delete in a transaction (D-013).
 	var deletedMessageCount int64
+	// 使用统一时间戳，确保级联删除的消息共享同一个 deleted_at 值，
+	// 以便恢复时区分"因会话删除而级联删除的消息"和"之前已单独删除的消息"。
+	now := time.Now().Truncate(time.Millisecond)
 	err = h.store.Transaction(ctx, func(tx *gorm.DB) error {
-		// 5a. Count non-deleted messages before deleting.
+		// 5a. Count non-deleted messages before deleting (GORM 自动过滤已删除记录).
 		if err := tx.Model(&model.Message{}).Where("conversation_id = ?", convID).Count(&deletedMessageCount).Error; err != nil {
 			return fmt.Errorf("count messages: %w", err)
 		}
 
-		// 5b. Soft-delete the conversation.
-		result := tx.Delete(&model.Conversation{}, "id = ?", convID)
+		// 5b. 软删除会话 — 使用原生 SQL 确保 deleted_at 值被正确设置。
+		// GORM 的软删除机制可能拦截 Update("deleted_at", ...) 并覆盖显式值，
+		// 因此必须使用 Exec 直接执行 SQL。
+		result := tx.Exec(
+			"UPDATE conversations SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
+			now, convID,
+		)
 		if result.Error != nil {
 			return fmt.Errorf("delete conversation: %w", result.Error)
 		}
@@ -114,8 +122,11 @@ func (h *deleteConversationHandler) HandleRequest(ctx context.Context, client *s
 			return store.ErrNotFound
 		}
 
-		// 5c. Soft-delete all messages in the conversation.
-		if err := tx.Where("conversation_id = ?", convID).Delete(&model.Message{}).Error; err != nil {
+		// 5c. 软删除所有未删除的消息 — 使用同一时间戳，通过原生 SQL 确保一致性.
+		if err := tx.Exec(
+			"UPDATE messages SET deleted_at = ? WHERE conversation_id = ? AND deleted_at IS NULL",
+			now, convID,
+		).Error; err != nil {
 			return fmt.Errorf("delete messages: %w", err)
 		}
 
@@ -135,7 +146,7 @@ func (h *deleteConversationHandler) HandleRequest(ctx context.Context, client *s
 		Action:         "delete",
 	})
 
-	now := time.Now()
+	// now 已在事务前声明（与级联删除使用同一时间戳）
 	updates := make([]model.UserUpdate, 0, len(members))
 	recipients := make([]sendMessageRecipient, 0, len(members))
 

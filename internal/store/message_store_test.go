@@ -782,7 +782,7 @@ func TestMessageStore_GetByClientMessageID_HappyPath(t *testing.T) {
 			Content: "hello", CreatedAt: testNow,
 		}), "creating message should succeed")
 
-		got, err := s.Messages.GetByClientMessageID(ctx, "unique-client-id-42")
+		got, err := s.Messages.GetByClientMessageID(ctx, "unique-client-id-42", "alice")
 		require.NoError(t, err, "GetByClientMessageID should succeed")
 		require.NotNil(t, got, "message should be non-nil")
 		assert.Equal(t, "msg-cm-1", got.ID, "ID should match")
@@ -799,7 +799,7 @@ func TestMessageStore_GetByClientMessageID_NotFound(t *testing.T) {
 		ctx := context.Background()
 		cleanAll(t, s, ctx)
 
-		got, err := s.Messages.GetByClientMessageID(ctx, "non-existent-client-id")
+		got, err := s.Messages.GetByClientMessageID(ctx, "non-existent-client-id", "alice")
 		require.ErrorIs(t, err, ErrNotFound, "expected ErrNotFound for non-existent client_message_id")
 		assert.Nil(t, got, "message should be nil when not found")
 	})

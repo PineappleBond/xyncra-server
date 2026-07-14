@@ -153,7 +153,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 		// TOCTOU-safe idempotency: catch unique constraint violation on
 		// client_message_id and return the already-persisted message (D-006).
 		if errors.Is(err, store.ErrDuplicateKey) {
-			existing, lookupErr := h.store.MessageStore().GetByClientMessageID(ctx, params.ClientMessageID)
+			existing, lookupErr := h.store.MessageStore().GetByClientMessageID(ctx, params.ClientMessageID, senderID)
 			if lookupErr == nil {
 				resp := sendMessageResponse{
 					Message:   existing,

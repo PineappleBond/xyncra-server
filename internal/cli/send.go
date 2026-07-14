@@ -131,6 +131,25 @@ func sendStandalone(ctx context.Context, cliCtx *CLIContext, convID, content str
 	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, fmt.Errorf("standalone unmarshal result: %w", err)
 	}
+
+	// RPC成功后同步本地DB（与IPC handler保持一致 — D-035）。
+	if result.Message != nil {
+		db, dbErr := store.New(cliCtx.DBPath)
+		if dbErr == nil {
+			defer db.Close()
+			if err := db.Messages.Create(ctx, result.Message); err != nil {
+				if !errors.Is(err, store.ErrDuplicateKey) {
+					fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to persist sent message locally: %v\n", err)
+				}
+			} else {
+				// 更新会话的last-message指针。
+				if err := db.Conversations.UpdateLastMessage(ctx, result.Message.ConversationID, result.Message.CreatedAt, result.Message.MessageID); err != nil && !errors.Is(err, store.ErrNotFound) {
+					fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to update conversation last message: %v\n", err)
+				}
+			}
+		}
+	}
+
 	return &result, nil
 }
 

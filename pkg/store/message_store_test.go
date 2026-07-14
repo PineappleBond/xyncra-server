@@ -87,7 +87,7 @@ func TestMessageStore_GetByClientMessageID_Found(t *testing.T) {
 	msg := newTestMsg(uid(), clientMsgID, convID, 1, "sender", "content")
 	require.NoError(t, db.Messages.Create(ctx, msg))
 
-	got, err := db.Messages.GetByClientMessageID(ctx, clientMsgID)
+	got, err := db.Messages.GetByClientMessageID(ctx, clientMsgID, "sender")
 	require.NoError(t, err)
 	assert.Equal(t, msg.ID, got.ID)
 	assert.Equal(t, clientMsgID, got.ClientMessageID)
@@ -98,7 +98,7 @@ func TestMessageStore_GetByClientMessageID_NotFound(t *testing.T) {
 	ctx := context.Background()
 	cleanAll(t, db, ctx)
 
-	_, err := db.Messages.GetByClientMessageID(ctx, "nonexistent-client-id")
+	_, err := db.Messages.GetByClientMessageID(ctx, "nonexistent-client-id", "sender")
 	assert.ErrorIs(t, err, ErrNotFound)
 }
 

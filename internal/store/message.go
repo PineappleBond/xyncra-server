@@ -77,13 +77,13 @@ func (ms *MessageStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// GetByClientMessageID retrieves a message by its client-generated unique ID.
-// This is useful for idempotency checks on the send-message path. Returns
-// ErrNotFound if no matching record exists.
-func (ms *MessageStore) GetByClientMessageID(ctx context.Context, clientMessageID string) (*model.Message, error) {
+// GetByClientMessageID retrieves a message by its client-generated unique ID
+// and sender ID (composite uniqueness). This is useful for idempotency checks
+// on the send-message path. Returns ErrNotFound if no matching record exists.
+func (ms *MessageStore) GetByClientMessageID(ctx context.Context, clientMessageID, senderID string) (*model.Message, error) {
 	var msg model.Message
 	err := ms.db.WithContext(ctx).
-		Where("client_message_id = ?", clientMessageID).
+		Where("client_message_id = ? AND sender_id = ?", clientMessageID, senderID).
 		First(&msg).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {

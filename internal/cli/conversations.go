@@ -115,6 +115,18 @@ func createConversationStandalone(ctx context.Context, cliCtx *CLIContext, peerI
 	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, fmt.Errorf("standalone create-conversation unmarshal result: %w", err)
 	}
+
+	// RPC成功后同步本地DB（与IPC handler保持一致 — D-035）。
+	if result.Conversation != nil {
+		db, dbErr := store.New(cliCtx.DBPath)
+		if dbErr == nil {
+			defer db.Close()
+			if err := db.Conversations.Upsert(ctx, result.Conversation); err != nil {
+				fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to persist created conversation locally: %v\n", err)
+			}
+		}
+	}
+
 	return &result, nil
 }
 
@@ -236,6 +248,16 @@ func deleteConversationStandalone(ctx context.Context, cliCtx *CLIContext, convI
 	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, fmt.Errorf("standalone delete-conversation unmarshal result: %w", err)
 	}
+
+	// RPC成功后同步本地DB（与IPC handler保持一致 — D-035）。
+	db, dbErr := store.New(cliCtx.DBPath)
+	if dbErr == nil {
+		defer db.Close()
+		if err := db.Conversations.Delete(ctx, convID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to delete conversation locally: %v\n", err)
+		}
+	}
+
 	return &result, nil
 }
 
@@ -340,6 +362,21 @@ func restoreConversationStandalone(ctx context.Context, cliCtx *CLIContext, conv
 	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, fmt.Errorf("standalone restore-conversation unmarshal result: %w", err)
 	}
+
+	// RPC成功后同步本地DB（与IPC handler保持一致 — D-035）。
+	db, dbErr := store.New(cliCtx.DBPath)
+	if dbErr == nil {
+		defer db.Close()
+		if err := db.Conversations.Restore(ctx, convID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// 本地记录不存在，跳过（standalone路径无法从服务器拉取补录，仅警告）。
+				fmt.Fprintf(os.Stderr, "[xyncra] warning: conversation %s not found in local DB, skipping local restore\n", convID)
+			} else {
+				fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to restore conversation locally: %v\n", err)
+			}
+		}
+	}
+
 	return &result, nil
 }
 

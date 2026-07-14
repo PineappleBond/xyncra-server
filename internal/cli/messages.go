@@ -96,6 +96,16 @@ func deleteMessageStandalone(ctx context.Context, cliCtx *CLIContext, msgID stri
 	if err != nil {
 		return fmt.Errorf("standalone delete-message: %w", err)
 	}
+
+	// RPC成功后同步本地DB（与IPC handler保持一致 — D-035）。
+	db, dbErr := store.New(cliCtx.DBPath)
+	if dbErr == nil {
+		defer db.Close()
+		if err := db.Messages.Delete(ctx, msgID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to delete message locally: %v\n", err)
+		}
+	}
+
 	return nil
 }
 

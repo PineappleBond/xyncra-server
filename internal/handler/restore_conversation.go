@@ -124,10 +124,14 @@ func (h *restoreConversationHandler) HandleRequest(ctx context.Context, client *
 			return store.ErrNotFound
 		}
 
-		// 6b. Restore all messages in the conversation.
-		msgResult := tx.Unscoped().Model(&model.Message{}).
-			Where("conversation_id = ? AND deleted_at IS NOT NULL", convID).
-			Update("deleted_at", nil)
+		// 6b. 仅恢复因本次会话删除而级联删除的消息（deleted_at 等于会话的 deleted_at），
+		// 不影响之前已单独删除的消息。使用原生 SQL 确保时间戳精确匹配，
+		// 避免 GORM 软删除机制干扰查询和更新行为。
+		convDeletedAt := conv.DeletedAt.Time
+		msgResult := tx.Exec(
+			"UPDATE messages SET deleted_at = NULL WHERE conversation_id = ? AND deleted_at = ?",
+			convID, convDeletedAt,
+		)
 		if msgResult.Error != nil {
 			return fmt.Errorf("restore messages: %w", msgResult.Error)
 		}

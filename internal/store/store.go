@@ -97,7 +97,9 @@ func NewFromDatabase(database *Database) *Store {
 }
 
 // AutoMigrate runs GORM's auto-migration for all known models, creating or
-// updating tables and indexes as needed.
+// updating tables and indexes as needed. It also performs manual index
+// migrations that GORM's AutoMigrate cannot handle (e.g. replacing a
+// single-column index with a composite one).
 func (s *Store) AutoMigrate(ctx context.Context) error {
 	if err := s.db.WithContext(ctx).AutoMigrate(
 		&model.Conversation{},
@@ -106,6 +108,15 @@ func (s *Store) AutoMigrate(ctx context.Context) error {
 	); err != nil {
 		return fmt.Errorf("store: auto-migrate: %w", err)
 	}
+
+	// Migrate client_message_id index: replace the legacy single-column index
+	// (idx_messages_client_message_id) with the composite unique index
+	// (idx_msg_client_id_sender) on (client_message_id, sender_id).
+	// GORM's AutoMigrate does not drop and recreate changed indexes, so we
+	// must do this manually.
+	s.db.Exec("DROP INDEX IF EXISTS idx_messages_client_message_id")
+	s.db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_client_id_sender ON messages(client_message_id, sender_id)")
+
 	return nil
 }
 

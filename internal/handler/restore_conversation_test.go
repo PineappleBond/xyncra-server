@@ -25,10 +25,14 @@ func TestRestoreConversation_HappyPath(t *testing.T) {
 	createTestConversation(t, s, convID, "alice", "bob")
 	seedTestMessages(t, s, convID, "alice", 3, 1)
 
-	// Delete the conversation first (cascade delete).
-	err := s.ConversationStore().Delete(ctx, convID)
-	require.NoError(t, err)
-	err = s.MessageStore().DeleteByConversation(ctx, convID)
+	// Delete the conversation first (cascade delete) via handler to ensure
+	// unified timestamp for conversation and messages (matches production behavior).
+	deleteHandler := NewDeleteConversationHandler(s, nil)
+	deleteClient := server.NewTestClient("alice")
+	deleteReq := newTestRequest("req-del", "delete_conversation", map[string]interface{}{
+		"conversation_id": convID,
+	})
+	_, err := deleteHandler.HandleRequest(ctx, deleteClient, deleteReq)
 	require.NoError(t, err)
 
 	// Verify deletion.
@@ -52,21 +56,22 @@ func TestRestoreConversation_HappyPath(t *testing.T) {
 	assert.Equal(t, int64(3), resp.RestoredMessageCount, "should have restored 3 messages")
 
 	// Verify UserUpdates created for ALL conversation members.
+	// Delete handler also creates UserUpdates, so each member has 2 (delete + restore).
 	aliceUpdates, err := s.UserUpdateStore().ListByUser(ctx, "alice", 0, 10)
 	require.NoError(t, err)
-	assert.Len(t, aliceUpdates, 1, "alice should have 1 UserUpdate")
-	assert.Equal(t, protocol.UpdateTypeConversation, aliceUpdates[0].Type, "Type should be 'conversation'")
+	assert.Len(t, aliceUpdates, 2, "alice should have 2 UserUpdates (delete + restore)")
+	assert.Equal(t, protocol.UpdateTypeConversation, aliceUpdates[1].Type, "Type should be 'conversation'")
 
-	// Verify payload contains conversation_id and action "restore".
+	// Verify payload contains conversation_id and action "restore" (second update).
 	var payload map[string]interface{}
-	require.NoError(t, json.Unmarshal(aliceUpdates[0].Payload, &payload))
+	require.NoError(t, json.Unmarshal(aliceUpdates[1].Payload, &payload))
 	assert.Equal(t, convID, payload["conversation_id"])
 	assert.Equal(t, "restore", payload["action"])
 
 	bobUpdates, err := s.UserUpdateStore().ListByUser(ctx, "bob", 0, 10)
 	require.NoError(t, err)
-	assert.Len(t, bobUpdates, 1, "bob should also have 1 UserUpdate (all members)")
-	assert.Equal(t, protocol.UpdateTypeConversation, bobUpdates[0].Type, "Type should be 'conversation'")
+	assert.Len(t, bobUpdates, 2, "bob should also have 2 UserUpdates (delete + restore)")
+	assert.Equal(t, protocol.UpdateTypeConversation, bobUpdates[1].Type, "Type should be 'conversation'")
 }
 
 // ---------------------------------------------------------------------------
@@ -194,9 +199,14 @@ func TestRestoreConversation_MessagesVisibleAfterRestore(t *testing.T) {
 	createTestConversation(t, s, convID, "alice", "bob")
 	seedTestMessages(t, s, convID, "alice", 5, 1)
 
-	// Delete cascade.
-	require.NoError(t, s.ConversationStore().Delete(ctx, convID))
-	require.NoError(t, s.MessageStore().DeleteByConversation(ctx, convID))
+	// Delete cascade via handler to ensure unified timestamp.
+	deleteHandler := NewDeleteConversationHandler(s, nil)
+	deleteClient := server.NewTestClient("alice")
+	deleteReq := newTestRequest("req-del", "delete_conversation", map[string]interface{}{
+		"conversation_id": convID,
+	})
+	_, deleteErr := deleteHandler.HandleRequest(ctx, deleteClient, deleteReq)
+	require.NoError(t, deleteErr)
 
 	// Verify messages are not visible.
 	msgs, err := s.MessageStore().ListByConversation(ctx, convID, 0, 100)
