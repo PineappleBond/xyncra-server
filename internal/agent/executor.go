@@ -102,7 +102,8 @@ func (e *AgentExecutor) getInterruptIDs(checkpointID string) []string {
 func (e *AgentExecutor) cleanupAfterResume(ctx context.Context, checkpointID string, logger Logger) {
 	if e.checkpointStore != nil {
 		if delErr := e.checkpointStore.Delete(ctx, checkpointID); delErr != nil {
-			logger.Error("agent resume: checkpoint cleanup failed",
+			// Non-fatal: TTL 24h safety net will cleanup (D-112).
+			logger.Info("agent resume: checkpoint cleanup failed (non-fatal, TTL will cleanup)",
 				"checkpoint_id", checkpointID, "error", delErr)
 		}
 	}
