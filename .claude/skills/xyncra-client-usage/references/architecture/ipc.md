@@ -90,6 +90,7 @@
 | `delete_message` | `{message_id: string}` | `void` | `delete-message` |
 | `mark_as_read` | `{conversation_id: string, message_id: uint32}` | `void` | `mark-as-read` |
 | `sync_updates` | `nil` | `{status: "ok"}` | `sync-updates` |
+| `agent_resume` | `{conversation_id: string, checkpoint_id: string, interrupt_id?: string, answer: string, agent_id: string}` | `{status: "queued"}` | `agent-resume` |
 
 **错误处理链**：
 1. 参数错误 -> `-32602` `invalid params: %v`
@@ -120,12 +121,75 @@
 | 命令 | IPC method | 超时 | 原因 |
 |------|-----------|------|------|
 | `sync-updates` | `sync_updates` | 30s | 避免与 daemon 同步状态竞争 SQLite 写入（D-036） |
+| `agent-resume` | `agent_resume` | 15s | HITL 恢复需要 daemon 内存中的 checkpoint/interrupt 数据（D-114） |
 
 **错误信息**：
 ```
 Error: daemon not running.
-Hint: Start with 'xyncra-client listen --user-id <user>'
+Hint: Start with 'xyncra-client listen --user-id <user> --device-id <device>'
 ```
+
+#### `agent_resume` 方法详情（D-085, D-114）
+
+由 `agent-resume` CLI 命令调用，用于恢复被 HITL 中断的 Agent 执行。
+
+**请求**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "<UUID>",
+  "method": "agent_resume",
+  "params": {
+    "conversation_id": "<conv-uuid>",
+    "checkpoint_id": "<checkpoint-uuid>",
+    "interrupt_id": "<interrupt-uuid>",
+    "answer": "用户回答内容",
+    "agent_id": "agent/hitl-bot"
+  }
+}
+```
+
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `conversation_id` | string | 是 | 会话 ID |
+| `checkpoint_id` | string | 是 | Agent 执行检查点 ID（来自 `agent_question` 事件） |
+| `interrupt_id` | string | 否 | 中断 ID（来自 `agent_question` 事件，未提供时 daemon 从内存查找） |
+| `answer` | string | 是 | 对 Agent 问题的回答 |
+| `agent_id` | string | 是 | Agent ID（如 `agent/hitl-bot`） |
+
+**成功响应**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "<UUID>",
+  "result": {
+    "status": "queued"
+  }
+}
+```
+
+`status: "queued"` 表示 resume 请求已入队，daemon 将通过 WebSocket 发送给服务器，Agent 将继续执行。
+
+**错误响应**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "<UUID>",
+  "error": {
+    "code": -32602,
+    "message": "invalid params: missing required field 'checkpoint_id'"
+  }
+}
+```
+
+**约束**：
+
+- checkpoint 有 24 小时 TTL，过期后返回错误
+- interrupt 存储在 daemon 内存中，daemon 重启后丢失
+- 此方法为 IPC-only（D-114），不支持 WebSocket fallback
 
 ### 本地 DB（不需要 IPC）
 
@@ -179,7 +243,7 @@ flowchart TD
 Error: Cannot send message.
   Cause 1: <ipc_error>
   Cause 2: <ws_error>
-Hint: Start the daemon first: xyncra-client listen --user-id <user>
+Hint: Start the daemon first: xyncra-client listen --user-id <user> --device-id <device>
 ```
 
 **错误分层**：

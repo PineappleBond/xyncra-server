@@ -105,6 +105,14 @@ type agentStatusPayload struct {
 	Timestamp      int64  `json:"timestamp"`
 }
 
+// agentTimeoutPayload is the JSON structure of an "agent_timeout" ephemeral update (D-087).
+type agentTimeoutPayload struct {
+	UserID         string `json:"user_id"`
+	ConversationID string `json:"conversation_id"`
+	Reason         string `json:"reason"`
+	Timestamp      int64  `json:"timestamp"`
+}
+
 // syncUpdatesResponse is the JSON structure returned by the sync_updates RPC.
 type syncUpdatesResponse struct {
 	Updates   []protocol.PackageDataUpdate `json:"updates"`
@@ -548,6 +556,13 @@ func (sm *syncManager) notifyHandler(ctx context.Context, update *protocol.Packa
 		if err := json.Unmarshal(update.Payload, &sp); err == nil {
 			if sh, ok := sm.handler.(AgentStatusHandler); ok {
 				_ = sh.OnAgentStatus(ctx, sp.UserID, sp.ConversationID, sp.Status)
+			}
+		}
+	case protocol.UpdateTypeAgentTimeout:
+		var tp agentTimeoutPayload
+		if err := json.Unmarshal(update.Payload, &tp); err == nil {
+			if th, ok := sm.handler.(AgentTimeoutHandler); ok {
+				_ = th.OnAgentTimeout(ctx, tp.UserID, tp.ConversationID, tp.Reason)
 			}
 		}
 	case protocol.UpdateTypeGap:

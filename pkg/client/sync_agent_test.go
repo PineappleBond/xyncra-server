@@ -37,15 +37,23 @@ type statusRecord struct {
 	status         string
 }
 
+// timeoutRecord holds the arguments passed to OnAgentTimeout.
+type timeoutRecord struct {
+	userID         string
+	conversationID string
+	reason         string
+}
+
 // agentMockHandler is a mock that implements UpdateHandler (via embedding
-// mockUpdateHandler), AgentQuestionHandler, AgentCheckpointHandler, and
-// AgentStatusHandler for testing agent ephemeral events.
+// mockUpdateHandler), AgentQuestionHandler, AgentCheckpointHandler,
+// AgentStatusHandler, and AgentTimeoutHandler for testing agent ephemeral events.
 type agentMockHandler struct {
 	mockUpdateHandler
 	mu          sync.Mutex
 	questions   []questionRecord
 	checkpoints []checkpointRecord
 	statuses    []statusRecord
+	timeouts    []timeoutRecord
 }
 
 // OnAgentQuestion records the HITL question event (implements AgentQuestionHandler).
@@ -82,6 +90,18 @@ func (h *agentMockHandler) OnAgentStatus(ctx context.Context, userID, conversati
 		userID:         userID,
 		conversationID: conversationID,
 		status:         status,
+	})
+	return nil
+}
+
+// OnAgentTimeout records the timeout event (implements AgentTimeoutHandler).
+func (h *agentMockHandler) OnAgentTimeout(ctx context.Context, userID, conversationID, reason string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.timeouts = append(h.timeouts, timeoutRecord{
+		userID:         userID,
+		conversationID: conversationID,
+		reason:         reason,
 	})
 	return nil
 }
@@ -176,6 +196,33 @@ func TestAgentStatusPayload_Unmarshal(t *testing.T) {
 	}
 	if p.Timestamp != 1700000002 {
 		t.Errorf("Timestamp: got %d, want %d", p.Timestamp, 1700000002)
+	}
+}
+
+func TestAgentTimeoutPayload_Unmarshal(t *testing.T) {
+	raw := `{
+		"user_id": "agent/bot",
+		"conversation_id": "conv-timeout",
+		"reason": "llm_request_timeout",
+		"timestamp": 1700000003
+	}`
+
+	var p agentTimeoutPayload
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		t.Fatalf("unmarshal agentTimeoutPayload: %v", err)
+	}
+
+	if p.UserID != "agent/bot" {
+		t.Errorf("UserID: got %q, want %q", p.UserID, "agent/bot")
+	}
+	if p.ConversationID != "conv-timeout" {
+		t.Errorf("ConversationID: got %q, want %q", p.ConversationID, "conv-timeout")
+	}
+	if p.Reason != "llm_request_timeout" {
+		t.Errorf("Reason: got %q, want %q", p.Reason, "llm_request_timeout")
+	}
+	if p.Timestamp != 1700000003 {
+		t.Errorf("Timestamp: got %d, want %d", p.Timestamp, 1700000003)
 	}
 }
 
@@ -330,6 +377,44 @@ func TestNotifyHandler_AgentStatus(t *testing.T) {
 	}
 }
 
+func TestNotifyHandler_AgentTimeout(t *testing.T) {
+	handler := &agentMockHandler{}
+	sm := newAgentTestSyncManager(t, handler)
+	ctx := context.Background()
+
+	payload := mustMarshal(t, agentTimeoutPayload{
+		UserID:         "agent/bot",
+		ConversationID: "conv-to",
+		Reason:         "llm_request_timeout",
+		Timestamp:      1700000003,
+	})
+
+	update := &protocol.PackageDataUpdate{
+		Seq:     0,
+		Type:    protocol.UpdateTypeAgentTimeout,
+		Payload: payload,
+	}
+
+	sm.notifyHandler(ctx, update)
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+
+	if len(handler.timeouts) != 1 {
+		t.Fatalf("expected 1 timeout event, got %d", len(handler.timeouts))
+	}
+	to := handler.timeouts[0]
+	if to.userID != "agent/bot" {
+		t.Errorf("userID: got %q, want %q", to.userID, "agent/bot")
+	}
+	if to.conversationID != "conv-to" {
+		t.Errorf("conversationID: got %q, want %q", to.conversationID, "conv-to")
+	}
+	if to.reason != "llm_request_timeout" {
+		t.Errorf("reason: got %q, want %q", to.reason, "llm_request_timeout")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Handler not implementing optional interface: events should be silently dropped
 // ---------------------------------------------------------------------------
@@ -341,7 +426,7 @@ func TestNotifyHandler_AgentEvents_DroppedWhenHandlerNotImplemented(t *testing.T
 	sm := newAgentTestSyncManager(t, handler)
 	ctx := context.Background()
 
-	// Send all three agent event types.
+	// Send all four agent event types.
 	for _, tc := range []struct {
 		name    string
 		typ     string
@@ -367,6 +452,13 @@ func TestNotifyHandler_AgentEvents_DroppedWhenHandlerNotImplemented(t *testing.T
 			typ:  protocol.UpdateTypeAgentStatus,
 			payload: agentStatusPayload{
 				UserID: "agent/bot", ConversationID: "conv-1", Status: "idle",
+			},
+		},
+		{
+			name: "agent_timeout",
+			typ:  protocol.UpdateTypeAgentTimeout,
+			payload: agentTimeoutPayload{
+				UserID: "agent/bot", ConversationID: "conv-1", Reason: "llm_request_timeout",
 			},
 		},
 	} {

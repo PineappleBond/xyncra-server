@@ -105,9 +105,9 @@ failed to open database: ...
 
 ### WebSocket 端点
 
-客户端连接：`ws://localhost:8080/ws?user_id=<ID>`
+客户端连接：`ws://localhost:8080/ws?user_id=<ID>&device_id=<DEVICE>`
 
-> 服务器不做认证（**D-002**），通过 URL 查询参数 `user_id` 识别用户。生产环境应在反向代理层注入已认证的用户身份。
+> 服务器不做认证（**D-002**），通过 URL 查询参数 `user_id` 和 `device_id` 识别用户和设备。生产环境应在反向代理层注入已认证的用户身份。
 
 ## 构建
 
@@ -124,16 +124,16 @@ go build -o xyncra-client ./cmd/xyncra-client
 `listen` 命令启动守护进程，维护 WebSocket 长连接并提供 IPC 服务。**所有写操作命令都依赖守护进程运行**（直接查询命令除外）。
 
 ```bash
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 ```
 
 预期 stderr 输出：
 
 ```
 [xyncra] Starting listener daemon...
-[xyncra] Device: abc12345
-[xyncra] Connecting to ws://localhost:8080/ws?user_id=alice ...
-[xyncra] IPC server listening at /Users/alice/.xyncra/alice/abc12345/xyncra.sock
+[xyncra] Device: dev1
+[xyncra] Connecting to ws://localhost:8080/ws?user_id=alice&device_id=dev1 ...
+[xyncra] IPC server listening at /Users/alice/.xyncra/alice/dev1/xyncra.sock
 [xyncra] Listening for updates... (Ctrl+C to stop)
 ```
 
@@ -150,7 +150,7 @@ go build -o xyncra-client ./cmd/xyncra-client
 
 ```bash
 # find-or-create 幂等模型（D-011）：重复执行返回同一会话，不报错
-./xyncra-client create-conversation --user-id alice --peer-id bob
+./xyncra-client create-conversation --user-id alice --device-id dev1 --peer-id bob
 ```
 
 预期输出：
@@ -169,7 +169,7 @@ Conversation created.
 ### 2. 发送消息
 
 ```bash
-./xyncra-client send --user-id alice -c <conversation_id> -m "Hello, Bob!"
+./xyncra-client send --user-id alice --device-id dev1 -c <conversation_id> -m "Hello, Bob!"
 ```
 
 预期输出：
@@ -193,7 +193,7 @@ Message sent.
 
 ```bash
 # 列出所有会话（分页：默认 limit=20）
-./xyncra-client list-conversations --user-id alice
+./xyncra-client list-conversations --user-id alice --device-id dev1
 ```
 
 预期输出：
@@ -206,7 +206,7 @@ ID                                    Peer                  Title               
 
 ```bash
 # 查看会话详情 + 未读计数
-./xyncra-client get-conversation --user-id alice -c <conversation_id>
+./xyncra-client get-conversation --user-id alice --device-id dev1 -c <conversation_id>
 ```
 
 预期输出：
@@ -226,7 +226,7 @@ Conversation Details
 
 ```bash
 # 获取消息历史（ASC 顺序，D-035）
-./xyncra-client get-messages --user-id alice -c <conversation_id>
+./xyncra-client get-messages --user-id alice --device-id dev1 -c <conversation_id>
 ```
 
 预期输出：
@@ -237,7 +237,7 @@ Conversation Details
 
 ```bash
 # 搜索消息（DESC 顺序，D-035）
-./xyncra-client search-messages --user-id alice -c <conversation_id> -q "Hello"
+./xyncra-client search-messages --user-id alice --device-id dev1 -c <conversation_id> -q "Hello"
 ```
 
 预期输出：
@@ -257,7 +257,7 @@ Conversation Details
 | 环境变量 | 对应 Flag | 默认值 | 说明 |
 |----------|-----------|--------|------|
 | `XYNCRA_USER_ID` | `--user-id, -u` | (必填) | 用户 ID |
-| `XYNCRA_DEVICE_ID` | `--device-id` | hostname SHA256[:8] | 设备 ID（**D-033**） |
+| `XYNCRA_DEVICE_ID` | `--device-id` | (必填) | 设备 ID（**D-033**） |
 | `XYNCRA_SERVER` | `--server, -s` | `ws://localhost:8080/ws` | 服务器 URL |
 | `XYNCRA_DB_PATH` | `--db-path` | `~/.xyncra/{uid}/{did}/xyncra.db` | SQLite 数据库路径 |
 | `XYNCRA_LOG_DIR` | `--log-dir` | `~/.xyncra/{uid}/{did}/logs` | 日志目录 |
@@ -273,21 +273,24 @@ flag > env var > default
 
 ```bash
 # 以下三种方式等效
-./xyncra-client listen --user-id alice
-XYNCRA_USER_ID=alice ./xyncra-client listen
-# 或在 shell profile 中 export XYNCRA_USER_ID=alice
+./xyncra-client listen --user-id alice --device-id dev1
+XYNCRA_USER_ID=alice XYNCRA_DEVICE_ID=dev1 ./xyncra-client listen
+# 或在 shell profile 中 export XYNCRA_USER_ID=alice XYNCRA_DEVICE_ID=dev1
 ```
 
-### device-id 自动生成（D-033）
+### device-id 说明（D-033）
 
-如果不指定 `--device-id`，客户端使用主机名的 SHA256 哈希前 8 位 hex 作为设备 ID。同一台机器总是生成相同的 device-id。
+`--device-id` 是必填参数。客户端需要明确的设备标识来建立正确的 WebSocket 连接，
+使 agent executor 能够发现客户端注册的函数。
+
+可通过 `--device-id` flag 或 `XYNCRA_DEVICE_ID` 环境变量设置。
 
 ```bash
-# 查看自动生成的 device-id
-./xyncra-client listen --user-id alice 2>&1 | grep "Device:"
+# 示例：指定 device-id
+./xyncra-client listen --user-id alice --device-id dev1
 ```
 
-> **D-033**：使用哈希而非真实主机名，兼顾匿名化和确定性。8 位 hex = 32 bit，对于单机设备标识绰绰有余。
+> **D-033**：设备标识用于区分同一用户的不同客户端实例。
 
 ## 目录结构
 
@@ -321,12 +324,12 @@ XYNCRA_USER_ID=alice ./xyncra-client listen
 
 ```
 1. 启动服务器        ./xyncra-server
-2. 启动守护进程      ./xyncra-client listen --user-id alice   （终端 1）
-3. 创建会话          ./xyncra-client create-conversation --user-id alice --peer-id bob
-4. 发送消息          ./xyncra-client send --user-id alice -c <id> -m "Hello!"
-5. 查询消息          ./xyncra-client get-messages --user-id alice -c <id>
-6. 手动触发同步      ./xyncra-client sync-updates --user-id alice
-7. 停止守护进程      ./xyncra-client kill --user-id alice
+2. 启动守护进程      ./xyncra-client listen --user-id alice --device-id dev1   （终端 1）
+3. 创建会话          ./xyncra-client create-conversation --user-id alice --device-id dev1 --peer-id bob
+4. 发送消息          ./xyncra-client send --user-id alice --device-id dev1 -c <id> -m "Hello!"
+5. 查询消息          ./xyncra-client get-messages --user-id alice --device-id dev1 -c <id>
+6. 手动触发同步      ./xyncra-client sync-updates --user-id alice --device-id dev1
+7. 停止守护进程      ./xyncra-client kill --user-id alice --device-id dev1
 ```
 
 > **注意**：`sync-updates` 是 IPC-only 命令（**D-036**），必须依赖守护进程运行，无 WebSocket fallback。

@@ -31,7 +31,7 @@ xyncra-client delete-message [flags]
 Delete a message by its UUID:
 
 ```bash
-xyncra-client delete-message --user-id alice --message-id 550e8400-e29b-41d4-a716-446655440000
+xyncra-client delete-message --user-id alice --device-id dev1 --message-id 550e8400-e29b-41d4-a716-446655440000
 ```
 
 ### Output Format
@@ -48,7 +48,7 @@ Message deleted.
 Error: Cannot delete message.
   Cause 1: <ipc_error>
   Cause 2: <ws_error>
-Hint: Start the daemon first: xyncra-client listen --user-id alice
+Hint: Start the daemon first: xyncra-client listen --user-id alice --device-id dev1
 ```
 
 ### Notes
@@ -85,13 +85,13 @@ xyncra-client mark-as-read [flags]
 Mark all messages as read in a conversation:
 
 ```bash
-xyncra-client mark-as-read --user-id alice -c <conv-uuid>
+xyncra-client mark-as-read --user-id alice --device-id dev1 -c <conv-uuid>
 ```
 
 Mark up to a specific message sequence number:
 
 ```bash
-xyncra-client mark-as-read --user-id alice -c <conv-uuid> --message-id 42
+xyncra-client mark-as-read --user-id alice --device-id dev1 -c <conv-uuid> --message-id 42
 ```
 
 ### Output Format
@@ -114,7 +114,7 @@ Marked as read up to message #100.
 Error: Cannot mark as read.
   Cause 1: <ipc_error>
   Cause 2: <ws_error>
-Hint: Start the daemon first: xyncra-client listen --user-id alice
+Hint: Start the daemon first: xyncra-client listen --user-id alice --device-id dev1
 ```
 
 ### Notes
@@ -152,13 +152,13 @@ xyncra-client get-messages [flags]
 Get recent messages in a conversation:
 
 ```bash
-xyncra-client get-messages --user-id alice -c <conv-uuid>
+xyncra-client get-messages --user-id alice --device-id dev1 -c <conv-uuid>
 ```
 
 Get messages after a specific sequence number:
 
 ```bash
-xyncra-client get-messages --user-id alice -c <conv-uuid> --after-message-id 20 --limit 10
+xyncra-client get-messages --user-id alice --device-id dev1 -c <conv-uuid> --after-message-id 20 --limit 10
 ```
 
 ### Output Format (stdout)
@@ -213,13 +213,13 @@ xyncra-client search-messages [flags]
 Search for messages containing a keyword:
 
 ```bash
-xyncra-client search-messages --user-id alice -c <conv-uuid> -q "meeting"
+xyncra-client search-messages --user-id alice --device-id dev1 -c <conv-uuid> -q "meeting"
 ```
 
 Paginate search results:
 
 ```bash
-xyncra-client search-messages --user-id alice -c <conv-uuid> -q "meeting" --after-message-id 50 --limit 20
+xyncra-client search-messages --user-id alice --device-id dev1 -c <conv-uuid> -q "meeting" --after-message-id 50 --limit 20
 ```
 
 ### Output Format (stdout)

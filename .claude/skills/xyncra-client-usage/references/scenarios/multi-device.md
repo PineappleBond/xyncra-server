@@ -25,7 +25,7 @@ This provides:
 
 ```bash
 # On a machine with hostname "macbook-pro.local"
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 # Device ID: sha256("macbook-pro.local")[:8] = "a1b2c3d4"
 
 # Verify the device ID in the daemon output
@@ -50,7 +50,7 @@ Alice uses her MacBook and Desktop PC with the same user ID. Each machine automa
 
 ```bash
 # hostname: macbook-pro.local
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 # [xyncra] Device: a1b2c3d4
 # [xyncra] IPC server listening at /Users/alice/.xyncra/alice/a1b2c3d4/xyncra.sock
 ```
@@ -61,7 +61,7 @@ Data directory: `~/.xyncra/alice/a1b2c3d4/`
 
 ```bash
 # hostname: desktop-pc.local
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 # [xyncra] Device: e5f6a7b8
 # [xyncra] IPC server listening at /Users/alice/.xyncra/alice/e5f6a7b8/xyncra.sock
 ```

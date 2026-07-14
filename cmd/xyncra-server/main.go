@@ -265,6 +265,12 @@ func main() {
 	contextManager := agent.NewDBContextManager(dataStore.MessageStore())
 
 	llmMetrics := agent.NewLogMetrics(srv.Logger())
+
+	// Checkpoint store for HITL support (D-083).
+	// Reuses the same dedicated redis.Client as idempotency.
+	// Created early so it can be passed to the executor for cleanup (D-112).
+	checkpointStore := agent.NewRedisCheckPointStore(redisIdempotencyClient, "", 0) // defaults: prefix="agent:checkpoint:", ttl=24h
+
 	agentExecutor := agent.NewAgentExecutor(
 		agentRegistry,
 		contextManager,
@@ -275,6 +281,7 @@ func main() {
 		10, // maxConcurrent: limit parallel LLM calls
 		srv.Logger(),
 		agent.WithLLMMetrics(llmMetrics),
+		agent.WithCheckPointStore(checkpointStore), // D-112: checkpoint cleanup after resume
 	)
 
 	// Idempotency store for agent task deduplication (D-Phase5-2).
@@ -285,9 +292,8 @@ func main() {
 	// Reuses the same dedicated redis.Client as idempotency (D-074).
 	conversationLock := agent.NewRedisConversationLock(redisIdempotencyClient)
 
-	// Checkpoint store for HITL support (D-083).
-	// Reuses the same dedicated redis.Client as idempotency.
-	checkpointStore := agent.NewRedisCheckPointStore(redisIdempotencyClient, "", 0) // defaults: prefix="agent:checkpoint:", ttl=24h
+	// Wire checkpoint store into agent builder (D-083).
+	// The store itself was created earlier alongside the executor (D-112).
 	agentBuilder.SetCheckPointStore(checkpointStore)
 
 	// MCP Bridge for external tool servers (D-086).

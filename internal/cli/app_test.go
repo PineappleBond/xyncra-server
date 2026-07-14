@@ -72,7 +72,7 @@ func TestNewCLIContext_MissingUserID(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XYNCRA_USER_ID", "")
-	t.Setenv("XYNCRA_DEVICE_ID", "")
+	t.Setenv("XYNCRA_DEVICE_ID", "testdevice")
 	t.Setenv("XYNCRA_SERVER", "")
 
 	cmd := newTestCommand()
@@ -83,6 +83,23 @@ func TestNewCLIContext_MissingUserID(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "user-id is required") {
 		t.Errorf("error = %q, want it to contain 'user-id is required'", err.Error())
+	}
+}
+
+func TestNewCLIContext_MissingDeviceID(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XYNCRA_USER_ID", "testuser")
+	t.Setenv("XYNCRA_DEVICE_ID", "")
+	t.Setenv("XYNCRA_SERVER", "")
+
+	cmd := newTestCommand()
+	_, err := NewCLIContext(cmd)
+	if err == nil {
+		t.Fatal("NewCLIContext() should fail when device-id is missing")
+	}
+	if !strings.Contains(err.Error(), "device-id is required") {
+		t.Errorf("error = %q, want it to contain 'device-id is required'", err.Error())
 	}
 }
 
@@ -178,7 +195,7 @@ func TestNewCLIContext_FlagOverridesEnv(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XYNCRA_USER_ID", "envuser")
-	t.Setenv("XYNCRA_DEVICE_ID", "")
+	t.Setenv("XYNCRA_DEVICE_ID", "envdevice")
 	t.Setenv("XYNCRA_SERVER", "")
 	t.Setenv("XYNCRA_DB_PATH", "")
 	t.Setenv("XYNCRA_LOG_DIR", "")
@@ -230,6 +247,7 @@ func TestNewRootCommand(t *testing.T) {
 		"sync-updates",
 		"logs",
 		"kill",
+		"agent-resume",
 	}
 	for _, name := range expectedCmds {
 		if !names[name] {
@@ -240,12 +258,12 @@ func TestNewRootCommand(t *testing.T) {
 
 func TestNewRootCommand_TotalSubcommandCount(t *testing.T) {
 	cmd := NewRootCommand()
-	// 17 subcommands: listen, send, create-conversation, delete-conversation,
+	// 19 subcommands: listen, send, create-conversation, delete-conversation,
 	// restore-conversation, list-conversations, get-conversation, delete-message,
 	// mark-as-read, get-messages, search-messages, draft, sync-updates,
-	// set-typing, stream-text, logs, kill.
-	if got := len(cmd.Commands()); got != 17 {
-		t.Errorf("expected 17 subcommands, got %d", got)
+	// set-typing, stream-text, logs, kill, register-functions, agent-resume.
+	if got := len(cmd.Commands()); got != 19 {
+		t.Errorf("expected 19 subcommands, got %d", got)
 	}
 }
 

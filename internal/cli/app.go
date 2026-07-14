@@ -38,7 +38,10 @@ func NewCLIContext(cmd *cobra.Command) (*CLIContext, error) {
 		return nil, fmt.Errorf("context: user-id is required (set via --user-id flag or XYNCRA_USER_ID env var)")
 	}
 
-	deviceID := resolveStringFlag(cmd, "device-id", "XYNCRA_DEVICE_ID", defaultDeviceID())
+	deviceID := resolveStringFlag(cmd, "device-id", "XYNCRA_DEVICE_ID", "")
+	if deviceID == "" {
+		return nil, fmt.Errorf("context: device-id is required (set via --device-id flag or XYNCRA_DEVICE_ID env var)")
+	}
 	serverURL := resolveStringFlag(cmd, "server", "XYNCRA_SERVER", "ws://localhost:8080/ws")
 
 	userDir, err := ensureUserDir(userID, deviceID)
@@ -69,7 +72,7 @@ func NewRootCommand() *cobra.Command {
 
 	// Global persistent flags (D-034: flag > env var > default).
 	cmd.PersistentFlags().StringP("user-id", "u", "", "User ID (env: XYNCRA_USER_ID)")
-	cmd.PersistentFlags().String("device-id", defaultDeviceID(), "Device ID (env: XYNCRA_DEVICE_ID)")
+	cmd.PersistentFlags().String("device-id", "", "Device ID (required, env: XYNCRA_DEVICE_ID)")
 	cmd.PersistentFlags().StringP("server", "s", "ws://localhost:8080/ws", "Server URL (env: XYNCRA_SERVER)")
 	cmd.PersistentFlags().String("db-path", "", "Database path (default: $USER_DIR/xyncra.db) (env: XYNCRA_DB_PATH)")
 	cmd.PersistentFlags().String("log-dir", "", "Log directory (default: $USER_DIR/logs/) (env: XYNCRA_LOG_DIR)")
@@ -92,6 +95,8 @@ func NewRootCommand() *cobra.Command {
 	cmd.AddCommand(newStreamTextCommand())
 	cmd.AddCommand(newLogsCommand())
 	cmd.AddCommand(newKillCommand())
+	cmd.AddCommand(newRegisterFunctionsCommand())
+	cmd.AddCommand(newAgentResumeCommand())
 
 	return cmd
 }

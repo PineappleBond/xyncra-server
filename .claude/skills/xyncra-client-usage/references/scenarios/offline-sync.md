@@ -35,7 +35,7 @@ All operations share the same seq space. The `Type` field determines how the cli
 The daemon is running and connected to the server.
 
 ```bash
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 # [xyncra] Starting listener daemon...
 # [xyncra] Device: a1b2c3d4
 # [xyncra] Connecting to ws://localhost:8080/ws?user_id=alice ...
@@ -67,7 +67,7 @@ When alice marks a message as read on another device:
 Query commands read from the local database (D-035) and immediately reflect the latest synced state:
 
 ```bash
-./xyncra-client get-messages --user-id alice -c 550e8400
+./xyncra-client get-messages --user-id alice --device-id dev1 -c 550e8400
 ```
 
 ```
@@ -113,7 +113,7 @@ t=0:11   Normal operation resumed
 After reconnection, verify data is up to date:
 
 ```bash
-./xyncra-client sync-updates --user-id alice
+./xyncra-client sync-updates --user-id alice --device-id dev1
 ```
 
 ```
@@ -142,12 +142,12 @@ For extended offline recovery:
 
 1. Start the daemon and let it connect:
    ```bash
-   ./xyncra-client listen --user-id alice
+   ./xyncra-client listen --user-id alice --device-id dev1
    ```
 
 2. Trigger a FullSync:
    ```bash
-   ./xyncra-client sync-updates --user-id alice
+   ./xyncra-client sync-updates --user-id alice --device-id dev1
    ```
    ```
    Sync complete.
@@ -205,7 +205,7 @@ If no updates occurred during the restart, FullSync processes 0 updates and the 
 If you want to explicitly force a resync:
 
 ```bash
-./xyncra-client sync-updates --user-id alice
+./xyncra-client sync-updates --user-id alice --device-id dev1
 ```
 
 ```
@@ -226,7 +226,7 @@ The `sync-updates` command triggers the daemon's `FullSync` flow via IPC.
 ### Successful Sync
 
 ```bash
-./xyncra-client sync-updates --user-id alice
+./xyncra-client sync-updates --user-id alice --device-id dev1
 ```
 
 ```
@@ -236,12 +236,12 @@ Sync complete.
 ### Daemon Not Running
 
 ```bash
-./xyncra-client sync-updates --user-id alice
+./xyncra-client sync-updates --user-id alice --device-id dev1
 ```
 
 ```
 Error: daemon not running.
-Hint: Start with 'xyncra-client listen --user-id alice'
+Hint: Start with 'xyncra-client listen --user-id alice --device-id dev1'
 ```
 
 Exit code: `2` (D-042, prerequisite not met)

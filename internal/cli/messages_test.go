@@ -509,6 +509,8 @@ func TestGetMessages_LimitValidation(t *testing.T) {
 			cmd.Flags().Lookup("db-path").Changed = true
 			_ = cmd.Flags().Set("user-id", "testuser")
 			cmd.Flags().Lookup("user-id").Changed = true
+			_ = cmd.Flags().Set("device-id", "testdevice")
+			cmd.Flags().Lookup("device-id").Changed = true
 			cmd.SetContext(context.Background())
 
 			err := cmd.RunE(cmd, nil)
@@ -548,6 +550,8 @@ func TestGetMessages_LimitPositive(t *testing.T) {
 	cmd.Flags().Lookup("db-path").Changed = true
 	_ = cmd.Flags().Set("user-id", "testuser")
 	cmd.Flags().Lookup("user-id").Changed = true
+	_ = cmd.Flags().Set("device-id", "testdevice")
+	cmd.Flags().Lookup("device-id").Changed = true
 	cmd.SetContext(context.Background())
 
 	err := cmd.RunE(cmd, nil)

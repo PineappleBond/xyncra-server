@@ -6,11 +6,11 @@ Use this skill when working with the xyncra-client CLI tool.
 
 1. **启动 Redis**：`redis-server`（默认 localhost:6379）
 2. **启动服务器**：`./xyncra-server`（默认 :8080）
-3. **启动客户端 daemon**：`./xyncra-client listen --user-id <user>`
+3. **启动客户端 daemon**：`./xyncra-client listen --user-id <user> --device-id <device>`
 
 ## Decision Tree (read first)
 
-1. Start the daemon? → `xyncra-client listen --user-id <user>`
+1. Start the daemon? → `xyncra-client listen --user-id <user> --device-id <device>`
 2. Send / modify data? → send, create-conversation, delete-conversation,
    restore-conversation, delete-message, mark-as-read (IPC+WS fallback)
 3. Query local data? → list-conversations / get-conversation / get-messages /
@@ -18,8 +18,9 @@ Use this skill when working with the xyncra-client CLI tool.
 4. Manual sync? → sync-updates (requires daemon, IPC-only)
 5. Drafts / logs? → draft save/get/delete, logs tail/search/stats/export/cleanup (local SQLite)
 6. Stop daemon? → `xyncra-client kill [--force]`
-7. Writing tests or direct API client? → **Server Protocol** section below (WebSocket JSON-RPC, sync_updates HTTP, Agent reply flow)
-8. More details? → Check references/ links below
+7. Resume HITL-interrupted agent? → `xyncra-client agent-resume` (IPC-only, D-114)
+8. Writing tests or direct API client? → **Server Protocol** section below (WebSocket JSON-RPC, sync_updates HTTP, Agent reply flow)
+9. More details? → Check references/ links below
 
 ## Command Table
 
@@ -37,6 +38,7 @@ Use this skill when working with the xyncra-client CLI tool.
 | `get-messages` | Local DB | List messages from SQLite |
 | `search-messages` | Local DB | Search messages in SQLite |
 | `sync-updates` | IPC-only | Trigger full sync via daemon (no fallback) |
+| `agent-resume` | IPC-only | Resume HITL-interrupted agent (D-036, D-114) |
 | `draft save/get/delete` | Local DB | Manage message drafts |
 | `logs tail/search/stats/export/cleanup` | Local DB | View and manage logs |
 | `kill` | OS process | Terminate running daemon |
@@ -46,12 +48,16 @@ Use this skill when working with the xyncra-client CLI tool.
 | Flag | Short | Env Variable | Default | Description |
 |------|-------|--------------|---------|-------------|
 | `--user-id` | `-u` | `XYNCRA_USER_ID` | `""` | User ID (required) |
-| `--device-id` | | `XYNCRA_DEVICE_ID` | hostname SHA256[:8] | Device ID |
+| `--device-id` | | `XYNCRA_DEVICE_ID` | `""` | Device ID (required) |
 | `--server` | `-s` | `XYNCRA_SERVER` | `ws://localhost:8080/ws` | Server URL |
 | `--db-path` | | `XYNCRA_DB_PATH` | `~/.xyncra/{u}/{d}/xyncra.db` | DB path |
 | `--log-dir` | | `XYNCRA_LOG_DIR` | `~/.xyncra/{u}/{d}/logs/` | Log dir |
 
 Priority: flag > env var > default (D-034). Special: `XYNCRA_DEBUG=1` enables debug logs.
+
+**Both `--user-id` and `--device-id` are required.** The server uses both to route
+WebSocket connections to the correct device. Without `--device-id`, the agent
+executor cannot discover client-registered functions.
 
 ## Directory Structure
 
@@ -85,6 +91,7 @@ D-032: IPC priority, WS fallback | D-033: device-id = hostname SHA256[:8]
 D-034: XYNCRA_ env prefix | D-035: Query commands read local SQLite
 D-036: sync-updates IPC-only | D-037: --peer-id not --user-id | D-038: string UUID vs uint32
 D-039: kill SIGTERM/SIGKILL + cleanup | D-040: logs retain 7d | D-041: tabwriter | D-042: exit codes
+D-085: HITL event broadcasting | D-087: AgentTimeoutHandler | D-114: agent-resume IPC-only
 
 ## Server Protocol (for test writers and direct API clients)
 
@@ -136,6 +143,7 @@ type Package struct {
 | `restore_conversation` | `conversation_id` | `{conversation, restored_message_count}` |
 | `delete_message` | `message_id` | `{status}` (sender only) |
 | `reload_agents` | `{}` | `{count}` (agent system) |
+| `agent_resume` | `conversation_id`, `checkpoint_id`, `interrupt_id?`, `answer`, `agent_id` | `{status: "queued"}` (HITL, D-114) |
 
 ### Push Update Types
 
@@ -172,7 +180,7 @@ type Package struct {
 ### Getting Agent Replies: Online vs Offline
 
 **Online (WebSocket connected):**
-1. Connect: `ws://{addr}/ws?user_id={userID}`
+1. Connect: `ws://{addr}/ws?user_id={userID}&device_id={deviceID}`
 2. Send `send_message` to agent conversation (agent user ID: `agent/{agentID}`, D-054)
 3. Receive ephemeral push updates (type=2): `typing` → `agent_status` → `streaming` (multiple) → `streaming(is_done=true)` → `typing(stop)`
 4. Receive persisted `message` push update (type=2, seq > 0) with agent's reply
@@ -189,7 +197,7 @@ type Package struct {
 
 ```go
 // 1. Connect WebSocket
-wsURL := fmt.Sprintf("ws://%s/ws?user_id=%s", addr, userID)
+wsURL := fmt.Sprintf("ws://%s/ws?user_id=%s&device_id=%s", addr, userID, deviceID)
 conn, _, _ := websocket.DefaultDialer.Dial(wsURL, nil)
 defer conn.Close()
 
@@ -254,6 +262,7 @@ resp := readResponse(t, aliceConn2, 5*time.Second)
   - [listen + kill](references/commands/listen.md) — Daemon lifecycle
   - [send](references/commands/send.md) | [conversations](references/commands/conversations.md) (5 cmds)
   - [messages](references/commands/messages.md) (4 cmds) | [sync](references/commands/sync.md) (IPC-only)
+  - [agent-resume](references/commands/agent-resume.md) (IPC-only, HITL)
   - [draft](references/commands/draft.md) (3 cmds) | [logs](references/commands/logs.md) (5 cmds)
 - [Architecture](references/architecture/)
   - [Overview](references/architecture/overview.md) | [Database](references/architecture/database.md)

@@ -3,6 +3,7 @@ package cli
 import (
 	"crypto/sha256"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 )
@@ -54,7 +55,18 @@ func (c *CLIContext) LogDirDefault() string {
 	return filepath.Join(c.UserDir, "logs") + string(filepath.Separator)
 }
 
-// ServerURLWithUser returns the server URL with user_id query parameter appended.
+// ServerURLWithUser returns the server URL with user_id and device_id query
+// parameters appended. Both are required for the server to route connections
+// to the correct device (D-033).
 func (c *CLIContext) ServerURLWithUser() string {
-	return c.ServerURL + "?user_id=" + c.UserID
+	u, err := url.Parse(c.ServerURL)
+	if err != nil {
+		// Fallback: manual concatenation (should not happen with valid URLs).
+		return c.ServerURL + "?user_id=" + url.QueryEscape(c.UserID) + "&device_id=" + url.QueryEscape(c.DeviceID)
+	}
+	q := u.Query()
+	q.Set("user_id", c.UserID)
+	q.Set("device_id", c.DeviceID)
+	u.RawQuery = q.Encode()
+	return u.String()
 }

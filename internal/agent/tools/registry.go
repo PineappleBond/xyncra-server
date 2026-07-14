@@ -116,4 +116,7 @@ func init() {
 	DefaultRegistry.Register("retrieve_tool_result", func(ctx context.Context, _ map[string]any) (tool.BaseTool, error) {
 		return NewRetrieveTool(DefaultToolResultStore)
 	})
+	DefaultRegistry.Register("ask_user", func(ctx context.Context, _ map[string]any) (tool.BaseTool, error) {
+		return NewAskUserTool()
+	})
 }

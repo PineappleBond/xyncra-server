@@ -27,7 +27,7 @@ This document covers exit codes, common error patterns, and how to handle errors
 Error: Cannot send message.
   Cause 1: dial unix /Users/alice/.xyncra/alice/a1b2c3d4/xyncra.sock: connect: connection refused
   Cause 2: dial tcp 127.0.0.1:8080: connect: connection refused
-Hint: Start the daemon first: xyncra-client listen --user-id alice
+Hint: Start the daemon first: xyncra-client listen --user-id alice --device-id dev1
 ```
 
 **Exit Code**: `1`
@@ -40,13 +40,13 @@ Hint: Start the daemon first: xyncra-client listen --user-id alice
 
 ```bash
 # Step 1: Start the daemon (fixes Cause 1)
-./xyncra-client listen --user-id alice &
+./xyncra-client listen --user-id alice --device-id dev1 &
 
 # Step 2: If you also need server connectivity, start the server (fixes Cause 2)
 ./xyncra-server &
 
 # Step 3: Retry the command
-./xyncra-client send --user-id alice -c 550e8400 -m "Hello"
+./xyncra-client send --user-id alice --device-id dev1 -c 550e8400 -m "Hello"
 ```
 
 > The dual-mode failure report always shows both causes and a hint. The format is (D-032):
@@ -80,24 +80,24 @@ Option A -- Use the existing daemon:
 
 ```bash
 # The daemon is already running, just send commands through it
-./xyncra-client send --user-id alice -c 550e8400 -m "Hello"
+./xyncra-client send --user-id alice --device-id dev1 -c 550e8400 -m "Hello"
 ```
 
 Option B -- Stop the existing daemon and restart:
 
 ```bash
 # Graceful stop
-./xyncra-client kill --user-id alice
+./xyncra-client kill --user-id alice --device-id dev1
 
 # Restart
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 ```
 
 Option C -- Force kill (if daemon is unresponsive):
 
 ```bash
-./xyncra-client kill --user-id alice --force
-./xyncra-client listen --user-id alice
+./xyncra-client kill --user-id alice --device-id dev1 --force
+./xyncra-client listen --user-id alice --device-id dev1
 ```
 
 ### Stale Lock Detection
@@ -106,7 +106,7 @@ If the process from the lock file is no longer alive, the daemon detects the sta
 
 ```bash
 # Process 12345 has already exited, but lock file remains
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 # [xyncra] Stale lock detected (PID: 12345, process not running). Cleaning up.
 # [xyncra] Starting listener daemon...
 ```
@@ -121,7 +121,7 @@ If the process from the lock file is no longer alive, the daemon detects the sta
 
 ```
 Error: daemon not running.
-Hint: Start with 'xyncra-client listen --user-id alice'
+Hint: Start with 'xyncra-client listen --user-id alice --device-id dev1'
 ```
 
 **Exit Code**: `2`
@@ -134,11 +134,11 @@ Hint: Start with 'xyncra-client listen --user-id alice'
 
 ```bash
 # Start the daemon first
-./xyncra-client listen --user-id alice &
+./xyncra-client listen --user-id alice --device-id dev1 &
 
 # Wait for it to connect, then sync
 sleep 2
-./xyncra-client sync-updates --user-id alice
+./xyncra-client sync-updates --user-id alice --device-id dev1
 ```
 
 > Unlike other commands (send, create-conversation, etc.), `sync-updates` does NOT fall back to a standalone WebSocket connection. This is intentional (D-036) to avoid state conflicts with the daemon's sync manager.
@@ -162,7 +162,7 @@ Error: user-id is required
 Option A -- Provide the flag:
 
 ```bash
-./xyncra-client send --user-id alice -c 550e8400 -m "Hello"
+./xyncra-client send --user-id alice --device-id dev1 -c 550e8400 -m "Hello"
 ```
 
 Option B -- Set the environment variable (D-034):
@@ -194,10 +194,10 @@ Error: get-conversation: conversation 550e8400 not found
 
 ```bash
 # Ensure the daemon is running and has synced
-./xyncra-client sync-updates --user-id alice
+./xyncra-client sync-updates --user-id alice --device-id dev1
 
 # Then retry
-./xyncra-client get-conversation --user-id alice -c 550e8400
+./xyncra-client get-conversation --user-id alice --device-id dev1 -c 550e8400
 ```
 
 > Query commands (list-conversations, get-conversation, get-messages, search-messages) always read from the local database. If data is missing, it means the daemon has not yet synced it.
@@ -220,11 +220,157 @@ Error: process did not exit within 5s. Use --force to force kill
 
 ```bash
 # Use --force to send SIGKILL
-./xyncra-client kill --user-id alice --force
+./xyncra-client kill --user-id alice --device-id dev1 --force
 
 # Or increase the timeout
-./xyncra-client kill --user-id alice --timeout 10s
+./xyncra-client kill --user-id alice --device-id dev1 --timeout 10s
 ```
+
+---
+
+### Error 7: agent-resume — Daemon Not Running
+
+**Cause**: `agent-resume` 是 IPC-only 命令（D-114），必须连接运行中的 daemon。无 WebSocket fallback。
+
+**Error Message**:
+
+```
+错误：守护进程未运行，请先启动 xyncra-client listen
+```
+
+**Exit Code**: `2`
+
+**Diagnosis**:
+- daemon 未启动，IPC socket 文件不存在
+- `agent-resume` 不像 `send` 那样有 WebSocket fallback（D-036, D-114）
+
+**Resolution**:
+
+```bash
+# 先启动 daemon
+./xyncra-client listen --user-id alice --device-id dev1 &
+
+# 等待 daemon 就绪
+sleep 2
+
+# 再执行 agent-resume
+./xyncra-client agent-resume \
+  --conversation-id <conv-uuid> \
+  --checkpoint-id cp-123 \
+  --answer "确认" \
+  --agent-id agent/hitl-bot
+```
+
+> 注意：如果 daemon 未运行时 Agent 触发了 HITL，checkpoint 可能已经过期（24h TTL）。需要先重新发送消息触发新的 Agent 执行。
+
+---
+
+### Error 8: agent-resume — Checkpoint Expired
+
+**Cause**: Agent 的 checkpoint 有 24 小时 TTL，超过后 checkpoint 失效，无法恢复。
+
+**Error Message**:
+
+```
+Error: agent-resume failed: checkpoint expired
+Hint: Checkpoint TTL is 24h. Please resend the message to trigger a new HITL.
+```
+
+**Exit Code**: `1`
+
+**Diagnosis**:
+- 从 `agent_question` 事件发生到执行 `agent-resume` 之间超过了 24 小时
+- daemon 在此期间重启过，内存中的 checkpoint 数据丢失
+
+**Resolution**:
+
+```bash
+# 重新发送消息触发新的 Agent 执行
+./xyncra-client send --user-id alice --device-id dev1 \
+  -c <conv-uuid> --agent-id agent/hitl-bot --content "帮我查天气"
+
+# 等待新的 agent_question 事件
+# 然后使用新的 checkpoint_id 和 interrupt_id 进行 resume
+./xyncra-client agent-resume \
+  --conversation-id <conv-uuid> \
+  --checkpoint-id <new-checkpoint-id> \
+  --interrupt-id <new-interrupt-id> \
+  --answer "北京" \
+  --agent-id agent/hitl-bot
+```
+
+---
+
+### Error 9: agent-resume — Interrupt ID 不匹配
+
+**Cause**: 使用了过时的 `interrupt_id`。多轮 HITL 中，每次 `agent_question` 事件都会生成新的 `interrupt_id`。
+
+**Error Message**:
+
+```
+Error: agent-resume failed: interrupt not found
+Hint: Use the interrupt_id from the latest agent_question event.
+```
+
+**Exit Code**: `1`
+
+**Diagnosis**:
+- 在多轮 HITL 中，使用了上一轮的 `interrupt_id`
+- daemon 重启后，旧的 interrupt 记录已丢失
+
+**Resolution**:
+
+```bash
+# 查看 listen 输出，找到最新的 agent_question 事件
+# [agent_question] agent=agent/hitl-bot conv=<conv-uuid> checkpoint_id=cp-new interrupt_id=int-new question="..."
+
+# 使用最新的 ID
+./xyncra-client agent-resume \
+  --conversation-id <conv-uuid> \
+  --checkpoint-id cp-new \
+  --interrupt-id int-new \
+  --answer "确认" \
+  --agent-id agent/hitl-bot
+```
+
+> 如果省略 `--interrupt-id`，daemon 会从内存中自动查找最新的 interrupt（适用于单轮 HITL 场景）。
+
+---
+
+### Error 10: 多轮 HITL — Resume 后又触发新的 HITL
+
+**Cause**: Agent resume 后继续执行，可能需要更多用户输入，再次触发 `agent_question`。
+
+**现象**：
+
+```bash
+# 第一轮 resume 成功
+Agent resumed.
+
+# listen 输出中立即出现新的 agent_question
+[agent_status] agent=agent/hitl-bot conv=<conv-uuid> status=thinking
+[agent_status] agent=agent/hitl-bot conv=<conv-uuid> status=asking_user
+[agent_question] agent=agent/hitl-bot conv=<conv-uuid> checkpoint_id=cp-002 interrupt_id=int-002 question="需要包含空气质量信息吗？"
+```
+
+**这不是错误**。这是 Agent 的正常行为——在一次执行中多次请求用户输入。
+
+**Resolution**:
+
+继续使用 `agent-resume` 回复，使用新的 `checkpoint_id` 和 `interrupt_id`：
+
+```bash
+./xyncra-client agent-resume \
+  --conversation-id <conv-uuid> \
+  --checkpoint-id cp-002 \
+  --interrupt-id int-002 \
+  --answer "是的，请包含" \
+  --agent-id agent/hitl-bot
+```
+
+循环此过程直到 Agent 输出 `[agent_status] status=idle`，表示执行完成。
+
+> 提示：在脚本中，可以用循环监听 `agent_question` 事件并自动回复，实现完全自动化的 HITL 流程。参见 [HITL Shell 脚本自动化](../scenarios/advanced.md#hitlhuman-in-the-loop完整流程)。
 
 ---
 
@@ -236,7 +382,7 @@ When a command that uses IPC+WS fallback (D-032) fails, the error always follows
 Error: Cannot <action>.
   Cause 1: <ipc_error>
   Cause 2: <ws_error>
-Hint: Start the daemon first: xyncra-client listen --user-id <user>
+Hint: Start the daemon first: xyncra-client listen --user-id <user> --device-id <device>
 ```
 
 This applies to:
@@ -272,14 +418,14 @@ These errors appear in the daemon's log output and in RPC error responses. They 
 ### Basic Pattern
 
 ```bash
-./xyncra-client send --user-id alice -c 550e8400 -m "Test message"
+./xyncra-client send --user-id alice --device-id dev1 -c 550e8400 -m "Test message"
 exit_code=$?
 
 if [ $exit_code -eq 0 ]; then
   echo "Message sent successfully"
 elif [ $exit_code -eq 2 ]; then
   echo "Prerequisite not met -- is the daemon running?"
-  echo "Try: xyncra-client listen --user-id alice"
+  echo "Try: xyncra-client listen --user-id alice --device-id dev1"
 else
   echo "Command failed (exit code: $exit_code)"
 fi
@@ -292,7 +438,7 @@ max_retries=3
 retry_delay=2
 
 for i in $(seq 1 $max_retries); do
-  ./xyncra-client send --user-id alice -c 550e8400 -m "Test message"
+  ./xyncra-client send --user-id alice --device-id dev1 -c 550e8400 -m "Test message"
   exit_code=$?
 
   if [ $exit_code -eq 0 ]; then
@@ -313,12 +459,12 @@ done
 
 ```bash
 # Check if daemon is running before attempting sync
-./xyncra-client sync-updates --user-id alice 2>/dev/null
+./xyncra-client sync-updates --user-id alice --device-id dev1 2>/dev/null
 if [ $? -ne 0 ]; then
   echo "Daemon not running. Starting..."
-  ./xyncra-client listen --user-id alice &
+  ./xyncra-client listen --user-id alice --device-id dev1 &
   sleep 3
-  ./xyncra-client sync-updates --user-id alice
+  ./xyncra-client sync-updates --user-id alice --device-id dev1
 fi
 ```
 
@@ -330,7 +476,7 @@ failed=0
 skipped=0
 
 for conv_id in "$@"; do
-  ./xyncra-client send --user-id alice -c "$conv_id" -m "Broadcast" 2>/dev/null
+  ./xyncra-client send --user-id alice --device-id dev1 -c "$conv_id" -m "Broadcast" 2>/dev/null
   exit_code=$?
 
   case $exit_code in
@@ -347,10 +493,10 @@ echo "Results: $success sent, $skipped skipped, $failed failed"
 
 ```bash
 # Kill daemon (ignore "not running" errors)
-./xyncra-client kill --user-id alice 2>/dev/null
+./xyncra-client kill --user-id alice --device-id dev1 2>/dev/null
 
 # Clean start
-./xyncra-client listen --user-id alice &
+./xyncra-client listen --user-id alice --device-id dev1 &
 daemon_pid=$!
 
 # Wait for daemon to be ready

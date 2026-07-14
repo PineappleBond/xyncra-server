@@ -109,6 +109,34 @@ func (h *cliUpdateHandler) OnStreaming(_ context.Context, userID, conversationID
 	return nil
 }
 
+// OnAgentQuestion prints an agent HITL question event to stdout (D-087).
+func (h *cliUpdateHandler) OnAgentQuestion(_ context.Context, userID, conversationID, question, checkpointID, interruptID string) error {
+	fmt.Fprintf(os.Stdout, "[agent_question] agent=%s conv=%s checkpoint_id=%s interrupt_id=%s question=%q\n",
+		userID, conversationID, checkpointID, interruptID, question)
+	return nil
+}
+
+// OnAgentCheckpointCreated prints a checkpoint created event to stdout (D-087).
+func (h *cliUpdateHandler) OnAgentCheckpointCreated(_ context.Context, userID, conversationID, checkpointID string) error {
+	fmt.Fprintf(os.Stdout, "[agent_checkpoint] agent=%s conv=%s checkpoint_id=%s\n",
+		userID, conversationID, checkpointID)
+	return nil
+}
+
+// OnAgentStatus prints an agent status change event to stdout (D-087).
+func (h *cliUpdateHandler) OnAgentStatus(_ context.Context, userID, conversationID, status string) error {
+	fmt.Fprintf(os.Stdout, "[agent_status] agent=%s conv=%s status=%s\n",
+		userID, conversationID, status)
+	return nil
+}
+
+// OnAgentTimeout prints an agent timeout event to stdout (D-087).
+func (h *cliUpdateHandler) OnAgentTimeout(_ context.Context, userID, conversationID, reason string) error {
+	fmt.Fprintf(os.Stdout, "[agent_timeout] agent=%s conv=%s reason=%q\n",
+		userID, conversationID, reason)
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // cliLogger — implements client.Logger
 // ---------------------------------------------------------------------------
@@ -551,6 +579,28 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
 		}
 		// Forward the server response as-is.
+		return NewIPCResponse(req.ID, json.RawMessage(data))
+	})
+
+	// agent_resume forwards the resume request to the server via WebSocket (D-085, D-114).
+	s.Register("agent_resume", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
+		var params struct {
+			ConversationID string `json:"conversation_id"`
+			CheckpointID   string `json:"checkpoint_id"`
+			InterruptID    string `json:"interrupt_id"`
+			Answer         string `json:"answer"`
+			AgentID        string `json:"agent_id"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil
+		}
+		data, err := xc.Call(ctx, "agent_resume", params)
+		if err != nil {
+			if ce, ok := errors.AsType[*client.ClientError](err); ok {
+				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
+			}
+			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
+		}
 		return NewIPCResponse(req.ID, json.RawMessage(data))
 	})
 }

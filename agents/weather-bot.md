@@ -17,6 +17,7 @@ tools:
   - get_current_time
   - retrieve_tool_result
 middleware:
+  enable_client_tools: true
   enable_patch_tool_calls: true
   enable_summarization: true
   summarization_tokens: 160000

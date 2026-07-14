@@ -247,6 +247,12 @@ type AgentStatusHandler interface {
 	OnAgentStatus(ctx context.Context, userID, conversationID, status string) error
 }
 
+// AgentTimeoutHandler is an optional interface that UpdateHandler implementations
+// may adopt to receive agent timeout ephemeral update events (D-087).
+type AgentTimeoutHandler interface {
+	OnAgentTimeout(ctx context.Context, userID, conversationID, reason string) error
+}
+
 // ---------------------------------------------------------------------------
 // clientOptions and Functional Options
 // ---------------------------------------------------------------------------

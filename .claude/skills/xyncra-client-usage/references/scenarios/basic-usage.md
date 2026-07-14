@@ -36,7 +36,7 @@ Expected output (stderr):
 Open a new terminal and start the daemon. The daemon maintains a persistent WebSocket connection and receives real-time updates (D-032).
 
 ```bash
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 ```
 
 Expected output (stderr):
@@ -56,7 +56,7 @@ Expected output (stderr):
 Open another terminal. Conversations use the find-or-create idempotent model (D-011): calling `create-conversation` multiple times for the same user pair returns the same conversation.
 
 ```bash
-./xyncra-client create-conversation --user-id alice --peer-id bob
+./xyncra-client create-conversation --user-id alice --device-id dev1 --peer-id bob
 ```
 
 Expected output:
@@ -71,7 +71,7 @@ Conversation created.
 Calling it again returns the existing conversation:
 
 ```bash
-./xyncra-client create-conversation --user-id alice --peer-id bob
+./xyncra-client create-conversation --user-id alice --device-id dev1 --peer-id bob
 ```
 
 ```
@@ -84,7 +84,7 @@ Conversation already exists (find-or-create).
 ### Step 5: Send a Message
 
 ```bash
-./xyncra-client send --user-id alice -c 550e8400-e29b-41d4-a716-446655440000 -m "Hello, Bob!"
+./xyncra-client send --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000 -m "Hello, Bob!"
 ```
 
 Expected output:
@@ -104,7 +104,7 @@ Message sent.
 All query commands read directly from the local SQLite database (D-035). They work even when the server is unreachable.
 
 ```bash
-./xyncra-client list-conversations --user-id alice
+./xyncra-client list-conversations --user-id alice --device-id dev1
 ```
 
 ```
@@ -114,7 +114,7 @@ ID                                      Peer                  Title   Last Messa
 ```
 
 ```bash
-./xyncra-client get-messages --user-id alice -c 550e8400-e29b-41d4-a716-446655440000
+./xyncra-client get-messages --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000
 ```
 
 ```
@@ -131,23 +131,23 @@ A typical daily session: start the daemon, check conversations, read messages, r
 
 ```bash
 # 1. Start the daemon
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 # (runs in background or separate terminal)
 
 # 2. List all conversations
-./xyncra-client list-conversations --user-id alice
+./xyncra-client list-conversations --user-id alice --device-id dev1
 
 # 3. View conversation details (includes unread count, D-012)
-./xyncra-client get-conversation --user-id alice -c 550e8400-e29b-41d4-a716-446655440000
+./xyncra-client get-conversation --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000
 
 # 4. Read messages in a conversation
-./xyncra-client get-messages --user-id alice -c 550e8400-e29b-41d4-a716-446655440000
+./xyncra-client get-messages --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000
 
 # 5. Send a reply
-./xyncra-client send --user-id alice -c 550e8400-e29b-41d4-a716-446655440000 -m "Hi Bob, how are you?"
+./xyncra-client send --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000 -m "Hi Bob, how are you?"
 
 # 6. Mark all messages as read (D-012, MAX semantics)
-./xyncra-client mark-as-read --user-id alice -c 550e8400-e29b-41d4-a716-446655440000
+./xyncra-client mark-as-read --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000
 ```
 
 Expected output for `get-conversation`:
@@ -179,10 +179,10 @@ Use `--after-message-id` to page through messages:
 
 ```bash
 # First page (default --limit=50)
-./xyncra-client get-messages --user-id alice -c 550e8400-e29b-41d4-a716-446655440000
+./xyncra-client get-messages --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000
 
 # Next page, starting after message #50
-./xyncra-client get-messages --user-id alice -c 550e8400-e29b-41d4-a716-446655440000 --after-message-id 50
+./xyncra-client get-messages --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000 --after-message-id 50
 ```
 
 ---
@@ -194,7 +194,7 @@ Use `--after-message-id` to page through messages:
 Search for messages containing specific text within a conversation (D-035, local DB read):
 
 ```bash
-./xyncra-client search-messages --user-id alice -c 550e8400-e29b-41d4-a716-446655440000 -q "Hello"
+./xyncra-client search-messages --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000 -q "Hello"
 ```
 
 Expected output (results in DESC order, newest first):
@@ -210,7 +210,7 @@ Expected output (results in DESC order, newest first):
 Export RPC logs for external analysis (D-040, default retention 7 days):
 
 ```bash
-./xyncra-client logs export --user-id alice --format csv --output rpc-logs.csv
+./xyncra-client logs export --user-id alice --device-id dev1 --format csv --output rpc-logs.csv
 ```
 
 Expected output (stderr):
@@ -224,13 +224,13 @@ The CSV file contains columns: time, method, status, duration, conversation_id, 
 ### Export Logs to JSON
 
 ```bash
-./xyncra-client logs export --user-id alice --format json --output rpc-logs.json
+./xyncra-client logs export --user-id alice --device-id dev1 --format json --output rpc-logs.json
 ```
 
 ### View Log Statistics
 
 ```bash
-./xyncra-client logs stats --user-id alice --since 24h
+./xyncra-client logs stats --user-id alice --device-id dev1 --since 24h
 ```
 
 Expected output:
@@ -246,7 +246,7 @@ mark_as_read            15          15          0           0.891
 With time interval grouping:
 
 ```bash
-./xyncra-client logs stats --user-id alice --since 24h --interval 1h
+./xyncra-client logs stats --user-id alice --device-id dev1 --since 24h --interval 1h
 ```
 
 ```
@@ -261,7 +261,7 @@ INTERVAL                METHOD                  COUNT       SUCCESS     ERRORS  
 Preview what would be deleted (D-040):
 
 ```bash
-./xyncra-client logs cleanup --user-id alice --retain 7d --dry-run
+./xyncra-client logs cleanup --user-id alice --device-id dev1 --retain 7d --dry-run
 ```
 
 ```
@@ -273,7 +273,7 @@ Would delete 150 log entries older than 2026-07-02T12:00:00Z
 Execute the cleanup:
 
 ```bash
-./xyncra-client logs cleanup --user-id alice --retain 7d
+./xyncra-client logs cleanup --user-id alice --device-id dev1 --retain 7d
 ```
 
 ```
@@ -291,7 +291,7 @@ Drafts are stored locally in SQLite and do not require network access or a runni
 ### Save a Draft
 
 ```bash
-./xyncra-client draft save --user-id alice -c 550e8400-e29b-41d4-a716-446655440000 -m "Hey Bob, I wanted to tell you about..."
+./xyncra-client draft save --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000 -m "Hey Bob, I wanted to tell you about..."
 ```
 
 ```
@@ -303,7 +303,7 @@ Draft saved.
 ### Retrieve a Draft
 
 ```bash
-./xyncra-client draft get --user-id alice -c 550e8400-e29b-41d4-a716-446655440000
+./xyncra-client draft get --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000
 ```
 
 ```
@@ -314,7 +314,7 @@ Hey Bob, I wanted to tell you about...
 ### Overwrite a Draft
 
 ```bash
-./xyncra-client draft save --user-id alice -c 550e8400-e29b-41d4-a716-446655440000 -m "Revised draft content"
+./xyncra-client draft save --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000 -m "Revised draft content"
 ```
 
 ```
@@ -324,7 +324,7 @@ Draft saved.
 ### Delete a Draft
 
 ```bash
-./xyncra-client draft delete --user-id alice -c 550e8400-e29b-41d4-a716-446655440000
+./xyncra-client draft delete --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000
 ```
 
 ```
@@ -334,7 +334,7 @@ Draft deleted.
 If no draft exists:
 
 ```bash
-./xyncra-client draft get --user-id alice -c 550e8400-e29b-41d4-a716-446655440000
+./xyncra-client draft get --user-id alice --device-id dev1 -c 550e8400-e29b-41d4-a716-446655440000
 ```
 
 ```

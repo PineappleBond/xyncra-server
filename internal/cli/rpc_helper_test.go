@@ -110,6 +110,7 @@ func TestStandaloneRPC_ServerError(t *testing.T) {
 
 	cliCtx := &CLIContext{
 		UserID:    "testuser",
+		DeviceID:  "testdevice",
 		ServerURL: wsURL(ts),
 		UserDir:   t.TempDir(),
 	}
@@ -130,6 +131,7 @@ func TestStandaloneRPC_ServerError(t *testing.T) {
 func TestStandaloneRPC_ConnectionFailed(t *testing.T) {
 	cliCtx := &CLIContext{
 		UserID:    "testuser",
+		DeviceID:  "testdevice",
 		ServerURL: "ws://127.0.0.1:1", // nothing listening
 		UserDir:   t.TempDir(),
 	}
@@ -160,6 +162,7 @@ func TestStandaloneRPC_Timeout(t *testing.T) {
 
 	cliCtx := &CLIContext{
 		UserID:    "testuser",
+		DeviceID:  "testdevice",
 		ServerURL: wsURL(ts),
 		UserDir:   t.TempDir(),
 	}
@@ -202,6 +205,7 @@ func TestStandaloneRPC_RequestFormat(t *testing.T) {
 
 	cliCtx := &CLIContext{
 		UserID:    "testuser",
+		DeviceID:  "testdevice",
 		ServerURL: wsURL(ts),
 		UserDir:   t.TempDir(),
 	}
@@ -237,6 +241,7 @@ func TestStandaloneRPC_NilParams(t *testing.T) {
 
 	cliCtx := &CLIContext{
 		UserID:    "testuser",
+		DeviceID:  "testdevice",
 		ServerURL: wsURL(ts),
 		UserDir:   t.TempDir(),
 	}

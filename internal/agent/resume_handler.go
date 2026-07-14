@@ -157,8 +157,16 @@ func NewAgentResumeHandler(
 		targets := make(map[string]any)
 		if payload.InterruptID != "" {
 			targets[payload.InterruptID] = payload.Answer
+			logger.Debug("agent resume: using client-provided interrupt ID",
+				"interrupt_id", payload.InterruptID,
+				"checkpoint_id", payload.CheckpointID)
 		} else {
-			for _, id := range executor.getInterruptIDs(payload.CheckpointID) {
+			storedIDs := executor.getInterruptIDs(payload.CheckpointID)
+			if len(storedIDs) == 0 {
+				logger.Info("agent resume: no interrupt IDs found for checkpoint",
+					"checkpoint_id", payload.CheckpointID)
+			}
+			for _, id := range storedIDs {
 				targets[id] = payload.Answer
 			}
 		}
@@ -289,6 +297,9 @@ func NewAgentResumeHandler(
 			"conversation_id", payload.ConversationID,
 			"checkpoint_id", payload.CheckpointID,
 		)
+
+		// Clean up checkpoint and interruptID mapping after successful resume (D-112, D-113).
+		executor.cleanupAfterResume(ctx, payload.CheckpointID, logger)
 
 		releaseLock()
 		return nil

@@ -61,6 +61,7 @@ func TestRunKill_NoLockFile(t *testing.T) {
 
 	killCmd := newTestKillCommand()
 	setFlag(killCmd, "user-id", "testuser")
+	setFlag(killCmd, "device-id", "testdevice")
 
 	output := captureStderr(func() {
 		err := killCmd.RunE(killCmd, nil)
@@ -85,6 +86,7 @@ func TestRunKill_StaleLock(t *testing.T) {
 
 	killCmd := newTestKillCommand()
 	setFlag(killCmd, "user-id", "testuser")
+	setFlag(killCmd, "device-id", "testdevice")
 
 	// We need CLIContext to resolve paths. Build one manually to find the lock path.
 	cliCtx, err := NewCLIContext(killCmd)
@@ -125,7 +127,7 @@ func TestRunKill_MissingUserID(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XYNCRA_USER_ID", "")
-	t.Setenv("XYNCRA_DEVICE_ID", "")
+	t.Setenv("XYNCRA_DEVICE_ID", "testdevice")
 	t.Setenv("XYNCRA_SERVER", "")
 
 	killCmd := newTestKillCommand()
@@ -233,6 +235,7 @@ func TestCleanupDaemonFiles_RemovesBothFiles(t *testing.T) {
 
 	killCmd := newTestKillCommand()
 	setFlag(killCmd, "user-id", "testuser")
+	setFlag(killCmd, "device-id", "testdevice")
 
 	cliCtx, err := NewCLIContext(killCmd)
 	if err != nil {
@@ -277,6 +280,7 @@ func TestCleanupDaemonFiles_NoFilesNoError(t *testing.T) {
 
 	killCmd := newTestKillCommand()
 	setFlag(killCmd, "user-id", "testuser")
+	setFlag(killCmd, "device-id", "testdevice")
 
 	cliCtx, err := NewCLIContext(killCmd)
 	if err != nil {

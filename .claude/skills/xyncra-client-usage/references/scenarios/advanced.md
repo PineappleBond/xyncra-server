@@ -29,15 +29,15 @@ Examples:
 
 ```bash
 # Uses default: ws://localhost:8080/ws
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 
 # Uses env var: wss://prod.example.com/ws
 export XYNCRA_SERVER=wss://prod.example.com/ws
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 
 # Uses flag (overrides env var): ws://staging:8080/ws
 export XYNCRA_SERVER=wss://prod.example.com/ws
-./xyncra-client listen --user-id alice --server ws://staging:8080/ws
+./xyncra-client listen --user-id alice --device-id dev1 --server ws://staging:8080/ws
 ```
 
 ---
@@ -50,11 +50,11 @@ Use `--db-path` or `XYNCRA_DB_PATH` to specify a non-default database location:
 
 ```bash
 # Via flag
-./xyncra-client listen --user-id alice --db-path /mnt/external/xyncra.db
+./xyncra-client listen --user-id alice --device-id dev1 --db-path /mnt/external/xyncra.db
 
 # Via environment variable
 export XYNCRA_DB_PATH=/mnt/external/xyncra.db
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 ```
 
 > The database file's parent directory must exist. The CLI does not create intermediate directories for custom paths.
@@ -65,11 +65,11 @@ Use `--log-dir` or `XYNCRA_LOG_DIR`:
 
 ```bash
 # Via flag
-./xyncra-client listen --user-id alice --log-dir /var/log/xyncra/
+./xyncra-client listen --user-id alice --device-id dev1 --log-dir /var/log/xyncra/
 
 # Via environment variable
 export XYNCRA_LOG_DIR=/var/log/xyncra/
-./xyncra-client listen --user-id alice
+./xyncra-client listen --user-id alice --device-id dev1
 ```
 
 ### Combined Custom Configuration
@@ -94,13 +94,13 @@ export XYNCRA_LOG_DIR=/var/log/xyncra/alice/
 Enable verbose debug logging by setting `XYNCRA_DEBUG`:
 
 ```bash
-XYNCRA_DEBUG=1 ./xyncra-client listen --user-id alice
+XYNCRA_DEBUG=1 ./xyncra-client listen --user-id alice --device-id dev1
 ```
 
 Or with `true`:
 
 ```bash
-XYNCRA_DEBUG=true ./xyncra-client listen --user-id alice
+XYNCRA_DEBUG=true ./xyncra-client listen --user-id alice --device-id dev1
 ```
 
 ### Debug Output
@@ -208,7 +208,7 @@ Allowed interval values: `1m`, `5m`, `15m`, `1h`, `1d`.
 **CSV format**:
 
 ```bash
-./xyncra-client logs export --user-id alice --format csv
+./xyncra-client logs export --user-id alice --device-id dev1 --format csv
 ```
 
 ```csv
@@ -220,7 +220,7 @@ time,method,status,duration_ms,conversation_id,request_id
 **JSON format**:
 
 ```bash
-./xyncra-client logs export --user-id alice --format json
+./xyncra-client logs export --user-id alice --device-id dev1 --format json
 ```
 
 ```json
@@ -255,10 +255,10 @@ This separation enables piping stdout to other tools while preserving error visi
 
 ```bash
 # Export logs to a file via stdout redirect
-./xyncra-client logs export --user-id alice --format csv > logs.csv
+./xyncra-client logs export --user-id alice --device-id dev1 --format csv > logs.csv
 
 # Parse message list with grep (only stdout is piped)
-./xyncra-client get-messages --user-id alice -c 550e8400 | grep "bob"
+./xyncra-client get-messages --user-id alice --device-id dev1 -c 550e8400 | grep "bob"
 ```
 
 ---
@@ -281,7 +281,7 @@ success=0
 failed=0
 
 for conv_id in "$@"; do
-  if ./xyncra-client send --user-id "$USER_ID" -c "$conv_id" -m "$MESSAGE" 2>/dev/null; then
+  if ./xyncra-client send --user-id "$USER_ID" --device-id "${DEVICE_ID:-dev1}" -c "$conv_id" -m "$MESSAGE" 2>/dev/null; then
     success=$((success + 1))
   else
     echo "Failed to send to conversation $conv_id" >&2
@@ -311,11 +311,11 @@ OUTPUT_DIR="/tmp/xyncra-analysis"
 mkdir -p "$OUTPUT_DIR"
 
 # Export RPC logs as CSV
-./xyncra-client logs export --user-id "$USER_ID" \
+./xyncra-client logs export --user-id "$USER_ID" --device-id "${DEVICE_ID:-dev1}" \
   --format csv --output "$OUTPUT_DIR/rpc.csv" --limit 10000
 
 # Export notification logs
-./xyncra-client logs export --user-id "$USER_ID" \
+./xyncra-client logs export --user-id "$USER_ID" --device-id "${DEVICE_ID:-dev1}" \
   --type notifications --format csv --output "$OUTPUT_DIR/notifications.csv"
 
 # Count errors by method
@@ -352,7 +352,7 @@ echo "Press Ctrl+C to stop."
 echo ""
 
 while true; do
-  output=$(./xyncra-client get-messages --user-id "$USER_ID" \
+  output=$(./xyncra-client get-messages --user-id "$USER_ID" --device-id "${DEVICE_ID:-dev1}" \
     -c "$CONV_ID" --after-message-id "$LAST_ID" 2>/dev/null)
 
   if [ -n "$output" ]; then
@@ -376,19 +376,19 @@ Start the daemon if not running, and perform operations:
 USER_ID="${XYNCRA_USER_ID:-alice}"
 
 # Check if daemon is running by attempting a lightweight IPC call
-if ! ./xyncra-client sync-updates --user-id "$USER_ID" 2>/dev/null; then
+if ! ./xyncra-client sync-updates --user-id "$USER_ID" --device-id "${DEVICE_ID:-dev1}" 2>/dev/null; then
   echo "Daemon not running. Starting..." >&2
-  ./xyncra-client listen --user-id "$USER_ID" &
+  ./xyncra-client listen --user-id "$USER_ID" --device-id "${DEVICE_ID:-dev1}" &
   DAEMON_PID=$!
 
   # Wait for socket to appear
-  DEVICE_ID=$(./xyncra-client listen --user-id "$USER_ID" --help 2>&1 | \
+  DEVICE_ID=$(./xyncra-client listen --user-id "$USER_ID" --device-id "${DEVICE_ID:-dev1}" --help 2>&1 | \
     grep -oP 'device.*?\(default: \K[a-f0-9]+' || echo "")
 
   # Alternative: just wait and check
   for i in $(seq 1 10); do
     sleep 1
-    if ./xyncra-client sync-updates --user-id "$USER_ID" 2>/dev/null; then
+    if ./xyncra-client sync-updates --user-id "$USER_ID" --device-id "${DEVICE_ID:-dev1}" 2>/dev/null; then
       echo "Daemon ready (PID: $DAEMON_PID)" >&2
       break
     fi
@@ -421,14 +421,14 @@ USER_ID="${XYNCRA_USER_ID:-alice}"
 QUERY="${1:?Usage: search-all.sh <query>}"
 
 # Get all conversation IDs
-conv_ids=$(./xyncra-client list-conversations --user-id "$USER_ID" --limit 1000 2>/dev/null | \
+conv_ids=$(./xyncra-client list-conversations --user-id "$USER_ID" --device-id "${DEVICE_ID:-dev1}" --limit 1000 2>/dev/null | \
   tail -n +3 | awk '{print $1}')
 
 echo "Searching for: $QUERY"
 echo "---"
 
 for conv_id in $conv_ids; do
-  results=$(./xyncra-client search-messages --user-id "$USER_ID" \
+  results=$(./xyncra-client search-messages --user-id "$USER_ID" --device-id "${DEVICE_ID:-dev1}" \
     -c "$conv_id" -q "$QUERY" 2>/dev/null)
   if [ -n "$results" ]; then
     echo ""
@@ -454,7 +454,7 @@ for user_dir in "$XYNCRA_HOME"/*/; do
   for device_dir in "$user_dir"*/; do
     device_id=$(basename "$device_dir")
     echo "Cleaning logs for $user_id/$device_id..."
-    ./xyncra-client logs cleanup --user-id "$user_id" \
+    ./xyncra-client logs cleanup --user-id "$user_id" --device-id "${device_id:-dev1}" \
       --device-id "$device_id" --retain "$RETAIN"
   done
 done
@@ -476,30 +476,30 @@ Several commands accept time arguments (`--since`, `--from`, `--to`, `--retain`)
 
 ```bash
 # Last hour
-./xyncra-client logs tail --user-id alice --since 1h
+./xyncra-client logs tail --user-id alice --device-id dev1 --since 1h
 
 # Last 30 minutes
-./xyncra-client logs tail --user-id alice --since 30m
+./xyncra-client logs tail --user-id alice --device-id dev1 --since 30m
 
 # Last 5 seconds
-./xyncra-client logs tail --user-id alice --since 5s
+./xyncra-client logs tail --user-id alice --device-id dev1 --since 5s
 ```
 
 ### Day Shorthand
 
 ```bash
 # Last 7 days
-./xyncra-client logs tail --user-id alice --since 7d
+./xyncra-client logs tail --user-id alice --device-id dev1 --since 7d
 
 # Last 30 days
-./xyncra-client logs cleanup --user-id alice --retain 30d
+./xyncra-client logs cleanup --user-id alice --device-id dev1 --retain 30d
 ```
 
 ### RFC3339
 
 ```bash
 # Specific start time
-./xyncra-client logs search --user-id alice \
+./xyncra-client logs search --user-id alice --device-id dev1 \
   --from 2026-07-09T12:00:00Z --to 2026-07-09T14:00:00Z
 ```
 
@@ -520,10 +520,10 @@ Different commands use different types for `--message-id`. Pay attention to the 
 
 ```bash
 # Delete a message by UUID (string)
-./xyncra-client delete-message --user-id alice --message-id f47ac10b-58cc-4372-a567-0e02b2c3d479
+./xyncra-client delete-message --user-id alice --device-id dev1 --message-id f47ac10b-58cc-4372-a567-0e02b2c3d479
 
 # Mark as read by sequence number (uint32)
-./xyncra-client mark-as-read --user-id alice -c 550e8400 --message-id 42
+./xyncra-client mark-as-read --user-id alice --device-id dev1 -c 550e8400 --message-id 42
 ```
 
 ---
@@ -534,7 +534,7 @@ Different commands use different types for `--message-id`. Pay attention to the 
 
 ```bash
 # Soft-delete a conversation (cascade: deletes all messages too)
-./xyncra-client delete-conversation --user-id alice -c 550e8400
+./xyncra-client delete-conversation --user-id alice --device-id dev1 -c 550e8400
 ```
 
 ```
@@ -543,7 +543,7 @@ Conversation deleted.
 
 ```bash
 # Restore the conversation (cascade: restores all messages too)
-./xyncra-client restore-conversation --user-id alice -c 550e8400
+./xyncra-client restore-conversation --user-id alice --device-id dev1 -c 550e8400
 ```
 
 ```
@@ -556,7 +556,7 @@ Conversation restored.
 
 ```bash
 # Only the sender can delete their own message
-./xyncra-client delete-message --user-id alice --message-id f47ac10b-58cc-4372-a567-0e02b2c3d479
+./xyncra-client delete-message --user-id alice --device-id dev1 --message-id f47ac10b-58cc-4372-a567-0e02b2c3d479
 ```
 
 ```
@@ -573,10 +573,10 @@ Message deleted.
 
 ```bash
 # First page (default --limit=20)
-./xyncra-client list-conversations --user-id alice
+./xyncra-client list-conversations --user-id alice --device-id dev1
 
 # Next page
-./xyncra-client list-conversations --user-id alice --offset 20 --limit 20
+./xyncra-client list-conversations --user-id alice --device-id dev1 --offset 20 --limit 20
 ```
 
 If more results exist, the output includes:
@@ -589,10 +589,10 @@ If more results exist, the output includes:
 
 ```bash
 # First page (default --limit=50)
-./xyncra-client get-messages --user-id alice -c 550e8400
+./xyncra-client get-messages --user-id alice --device-id dev1 -c 550e8400
 
 # Next page
-./xyncra-client get-messages --user-id alice -c 550e8400 --after-message-id 50 --limit 50
+./xyncra-client get-messages --user-id alice --device-id dev1 -c 550e8400 --after-message-id 50 --limit 50
 ```
 
 If more results exist:
@@ -607,10 +607,10 @@ Search returns results in DESC order (newest first). Use `--after-message-id` fo
 
 ```bash
 # First page of search (newest matches first)
-./xyncra-client search-messages --user-id alice -c 550e8400 -q "Hello"
+./xyncra-client search-messages --user-id alice --device-id dev1 -c 550e8400 -q "Hello"
 
 # Next page (older matches)
-./xyncra-client search-messages --user-id alice -c 550e8400 -q "Hello" --after-message-id 100
+./xyncra-client search-messages --user-id alice --device-id dev1 -c 550e8400 -q "Hello" --after-message-id 100
 ```
 
 ---
@@ -660,6 +660,140 @@ services:
     command: listen
     depends_on:
       - xyncra-server
+```
+
+---
+
+## HITL（Human-In-The-Loop）完整流程
+
+当 Agent 配置了 `ask_user` 工具时，Agent 可以在执行过程中请求用户输入，形成 HITL 交互循环。以下演示完整的 HITL 流程。
+
+### 前置条件
+
+- Agent 已注册并配置了 `ask_user` 工具（如 `agent/hitl-bot`）
+- daemon 正在运行（`xyncra-client listen`）
+
+### 步骤 1：启动 daemon 监听
+
+```bash
+xyncra-client listen --user-id alice --device-id dev1
+```
+
+daemon 启动后会输出 HITL 相关事件到 stdout（D-085）：
+
+```
+[xyncra] IPC server listening at /Users/alice/.xyncra/alice/dev1/xyncra.sock
+[xyncra] Listening for updates... (Ctrl+C to stop)
+```
+
+### 步骤 2：发送消息触发 Agent
+
+在另一个终端中发送消息，触发 Agent 执行：
+
+```bash
+xyncra-client send --user-id alice --device-id dev1 \
+  -c <conv-uuid> --agent-id agent/hitl-bot --content "帮我查一下北京明天的天气"
+```
+
+### 步骤 3：观察 agent_question 事件
+
+在 listen 终端中，Agent 会通过 `ask_user` 工具请求用户输入。daemon 输出 `agent_question` 事件：
+
+```
+[agent_status] agent=agent/hitl-bot conv=<conv-uuid> status=thinking
+[agent_status] agent=agent/hitl-bot conv=<conv-uuid> status=asking_user
+[agent_question] agent=agent/hitl-bot conv=<conv-uuid> checkpoint_id=cp-abc123 interrupt_id=int-def456 question="请问您要查询哪个日期的天气？"
+```
+
+关键信息：
+- `checkpoint_id`：Agent 的执行检查点，resume 时必须提供
+- `interrupt_id`：本次中断的唯一标识，可选提供给 resume
+- `question`：Agent 向用户提出的问题
+
+### 步骤 4：使用 agent-resume 回复
+
+在第三个终端（或脚本中）使用 `agent-resume` 回复 Agent 的问题：
+
+```bash
+xyncra-client agent-resume \
+  --conversation-id <conv-uuid> \
+  --checkpoint-id cp-abc123 \
+  --interrupt-id int-def456 \
+  --answer "明天" \
+  --agent-id agent/hitl-bot
+```
+
+输出：
+
+```
+Agent resumed.
+  Conversation: <conv-uuid>
+  Checkpoint: cp-abc123
+  Agent: agent/hitl-bot
+```
+
+### 步骤 5：Agent 继续执行
+
+Agent 收到回答后继续执行。在 listen 终端中观察后续事件：
+
+```
+[agent_status] agent=agent/hitl-bot conv=<conv-uuid> status=thinking
+[agent_status] agent=agent/hitl-bot conv=<conv-uuid> status=generating
+[agent_checkpoint] agent=agent/hitl-bot conv=<conv-uuid> checkpoint_id=cp-abc123
+[new message] seq=43 from=agent/hitl-bot conv=<conv-uuid> "北京明天（2026-07-15）天气预报：晴，气温 22°C ~ 31°C，湿度 45%，空气质量优。"
+[agent_status] agent=agent/hitl-bot conv=<conv-uuid> status=idle
+```
+
+### 多轮 HITL
+
+Agent 可以在一次执行中多次触发 HITL。每次 resume 后，Agent 可能再次请求输入：
+
+```bash
+# 第一轮 HITL
+[agent_question] ... checkpoint_id=cp-001 interrupt_id=int-001 question="请问您要查哪个城市？"
+xyncra-client agent-resume -c <conv-uuid> --checkpoint-id cp-001 --interrupt-id int-001 --answer "北京" --agent-id agent/hitl-bot
+
+# 第二轮 HITL（Agent 需要更多输入）
+[agent_question] ... checkpoint_id=cp-002 interrupt_id=int-002 question="需要包含空气质量信息吗？"
+xyncra-client agent-resume -c <conv-uuid> --checkpoint-id cp-002 --interrupt-id int-002 --answer "是的" --agent-id agent/hitl-bot
+
+# Agent 完成执行
+[agent_status] ... status=idle
+[new message] seq=44 from=agent/hitl-bot conv=<conv-uuid> "北京明天天气：晴，22°C ~ 31°C，空气质量优（AQI: 35）"
+```
+
+> 每轮 HITL 的 `checkpoint_id` 和 `interrupt_id` 都是新的，必须使用最新 `agent_question` 事件中的值。
+
+### Shell 脚本自动化 HITL
+
+在自动化场景中，可以用脚本解析 listen 输出并自动回复：
+
+```bash
+#!/bin/bash
+# auto-hitl.sh -- 自动响应 Agent 的 HITL 请求
+
+CONV_ID="${1:?Usage: auto-hitl.sh <conversation_id>}"
+AGENT_ID="${2:?Usage: auto-hitl.sh <conv_id> <agent_id>}"
+
+# 启动 listen 并在后台捕获 agent_question 事件
+xyncra-client listen --user-id alice --device-id dev1 2>/dev/null | \
+  grep --line-buffered '\[agent_question\]' | \
+  while read -r line; do
+    # 解析 checkpoint_id 和 interrupt_id
+    checkpoint_id=$(echo "$line" | grep -oP 'checkpoint_id=\K[^ ]+')
+    interrupt_id=$(echo "$line" | grep -oP 'interrupt_id=\K[^ ]+')
+    question=$(echo "$line" | grep -oP 'question="\K[^"]+')
+
+    echo "Agent asks: $question"
+
+    # 自动回复（可替换为 LLM API 调用等逻辑）
+    xyncra-client agent-resume \
+      --conversation-id "$CONV_ID" \
+      --checkpoint-id "$checkpoint_id" \
+      --interrupt-id "$interrupt_id" \
+      --answer "自动确认" \
+      --agent-id "$AGENT_ID"
+  done
 ```
 
 ---

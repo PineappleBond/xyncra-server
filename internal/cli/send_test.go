@@ -305,6 +305,7 @@ func TestSendStandalone_ServerError(t *testing.T) {
 
 	cliCtx := &CLIContext{
 		UserID:    "testuser",
+		DeviceID:  "testdevice",
 		ServerURL: wsURL,
 		UserDir:   t.TempDir(),
 	}
@@ -318,6 +319,7 @@ func TestSendStandalone_ServerError(t *testing.T) {
 func TestSendStandalone_NoServer(t *testing.T) {
 	cliCtx := &CLIContext{
 		UserID:    "testuser",
+		DeviceID:  "testdevice",
 		ServerURL: "ws://127.0.0.1:1", // No server here.
 		UserDir:   t.TempDir(),
 	}

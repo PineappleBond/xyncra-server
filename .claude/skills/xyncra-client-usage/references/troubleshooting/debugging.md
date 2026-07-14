@@ -17,13 +17,13 @@ The xyncra-client supports debug logging via the `XYNCRA_DEBUG` environment vari
 ### Usage
 
 ```bash
-XYNCRA_DEBUG=1 ./xyncra-client listen --user-id alice
+XYNCRA_DEBUG=1 ./xyncra-client listen --user-id alice --device-id dev1
 ```
 
 Or with `true`:
 
 ```bash
-XYNCRA_DEBUG=true ./xyncra-client listen --user-id alice
+XYNCRA_DEBUG=true ./xyncra-client listen --user-id alice --device-id dev1
 ```
 
 ### What You Will See
@@ -51,7 +51,7 @@ With `XYNCRA_DEBUG=1`, additional lines appear:
 Debug mode works with any command, but is most useful with `listen`:
 
 ```bash
-XYNCRA_DEBUG=1 ./xyncra-client send --user-id alice --conversation-id <uuid> --content "test"
+XYNCRA_DEBUG=1 ./xyncra-client send --user-id alice --device-id dev1 --conversation-id <uuid> --content "test"
 ```
 
 ---
@@ -227,8 +227,8 @@ echo '{"jsonrpc":"2.0","id":"2","method":"send_message","params":{"conversation_
 ### Check Socket is Responding
 
 If `socat` hangs or returns "connection refused":
-1. The daemon is not running -- start it with `./xyncra-client listen --user-id alice`
-2. The socket file is stale -- use `./xyncra-client kill --user-id alice` to clean up
+1. The daemon is not running -- start it with `./xyncra-client listen --user-id alice --device-id dev1`
+2. The socket file is stale -- use `./xyncra-client kill --user-id alice --device-id dev1` to clean up
 3. Wrong user-id or device-id -- verify the path matches your daemon's configuration
 
 ---
@@ -264,7 +264,7 @@ ps -p $PID
 If `ps` returns no output, the process is dead and the lock is stale. Use `kill` to clean up:
 
 ```bash
-./xyncra-client kill --user-id alice
+./xyncra-client kill --user-id alice --device-id dev1
 ```
 
 ### Force Remove a Stale Lock
@@ -287,13 +287,13 @@ The xyncra-client provides built-in log management commands for inspecting RPC a
 
 ```bash
 # Last 1 hour
-./xyncra-client logs stats --user-id alice --since 1h
+./xyncra-client logs stats --user-id alice --device-id dev1 --since 1h
 
 # Last 24 hours
-./xyncra-client logs stats --user-id alice --since 24h
+./xyncra-client logs stats --user-id alice --device-id dev1 --since 24h
 
 # Last 7 days
-./xyncra-client logs stats --user-id alice --since 7d
+./xyncra-client logs stats --user-id alice --device-id dev1 --since 7d
 ```
 
 Output example:
@@ -308,74 +308,74 @@ create_conversation     10          10          0           2.345
 ### View Logs with Time Breakdown
 
 ```bash
-./xyncra-client logs stats --user-id alice --since 24h --interval 1h
+./xyncra-client logs stats --user-id alice --device-id dev1 --since 24h --interval 1h
 ```
 
 ### Search for Errors
 
 ```bash
 # All error entries
-./xyncra-client logs search --user-id alice --error
+./xyncra-client logs search --user-id alice --device-id dev1 --error
 
 # Errors for a specific method
-./xyncra-client logs search --user-id alice --error --method send_message
+./xyncra-client logs search --user-id alice --device-id dev1 --error --method send_message
 
 # Errors within a time range
-./xyncra-client logs search --user-id alice --error --from 2h --to 30m
+./xyncra-client logs search --user-id alice --device-id dev1 --error --from 2h --to 30m
 ```
 
 ### Search by Conversation
 
 ```bash
-./xyncra-client logs search --user-id alice --conversation-id <uuid> --limit 50
+./xyncra-client logs search --user-id alice --device-id dev1 --conversation-id <uuid> --limit 50
 ```
 
 ### Search by Request ID
 
 ```bash
-./xyncra-client logs search --user-id alice --request-id <request-id>
+./xyncra-client logs search --user-id alice --device-id dev1 --request-id <request-id>
 ```
 
 ### View Recent Logs
 
 ```bash
 # RPC logs (default)
-./xyncra-client logs tail --user-id alice --limit 20
+./xyncra-client logs tail --user-id alice --device-id dev1 --limit 20
 
 # Notification logs
-./xyncra-client logs tail --user-id alice --type notifications --limit 20
+./xyncra-client logs tail --user-id alice --device-id dev1 --type notifications --limit 20
 
 # Logs since a specific time
-./xyncra-client logs tail --user-id alice --since 30m
+./xyncra-client logs tail --user-id alice --device-id dev1 --since 30m
 ```
 
 ### Export Logs for Analysis
 
 ```bash
 # Export to CSV
-./xyncra-client logs export --user-id alice --format csv --output rpc_logs.csv
+./xyncra-client logs export --user-id alice --device-id dev1 --format csv --output rpc_logs.csv
 
 # Export to JSON
-./xyncra-client logs export --user-id alice --format json --output rpc_logs.json
+./xyncra-client logs export --user-id alice --device-id dev1 --format json --output rpc_logs.json
 
 # Export notification logs
-./xyncra-client logs export --user-id alice --type notifications --format csv --output notifications.csv
+./xyncra-client logs export --user-id alice --device-id dev1 --type notifications --format csv --output notifications.csv
 
 # Export with filters
-./xyncra-client logs export --user-id alice --method send_message --from 7d --format csv --output sends.csv
+./xyncra-client logs export --user-id alice --device-id dev1 --method send_message --from 7d --format csv --output sends.csv
 ```
 
 ### Clean Up Old Logs
 
 ```bash
 # Preview what would be deleted (D-040, default 7-day retention)
-./xyncra-client logs cleanup --user-id alice --dry-run
+./xyncra-client logs cleanup --user-id alice --device-id dev1 --dry-run
 
 # Delete logs older than 1 day
-./xyncra-client logs cleanup --user-id alice --retain 24h
+./xyncra-client logs cleanup --user-id alice --device-id dev1 --retain 24h
 
 # Clean only RPC logs
-./xyncra-client logs cleanup --user-id alice --type rpc
+./xyncra-client logs cleanup --user-id alice --device-id dev1 --type rpc
 ```
 
 ---
@@ -415,7 +415,7 @@ echo $XYNCRA_SERVER
 Or pass it explicitly:
 
 ```bash
-./xyncra-client listen --user-id alice --server ws://myserver:8080/ws
+./xyncra-client listen --user-id alice --device-id dev1 --server ws://myserver:8080/ws
 ```
 
 ### Check Port Binding
@@ -442,7 +442,7 @@ ps aux | grep xyncra-client
 
 Look for the `listen` process (not one-off commands like `send`):
 ```
-user  12345  0.1  0.2  1234567  12345  ??  S  12:00PM  0:01.23 ./xyncra-client listen --user-id alice
+user  12345  0.1  0.2  1234567  12345  ??  S  12:00PM  0:01.23 ./xyncra-client listen --user-id alice --device-id dev1
 ```
 
 ### Inspect Open Files
@@ -481,8 +481,8 @@ kill -KILL <PID>
 
 Or use the built-in `kill` command (D-039):
 ```bash
-./xyncra-client kill --user-id alice
-./xyncra-client kill --user-id alice --force
+./xyncra-client kill --user-id alice --device-id dev1
+./xyncra-client kill --user-id alice --device-id dev1 --force
 ```
 
 ### Check Process Resource Usage
@@ -511,7 +511,7 @@ The CLI uses standardized exit codes (D-042):
 ### Checking Exit Codes in Scripts
 
 ```bash
-./xyncra-client sync-updates --user-id alice
+./xyncra-client sync-updates --user-id alice --device-id dev1
 EXIT_CODE=$?
 
 case $EXIT_CODE in
@@ -537,7 +537,7 @@ The client uses extended error codes (D-027):
 These codes appear in RPC log entries and error messages. Use `logs search --error` to find them:
 
 ```bash
-./xyncra-client logs search --user-id alice --error --method sync_updates
+./xyncra-client logs search --user-id alice --device-id dev1 --error --method sync_updates
 ```
 
 ---
@@ -568,12 +568,12 @@ When reporting an issue, gather the following information:
 
 5. **Recent error logs:**
    ```bash
-   ./xyncra-client logs search --user-id {user-id} --error --limit 20
+   ./xyncra-client logs search --user-id {user-id} --device-id {device-id} --error --limit 20
    ```
 
 6. **Log statistics:**
    ```bash
-   ./xyncra-client logs stats --user-id {user-id} --since 1h
+   ./xyncra-client logs stats --user-id {user-id} --device-id {device-id} --since 1h
    ```
 
 7. **Server connectivity:**
@@ -583,7 +583,7 @@ When reporting an issue, gather the following information:
 
 8. **Debug mode output:**
    ```bash
-   XYNCRA_DEBUG=1 ./xyncra-client listen --user-id {user-id} 2>&1 | head -50
+   XYNCRA_DEBUG=1 ./xyncra-client listen --user-id {user-id} --device-id {device-id} 2>&1 | head -50
    ```
 
 ---

@@ -28,13 +28,13 @@ No command-specific flags. Uses global persistent flags only (`--user-id`, `--de
 Start the daemon for user `alice`:
 
 ```bash
-xyncra-client listen --user-id alice
+xyncra-client listen --user-id alice --device-id dev1
 ```
 
 Start with custom server and device:
 
 ```bash
-xyncra-client listen --user-id alice --server ws://10.0.0.1:8080/ws --device-id mydevice
+xyncra-client listen --user-id alice --device-id dev1 --server ws://10.0.0.1:8080/ws --device-id mydevice
 ```
 
 ### Output Format
@@ -58,6 +58,26 @@ xyncra-client listen --user-id alice --server ws://10.0.0.1:8080/ws --device-id 
 [conversation] id=<conv-uuid> title="Chat with Bob"
 [gap] seq=99
 ```
+
+### HITL Event Output (D-085)
+
+当 Agent 触发 Human-in-the-Loop 流程时，daemon 会输出以下事件到 stdout：
+
+```
+[agent_question] agent=agent/hitl-bot conv=<conv-uuid> checkpoint_id=<uuid> interrupt_id=<uuid> question="是否需要执行此操作？"
+[agent_checkpoint] agent=agent/hitl-bot conv=<conv-uuid> checkpoint_id=<uuid>
+[agent_status] agent=agent/hitl-bot conv=<conv-uuid> status=thinking
+[agent_timeout] agent=agent/hitl-bot conv=<conv-uuid> reason="agent execution timed out"
+```
+
+| 事件 | 说明 | 关键字段 |
+|------|------|---------|
+| `agent_question` | Agent 请求用户输入（HITL 中断） | `checkpoint_id`, `interrupt_id`, `question` |
+| `agent_checkpoint` | Agent 保存检查点 | `checkpoint_id` |
+| `agent_status` | Agent 状态变更 | `status` (thinking/tool_calling/generating/idle/asking_user) |
+| `agent_timeout` | Agent 执行超时 | `reason` |
+
+> 收到 `agent_question` 后，使用 `xyncra-client agent-resume` 回复用户输入。详见 [agent-resume](./agent-resume.md)。
 
 ### Daemon Lifecycle
 

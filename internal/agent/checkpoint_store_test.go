@@ -20,6 +20,7 @@ type mockCheckpointRedis struct {
 	ttls    map[string]time.Duration
 	failGet bool
 	failSet bool
+	failDel bool
 }
 
 func newMockCheckpointRedis() *mockCheckpointRedis {
@@ -63,6 +64,25 @@ func (m *mockCheckpointRedis) Set(_ context.Context, key string, value any, expi
 	m.ttls[key] = expiration
 	cmd := redis.NewStatusCmd(context.Background(), "set", key, value)
 	cmd.SetVal("OK")
+	return cmd
+}
+
+func (m *mockCheckpointRedis) Del(_ context.Context, keys ...string) *redis.IntCmd {
+	if m.failDel {
+		cmd := redis.NewIntCmd(context.Background(), "del", "key")
+		cmd.SetErr(redis.ErrClosed)
+		return cmd
+	}
+	var deleted int64
+	for _, key := range keys {
+		if _, ok := m.data[key]; ok {
+			delete(m.data, key)
+			delete(m.ttls, key)
+			deleted++
+		}
+	}
+	cmd := redis.NewIntCmd(context.Background(), "del", keys)
+	cmd.SetVal(deleted)
 	return cmd
 }
 
@@ -158,4 +178,43 @@ func TestRedisCheckPointStore_LargePayload(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, existed)
 	assert.Equal(t, large, val)
+}
+
+func TestRedisCheckPointStore_Delete(t *testing.T) {
+	mock := newMockCheckpointRedis()
+	store := NewRedisCheckPointStore(mock, "", 0)
+
+	ctx := context.Background()
+	require.NoError(t, store.Set(ctx, "cp-del", []byte("data")))
+
+	// Verify it exists before delete.
+	_, existed, err := store.Get(ctx, "cp-del")
+	require.NoError(t, err)
+	assert.True(t, existed)
+
+	// Delete and confirm removal.
+	err = store.Delete(ctx, "cp-del")
+	require.NoError(t, err)
+
+	_, existed, err = store.Get(ctx, "cp-del")
+	require.NoError(t, err)
+	assert.False(t, existed)
+}
+
+func TestRedisCheckPointStore_DeleteIdempotent(t *testing.T) {
+	mock := newMockCheckpointRedis()
+	store := NewRedisCheckPointStore(mock, "", 0)
+
+	// Deleting a non-existent key must not error (idempotent).
+	err := store.Delete(context.Background(), "nonexistent")
+	assert.NoError(t, err)
+}
+
+func TestRedisCheckPointStore_DeleteRedisError(t *testing.T) {
+	mock := newMockCheckpointRedis()
+	mock.failDel = true
+	store := NewRedisCheckPointStore(mock, "", 0)
+
+	err := store.Delete(context.Background(), "cp-err")
+	assert.Error(t, err, "D-083: Redis errors must propagate (fail-closed)")
 }

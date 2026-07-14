@@ -15,6 +15,7 @@ import (
 type redisCheckpointClient interface {
 	Get(ctx context.Context, key string) *redis.StringCmd
 	Set(ctx context.Context, key string, value any, expiration time.Duration) *redis.StatusCmd
+	Del(ctx context.Context, keys ...string) *redis.IntCmd
 }
 
 // RedisCheckPointStore implements compose.CheckPointStore (Eino) backed by
@@ -67,6 +68,15 @@ func (s *RedisCheckPointStore) Get(ctx context.Context, key string) ([]byte, boo
 func (s *RedisCheckPointStore) Set(ctx context.Context, key string, value []byte) error {
 	if err := s.client.Set(ctx, s.keyPrefix+key, value, s.ttl).Err(); err != nil {
 		return fmt.Errorf("%w: %v", ErrCheckpointStoreSet, err)
+	}
+	return nil
+}
+
+// Delete removes a checkpoint by key. Idempotent — no error when key does not exist.
+// Redis errors are returned to the caller (D-083: fail-closed).
+func (s *RedisCheckPointStore) Delete(ctx context.Context, key string) error {
+	if err := s.client.Del(ctx, s.keyPrefix+key).Err(); err != nil {
+		return fmt.Errorf("checkpoint store delete: %w", err)
 	}
 	return nil
 }

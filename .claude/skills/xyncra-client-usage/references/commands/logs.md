@@ -33,13 +33,13 @@ xyncra-client logs tail [flags]
 Show recent RPC logs:
 
 ```bash
-xyncra-client logs tail --user-id alice
+xyncra-client logs tail --user-id alice --device-id dev1
 ```
 
 Show notification logs from the last 30 minutes:
 
 ```bash
-xyncra-client logs tail --user-id alice --type notifications --since 30m --limit 20
+xyncra-client logs tail --user-id alice --device-id dev1 --type notifications --since 30m --limit 20
 ```
 
 ### Output Format (stdout)
@@ -98,19 +98,19 @@ xyncra-client logs search [flags]
 Search for failed RPC calls:
 
 ```bash
-xyncra-client logs search --user-id alice --error
+xyncra-client logs search --user-id alice --device-id dev1 --error
 ```
 
 Search for a specific method in a time range:
 
 ```bash
-xyncra-client logs search --user-id alice --method send_message --from 2h --to 30m
+xyncra-client logs search --user-id alice --device-id dev1 --method send_message --from 2h --to 30m
 ```
 
 Look up a specific request by ID:
 
 ```bash
-xyncra-client logs search --user-id alice --request-id 550e8400-e29b-41d4-a716-446655440000
+xyncra-client logs search --user-id alice --device-id dev1 --request-id 550e8400-e29b-41d4-a716-446655440000
 ```
 
 ### Output Format
@@ -151,13 +151,13 @@ xyncra-client logs stats [flags]
 Show stats for the last 24 hours:
 
 ```bash
-xyncra-client logs stats --user-id alice
+xyncra-client logs stats --user-id alice --device-id dev1
 ```
 
 Show stats grouped by 1-hour intervals:
 
 ```bash
-xyncra-client logs stats --user-id alice --since 7d --interval 1h
+xyncra-client logs stats --user-id alice --device-id dev1 --since 7d --interval 1h
 ```
 
 ### Output Format (stdout)
@@ -229,19 +229,19 @@ xyncra-client logs export [flags]
 Export RPC logs to CSV on stdout:
 
 ```bash
-xyncra-client logs export --user-id alice > logs.csv
+xyncra-client logs export --user-id alice --device-id dev1 > logs.csv
 ```
 
 Export notification logs to JSON file:
 
 ```bash
-xyncra-client logs export --user-id alice --type notifications --format json -o notifications.json
+xyncra-client logs export --user-id alice --device-id dev1 --type notifications --format json -o notifications.json
 ```
 
 Export a specific method's logs for a time range:
 
 ```bash
-xyncra-client logs export --user-id alice --method send_message --from 7d --format csv -o sends.csv
+xyncra-client logs export --user-id alice --device-id dev1 --method send_message --from 7d --format csv -o sends.csv
 ```
 
 ### Output
@@ -283,19 +283,19 @@ xyncra-client logs cleanup [flags]
 Preview what would be cleaned up (default 7-day retention):
 
 ```bash
-xyncra-client logs cleanup --user-id alice --dry-run
+xyncra-client logs cleanup --user-id alice --device-id dev1 --dry-run
 ```
 
 Clean up logs older than 3 days:
 
 ```bash
-xyncra-client logs cleanup --user-id alice --retain 72h
+xyncra-client logs cleanup --user-id alice --device-id dev1 --retain 72h
 ```
 
 Clean up only RPC logs:
 
 ```bash
-xyncra-client logs cleanup --user-id alice --type rpc --retain 168h
+xyncra-client logs cleanup --user-id alice --device-id dev1 --type rpc --retain 168h
 ```
 
 ### Output Format (stdout)

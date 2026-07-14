@@ -32,13 +32,13 @@ xyncra-client create-conversation [flags]
 Create a conversation with user `bob`:
 
 ```bash
-xyncra-client create-conversation --user-id alice --peer-id bob
+xyncra-client create-conversation --user-id alice --device-id dev1 --peer-id bob
 ```
 
 Create with a title:
 
 ```bash
-xyncra-client create-conversation --user-id alice --peer-id bob --title "Project Chat"
+xyncra-client create-conversation --user-id alice --device-id dev1 --peer-id bob --title "Project Chat"
 ```
 
 ### Output Format
@@ -67,7 +67,7 @@ Conversation already exists (find-or-create).
 Error: Cannot create conversation.
   Cause 1: <ipc_error>
   Cause 2: <ws_error>
-Hint: Start the daemon first: xyncra-client listen --user-id alice
+Hint: Start the daemon first: xyncra-client listen --user-id alice --device-id dev1
 ```
 
 ### Notes
@@ -102,7 +102,7 @@ xyncra-client delete-conversation [flags]
 Delete a conversation:
 
 ```bash
-xyncra-client delete-conversation --user-id alice -c <conv-uuid>
+xyncra-client delete-conversation --user-id alice --device-id dev1 -c <conv-uuid>
 ```
 
 ### Output Format
@@ -119,7 +119,7 @@ Conversation deleted.
 Error: Cannot delete conversation.
   Cause 1: <ipc_error>
   Cause 2: <ws_error>
-Hint: Start the daemon first: xyncra-client listen --user-id alice
+Hint: Start the daemon first: xyncra-client listen --user-id alice --device-id dev1
 ```
 
 ### Notes
@@ -154,7 +154,7 @@ xyncra-client restore-conversation [flags]
 Restore a deleted conversation:
 
 ```bash
-xyncra-client restore-conversation --user-id alice -c <conv-uuid>
+xyncra-client restore-conversation --user-id alice --device-id dev1 -c <conv-uuid>
 ```
 
 ### Output Format
@@ -171,7 +171,7 @@ Conversation restored.
 Error: Cannot restore conversation.
   Cause 1: <ipc_error>
   Cause 2: <ws_error>
-Hint: Start the daemon first: xyncra-client listen --user-id alice
+Hint: Start the daemon first: xyncra-client listen --user-id alice --device-id dev1
 ```
 
 ### Notes
@@ -207,13 +207,13 @@ xyncra-client list-conversations [flags]
 List first page of conversations:
 
 ```bash
-xyncra-client list-conversations --user-id alice
+xyncra-client list-conversations --user-id alice --device-id dev1
 ```
 
 Paginate to the next page:
 
 ```bash
-xyncra-client list-conversations --user-id alice --offset 20 --limit 10
+xyncra-client list-conversations --user-id alice --device-id dev1 --offset 20 --limit 10
 ```
 
 ### Output Format (stdout)
@@ -261,7 +261,7 @@ xyncra-client get-conversation [flags]
 Show conversation details:
 
 ```bash
-xyncra-client get-conversation --user-id alice -c <conv-uuid>
+xyncra-client get-conversation --user-id alice --device-id dev1 -c <conv-uuid>
 ```
 
 ### Output Format (stdout)

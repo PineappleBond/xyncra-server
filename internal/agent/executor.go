@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/compose"
 
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
@@ -55,11 +56,25 @@ type AgentExecutor struct {
 	typingTimeout  time.Duration // default 60s
 	metrics        LLMMetrics    // optional LLM call metrics recorder (nil = disabled)
 
+	// checkpointStore is used for HITL checkpoint cleanup after resume (D-112).
+	// When non-nil and the underlying store supports Delete, the resume handler
+	// removes the checkpoint from Redis after a successful resume to prevent
+	// memory leaks.
+	checkpointStore DeletableCheckPointStore
+
 	// interruptIDs maps checkpointID -> []interruptID. Populated when an
 	// interrupt event is detected; consumed during resume to build the
 	// correct ResumeParams.Targets when the client does not supply an
 	// explicit interrupt ID.
 	interruptIDs sync.Map // map[string][]string
+}
+
+// DeletableCheckPointStore extends compose.CheckPointStore with a Delete
+// capability (D-112). Any store that implements Get, Set, and Delete satisfies
+// this interface.
+type DeletableCheckPointStore interface {
+	compose.CheckPointStore
+	Delete(ctx context.Context, key string) error
 }
 
 // registerInterruptIDs stores interrupt IDs for a checkpoint so they can be
@@ -79,6 +94,19 @@ func (e *AgentExecutor) getInterruptIDs(checkpointID string) []string {
 	}
 	ids, _ := v.([]string)
 	return ids
+}
+
+// cleanupAfterResume removes the checkpoint and interruptID mapping after
+// a successful resume. Non-fatal: errors are logged but do not affect the
+// resume result (D-112, D-113).
+func (e *AgentExecutor) cleanupAfterResume(ctx context.Context, checkpointID string, logger Logger) {
+	if e.checkpointStore != nil {
+		if delErr := e.checkpointStore.Delete(ctx, checkpointID); delErr != nil {
+			logger.Error("agent resume: checkpoint cleanup failed",
+				"checkpoint_id", checkpointID, "error", delErr)
+		}
+	}
+	e.interruptIDs.Delete(checkpointID)
 }
 
 // ExecutorOption configures an AgentExecutor.
@@ -110,6 +138,15 @@ func WithTypingTimeout(d time.Duration) ExecutorOption {
 func WithLLMMetrics(m LLMMetrics) ExecutorOption {
 	return func(e *AgentExecutor) {
 		e.metrics = m
+	}
+}
+
+// WithCheckPointStore sets the checkpoint store for HITL checkpoint cleanup
+// after resume (D-112). The store must implement Delete; when set, the resume
+// handler removes the checkpoint from Redis after a successful resume.
+func WithCheckPointStore(store DeletableCheckPointStore) ExecutorOption {
+	return func(e *AgentExecutor) {
+		e.checkpointStore = store
 	}
 }
 

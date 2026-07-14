@@ -1023,3 +1023,102 @@ func TestCLIUpdateHandler_OnStreaming_Matrix(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// HITL handler output tests (D-087)
+// ---------------------------------------------------------------------------
+
+// TestCLIUpdateHandler_OnAgentQuestion verifies the output format of the
+// OnAgentQuestion HITL handler.
+func TestCLIUpdateHandler_OnAgentQuestion(t *testing.T) {
+	h := newCLIUpdateHandler()
+
+	output := captureStdout(func() {
+		err := h.OnAgentQuestion(context.Background(),
+			"agent/weather-bot", "conv-123",
+			"What city?", "cp-abc", "intr-xyz")
+		if err != nil {
+			t.Fatalf("OnAgentQuestion() error: %v", err)
+		}
+	})
+
+	assert.Contains(t, output, "[agent_question]")
+	assert.Contains(t, output, "agent=agent/weather-bot")
+	assert.Contains(t, output, "conv=conv-123")
+	assert.Contains(t, output, "checkpoint_id=cp-abc")
+	assert.Contains(t, output, "interrupt_id=intr-xyz")
+	assert.Contains(t, output, "What city?")
+}
+
+// TestCLIUpdateHandler_OnAgentCheckpointCreated verifies the output format of
+// the OnAgentCheckpointCreated handler.
+func TestCLIUpdateHandler_OnAgentCheckpointCreated(t *testing.T) {
+	h := newCLIUpdateHandler()
+
+	output := captureStdout(func() {
+		err := h.OnAgentCheckpointCreated(context.Background(),
+			"agent/weather-bot", "conv-123", "cp-abc")
+		if err != nil {
+			t.Fatalf("OnAgentCheckpointCreated() error: %v", err)
+		}
+	})
+
+	assert.Contains(t, output, "[agent_checkpoint]")
+	assert.Contains(t, output, "agent=agent/weather-bot")
+	assert.Contains(t, output, "conv=conv-123")
+	assert.Contains(t, output, "checkpoint_id=cp-abc")
+}
+
+// TestCLIUpdateHandler_OnAgentStatus verifies the output format of the
+// OnAgentStatus handler.
+func TestCLIUpdateHandler_OnAgentStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		userID     string
+		convID     string
+		status     string
+		wantFields []string
+	}{
+		{
+			name:   "asking_user",
+			userID: "agent/bot1", convID: "conv-1", status: "asking_user",
+			wantFields: []string{"[agent_status]", "agent=agent/bot1", "conv=conv-1", "status=asking_user"},
+		},
+		{
+			name:   "running",
+			userID: "agent/bot2", convID: "conv-2", status: "running",
+			wantFields: []string{"[agent_status]", "agent=agent/bot2", "status=running"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCLIUpdateHandler()
+			output := captureStdout(func() {
+				require.NoError(t, h.OnAgentStatus(context.Background(), tc.userID, tc.convID, tc.status))
+			})
+			for _, field := range tc.wantFields {
+				assert.Contains(t, output, field)
+			}
+		})
+	}
+}
+
+// TestCLIUpdateHandler_OnAgentTimeout verifies the output format of the
+// OnAgentTimeout handler.
+func TestCLIUpdateHandler_OnAgentTimeout(t *testing.T) {
+	h := newCLIUpdateHandler()
+
+	output := captureStdout(func() {
+		err := h.OnAgentTimeout(context.Background(),
+			"agent/weather-bot", "conv-123", "LLM timeout after 120s")
+		if err != nil {
+			t.Fatalf("OnAgentTimeout() error: %v", err)
+		}
+	})
+
+	assert.Contains(t, output, "[agent_timeout]")
+	assert.Contains(t, output, "agent=agent/weather-bot")
+	assert.Contains(t, output, "conv=conv-123")
+	assert.Contains(t, output, "LLM timeout after 120s")
+}

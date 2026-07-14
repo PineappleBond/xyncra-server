@@ -32,18 +32,18 @@ Stale lock file (D-031). The listen daemon crashed or was killed (e.g., SIGKILL)
    ```
    Replace `{user-id}` and `{device-id}` with your actual values. The default device ID can be found by running:
    ```bash
-   ./xyncra-client listen --user-id alice 2>&1 | grep "Device:"
+   ./xyncra-client listen --user-id alice --device-id dev1 --device-id dev1 2>&1 | grep "Device:"
    ```
 
 3. Alternatively, use the `kill` command which handles stale locks automatically:
    ```bash
-   ./xyncra-client kill --user-id alice
+   ./xyncra-client kill --user-id alice --device-id dev1
    ```
    Output: `Daemon process (PID: 12345) is not running. Cleaning up stale files.`
 
 4. Then restart the daemon:
    ```bash
-   ./xyncra-client listen --user-id alice
+   ./xyncra-client listen --user-id alice --device-id dev1 --device-id dev1
    ```
 
 ---
@@ -70,12 +70,12 @@ One of the following:
 
 2. If the daemon is not running, start it:
    ```bash
-   ./xyncra-client listen --user-id <recipient-user-id>
+   ./xyncra-client listen --user-id <recipient-user-id> --device-id <device>
    ```
 
 3. Trigger a manual sync to pull any missed updates:
    ```bash
-   ./xyncra-client sync-updates --user-id <recipient-user-id>
+   ./xyncra-client sync-updates --user-id <recipient-user-id> --device-id <device>
    ```
    Note: `sync-updates` requires the daemon to be running (D-036). If the daemon is not running, start it first.
 
@@ -110,19 +110,19 @@ The local SQLite database has not been synced yet (D-035). The `list-conversatio
 
 1. Start the listen daemon to trigger synchronization:
    ```bash
-   ./xyncra-client listen --user-id alice
+   ./xyncra-client listen --user-id alice --device-id dev1 --device-id dev1
    ```
 
 2. Wait for the initial sync to complete (watch for `[new message]` or `[conversation]` output).
 
 3. In a separate terminal, run the query again:
    ```bash
-   ./xyncra-client get-conversation --user-id alice --conversation-id <uuid>
+   ./xyncra-client get-conversation --user-id alice --device-id dev1 --conversation-id <uuid>
    ```
 
 4. If the conversation was just created on this device, verify it exists by listing all conversations:
    ```bash
-   ./xyncra-client list-conversations --user-id alice
+   ./xyncra-client list-conversations --user-id alice --device-id dev1
    ```
 
 ---
@@ -135,7 +135,7 @@ The local SQLite database has not been synced yet (D-035). The `list-conversatio
 Error: Cannot send message.
   Cause 1: dial unix /Users/xxx/.xyncra/alice/abc12345/xyncra.sock: connect: connection refused
   Cause 2: <websocket_error>
-Hint: Start the daemon first: xyncra-client listen --user-id alice
+Hint: Start the daemon first: xyncra-client listen --user-id alice --device-id dev1 --device-id dev1
 ```
 
 **Cause:**
@@ -158,13 +158,13 @@ Hint: Start the daemon first: xyncra-client listen --user-id alice
 
 3. Start the daemon:
    ```bash
-   ./xyncra-client listen --user-id alice
+   ./xyncra-client listen --user-id alice --device-id dev1 --device-id dev1
    ```
 
 4. If the daemon is running but the socket is missing, kill and restart:
    ```bash
-   ./xyncra-client kill --user-id alice
-   ./xyncra-client listen --user-id alice
+   ./xyncra-client kill --user-id alice --device-id dev1
+   ./xyncra-client listen --user-id alice --device-id dev1 --device-id dev1
    ```
 
 5. For IPC+WS fallback commands (D-032), the WebSocket fallback should still work even without the daemon. If both fail, check the server URL:
@@ -202,8 +202,8 @@ Multiple processes are attempting to write to the SQLite database simultaneously
 
 4. Check for stale processes and clean up:
    ```bash
-   ./xyncra-client kill --user-id alice
-   ./xyncra-client listen --user-id alice
+   ./xyncra-client kill --user-id alice --device-id dev1
+   ./xyncra-client listen --user-id alice --device-id dev1 --device-id dev1
    ```
 
 5. If the problem persists, check the database file integrity:
@@ -245,17 +245,17 @@ Using the wrong type will cause a parameter error.
 
 For `delete-message`, use the string UUID:
 ```bash
-./xyncra-client delete-message --user-id alice --message-id "550e8400-e29b-41d4-a716-446655440000"
+./xyncra-client delete-message --user-id alice --device-id dev1 --message-id "550e8400-e29b-41d4-a716-446655440000"
 ```
 
 For `mark-as-read`, use the uint32 sequence number:
 ```bash
-./xyncra-client mark-as-read --user-id alice --conversation-id <uuid> --message-id 42
+./xyncra-client mark-as-read --user-id alice --device-id dev1 --conversation-id <uuid> --message-id 42
 ```
 
 To find the correct values, query the local database:
 ```bash
-./xyncra-client get-messages --user-id alice --conversation-id <uuid>
+./xyncra-client get-messages --user-id alice --device-id dev1 --conversation-id <uuid>
 ```
 
 Output shows `[<message_id>]` (uint32 sequence number) for each message. The string UUID is not displayed in `get-messages` output; use `sqlite3` to query it directly (see [debugging.md](./debugging.md)).
@@ -284,27 +284,27 @@ Or after removing `--dry-run`, still `Deleted 0 log entries.`
 
 1. Remove `--dry-run` to actually perform deletion:
    ```bash
-   ./xyncra-client logs cleanup --user-id alice
+   ./xyncra-client logs cleanup --user-id alice --device-id dev1
    ```
 
 2. To delete more aggressively, reduce the retention period:
    ```bash
    # Delete logs older than 1 day
-   ./xyncra-client logs cleanup --user-id alice --retain 24h
+   ./xyncra-client logs cleanup --user-id alice --device-id dev1 --retain 24h
 
    # Delete logs older than 1 hour
-   ./xyncra-client logs cleanup --user-id alice --retain 1h
+   ./xyncra-client logs cleanup --user-id alice --device-id dev1 --retain 1h
    ```
 
 3. Preview before deleting:
    ```bash
-   ./xyncra-client logs cleanup --user-id alice --retain 24h --dry-run
+   ./xyncra-client logs cleanup --user-id alice --device-id dev1 --retain 24h --dry-run
    ```
 
 4. To clean only a specific log type:
    ```bash
-   ./xyncra-client logs cleanup --user-id alice --type rpc
-   ./xyncra-client logs cleanup --user-id alice --type notifications
+   ./xyncra-client logs cleanup --user-id alice --device-id dev1 --type rpc
+   ./xyncra-client logs cleanup --user-id alice --device-id dev1 --type notifications
    ```
 
 ---
@@ -315,7 +315,7 @@ Or after removing `--dry-run`, still `Deleted 0 log entries.`
 
 ```
 Error: daemon not running.
-Hint: Start with 'xyncra-client listen --user-id <user>'
+Hint: Start with 'xyncra-client listen --user-id <user> --device-id <device>'
 ```
 
 Exit code: 2 (D-042).
@@ -328,12 +328,12 @@ Exit code: 2 (D-042).
 
 1. Start the daemon first:
    ```bash
-   ./xyncra-client listen --user-id alice
+   ./xyncra-client listen --user-id alice --device-id dev1 --device-id dev1
    ```
 
 2. In a separate terminal, run the sync:
    ```bash
-   ./xyncra-client sync-updates --user-id alice
+   ./xyncra-client sync-updates --user-id alice --device-id dev1
    ```
 
 3. If the daemon fails to start (e.g., lock conflict), check for stale locks (see [Issue #1](#1-listen-already-running-but-process-is-not-visible)).
@@ -352,7 +352,7 @@ Or accidentally using `--user-id` instead of `--peer-id`:
 
 ```bash
 # Wrong - this sets the current user, not the peer
-./xyncra-client create-conversation --user-id alice --user-id bob
+./xyncra-client create-conversation --user-id alice --device-id dev1 --user-id bob
 ```
 
 **Cause:**
@@ -363,7 +363,7 @@ Or accidentally using `--user-id` instead of `--peer-id`:
 
 Use the correct flag:
 ```bash
-./xyncra-client create-conversation --user-id alice --peer-id bob --title "Chat with Bob"
+./xyncra-client create-conversation --user-id alice --device-id dev1 --peer-id bob --title "Chat with Bob"
 ```
 
 Remember:
@@ -509,7 +509,7 @@ dial tcp 127.0.0.1:8080: connect: connection refused
 
 | Symptom | Likely Cause | First Action |
 |---------|-------------|--------------|
-| "lock is held" + no process | Stale lock (D-031) | `./xyncra-client kill --user-id alice` |
+| "lock is held" + no process | Stale lock (D-031) | `./xyncra-client kill --user-id alice --device-id dev1` |
 | Messages not received | Daemon not running | Start `listen` on recipient side |
 | "conversation not found" | Local DB not synced (D-035) | Start `listen` to sync data |
 | "connection refused" on socket | Daemon not running / wrong path | Check `ls ~/.xyncra/{uid}/{did}/xyncra.sock` |

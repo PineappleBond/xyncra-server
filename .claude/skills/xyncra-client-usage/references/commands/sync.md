@@ -29,7 +29,7 @@ No command-specific flags. Uses global persistent flags only.
 Trigger a sync while the daemon is running:
 
 ```bash
-xyncra-client sync-updates --user-id alice
+xyncra-client sync-updates --user-id alice --device-id dev1
 ```
 
 ### Error: Daemon Not Running
@@ -38,7 +38,7 @@ If the daemon is not running:
 
 ```
 Error: daemon not running.
-Hint: Start with 'xyncra-client listen --user-id alice'
+Hint: Start with 'xyncra-client listen --user-id alice --device-id dev1'
 ```
 
 Exit code: `2` (D-042 -- precondition not met).

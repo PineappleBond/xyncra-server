@@ -32,13 +32,13 @@ xyncra-client draft save [flags]
 Save a draft:
 
 ```bash
-xyncra-client draft save --user-id alice -c <conv-uuid> -m "Hey, I was thinking about..."
+xyncra-client draft save --user-id alice --device-id dev1 -c <conv-uuid> -m "Hey, I was thinking about..."
 ```
 
 Update an existing draft (overwrites):
 
 ```bash
-xyncra-client draft save --user-id alice -c <conv-uuid> -m "Updated draft content"
+xyncra-client draft save --user-id alice --device-id dev1 -c <conv-uuid> -m "Updated draft content"
 ```
 
 ### Output Format
@@ -81,7 +81,7 @@ xyncra-client draft get [flags]
 Get the draft for a conversation:
 
 ```bash
-xyncra-client draft get --user-id alice -c <conv-uuid>
+xyncra-client draft get --user-id alice --device-id dev1 -c <conv-uuid>
 ```
 
 ### Output Format
@@ -126,7 +126,7 @@ xyncra-client draft delete [flags]
 Delete a draft:
 
 ```bash
-xyncra-client draft delete --user-id alice -c <conv-uuid>
+xyncra-client draft delete --user-id alice --device-id dev1 -c <conv-uuid>
 ```
 
 ### Output Format

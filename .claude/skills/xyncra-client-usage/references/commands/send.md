@@ -29,13 +29,13 @@ xyncra-client send [flags]
 Send a text message:
 
 ```bash
-xyncra-client send --user-id alice -c <conv-uuid> -m "Hello, world!"
+xyncra-client send --user-id alice --device-id dev1 -c <conv-uuid> -m "Hello, world!"
 ```
 
 Send a reply to a specific message:
 
 ```bash
-xyncra-client send --user-id alice -c <conv-uuid> -m "I agree" --reply-to 42
+xyncra-client send --user-id alice --device-id dev1 -c <conv-uuid> -m "I agree" --reply-to 42
 ```
 
 Send via environment variables (no flags):
@@ -51,7 +51,7 @@ xyncra-client send -c <conv-uuid> -m "Hello!"
 Error: Cannot send message.
   Cause 1: dial unix /Users/alice/.xyncra/alice/abc12345/xyncra.sock: connect: connection refused
   Cause 2: dial tcp 127.0.0.1:8080: connect: connection refused
-Hint: Start the daemon first: xyncra-client listen --user-id alice
+Hint: Start the daemon first: xyncra-client listen --user-id alice --device-id dev1
 ```
 
 ## Output Format
