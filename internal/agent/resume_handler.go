@@ -34,18 +34,26 @@ type AgentResumePayload struct {
 //
 // The handler:
 //  1. Unmarshals the task payload
-//  2. Acquires a per-conversation lock (D-084)
-//  3. Looks up agent config from registry
-//  4. Builds the agent (with CheckPointStore)
-//  5. Calls Runner.ResumeWithParams with the user's answer
-//  6. Bridges the stream and broadcasts to the human user
-//  7. Persists the final message
-//  8. Always returns nil to MQ (D-073)
+//  2. Checks idempotency (skip if checkpoint already resumed)
+//  3. Acquires a per-conversation lock (D-084)
+//  4. Looks up agent config from registry
+//  5. Builds the agent (with CheckPointStore)
+//  6. Calls Runner.ResumeWithParams with the user's answer
+//  7. Bridges the stream and broadcasts to the human user
+//  8. Persists the final message
+//  9. Always returns nil to MQ (D-073)
+//
+// idempotency may be nil to disable the duplicate-resume guard (backward
+// compatible). When non-nil, a Redis SETNX on "agent:resume:<checkpointID>"
+// ensures that the same checkpoint is resumed at most once, even if multiple
+// TypeAgentResume tasks are enqueued (e.g. client calls both send_message
+// and agent_resume, or retries agent_resume).
 func NewAgentResumeHandler(
 	executor *AgentExecutor,
 	registry *AgentRegistry,
 	lock ConversationLock,
 	logger Logger,
+	idempotency IdempotencyStore,
 ) func(ctx context.Context, task *mq.Task) error {
 	if logger == nil {
 		logger = noopLogger{}
@@ -70,6 +78,27 @@ func NewAgentResumeHandler(
 				"agent_id", payload.AgentID,
 			)
 			return nil
+		}
+
+		// 2b. Idempotency check: prevent the same checkpoint from being resumed
+		// more than once. Uses Redis SETNX for atomic check-and-set (24h TTL).
+		// This guards against duplicate resume tasks (e.g. client sends both
+		// send_message + agent_resume, or retries agent_resume).
+		if idempotency != nil {
+			idempotencyKey := "agent:resume:" + payload.CheckpointID
+			dup, err := idempotency.MarkProcessed(ctx, idempotencyKey, 24*time.Hour)
+			if err != nil {
+				logger.Error("agent resume: idempotency check failed",
+					"checkpoint_id", payload.CheckpointID, "error", err)
+				// Fail-open: continue processing if Redis is down.
+			} else if dup {
+				logger.Info("agent resume: skipping duplicate resume (checkpoint already resumed)",
+					"checkpoint_id", payload.CheckpointID,
+					"conversation_id", payload.ConversationID,
+					"agent_id", payload.AgentID,
+				)
+				return nil
+			}
 		}
 
 		// 3. Acquire per-conversation lock (D-084).
@@ -99,6 +128,9 @@ func NewAgentResumeHandler(
 				if err := lock.Release(ctx, payload.ConversationID); err != nil {
 					logger.Error("agent resume: lock release failed",
 						"conversation_id", payload.ConversationID, "error", err)
+				} else {
+					logger.Debug("agent resume: conversation lock released",
+						"conversation_id", payload.ConversationID)
 				}
 			}
 		}
@@ -151,23 +183,46 @@ func NewAgentResumeHandler(
 		defer clearTyping()
 
 		// ResumeWithParams passes the user's answer back to the interrupted agent.
-		// Build the Targets map: when the client provides a specific interrupt ID,
-		// use it directly. Otherwise use the interrupt IDs registered during the
-		// original interrupt so every interrupted component receives the answer.
+		// Build the Targets map: always use the interrupt IDs registered during the
+		// original interrupt to ensure consistency with Eino's checkpoint. The client
+		// may provide an interrupt_id, but we validate it against the stored IDs to
+		// prevent mismatches that would cause isResumeTarget=false.
 		targets := make(map[string]any)
-		if payload.InterruptID != "" {
-			targets[payload.InterruptID] = payload.Answer
-			logger.Debug("agent resume: using client-provided interrupt ID",
-				"interrupt_id", payload.InterruptID,
+		storedIDs := executor.getInterruptIDs(payload.CheckpointID)
+		if len(storedIDs) == 0 {
+			logger.Info("agent resume: no interrupt IDs found for checkpoint",
 				"checkpoint_id", payload.CheckpointID)
-		} else {
-			storedIDs := executor.getInterruptIDs(payload.CheckpointID)
-			if len(storedIDs) == 0 {
-				logger.Info("agent resume: no interrupt IDs found for checkpoint",
+			// Fallback: if no stored IDs, use client-provided ID (backward compatibility)
+			if payload.InterruptID != "" {
+				targets[payload.InterruptID] = payload.Answer
+				logger.Debug("agent resume: using client-provided interrupt ID (no stored IDs)",
+					"interrupt_id", payload.InterruptID,
 					"checkpoint_id", payload.CheckpointID)
 			}
+		} else {
+			// Use stored IDs (authoritative source from Eino checkpoint)
 			for _, id := range storedIDs {
 				targets[id] = payload.Answer
+			}
+			// Log if client provided a different ID (for debugging)
+			if payload.InterruptID != "" {
+				clientIDMatched := false
+				for _, id := range storedIDs {
+					if id == payload.InterruptID {
+						clientIDMatched = true
+						break
+					}
+				}
+				if !clientIDMatched {
+					logger.Info("agent resume: client-provided interrupt ID does not match stored IDs (using stored IDs)",
+						"client_interrupt_id", payload.InterruptID,
+						"stored_interrupt_ids", storedIDs,
+						"checkpoint_id", payload.CheckpointID)
+				} else {
+					logger.Debug("agent resume: client-provided interrupt ID matches stored IDs",
+						"interrupt_id", payload.InterruptID,
+						"checkpoint_id", payload.CheckpointID)
+				}
 			}
 		}
 		params := &adk.ResumeParams{

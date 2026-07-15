@@ -205,11 +205,14 @@ func (l *cliLogger) Debug(msg string, args ...any) {
 
 // newListenCommand creates the "listen" subcommand for the CLI.
 func newListenCommand() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "listen",
 		Short: "Start listening for message updates",
 		RunE:  runListen,
 	}
+	cmd.Flags().String("device-name", "xyncra-cli", "Human-readable device name for function registration")
+	cmd.Flags().String("device-type", "cli", "Device type (e.g. cli, browser) for function registration")
+	return cmd
 }
 
 // runListen is the entry point for the "listen" subcommand. It acquires the
@@ -250,6 +253,10 @@ func runListen(cmd *cobra.Command, _ []string) error {
 	// Build the server URL with user_id query parameter (D-005).
 	serverURL := cliCtx.ServerURLWithUser()
 
+	// Read device metadata flags for function registration (D-115).
+	deviceName, _ := cmd.Flags().GetString("device-name")
+	deviceType, _ := cmd.Flags().GetString("device-type")
+
 	// Build client options.
 	clientOpts := []client.ClientOption{
 		client.WithServerURL(serverURL),
@@ -258,6 +265,9 @@ func runListen(cmd *cobra.Command, _ []string) error {
 		client.WithDB(db),
 		client.WithUpdateHandler(handler),
 		client.WithLogger(logger),
+		client.WithDeviceName(deviceName),
+		client.WithDeviceType(deviceType),
+		client.WithFunctions(builtinFunctionInfos()),
 	}
 
 	// Testing hooks: allow overriding reconnect delays via env vars (D-048).
@@ -280,6 +290,9 @@ func runListen(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("listen: create client: %w", err)
 	}
 	defer xc.Stop()
+
+	// Register built-in function handlers (D-115).
+	registerBuiltinHandlers(xc)
 
 	// Register IPC method handlers.
 	registerIPCHandlers(ipcServer, xc, db, cliCtx.UserID)

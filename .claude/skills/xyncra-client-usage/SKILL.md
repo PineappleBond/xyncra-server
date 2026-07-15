@@ -26,7 +26,7 @@ Use this skill when working with the xyncra-client CLI tool.
 
 | Command | Mode | Description |
 |---------|------|-------------|
-| `listen` | Daemon | Start long-running daemon (IPC + WebSocket) |
+| `listen` | Daemon | Start long-running daemon (IPC + WebSocket + built-in functions) |
 | `send` | IPC+WS | Send message to conversation |
 | `create-conversation` | IPC+WS | Create 1-on-1 conversation (find-or-create) |
 | `delete-conversation` | IPC+WS | Soft-delete conversation + messages |
@@ -80,6 +80,18 @@ IPC first with automatic WebSocket fallback (D-032). Exception: `sync-updates` i
 **Local Database**: Query commands read SQLite directly (offline-capable, D-035):
 list-conversations, get-conversation, get-messages, search-messages, draft *, logs *
 
+## Built-in Functions (Auto-registered by daemon, D-115)
+
+The `listen` daemon automatically registers these functions on startup. No separate command is needed.
+
+| Function | Description | Parameters |
+|----------|-------------|------------|
+| `ping` | Echo test for ReverseRPC channel | `message` (string, optional) |
+| `get_device_info` | Device info (hostname, OS, arch, pid) | none |
+| `get_time` | Current device time (UTC, unix, timezone) | none |
+
+These functions are registered via `system.register_functions` RPC and can be invoked by the server/agent through ReverseRPC.
+
 ## Exit Codes (D-042)
 
 0=success, 1=general error, 2=precondition not met (lock conflict), 3=timeout (kill only)
@@ -92,6 +104,7 @@ D-034: XYNCRA_ env prefix | D-035: Query commands read local SQLite
 D-036: sync-updates IPC-only | D-037: --peer-id not --user-id | D-038: string UUID vs uint32
 D-039: kill SIGTERM/SIGKILL + cleanup | D-040: logs retain 7d | D-041: tabwriter | D-042: exit codes
 D-085: HITL event broadcasting | D-087: AgentTimeoutHandler | D-114: agent-resume IPC-only
+D-115: Daemon 内置函数自动注册（消除 register-functions 独立进程）
 
 ## Server Protocol (for test writers and direct API clients)
 

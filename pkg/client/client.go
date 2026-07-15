@@ -436,19 +436,40 @@ func (c *XyncraClient) performReconnectHandshake(ctx context.Context) {
 	}()
 }
 
-// reregisterFunctions re-sends system.register_functions after reconnect.
-// Currently a placeholder — logs the intent. Full implementation pending
-// client-side function manifest API.
+// reregisterFunctions sends system.register_functions after reconnect so the
+// server knows which functions this device provides (D-098, D-101).
+// Follows fail-open semantics (D-072): registration errors are logged but
+// do not block FullSync or cause the client to disconnect.
+//
+// Note: Call failures may be persisted to the retry manager queue for later
+// retry; this is intentional and consistent with the fail-open policy (D-072).
+//
+// The 10-second timeout is derived from the parent ctx, so time spent on the
+// reconnect handshake reduces the budget available here. This is intentional:
+// if the parent ctx is cancelled the client is shutting down and registration
+// should not proceed.
 func (c *XyncraClient) reregisterFunctions(ctx context.Context) {
-	c.reqMu.RLock()
-	count := len(c.requestHandlers)
-	c.reqMu.RUnlock()
-
-	if count == 0 {
+	fns := c.opts.functions
+	if len(fns) == 0 {
 		return
 	}
 
-	c.logger.Info("function re-registration pending", "count", count)
+	params := map[string]any{
+		"device_name": c.opts.deviceName,
+		"device_type": c.opts.deviceType,
+		"functions":   fns,
+	}
+
+	// Independent timeout so registration cannot stall FullSync.
+	regCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	_, err := c.Call(regCtx, "system.register_functions", params)
+	if err != nil {
+		c.logger.Error("function registration failed (fail-open)", "error", err, "count", len(fns))
+		return
+	}
+	c.logger.Info("functions registered", "count", len(fns))
 }
 
 // ---------------------------------------------------------------------------

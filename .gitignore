@@ -50,6 +50,7 @@ go.work.sum
 *.tmp
 *.bak
 *.log
+llm-logs-e2e/
 
 # === Claude Code / 工具 ===
 .claude/

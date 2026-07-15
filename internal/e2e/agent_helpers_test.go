@@ -184,7 +184,7 @@ func setupAgentE2E(t *testing.T, opts ...agent.ExecutorOption) *agentE2EEnv {
 	agentTaskHandler := agent.NewAgentTaskHandler(agentExecutor, idempotencyStore, conversationLock, testLogger{t: t})
 	base.taskHandler.Register("mq:agent_process", agentTaskHandler)
 
-	agentResumeHandler := agent.NewAgentResumeHandler(agentExecutor, agentRegistry, conversationLock, testLogger{t: t})
+	agentResumeHandler := agent.NewAgentResumeHandler(agentExecutor, agentRegistry, conversationLock, testLogger{t: t}, idempotencyStore)
 	base.taskHandler.Register("mq:agent_resume", agentResumeHandler)
 
 	// 15. Register agent RPC handlers on the existing message handler.

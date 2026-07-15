@@ -182,7 +182,7 @@ func TestAgentHITL_AE_HITL_003(t *testing.T) {
 
 	// Verify the resume handler can be constructed with the test environment.
 	env := setupAgentE2E(t)
-	handler := agent.NewAgentResumeHandler(env.executor, env.registry, env.lock, testLogger{})
+	handler := agent.NewAgentResumeHandler(env.executor, env.registry, env.lock, testLogger{}, nil)
 	assert.NotNil(t, handler, "resume handler should be constructable")
 
 	// Verify that calling the handler with nil task is a no-op.

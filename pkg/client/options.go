@@ -288,6 +288,12 @@ type clientOptions struct {
 	adaptiveTimeoutMax   time.Duration
 	responseRetryMaxSize int
 	responseRetryMax     int
+
+	// DynamicToolProvider: device metadata and function manifest for
+	// auto-registration on connect/reconnect (D-098, D-101).
+	deviceName string
+	deviceType string
+	functions  []protocol.FunctionInfo
 }
 
 // ClientOption configures a Client instance via the functional options pattern.
@@ -419,4 +425,19 @@ func WithResponseRetryMax(n int) ClientOption {
 	return func(o *clientOptions) {
 		o.responseRetryMax = n
 	}
+}
+
+// WithDeviceName sets the human-readable device name for function registration.
+func WithDeviceName(name string) ClientOption {
+	return func(o *clientOptions) { o.deviceName = name }
+}
+
+// WithDeviceType sets the device type (e.g. "cli", "browser") for function registration.
+func WithDeviceType(dtype string) ClientOption {
+	return func(o *clientOptions) { o.deviceType = dtype }
+}
+
+// WithFunctions provides the list of functions to auto-register on connect/reconnect.
+func WithFunctions(fns []protocol.FunctionInfo) ClientOption {
+	return func(o *clientOptions) { o.functions = fns }
 }

@@ -95,7 +95,6 @@ func NewRootCommand() *cobra.Command {
 	cmd.AddCommand(newStreamTextCommand())
 	cmd.AddCommand(newLogsCommand())
 	cmd.AddCommand(newKillCommand())
-	cmd.AddCommand(newRegisterFunctionsCommand())
 	cmd.AddCommand(newAgentResumeCommand())
 
 	return cmd

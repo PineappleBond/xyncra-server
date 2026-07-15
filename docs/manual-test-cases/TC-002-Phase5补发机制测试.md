@@ -67,6 +67,7 @@ make build
 ### 3.2 启动 Docker E2E 环境
 
 ```bash
+docker compose -f docker-compose.e2e.yml build --no-cache && \
 docker compose -f docker-compose.e2e.yml up -d
 ```
 

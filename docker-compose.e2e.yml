@@ -30,6 +30,9 @@ services:
       - XYNCRA_REDIS_DB=15
       - XYNCRA_DB_DRIVER=sqlite
       - XYNCRA_DB_DSN=/app/xyncra-e2e.db
+      - XYNCRA_LLM_LOG_DIR=/app/llm-logs
+    volumes:
+      - ./llm-logs-e2e:/app/llm-logs
     user: "root"
     depends_on:
       redis-e2e:

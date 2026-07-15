@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -60,10 +61,13 @@ func (s *RedisIdempotencyStore) MarkProcessed(ctx context.Context, key string, t
 //
 // The handler:
 //  1. Unmarshals the task payload into AgentProcessPayload
-//  2. Acquires a per-conversation lock (if lock is non-nil)
+//  2. Acquires a per-conversation lock (if lock is non-nil); returns error if held so Asynq retries
 //  3. Checks idempotency (skip if already processed)
 //  4. Calls AgentExecutor.ExecuteWithErrorMessage
-//  5. Always returns nil to MQ (errors are persisted as user-friendly messages, D-067)
+//  5. Returns nil to MQ for permanent errors (D-067); returns transient errors for retry
+//
+// On normal completion (after releasing the lock) the handler invalidates the
+// conversation context cache so subsequent retries load fresh DB state.
 //
 // HITL interrupts (D-084): when the executor returns ErrHITLInterrupted the
 // conversation lock is intentionally NOT released so that no new task can
@@ -115,9 +119,9 @@ func NewAgentTaskHandler(
 					"conversation_id", payload.ConversationID, "error", err)
 				// fail-open (D-072 pattern)
 			} else if !acquired {
-				logger.Info("conversation lock: already held, skipping",
+				logger.Info("conversation lock: already held, requeueing",
 					"conversation_id", payload.ConversationID)
-				return nil // D-073: another task is processing this conversation
+				return fmt.Errorf("conversation lock held by another task, retrying later") // D-073: Asynq will retry with exponential backoff
 			} else {
 				lockHeld = true
 			}
@@ -165,6 +169,9 @@ func NewAgentTaskHandler(
 
 		// Normal path: release the lock.
 		releaseLock()
+
+		// Invalidate context cache so retried tasks load fresh messages from DB.
+		executor.InvalidateContextCache(payload.ConversationID)
 
 		if execErr != nil {
 			// Error already persisted as user-friendly message (D-067).

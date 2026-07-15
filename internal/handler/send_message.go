@@ -216,7 +216,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 						Type:    mq.TypeAgentProcess,
 						Payload: payloadBytes,
 					}
-					if _, err := h.broker.Enqueue(ctx, agentTask); err != nil {
+					if _, err := h.broker.Enqueue(ctx, agentTask, mq.WithMaxRetry(20)); err != nil {
 						log.Printf("send_message: agent MQ enqueue failed (fire-and-forget): %v", err)
 					}
 				}

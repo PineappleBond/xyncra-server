@@ -101,11 +101,19 @@ func (e *AgentExecutor) getInterruptIDs(checkpointID string) []string {
 // resume result (D-112, D-113).
 func (e *AgentExecutor) cleanupAfterResume(ctx context.Context, checkpointID string, logger Logger) {
 	if e.checkpointStore != nil {
+		logger.Info("agent resume: attempting checkpoint cleanup",
+			"checkpoint_id", checkpointID)
 		if delErr := e.checkpointStore.Delete(ctx, checkpointID); delErr != nil {
 			// Non-fatal: TTL 24h safety net will cleanup (D-112).
 			logger.Info("agent resume: checkpoint cleanup failed (non-fatal, TTL will cleanup)",
 				"checkpoint_id", checkpointID, "error", delErr)
+		} else {
+			logger.Info("agent resume: checkpoint cleaned up successfully",
+				"checkpoint_id", checkpointID)
 		}
+	} else {
+		logger.Info("agent resume: checkpointStore is nil, skipping cleanup",
+			"checkpoint_id", checkpointID)
 	}
 	e.interruptIDs.Delete(checkpointID)
 }
@@ -434,6 +442,15 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 // SetContextManager replaces the context manager. Exported for testing only.
 func (e *AgentExecutor) SetContextManager(cm ContextManager) {
 	e.contextManager = cm
+}
+
+// InvalidateContextCache removes the cached context for a conversation so that
+// the next task (e.g. a retried one) loads fresh messages from the database.
+// Safe to call even if contextManager is nil.
+func (e *AgentExecutor) InvalidateContextCache(conversationID string) {
+	if e.contextManager != nil {
+		e.contextManager.InvalidateCache(conversationID)
+	}
 }
 
 // ExecuteWithErrorMessage wraps Execute and sends a user-friendly error message

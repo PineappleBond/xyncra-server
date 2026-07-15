@@ -64,6 +64,7 @@ make build
 ### 3.2 启动 Docker E2E 环境
 
 ```bash
+docker compose -f docker-compose.e2e.yml build --no-cache && \
 docker compose -f docker-compose.e2e.yml up -d
 ```
 
@@ -95,7 +96,7 @@ name: HITL 测试助手
 description: 需要用户确认的测试 Agent
 model: qwen3.7-plus
 api_key_env: XYNCRA_TEST_REAL_API_KEY
-base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+base_url: https://coding.dashscope.aliyuncs.com/v1
 parameters:
   temperature: 0.3
   max_tokens: 500
@@ -206,6 +207,7 @@ flowchart TD
 ```bash
 ./bin/xyncra-client listen \
   --user-id alice \
+  --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   > "$E2E_HOME/alice-daemon.log" 2>&1 &
 ALICE_PID=$!
@@ -217,8 +219,9 @@ sleep 2
 ```bash
 HITL_CONV_ID=$(./bin/xyncra-client create-conversation \
   --user-id alice \
+  --device-id test-device-alice \
   --server ws://localhost:18080/ws \
-  --peer-id "agent/hitl-bot" | grep "ID:" | awk '{print $2}')
+  --peer-id "agent/hitl-bot" | grep "Conversation ID:" | awk '{print $3}')
 echo "HITL_CONV_ID=$HITL_CONV_ID"
 ```
 
@@ -231,6 +234,7 @@ echo "HITL_CONV_ID=$HITL_CONV_ID"
 ```bash
 ./bin/xyncra-client send \
   --user-id alice \
+  --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --conversation-id "$HITL_CONV_ID" \
   --content "删除所有数据"
@@ -279,6 +283,7 @@ echo "CHECKPOINT_ID=$CHECKPOINT_ID"
 ```bash
 ./bin/xyncra-client send \
   --user-id alice \
+  --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --conversation-id "$HITL_CONV_ID" \
   --content "确认"
@@ -323,10 +328,11 @@ sleep 10  # 等待 Agent 恢复执行并生成响应
 #### 步骤 3.5: 验证最终消息
 
 ```bash
-./bin/xyncra-client sync-updates --user-id alice
+./bin/xyncra-client sync-updates --user-id alice --device-id test-device-alice
 
 ./bin/xyncra-client get-messages \
   --user-id alice \
+  --device-id test-device-alice \
   --conversation-id "$HITL_CONV_ID" \
   --limit 5
 # 预期: 包含 Agent 的确认消息，如 "操作已确认，正在执行..."
@@ -341,6 +347,7 @@ sleep 10  # 等待 Agent 恢复执行并生成响应
 ```bash
 ./bin/xyncra-client send \
   --user-id alice \
+  --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --conversation-id "$HITL_CONV_ID" \
   --content "再次删除所有数据"
@@ -366,6 +373,7 @@ redis-cli -p 16379 -n 15 GET "$LOCK_KEY"
 ```bash
 ./bin/xyncra-client send \
   --user-id alice \
+  --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --conversation-id "$HITL_CONV_ID" \
   --content "这是一条新消息"
@@ -396,16 +404,18 @@ redis-cli -p 16379 -n 15 DEL "$LOCK_KEY"
 ```bash
 ./bin/xyncra-client send \
   --user-id alice \
+  --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --conversation-id "$HITL_CONV_ID" \
   --content "现在可以正常处理了吗？"
 
 sleep 10
 
-./bin/xyncra-client sync-updates --user-id alice
+./bin/xyncra-client sync-updates --user-id alice --device-id test-device-alice
 
 ./bin/xyncra-client get-messages \
   --user-id alice \
+  --device-id test-device-alice \
   --conversation-id "$HITL_CONV_ID" \
   --limit 3
 # 预期: Agent 正常响应
@@ -462,7 +472,7 @@ $R FLUSHDB
 ## 10. 环境清理
 
 ```bash
-./bin/xyncra-client kill --user-id alice
+./bin/xyncra-client kill --user-id alice --device-id test-device-alice
 
 docker compose -f docker-compose.e2e.yml down
 

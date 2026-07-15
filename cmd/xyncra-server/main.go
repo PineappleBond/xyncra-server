@@ -334,7 +334,8 @@ func main() {
 	taskHandler.Register(mq.TypeAgentProcess, agentTaskHandler)
 
 	// Register agent resume handler (Phase 8B / D-085).
-	agentResumeHandler := agent.NewAgentResumeHandler(agentExecutor, agentRegistry, conversationLock, srv.Logger())
+	// Pass idempotencyStore to prevent duplicate resumes of the same checkpoint.
+	agentResumeHandler := agent.NewAgentResumeHandler(agentExecutor, agentRegistry, conversationLock, srv.Logger(), idempotencyStore)
 	taskHandler.Register(mq.TypeAgentResume, agentResumeHandler)
 
 	go func() {

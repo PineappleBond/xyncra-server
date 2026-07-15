@@ -33,10 +33,19 @@ func NewAskUserTool() (tool.InvokableTool, error) {
 			// Check if we are being resumed after an interrupt.
 			isResumeTarget, hasData, data := tool.GetResumeContext[string](ctx)
 			if isResumeTarget && hasData {
-				return data, nil
+				// Return a neutral acknowledgment that doesn't echo the user's answer.
+				// Include the answer in a way that guides the LLM's response without repetition.
+				if data == "确认" {
+					return "User has approved the operation. Proceed to execute it now.", nil
+				}
+				if data == "取消" {
+					return "User has rejected the operation. Cancel and inform the user.", nil
+				}
+				// For other answers, provide context without echoing
+				return fmt.Sprintf("User responded. Continue based on their response: %s", data), nil
 			}
 			if isResumeTarget && !hasData {
-				return "confirmed", nil
+				return "User has confirmed. Proceed with the operation.", nil
 			}
 
 			// First call: trigger interrupt with the question.

@@ -519,7 +519,7 @@ func TestNewAgentTaskHandler_ConversationLock_Acquired(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 18. Conversation lock already held → skip execution
+// 18. Conversation lock already held → return error (Asynq requeues)
 // ---------------------------------------------------------------------------
 
 func TestNewAgentTaskHandler_ConversationLock_AlreadyHeld(t *testing.T) {
@@ -536,7 +536,8 @@ func TestNewAgentTaskHandler_ConversationLock_AlreadyHeld(t *testing.T) {
 	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
 
 	err := handler(context.Background(), task)
-	assert.NoError(t, err)
+	assert.Error(t, err, "handler returns error when lock is already held so Asynq retries")
+	assert.Contains(t, err.Error(), "conversation lock held")
 
 	// Executor should NOT have been called.
 	assert.Empty(t, mockBS.calls, "executor should not be called when lock is already held")

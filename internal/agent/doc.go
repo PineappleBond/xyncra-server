@@ -62,8 +62,14 @@
 // adapter layer that converts MQ tasks to ExecutePayload. It unmarshals the
 // AgentProcessPayload, validates required fields, checks idempotency via Redis
 // SETNX (24h TTL, fail-open on Redis errors), and calls
-// AgentExecutor.ExecuteWithErrorMessage. The handler always returns nil to MQ
-// (D-067: errors are persisted as user-friendly messages, so retry won't help).
+// AgentExecutor.ExecuteWithErrorMessage. On normal completion the handler
+// invalidates the conversation context cache so that retried tasks (e.g.
+// ones that were requeued because the conversation lock was held) load fresh
+// messages from the database. The handler returns nil for permanent errors
+// (bad payload, agent not found — retry won't help) and returns an error for
+// transient failures (LLM timeout, rate limit) or when the conversation lock
+// is held by another task (Asynq retries with exponential backoff until the
+// lock is released).
 //
 // RedisIdempotencyStore: Redis-based deduplication using SETNX with TTL. The
 // IdempotencyStore interface provides atomic check-and-set semantics. The key
@@ -144,8 +150,12 @@
 // implements it via Redis SETNX with a configurable TTL (default 130s, covering
 // the 120s total timeout plus buffer). Release uses a Lua script that verifies
 // the lock value before deletion, preventing one owner from releasing another's
-// lock. Fail-open: Redis errors are logged but do not block execution. The
-// lock reuses the same dedicated redis.Client as the idempotency store (D-074).
+// lock. Fail-open: Redis errors are logged but do not block execution. When a
+// task fails to acquire the lock it returns an error so Asynq requeues it with
+// exponential backoff; once the active task finishes and invalidates the context
+// cache, the retried task loads the latest messages (including those queued
+// while the lock was held) and proceeds normally. The lock reuses the same
+// dedicated redis.Client as the idempotency store (D-074).
 //
 // LLMMetrics (monitoring.go): LLMMetrics is the interface for recording LLM
 // call metrics (agent ID, model, duration, token counts, error). LogMetrics

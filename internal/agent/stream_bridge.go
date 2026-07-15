@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/schema"
 )
 
 // StreamChunk represents a single piece of streaming output.
@@ -97,6 +98,12 @@ func (sb *StreamBridge) Bridge(ctx context.Context, iter *adk.AsyncIterator[*adk
 				}
 				if r.event.Output != nil && r.event.Output.MessageOutput != nil {
 					mv := r.event.Output.MessageOutput
+					// Skip tool result events (D-HITL-TOOL-RESULT-FILTER).
+					// Tool results are internal signals for the LLM and must
+					// not be included in the user-visible output stream.
+					if mv.Role == schema.Tool {
+						continue
+					}
 					if mv.IsStreaming {
 						for {
 							chunk, recvErr := mv.MessageStream.Recv()
@@ -257,6 +264,12 @@ func (sb *StreamBridge) BridgeWithInterrupt(
 
 				if r.event.Output != nil && r.event.Output.MessageOutput != nil {
 					mv := r.event.Output.MessageOutput
+					// Skip tool result events (D-HITL-TOOL-RESULT-FILTER).
+					// Tool results are internal signals for the LLM and must
+					// not be included in the user-visible output stream.
+					if mv.Role == schema.Tool {
+						continue
+					}
 					if mv.IsStreaming {
 						for {
 							chunk, recvErr := mv.MessageStream.Recv()

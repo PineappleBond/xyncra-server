@@ -697,10 +697,10 @@ func TestCleanupAfterResume_DeleteFails_LogsError(t *testing.T) {
 	logger := &captureLogger{}
 	e.cleanupAfterResume(context.Background(), "cp-log", logger)
 
-	// An info-level log should have been recorded (non-fatal per D-112).
-	require.Equal(t, 1, logger.infoCount(), "exactly one Info() call expected")
+	// Two info-level logs should have been recorded: one for attempt, one for failure.
+	require.Equal(t, 2, logger.infoCount(), "exactly two Info() calls expected (attempt + failure)")
 
-	// Verify the log message mentions checkpoint cleanup failure.
+	// Verify the last log message mentions checkpoint cleanup failure.
 	lastInfo := logger.lastInfo()
 	assert.Contains(t, lastInfo.msg, "checkpoint cleanup failed",
 		"log should mention checkpoint cleanup failure")
