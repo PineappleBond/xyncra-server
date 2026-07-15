@@ -47,11 +47,8 @@ type DeviceFunctions struct {
 	// DeviceID is the device identifier (D-093).
 	DeviceID string
 
-	// DeviceName is the human-readable name reported by the client.
-	DeviceName string
-
-	// DeviceType describes the kind of device (e.g. "cli", "browser").
-	DeviceType string
+	// DeviceInfo holds arbitrary device metadata (e.g. "name", "type").
+	DeviceInfo map[string]string
 
 	// Functions is the list of callable functions declared by the device.
 	Functions []protocol.FunctionInfo
@@ -97,11 +94,8 @@ type RegisterFunctionsParams struct {
 	// DeviceID identifies the device registering functions.
 	DeviceID string `json:"device_id"`
 
-	// DeviceName is a human-readable label for the device.
-	DeviceName string `json:"device_name"`
-
-	// DeviceType describes the kind of device (e.g. "cli", "browser").
-	DeviceType string `json:"device_type"`
+	// DeviceInfo holds arbitrary device metadata (e.g. "name", "type").
+	DeviceInfo map[string]string `json:"device_info,omitempty"`
 
 	// Functions is the list of callable functions the device exposes.
 	Functions []protocol.FunctionInfo `json:"functions"`
@@ -192,11 +186,19 @@ func (r *MemoryFunctionRegistry) RegisterFunctions(_ context.Context, userID, de
 	funcs := make([]protocol.FunctionInfo, len(params.Functions))
 	copy(funcs, params.Functions)
 
+	// Deep copy DeviceInfo to prevent caller mutation.
+	var deviceInfoCopy map[string]string
+	if params.DeviceInfo != nil {
+		deviceInfoCopy = make(map[string]string, len(params.DeviceInfo))
+		for k, v := range params.DeviceInfo {
+			deviceInfoCopy[k] = v
+		}
+	}
+
 	record := &DeviceFunctions{
 		UserID:       userID,
 		DeviceID:     deviceID,
-		DeviceName:   params.DeviceName,
-		DeviceType:   params.DeviceType,
+		DeviceInfo:   deviceInfoCopy,
 		Functions:    funcs,
 		RegisteredAt: time.Now(),
 	}
@@ -254,6 +256,12 @@ func (r *MemoryFunctionRegistry) GetDeviceFunctions(_ context.Context, userID, d
 	cp := *df
 	cp.Functions = make([]protocol.FunctionInfo, len(df.Functions))
 	copy(cp.Functions, df.Functions)
+	if df.DeviceInfo != nil {
+		cp.DeviceInfo = make(map[string]string, len(df.DeviceInfo))
+		for k, v := range df.DeviceInfo {
+			cp.DeviceInfo[k] = v
+		}
+	}
 	return &cp, nil
 }
 

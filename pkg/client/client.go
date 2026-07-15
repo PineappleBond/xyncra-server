@@ -455,9 +455,10 @@ func (c *XyncraClient) reregisterFunctions(ctx context.Context) {
 	}
 
 	params := map[string]any{
-		"device_name": c.opts.deviceName,
-		"device_type": c.opts.deviceType,
-		"functions":   fns,
+		"functions": fns,
+	}
+	if c.opts.deviceInfo != nil {
+		params["device_info"] = c.opts.deviceInfo
 	}
 
 	// Independent timeout so registration cannot stall FullSync.

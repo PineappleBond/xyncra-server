@@ -175,3 +175,27 @@ func TestPingHandler_InvalidParams(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ping: parse params")
 }
+
+// TestParseDeviceInfo verifies that parseDeviceInfo handles empty strings,
+// valid JSON, invalid JSON, JSON arrays, and JSON strings correctly.
+func TestParseDeviceInfo(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected map[string]string
+	}{
+		{"empty string", "", nil},
+		{"valid JSON", `{"name":"test","os":"linux"}`, map[string]string{"name": "test", "os": "linux"}},
+		{"invalid JSON", "not-json", map[string]string{}},
+		{"JSON array", `[1,2,3]`, map[string]string{}},
+		{"JSON string", `"hello"`, map[string]string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := parseDeviceInfo(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

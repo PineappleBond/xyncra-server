@@ -291,8 +291,7 @@ type clientOptions struct {
 
 	// DynamicToolProvider: device metadata and function manifest for
 	// auto-registration on connect/reconnect (D-098, D-101).
-	deviceName string
-	deviceType string
+	deviceInfo map[string]string
 	functions  []protocol.FunctionInfo
 }
 
@@ -427,14 +426,9 @@ func WithResponseRetryMax(n int) ClientOption {
 	}
 }
 
-// WithDeviceName sets the human-readable device name for function registration.
-func WithDeviceName(name string) ClientOption {
-	return func(o *clientOptions) { o.deviceName = name }
-}
-
-// WithDeviceType sets the device type (e.g. "cli", "browser") for function registration.
-func WithDeviceType(dtype string) ClientOption {
-	return func(o *clientOptions) { o.deviceType = dtype }
+// WithDeviceInfo sets arbitrary device metadata sent with function registration.
+func WithDeviceInfo(info map[string]string) ClientOption {
+	return func(o *clientOptions) { o.deviceInfo = info }
 }
 
 // WithFunctions provides the list of functions to auto-register on connect/reconnect.

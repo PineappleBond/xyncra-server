@@ -191,6 +191,11 @@ func (l *cliLogger) Error(msg string, args ...any) {
 	fmt.Fprintf(os.Stderr, "[%s] [ERROR] %s%s\n", logTimestamp(), msg, formatLogArgs(args))
 }
 
+// Warn logs a warning message to stderr.
+func (l *cliLogger) Warn(msg string, args ...any) {
+	fmt.Fprintf(os.Stderr, "[%s] [WARN] %s%s\n", logTimestamp(), msg, formatLogArgs(args))
+}
+
 // Debug logs a debug message to stderr, only when XYNCRA_DEBUG is enabled.
 func (l *cliLogger) Debug(msg string, args ...any) {
 	if !l.debug {
@@ -210,8 +215,7 @@ func newListenCommand() *cobra.Command {
 		Short: "Start listening for message updates",
 		RunE:  runListen,
 	}
-	cmd.Flags().String("device-name", "xyncra-cli", "Human-readable device name for function registration")
-	cmd.Flags().String("device-type", "cli", "Device type (e.g. cli, browser) for function registration")
+	cmd.Flags().String("device-info", "", "JSON object with device metadata (e.g. '{\"name\":\"MacBook\",\"os\":\"darwin\"}')")
 	return cmd
 }
 
@@ -253,9 +257,9 @@ func runListen(cmd *cobra.Command, _ []string) error {
 	// Build the server URL with user_id query parameter (D-005).
 	serverURL := cliCtx.ServerURLWithUser()
 
-	// Read device metadata flags for function registration (D-115).
-	deviceName, _ := cmd.Flags().GetString("device-name")
-	deviceType, _ := cmd.Flags().GetString("device-type")
+	// Read device metadata flag for function registration (D-115).
+	deviceInfoJSON, _ := cmd.Flags().GetString("device-info")
+	deviceInfo := parseDeviceInfo(deviceInfoJSON)
 
 	// Build client options.
 	clientOpts := []client.ClientOption{
@@ -265,8 +269,7 @@ func runListen(cmd *cobra.Command, _ []string) error {
 		client.WithDB(db),
 		client.WithUpdateHandler(handler),
 		client.WithLogger(logger),
-		client.WithDeviceName(deviceName),
-		client.WithDeviceType(deviceType),
+		client.WithDeviceInfo(deviceInfo),
 		client.WithFunctions(builtinFunctionInfos()),
 	}
 
@@ -665,4 +668,21 @@ func runCleanup(db *store.ClientDB, retention time.Duration, logger *cliLogger) 
 	if err != nil {
 		logger.Error("auto-cleanup", "error", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// parseDeviceInfo helper
+// ---------------------------------------------------------------------------
+
+// parseDeviceInfo parses a JSON string into a map[string]string.
+// Returns nil for empty input and an empty map on parse error (fail-open).
+func parseDeviceInfo(jsonStr string) map[string]string {
+	if jsonStr == "" {
+		return nil
+	}
+	var info map[string]string
+	if err := json.Unmarshal([]byte(jsonStr), &info); err != nil {
+		return map[string]string{}
+	}
+	return info
 }

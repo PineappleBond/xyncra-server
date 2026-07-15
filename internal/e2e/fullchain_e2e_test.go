@@ -365,8 +365,7 @@ func registerTodoFunctions(t *testing.T, cl *client.XyncraClient, deviceID strin
 
 	_, err := cl.Call(ctx, "system.register_functions", map[string]any{
 		"device_id":   deviceID,
-		"device_name": "Full Chain Test Device",
-		"device_type": "desktop",
+		"device_info": map[string]string{"name": "Full Chain Test Device", "type": "desktop"},
 		"functions":   functions,
 	})
 	require.NoError(t, err, "register_functions should succeed")

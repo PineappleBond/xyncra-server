@@ -62,26 +62,16 @@ func TestWithFunctions_NilSlice(t *testing.T) {
 	assert.Nil(t, opts.functions)
 }
 
-// TestWithDeviceName verifies that WithDeviceName sets the device name on
+// TestWithDeviceInfo verifies that WithDeviceInfo sets the device info map on
 // clientOptions.
-func TestWithDeviceName(t *testing.T) {
+func TestWithDeviceInfo(t *testing.T) {
 	t.Parallel()
 
 	var opts clientOptions
-	WithDeviceName("my-device")(&opts)
+	WithDeviceInfo(map[string]string{"name": "test", "os": "linux"})(&opts)
 
-	assert.Equal(t, "my-device", opts.deviceName)
-}
-
-// TestWithDeviceType verifies that WithDeviceType sets the device type on
-// clientOptions.
-func TestWithDeviceType(t *testing.T) {
-	t.Parallel()
-
-	var opts clientOptions
-	WithDeviceType("cli")(&opts)
-
-	assert.Equal(t, "cli", opts.deviceType)
+	assert.Equal(t, "test", opts.deviceInfo["name"])
+	assert.Equal(t, "linux", opts.deviceInfo["os"])
 }
 
 // ---------------------------------------------------------------------------
@@ -169,8 +159,7 @@ func TestReregisterFunctions_SendsRPC(t *testing.T) {
 	}
 
 	c := newRegTestClient(t, server,
-		WithDeviceName("test-dev"),
-		WithDeviceType("cli"),
+		WithDeviceInfo(map[string]string{"name": "test-dev", "type": "cli"}),
 		WithFunctions(fns),
 	)
 
@@ -189,8 +178,10 @@ func TestReregisterFunctions_SendsRPC(t *testing.T) {
 	receivedMu.Lock()
 	defer receivedMu.Unlock()
 
-	assert.Equal(t, "test-dev", receivedParams["device_name"])
-	assert.Equal(t, "cli", receivedParams["device_type"])
+	deviceInfo, ok := receivedParams["device_info"].(map[string]any)
+	require.True(t, ok, "device_info should be a map")
+	assert.Equal(t, "test-dev", deviceInfo["name"])
+	assert.Equal(t, "cli", deviceInfo["type"])
 
 	fnList, ok := receivedParams["functions"].([]any)
 	require.True(t, ok, "functions should be a slice")
@@ -212,8 +203,7 @@ func TestReregisterFunctions_EmptyFunctions(t *testing.T) {
 	})
 
 	c := newRegTestClient(t, server,
-		WithDeviceName("test-dev"),
-		WithDeviceType("cli"),
+		WithDeviceInfo(map[string]string{"name": "test-dev", "type": "cli"}),
 		WithFunctions(nil),
 	)
 
@@ -248,8 +238,7 @@ func TestReregisterFunctions_FailOpen(t *testing.T) {
 	}
 
 	c := newRegTestClient(t, server,
-		WithDeviceName("test-dev"),
-		WithDeviceType("cli"),
+		WithDeviceInfo(map[string]string{"name": "test-dev", "type": "cli"}),
 		WithFunctions(fns),
 	)
 
@@ -284,8 +273,7 @@ func TestReregisterFunctions_Timeout(t *testing.T) {
 	}
 
 	c := newRegTestClient(t, server,
-		WithDeviceName("test-dev"),
-		WithDeviceType("cli"),
+		WithDeviceInfo(map[string]string{"name": "test-dev", "type": "cli"}),
 		WithFunctions(fns),
 	)
 
@@ -345,8 +333,7 @@ func TestReregisterFunctions_ReconnectIntegration(t *testing.T) {
 	}
 
 	c := newRegTestClient(t, server,
-		WithDeviceName("test-dev"),
-		WithDeviceType("browser"),
+		WithDeviceInfo(map[string]string{"name": "test-dev", "type": "browser"}),
 		WithFunctions(fns),
 	)
 

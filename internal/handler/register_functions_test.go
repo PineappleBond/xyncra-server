@@ -72,8 +72,7 @@ func TestRegisterFunctions_HandleRequest_ValidRegistration(t *testing.T) {
 
 	params := map[string]any{
 		"device_id":   deviceID,
-		"device_name": "Alice's CLI",
-		"device_type": "cli",
+		"device_info": map[string]string{"name": "Alice's CLI", "type": "cli"},
 		"functions": []map[string]any{
 			{
 				"name":        "read_file",
@@ -113,8 +112,8 @@ func TestRegisterFunctions_HandleRequest_ValidRegistration(t *testing.T) {
 	df, err := registry.GetDeviceFunctions(ctx, userID, deviceID)
 	require.NoError(t, err)
 	require.NotNil(t, df)
-	assert.Equal(t, "Alice's CLI", df.DeviceName)
-	assert.Equal(t, "cli", df.DeviceType)
+	assert.Equal(t, "Alice's CLI", df.DeviceInfo["name"])
+	assert.Equal(t, "cli", df.DeviceInfo["type"])
 }
 
 // ---------------------------------------------------------------------------

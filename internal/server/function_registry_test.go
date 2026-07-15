@@ -52,8 +52,7 @@ func TestMemoryFunctionRegistry_Register_SingleDevice(t *testing.T) {
 	ctx := context.Background()
 
 	params := &RegisterFunctionsParams{
-		DeviceName: "my-cli",
-		DeviceType: "cli",
+		DeviceInfo: map[string]string{"name": "my-cli", "type": "cli"},
 		Functions: []protocol.FunctionInfo{
 			{Name: "hello", Description: "say hello"},
 		},
@@ -89,8 +88,7 @@ func TestMemoryFunctionRegistry_Register_MultipleFunctions(t *testing.T) {
 
 	fns := makeFunctions(5)
 	params := &RegisterFunctionsParams{
-		DeviceName: "browser",
-		DeviceType: "browser",
+		DeviceInfo: map[string]string{"name": "browser", "type": "browser"},
 		Functions:  fns,
 	}
 
@@ -124,8 +122,7 @@ func TestMemoryFunctionRegistry_Register_UpdateExisting(t *testing.T) {
 
 	// First registration.
 	params1 := &RegisterFunctionsParams{
-		DeviceName: "cli",
-		DeviceType: "cli",
+		DeviceInfo: map[string]string{"name": "cli", "type": "cli"},
 		Functions: []protocol.FunctionInfo{
 			{Name: "old_func_a"},
 			{Name: "old_func_b"},
@@ -137,8 +134,7 @@ func TestMemoryFunctionRegistry_Register_UpdateExisting(t *testing.T) {
 
 	// Second registration — full replacement.
 	params2 := &RegisterFunctionsParams{
-		DeviceName: "cli-updated",
-		DeviceType: "cli",
+		DeviceInfo: map[string]string{"name": "cli-updated", "type": "cli"},
 		Functions: []protocol.FunctionInfo{
 			{Name: "new_func"},
 		},
@@ -163,8 +159,8 @@ func TestMemoryFunctionRegistry_Register_UpdateExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDeviceFunctions error: %v", err)
 	}
-	if df.DeviceName != "cli-updated" {
-		t.Fatalf("expected DeviceName 'cli-updated', got %q", df.DeviceName)
+	if df.DeviceInfo["name"] != "cli-updated" {
+		t.Fatalf("expected DeviceInfo name 'cli-updated', got %q", df.DeviceInfo["name"])
 	}
 }
 
@@ -177,13 +173,11 @@ func TestMemoryFunctionRegistry_Register_MultipleDevices(t *testing.T) {
 	ctx := context.Background()
 
 	params1 := &RegisterFunctionsParams{
-		DeviceName: "cli",
-		DeviceType: "cli",
+		DeviceInfo: map[string]string{"name": "cli", "type": "cli"},
 		Functions:  []protocol.FunctionInfo{{Name: "cli_func"}},
 	}
 	params2 := &RegisterFunctionsParams{
-		DeviceName: "browser",
-		DeviceType: "browser",
+		DeviceInfo: map[string]string{"name": "browser", "type": "browser"},
 		Functions:  []protocol.FunctionInfo{{Name: "browser_func"}},
 	}
 
@@ -220,8 +214,7 @@ func TestMemoryFunctionRegistry_Register_MultipleUsers(t *testing.T) {
 	ctx := context.Background()
 
 	params := &RegisterFunctionsParams{
-		DeviceName: "cli",
-		DeviceType: "cli",
+		DeviceInfo: map[string]string{"name": "cli", "type": "cli"},
 		Functions:  []protocol.FunctionInfo{{Name: "func_a"}},
 	}
 
@@ -230,8 +223,7 @@ func TestMemoryFunctionRegistry_Register_MultipleUsers(t *testing.T) {
 	}
 
 	params2 := &RegisterFunctionsParams{
-		DeviceName: "cli",
-		DeviceType: "cli",
+		DeviceInfo: map[string]string{"name": "cli", "type": "cli"},
 		Functions:  []protocol.FunctionInfo{{Name: "func_b"}},
 	}
 	if err := reg.RegisterFunctions(ctx, "user-2", "device-1", params2); err != nil {
@@ -324,8 +316,7 @@ func TestMemoryFunctionRegistry_Register_EmptyFunctionsList(t *testing.T) {
 	ctx := context.Background()
 
 	params := &RegisterFunctionsParams{
-		DeviceName: "cli",
-		DeviceType: "cli",
+		DeviceInfo: map[string]string{"name": "cli", "type": "cli"},
 		Functions:  []protocol.FunctionInfo{},
 	}
 
@@ -349,8 +340,8 @@ func TestMemoryFunctionRegistry_Register_EmptyFunctionsList(t *testing.T) {
 	if df == nil {
 		t.Fatal("expected non-nil DeviceFunctions")
 	}
-	if df.DeviceName != "cli" {
-		t.Fatalf("expected DeviceName 'cli', got %q", df.DeviceName)
+	if df.DeviceInfo["name"] != "cli" {
+		t.Fatalf("expected DeviceInfo name 'cli', got %q", df.DeviceInfo["name"])
 	}
 }
 
@@ -406,8 +397,7 @@ func TestMemoryFunctionRegistry_ConcurrentRegister_DifferentDevices(t *testing.T
 			defer wg.Done()
 			deviceID := fmt.Sprintf("device-%d", idx)
 			params := &RegisterFunctionsParams{
-				DeviceName: deviceID,
-				DeviceType: "cli",
+				DeviceInfo: map[string]string{"name": deviceID, "type": "cli"},
 				Functions:  []protocol.FunctionInfo{{Name: fmt.Sprintf("fn_%d", idx)}},
 			}
 			if err := reg.RegisterFunctions(ctx, "user-1", deviceID, params); err != nil {
@@ -448,8 +438,7 @@ func TestMemoryFunctionRegistry_ConcurrentRegister_SameDevice(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			params := &RegisterFunctionsParams{
-				DeviceName: fmt.Sprintf("iter-%d", idx),
-				DeviceType: "cli",
+				DeviceInfo: map[string]string{"name": fmt.Sprintf("iter-%d", idx), "type": "cli"},
 				Functions:  []protocol.FunctionInfo{{Name: fmt.Sprintf("fn_%d", idx)}},
 			}
 			if err := reg.RegisterFunctions(ctx, "user-1", "device-1", params); err != nil {
@@ -485,8 +474,7 @@ func TestMemoryFunctionRegistry_ConcurrentReadWrite(t *testing.T) {
 
 	// Pre-populate.
 	params := &RegisterFunctionsParams{
-		DeviceName: "cli",
-		DeviceType: "cli",
+		DeviceInfo: map[string]string{"name": "cli", "type": "cli"},
 		Functions:  []protocol.FunctionInfo{{Name: "initial"}},
 	}
 	if err := reg.RegisterFunctions(ctx, "user-1", "device-1", params); err != nil {
@@ -503,8 +491,7 @@ func TestMemoryFunctionRegistry_ConcurrentReadWrite(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			p := &RegisterFunctionsParams{
-				DeviceName: fmt.Sprintf("writer-%d", idx),
-				DeviceType: "cli",
+				DeviceInfo: map[string]string{"name": fmt.Sprintf("writer-%d", idx), "type": "cli"},
 				Functions:  []protocol.FunctionInfo{{Name: fmt.Sprintf("fn_%d", idx)}},
 			}
 			_ = reg.RegisterFunctions(ctx, "user-1", "device-1", p)
@@ -597,8 +584,7 @@ func TestMemoryFunctionRegistry_GetDeviceFunctions_AfterRegister(t *testing.T) {
 	ctx := context.Background()
 
 	params := &RegisterFunctionsParams{
-		DeviceName: "my-browser",
-		DeviceType: "browser",
+		DeviceInfo: map[string]string{"name": "my-browser", "type": "browser"},
 		Functions: []protocol.FunctionInfo{
 			{Name: "fn_a", Description: "does A"},
 			{Name: "fn_b", Description: "does B"},
@@ -621,11 +607,11 @@ func TestMemoryFunctionRegistry_GetDeviceFunctions_AfterRegister(t *testing.T) {
 	if df.DeviceID != "device-1" {
 		t.Errorf("expected DeviceID 'device-1', got %q", df.DeviceID)
 	}
-	if df.DeviceName != "my-browser" {
-		t.Errorf("expected DeviceName 'my-browser', got %q", df.DeviceName)
+	if df.DeviceInfo["name"] != "my-browser" {
+		t.Errorf("expected DeviceInfo name 'my-browser', got %q", df.DeviceInfo["name"])
 	}
-	if df.DeviceType != "browser" {
-		t.Errorf("expected DeviceType 'browser', got %q", df.DeviceType)
+	if df.DeviceInfo["type"] != "browser" {
+		t.Errorf("expected DeviceInfo type 'browser', got %q", df.DeviceInfo["type"])
 	}
 	if len(df.Functions) != 2 {
 		t.Errorf("expected 2 functions, got %d", len(df.Functions))
@@ -648,8 +634,7 @@ func TestMemoryFunctionRegistry_OnDeviceDisconnect_Existing(t *testing.T) {
 	ctx := context.Background()
 
 	params := &RegisterFunctionsParams{
-		DeviceName: "cli",
-		DeviceType: "cli",
+		DeviceInfo: map[string]string{"name": "cli", "type": "cli"},
 		Functions:  []protocol.FunctionInfo{{Name: "fn_a"}},
 	}
 	if err := reg.RegisterFunctions(ctx, "user-1", "device-1", params); err != nil {
@@ -797,8 +782,7 @@ func TestMemoryFunctionRegistry_GetDeviceFunctions_DeepCopy(t *testing.T) {
 	ctx := context.Background()
 
 	params := &RegisterFunctionsParams{
-		DeviceName: "original-device",
-		DeviceType: "cli",
+		DeviceInfo: map[string]string{"name": "original-device", "type": "cli"},
 		Functions: []protocol.FunctionInfo{
 			{Name: "fn_a", Description: "original desc"},
 		},
@@ -812,7 +796,7 @@ func TestMemoryFunctionRegistry_GetDeviceFunctions_DeepCopy(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, df)
 
-	df.DeviceName = "MUTATED"
+	df.DeviceInfo["name"] = "MUTATED"
 	df.Functions[0].Name = "MUTATED_FUNC"
 	df.Functions[0].Description = "MUTATED_DESC"
 
@@ -820,7 +804,7 @@ func TestMemoryFunctionRegistry_GetDeviceFunctions_DeepCopy(t *testing.T) {
 	df2, err := reg.GetDeviceFunctions(ctx, "user-1", "device-1")
 	require.NoError(t, err)
 	require.NotNil(t, df2)
-	assert.Equal(t, "original-device", df2.DeviceName, "DeviceName should not be mutated")
+	assert.Equal(t, "original-device", df2.DeviceInfo["name"], "DeviceInfo name should not be mutated")
 	assert.Equal(t, "fn_a", df2.Functions[0].Name, "function name should not be mutated")
 	assert.Equal(t, "original desc", df2.Functions[0].Description, "function description should not be mutated")
 }
@@ -900,8 +884,7 @@ func TestMemoryFunctionRegistry_Register_FunctionInfoFullRoundTrip(t *testing.T)
 	ctx := context.Background()
 
 	params := &RegisterFunctionsParams{
-		DeviceName: "test-device",
-		DeviceType: "cli",
+		DeviceInfo: map[string]string{"name": "test-device", "type": "cli"},
 		Functions: []protocol.FunctionInfo{
 			{
 				Name:        "read_file",

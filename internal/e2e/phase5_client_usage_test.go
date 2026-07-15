@@ -233,8 +233,7 @@ func TestPhase5Client_ReverseRPCReconnectIntegration(t *testing.T) {
 	// Step 2: Register functions (client capability registration).
 	sendRequest(t, conn1, "reg-1", "system.register_functions", map[string]any{
 		"device_id":   deviceID,
-		"device_name": "Test Device",
-		"device_type": "desktop",
+		"device_info": map[string]string{"name": "Test Device", "type": "desktop"},
 		"functions": []map[string]any{
 			{
 				"name":        "test.get_location",
@@ -475,8 +474,7 @@ func TestPhase5Client_RegisterFunctionsAfterReconnect(t *testing.T) {
 
 	sendRequest(t, conn1, "reg-1", "system.register_functions", map[string]any{
 		"device_id":   deviceID,
-		"device_name": "Test Device",
-		"device_type": "desktop",
+		"device_info": map[string]string{"name": "Test Device", "type": "desktop"},
 		"functions": []map[string]any{
 			{
 				"name":        "test.func_before",
@@ -515,8 +513,7 @@ func TestPhase5Client_RegisterFunctionsAfterReconnect(t *testing.T) {
 	// Step 5: Register NEW functions after reconnect.
 	sendRequest(t, conn2, "reg-2", "system.register_functions", map[string]any{
 		"device_id":   deviceID,
-		"device_name": "Test Device",
-		"device_type": "desktop",
+		"device_info": map[string]string{"name": "Test Device", "type": "desktop"},
 		"functions": []map[string]any{
 			{
 				"name":        "test.func_after",

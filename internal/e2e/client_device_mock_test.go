@@ -110,8 +110,7 @@ func (d *mockClientDevice) registerFunctions(t *testing.T, funcs []protocol.Func
 
 	params := map[string]interface{}{
 		"device_id":   d.deviceID,
-		"device_name": "Mock Device " + d.deviceID,
-		"device_type": "desktop",
+		"device_info": map[string]string{"name": "Mock Device " + d.deviceID, "type": "desktop"},
 		"functions":   funcs,
 	}
 
