@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/PineappleBond/xyncra-server/internal/mq"
+	"github.com/PineappleBond/xyncra-server/internal/store/model"
 )
 
 // ---------------------------------------------------------------------------
@@ -195,16 +195,27 @@ func TestCleanupAfterResume_DeleteFails(t *testing.T) {
 // if the idempotency check passes — that's fine; we only need to verify whether
 // the idempotency gate lets the task through or blocks it.
 func newMinimalResumeHandler(
+	t *testing.T,
 	idempotency IdempotencyStore,
 ) (
 	handler func(ctx context.Context, task *mq.Task) error,
 	idemCalls *[]string,
 ) {
+	t.Helper()
 	registry := NewRegistry() // empty — agent lookup will fail if reached
 	idemCalls = &[]string{}
 
+	// Create a minimal executor with a real SQLite store so that
+	// cleanupAfterResumeFailure can run without nil-pointer panics when the
+	// idempotency gate opens and the handler reaches agent-not-found.
+	testStore := setupTestStore(t)
+	executor := &AgentExecutor{
+		store:  testStore,
+		logger: noopLogger{},
+	}
+
 	return NewAgentResumeHandler(
-		nil, // executor: not needed for idempotency tests
+		executor,
 		registry,
 		nil, // lock: not needed for idempotency tests
 		noopLogger{},
@@ -228,12 +239,12 @@ func makeResumeTask(checkpointID string) *mq.Task {
 // without proceeding to agent lookup or lock acquisition.
 func TestResumeIdempotency_DuplicateSkipped(t *testing.T) {
 	idem := &mockIdempotencyStore{
-		markProcessedFn: func(_ context.Context, key string, _ time.Duration) (bool, error) {
-			// Always report as duplicate.
+		checkProcessedFn: func(_ context.Context, key string) (bool, error) {
+			// Always report as already processed/in-progress.
 			return true, nil
 		},
 	}
-	handler, _ := newMinimalResumeHandler(idem)
+	handler, _ := newMinimalResumeHandler(t, idem)
 
 	err := handler(context.Background(), makeResumeTask("cp-dup"))
 	require.NoError(t, err, "duplicate resume should return nil (no error)")
@@ -244,11 +255,11 @@ func TestResumeIdempotency_DuplicateSkipped(t *testing.T) {
 // It will fail at agent lookup (empty registry) but that proves the gate opened.
 func TestResumeIdempotency_FirstCallProceeds(t *testing.T) {
 	idem := &mockIdempotencyStore{
-		markProcessedFn: func(_ context.Context, key string, _ time.Duration) (bool, error) {
-			return false, nil // first time
+		checkProcessedFn: func(_ context.Context, key string) (bool, error) {
+			return false, nil // not processed
 		},
 	}
-	handler, _ := newMinimalResumeHandler(idem)
+	handler, _ := newMinimalResumeHandler(t, idem)
 
 	// The handler will fail at agent lookup (empty registry) — that's expected.
 	// What matters is that it did NOT return early at the idempotency check.
@@ -260,11 +271,11 @@ func TestResumeIdempotency_FirstCallProceeds(t *testing.T) {
 // returns an error, the handler proceeds (fail-open) rather than blocking.
 func TestResumeIdempotency_ErrorFailsOpen(t *testing.T) {
 	idem := &mockIdempotencyStore{
-		markProcessedFn: func(_ context.Context, key string, _ time.Duration) (bool, error) {
+		checkProcessedFn: func(_ context.Context, key string) (bool, error) {
 			return false, fmt.Errorf("redis connection refused")
 		},
 	}
-	handler, _ := newMinimalResumeHandler(idem)
+	handler, _ := newMinimalResumeHandler(t, idem)
 
 	// Should proceed past idempotency despite error.
 	err := handler(context.Background(), makeResumeTask("cp-err"))
@@ -274,7 +285,7 @@ func TestResumeIdempotency_ErrorFailsOpen(t *testing.T) {
 // TestResumeIdempotency_NilStoreSkipsCheck verifies that when idempotency is
 // nil, no check is performed and the handler proceeds directly.
 func TestResumeIdempotency_NilStoreSkipsCheck(t *testing.T) {
-	handler, _ := newMinimalResumeHandler(nil)
+	handler, _ := newMinimalResumeHandler(t, nil)
 
 	// Should proceed without panic.
 	assert.NotPanics(t, func() {
@@ -283,19 +294,123 @@ func TestResumeIdempotency_NilStoreSkipsCheck(t *testing.T) {
 	})
 }
 
-// TestResumeIdempotency_CorrectKeyFormat verifies that the idempotency key
-// uses the expected "agent:resume:<checkpointID>" format.
+// TestResumeIdempotency_CorrectKeyFormat verifies that the idempotency keys
+// use the expected "agent:resume:<checkpointID>" and
+// "agent:resume:processing:<checkpointID>" formats.
 func TestResumeIdempotency_CorrectKeyFormat(t *testing.T) {
-	var capturedKey string
+	var capturedKeys []string
 	idem := &mockIdempotencyStore{
-		markProcessedFn: func(_ context.Context, key string, _ time.Duration) (bool, error) {
-			capturedKey = key
+		checkProcessedFn: func(_ context.Context, key string) (bool, error) {
+			capturedKeys = append(capturedKeys, key)
 			return true, nil // duplicate to short-circuit
 		},
 	}
-	handler, _ := newMinimalResumeHandler(idem)
+	handler, _ := newMinimalResumeHandler(t, idem)
 
 	_ = handler(context.Background(), makeResumeTask("cp-key-test"))
-	assert.Equal(t, "agent:resume:cp-key-test", capturedKey,
-		"idempotency key should follow 'agent:resume:<checkpointID>' format")
+	assert.Contains(t, capturedKeys, "agent:resume:cp-key-test",
+		"processed key should follow 'agent:resume:<checkpointID>' format")
+	assert.Contains(t, capturedKeys, "agent:resume:processing:cp-key-test",
+		"processing key should follow 'agent:resume:processing:<checkpointID>' format")
+}
+
+// ---------------------------------------------------------------------------
+// R-01: cleanupAfterResumeFailure calls all cleanup steps (D-122)
+// ---------------------------------------------------------------------------
+
+// TestCleanupAfterResumeFailure_CallsAllSteps verifies that
+// cleanupAfterResumeFailure invokes ClearAgentStatus, DeleteByCheckpoint, and
+// cleanupAfterResume (checkpoint deletion).
+func TestCleanupAfterResumeFailure_CallsAllSteps(t *testing.T) {
+	// Use a real SQLite store so that ClearAgentStatus and DeleteByCheckpoint
+	// can run without complex mocking.
+	testStore := setupTestStore(t)
+
+	// Seed a conversation with agent_status = asking_user.
+	ctx := context.Background()
+	convID := "conv-cleanup-1"
+	createTestConv(t, testStore, convID)
+	require.NoError(t, testStore.Conversations.UpdateAgentStatus(ctx, convID,
+		model.AgentStatusAskingUser, "agent/bot", "cp-cleanup"))
+
+	// Seed a Question for the checkpoint.
+	questionStore := testStore.Questions
+	require.NoError(t, questionStore.Create(ctx, &model.Question{
+		ID:             "q-cleanup-1",
+		ConversationID: convID,
+		CheckpointID:   "cp-cleanup",
+		InterruptID:    "intr-1",
+		QuestionText:   "Are you sure?",
+		Status:         model.QuestionStatusPending,
+	}))
+
+	// Verify question exists before cleanup.
+	qCount, err := questionStore.CountPendingByCheckpoint(ctx, "cp-cleanup")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), qCount)
+
+	// Set up checkpoint store to track deletion.
+	fs := newFakeDeletableStore()
+	_ = fs.Set(ctx, "cp-cleanup", []byte("checkpoint-data"))
+
+	executor := &AgentExecutor{
+		store:           testStore,
+		questionStore:   questionStore,
+		checkpointStore: fs,
+		logger:          noopLogger{},
+	}
+
+	cleanupAfterResumeFailure(ctx, executor, convID, "cp-cleanup", noopLogger{})
+
+	// 1. ClearAgentStatus: conversation should be reset to idle.
+	conv, err := testStore.Conversations.Get(ctx, convID)
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusIdle, conv.AgentStatus,
+		"ClearAgentStatus should reset agent_status to idle")
+
+	// 2. DeleteByCheckpoint: questions should be soft-deleted.
+	qCountAfter, err := questionStore.CountPendingByCheckpoint(ctx, "cp-cleanup")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), qCountAfter,
+		"DeleteByCheckpoint should remove all questions for the checkpoint")
+
+	// 3. cleanupAfterResume: checkpoint should be deleted from store.
+	assert.Equal(t, 1, fs.deleteCnt, "checkpoint Delete should be called once")
+	_, ok, err := fs.Get(ctx, "cp-cleanup")
+	require.NoError(t, err)
+	assert.False(t, ok, "checkpoint data should be deleted")
+}
+
+// ---------------------------------------------------------------------------
+// R-02: cleanupAfterResumeFailure with nil questionStore/checkpointStore
+// ---------------------------------------------------------------------------
+
+// TestCleanupAfterResumeFailure_NilOptionalStores verifies that
+// cleanupAfterResumeFailure does not panic when optional stores (questionStore,
+// checkpointStore) are nil. Note: executor.store must be non-nil as the
+// function calls store.ConversationStore() unconditionally.
+func TestCleanupAfterResumeFailure_NilOptionalStores(t *testing.T) {
+	testStore := setupTestStore(t)
+	ctx := context.Background()
+	convID := "conv-nil-opt"
+	createTestConv(t, testStore, convID)
+	require.NoError(t, testStore.Conversations.UpdateAgentStatus(ctx, convID,
+		model.AgentStatusAskingUser, "agent/bot", "cp-nil"))
+
+	executor := &AgentExecutor{
+		store:           testStore,
+		questionStore:   nil, // optional, should not panic
+		checkpointStore: nil, // optional, should not panic
+		logger:          noopLogger{},
+	}
+
+	assert.NotPanics(t, func() {
+		cleanupAfterResumeFailure(ctx, executor, convID, "cp-nil", noopLogger{})
+	})
+
+	// ClearAgentStatus should still have been called.
+	conv, err := testStore.Conversations.Get(ctx, convID)
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusIdle, conv.AgentStatus,
+		"ClearAgentStatus should still work even with nil optional stores")
 }

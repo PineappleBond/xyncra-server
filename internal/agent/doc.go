@@ -60,8 +60,8 @@
 //
 // AgentTaskHandler (task_handler.go): AgentTaskHandler is the MQ task handler
 // adapter layer that converts MQ tasks to ExecutePayload. It unmarshals the
-// AgentProcessPayload, validates required fields, checks idempotency via Redis
-// SETNX (24h TTL, fail-open on Redis errors), and calls
+// AgentProcessPayload, validates required fields, checks two-phase idempotency
+// (D-121, fail-open on Redis errors), and calls
 // AgentExecutor.ExecuteWithErrorMessage. On normal completion the handler
 // invalidates the conversation context cache so that retried tasks (e.g.
 // ones that were requeued because the conversation lock was held) load fresh
@@ -71,11 +71,32 @@
 // is held by another task (Asynq retries with exponential backoff until the
 // lock is released).
 //
+// Two-phase idempotency (D-121):
+//
+//	The handler uses two-phase idempotency:
+//	  1. agent:processing:{messageID} (TTL 130s): SETNX before execution, prevents concurrent duplicates
+//	  2. agent:processed:{messageID} (TTL 24h): SET after success, prevents replay duplicates
+//
+//	On crash: the processing key expires after 130s, allowing Asynq retry to re-execute.
+//	On HITL interrupt: the processing key expires naturally, no processed key is set.
+//	On transient error: the processing key expires naturally, error returned for Asynq retry.
+//
+// Resume handler idempotency (D-121):
+//
+//	The resume handler uses the same two-phase pattern:
+//	  1. agent:resume:processing:{checkpointID} (TTL 130s): SETNX before execution
+//	  2. agent:resume:{checkpointID} (TTL 24h): SET after successful resume
+//
+//	On HITL re-interrupt: the processing key is deleted to allow subsequent resume.
+//	On transient error: the processing key is deleted to allow immediate retry.
+//	On permanent failure: processing key deleted + processed key set (24h) to prevent replay.
+//
 // RedisIdempotencyStore: Redis-based deduplication using SETNX with TTL. The
 // IdempotencyStore interface provides atomic check-and-set semantics. The key
-// format is "agent:processed:{messageID}" with a 24-hour TTL. SetNX returns
-// true if the key was set (first time), false if it already existed (duplicate).
-// Fail-open: if Redis is unavailable, processing continues (logged but not blocked).
+// formats are "agent:processing:{messageID}" (130s), "agent:processed:{messageID}"
+// (24h), "agent:resume:processing:{checkpointID}" (130s), and
+// "agent:resume:{checkpointID}" (24h). Fail-open: if Redis is unavailable,
+// processing continues (logged but not blocked).
 //
 // # Phase 5: main.go Wiring
 //
@@ -93,7 +114,7 @@
 //
 // The end-to-end data flow for agent message processing:
 //
-//	MQ task → AgentTaskHandler → idempotency check (Redis SETNX)
+//	MQ task → AgentTaskHandler → two-phase idempotency check (D-121)
 //	→ AgentExecutor.ExecuteWithErrorMessage → typing=true broadcast
 //	→ context loading (DBContextManager) → agent building (AgentBuilder)
 //	→ LLM streaming (Eino Runner) → stream bridge (cumulative snapshots)

@@ -55,6 +55,14 @@ func (brokenIdempotencyStore) MarkProcessed(_ context.Context, _ string, _ time.
 	return false, fmt.Errorf("simulated Redis failure")
 }
 
+func (brokenIdempotencyStore) CheckProcessed(_ context.Context, _ string) (bool, error) {
+	return false, fmt.Errorf("simulated Redis failure")
+}
+
+func (brokenIdempotencyStore) DeleteKey(_ context.Context, _ string) error {
+	return fmt.Errorf("simulated Redis failure")
+}
+
 // brokenConversationLock always returns an error from Acquire, simulating Redis
 // unavailability. Release is a no-op. Used to verify fail-open behavior.
 type brokenConversationLock struct{}

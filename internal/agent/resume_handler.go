@@ -81,24 +81,26 @@ func NewAgentResumeHandler(
 			return nil
 		}
 
-		// 2b. Idempotency check: prevent the same checkpoint from being resumed
-		// more than once. Uses Redis SETNX for atomic check-and-set (24h TTL).
-		// This guards against duplicate resume tasks (e.g. client sends both
-		// send_message + agent_resume, or retries agent_resume).
+		// 2b. Two-phase idempotency check (D-121).
 		if idempotency != nil {
-			idempotencyKey := "agent:resume:" + payload.CheckpointID
-			dup, err := idempotency.MarkProcessed(ctx, idempotencyKey, 24*time.Hour)
-			if err != nil {
-				logger.Error("agent resume: idempotency check failed",
-					"checkpoint_id", payload.CheckpointID, "error", err)
-				// Fail-open: continue processing if Redis is down.
-			} else if dup {
-				logger.Info("agent resume: skipping duplicate resume (checkpoint already resumed)",
+			processedKey := "agent:resume:" + payload.CheckpointID
+			processingKey := "agent:resume:processing:" + payload.CheckpointID
+
+			processed, err1 := idempotency.CheckProcessed(ctx, processedKey)
+			processing, err2 := idempotency.CheckProcessed(ctx, processingKey)
+
+			// Fail-open: only skip if check succeeded and key exists (D-072).
+			if (err1 == nil && processed) || (err2 == nil && processing) {
+				logger.Info("agent resume: skipping duplicate/in-progress resume",
 					"checkpoint_id", payload.CheckpointID,
 					"conversation_id", payload.ConversationID,
-					"agent_id", payload.AgentID,
 				)
 				return nil
+			}
+
+			// Mark as in-progress with lock-matching TTL (130s, D-075).
+			if _, err := idempotency.MarkProcessed(ctx, processingKey, 130*time.Second); err != nil {
+				logger.Error("agent resume: processing mark failed (non-fatal)", "error", err)
 			}
 		}
 
@@ -141,6 +143,24 @@ func NewAgentResumeHandler(
 		config, ok := registry.Get(agentID)
 		if !ok {
 			logger.Error("agent resume: agent not found", "agent_id", agentID)
+			cleanupAfterResumeFailure(ctx, executor, payload.ConversationID, payload.CheckpointID, logger)
+			execPayload := ExecutePayload{
+				ConversationID: payload.ConversationID,
+				AgentID:        payload.AgentID,
+				SenderID:       payload.SenderID,
+				DeviceID:       payload.DeviceID,
+			}
+			executor.sendErrorMessage(ctx, execPayload,
+				"抱歉，Agent 配置不存在，请重新发送消息。")
+			// Clean up idempotency keys (D-121).
+			if idempotency != nil {
+				processingKey := "agent:resume:processing:" + payload.CheckpointID
+				processedKey := "agent:resume:" + payload.CheckpointID
+				_ = idempotency.DeleteKey(ctx, processingKey)
+				if _, err := idempotency.MarkProcessed(ctx, processedKey, 24*time.Hour); err != nil {
+					logger.Error("agent resume: processed mark after failure (non-fatal)", "error", err)
+				}
+			}
 			releaseLock()
 			return nil
 		}
@@ -157,6 +177,7 @@ func NewAgentResumeHandler(
 		builtAgent, err := executor.agentBuilder.Build(ctx, config)
 		if err != nil {
 			logger.Error("agent resume: build failed", "agent_id", agentID, "error", err)
+			cleanupAfterResumeFailure(ctx, executor, payload.ConversationID, payload.CheckpointID, logger)
 			execPayload := ExecutePayload{
 				ConversationID: payload.ConversationID,
 				AgentID:        payload.AgentID,
@@ -165,6 +186,15 @@ func NewAgentResumeHandler(
 			}
 			executor.sendErrorMessage(ctx, execPayload,
 				"抱歉，恢复执行失败，请重新发送消息。")
+			// Clean up idempotency keys (D-121).
+			if idempotency != nil {
+				processingKey := "agent:resume:processing:" + payload.CheckpointID
+				processedKey := "agent:resume:" + payload.CheckpointID
+				_ = idempotency.DeleteKey(ctx, processingKey)
+				if _, err := idempotency.MarkProcessed(ctx, processedKey, 24*time.Hour); err != nil {
+					logger.Error("agent resume: processed mark after failure (non-fatal)", "error", err)
+				}
+			}
 			releaseLock()
 			return nil
 		}
@@ -195,6 +225,7 @@ func NewAgentResumeHandler(
 		if err != nil {
 			logger.Error("agent resume: get questions failed",
 				"checkpoint_id", payload.CheckpointID, "error", err)
+			cleanupAfterResumeFailure(ctx, executor, payload.ConversationID, payload.CheckpointID, logger)
 			execPayload := ExecutePayload{
 				ConversationID: payload.ConversationID,
 				AgentID:        payload.AgentID,
@@ -203,6 +234,15 @@ func NewAgentResumeHandler(
 			}
 			executor.sendErrorMessage(ctx, execPayload,
 				"抱歉，恢复执行失败，请重新发送消息。")
+			// Clean up idempotency keys (D-121).
+			if idempotency != nil {
+				processingKey := "agent:resume:processing:" + payload.CheckpointID
+				processedKey := "agent:resume:" + payload.CheckpointID
+				_ = idempotency.DeleteKey(ctx, processingKey)
+				if _, err := idempotency.MarkProcessed(ctx, processedKey, 24*time.Hour); err != nil {
+					logger.Error("agent resume: processed mark after failure (non-fatal)", "error", err)
+				}
+			}
 			releaseLock()
 			return nil // D-073
 		}
@@ -236,6 +276,7 @@ func NewAgentResumeHandler(
 			clearTyping()
 			// Check if checkpoint expired.
 			if errors.Is(err, ErrCheckpointNotFound) || strings.Contains(err.Error(), "not found") {
+				cleanupAfterResumeFailure(ctx, executor, payload.ConversationID, payload.CheckpointID, logger)
 				execPayload := ExecutePayload{
 					ConversationID: payload.ConversationID,
 					AgentID:        payload.AgentID,
@@ -244,14 +285,19 @@ func NewAgentResumeHandler(
 				}
 				executor.sendErrorMessage(ctx, execPayload,
 					"抱歉，等待时间过长，请重新发送消息。")
-
-				// Clear conversation status so the conversation is not stuck in asking_user.
-				if clearErr := executor.store.ConversationStore().ClearAgentStatus(ctx, payload.ConversationID); clearErr != nil {
-					logger.Error("agent resume: clear conversation status failed after checkpoint expiry (non-fatal)",
-						"conversation_id", payload.ConversationID, "error", clearErr)
+				// Clean up idempotency keys (D-121).
+				if idempotency != nil {
+					processingKey := "agent:resume:processing:" + payload.CheckpointID
+					processedKey := "agent:resume:" + payload.CheckpointID
+					_ = idempotency.DeleteKey(ctx, processingKey)
+					if _, err := idempotency.MarkProcessed(ctx, processedKey, 24*time.Hour); err != nil {
+						logger.Error("agent resume: processed mark after failure (non-fatal)", "error", err)
+					}
 				}
 			}
-			// Return transient errors: log + notify user, but return nil to MQ (M-3: idempotency makes retry dead code).
+			// HITL resume: transient error notifies user rather than auto-retrying via MQ,
+			// because the user has invested interaction cost and should decide whether to retry.
+			// This differs from task_handler which returns error for Asynq auto-retry.
 			if isTransientError(err) {
 				execPayload := ExecutePayload{
 					ConversationID: payload.ConversationID,
@@ -261,6 +307,11 @@ func NewAgentResumeHandler(
 				}
 				executor.sendErrorMessage(ctx, execPayload,
 					"抱歉，服务暂时不可用，请稍后重试。")
+				// Delete processing key to allow immediate retry (D-121).
+				if idempotency != nil {
+					processingKey := "agent:resume:processing:" + payload.CheckpointID
+					_ = idempotency.DeleteKey(ctx, processingKey)
+				}
 			}
 			releaseLock()
 			return nil
@@ -281,7 +332,9 @@ func NewAgentResumeHandler(
 				partialText := fullResponse.String()
 				executor.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, partialText, true)
 				clearTyping()
-				// Transient stream errors: log + notify user, return nil to MQ (M-3).
+				// HITL resume: transient error notifies user rather than auto-retrying via MQ,
+				// because the user has invested interaction cost and should decide whether to retry.
+				// This differs from task_handler which returns error for Asynq auto-retry.
 				if isTransientError(chunk.Err) {
 					execPayload := ExecutePayload{
 						ConversationID: payload.ConversationID,
@@ -291,6 +344,11 @@ func NewAgentResumeHandler(
 					}
 					executor.sendErrorMessage(ctx, execPayload,
 						"抱歉，服务暂时不可用，请稍后重试。")
+					// Delete processing key to allow immediate retry (D-121).
+					if idempotency != nil {
+						processingKey := "agent:resume:processing:" + payload.CheckpointID
+						_ = idempotency.DeleteKey(ctx, processingKey)
+					}
 				}
 				releaseLock()
 				return nil
@@ -343,6 +401,11 @@ func NewAgentResumeHandler(
 				info.Question, payload.CheckpointID, info.InterruptID)
 			executor.broadcaster.SendAgentCheckpointCreated(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, payload.CheckpointID)
 			// D-084: Do NOT release lock on HITL re-interrupt.
+			// Delete processing key to allow subsequent resume (D-121).
+			if idempotency != nil {
+				processingKey := "agent:resume:processing:" + payload.CheckpointID
+				_ = idempotency.DeleteKey(ctx, processingKey)
+			}
 			return nil
 		}
 
@@ -392,6 +455,16 @@ func NewAgentResumeHandler(
 			"checkpoint_id", payload.CheckpointID,
 		)
 
+		// Mark as processed (24h) for replay protection. Clean up processing key (D-121).
+		if idempotency != nil {
+			processedKey := "agent:resume:" + payload.CheckpointID
+			processingKey := "agent:resume:processing:" + payload.CheckpointID
+			if _, err := idempotency.MarkProcessed(ctx, processedKey, 24*time.Hour); err != nil {
+				logger.Error("agent resume: processed mark failed (non-fatal)", "error", err)
+			}
+			_ = idempotency.DeleteKey(ctx, processingKey)
+		}
+
 		// Phase 2 cleanup: clear conversation status, delete questions, delete checkpoint.
 		// All cleanup operations are non-fatal — errors are logged but do not affect
 		// the resume result.
@@ -416,4 +489,24 @@ func NewAgentResumeHandler(
 		releaseLock()
 		return nil
 	}
+}
+
+// cleanupAfterResumeFailure resets conversation state after a permanent resume failure.
+// All operations are non-fatal — errors are logged but do not propagate (D-122).
+func cleanupAfterResumeFailure(ctx context.Context, executor *AgentExecutor,
+	conversationID, checkpointID string, logger Logger) {
+	// 1. Clear agent status (reset to idle).
+	if err := executor.store.ConversationStore().ClearAgentStatus(ctx, conversationID); err != nil {
+		logger.Error("agent resume: clear status after failure (non-fatal)",
+			"conversation_id", conversationID, "error", err)
+	}
+	// 2. Delete questions for this checkpoint (soft-delete via GORM).
+	if executor.questionStore != nil {
+		if err := executor.questionStore.DeleteByCheckpoint(ctx, checkpointID); err != nil {
+			logger.Error("agent resume: delete questions after failure (non-fatal)",
+				"checkpoint_id", checkpointID, "error", err)
+		}
+	}
+	// 3. Delete checkpoint from Redis (D-112).
+	executor.cleanupAfterResume(ctx, checkpointID, logger)
 }

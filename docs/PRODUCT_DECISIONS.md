@@ -54,9 +54,9 @@
 | D-066 | LLMProvider 接口抽象 | 支持运行时注册新提供商，扩展性 |
 | D-067 | Agent 错误消息策略 | 失败时持久化错误消息，避免用户困惑 |
 | D-070 | AgentTaskHandler 放置于 `internal/agent/` 包 | Task handler 直接依赖 agent 包内部组件，避免反向依赖 |
-| D-071 | Agent 幂等性使用 Redis SETNX + 24h TTL | 零新依赖，原子操作适合分布式幂等性 |
+| D-071 | Agent 幂等性使用 Redis SETNX + 24h TTL | 零新依赖，原子操作适合分布式幂等性（参见 D-121 两阶段演进） |
 | D-072 | Agent 幂等性 fail-open 策略 | Redis 不可用时跳过检查继续执行 |
-| D-073 | AgentTaskHandler 总是返回 nil 给 MQ | ExecuteWithErrorMessage 已处理所有错误，MQ 重试无意义 |
+| D-073 | AgentTaskHandler MQ 返回策略 | 永久错误返回 nil（D-067），transient 错误返回 error 允许 Asynq 重试（参见 D-121） |
 | D-074 | Agent 幂等性使用独立 redis.Client | Pub/Sub 连接不能共享，独立客户端允许独立配置 |
 | D-075 | Agent 会话级并发锁（Per-Conversation Lock） | Redis SETNX 分布式锁，保证同一会话串行处理 |
 | D-076 | reload_agents RPC 管理接口 | 无鉴权热更新 Agent 配置，内网部署模型 |
@@ -102,6 +102,8 @@
 | D-116 | Question 持久化表（HITL 韧性） | 新增 Question 表，answer 先写 DB 再入队 MQ，task payload 只含 checkpoint_id |
 | D-117 | Conversation 状态机 | 新增 agent_status 字段（idle/thinking/tool_calling/generating/asking_user/timeout） |
 | D-118 | Pull-on-Notification 模式 | Update 事件为轻量通知（只含 conversation_id），客户端拉取 Conversation 获取最新状态 |
+| D-121 | 两阶段幂等性 (Two-Phase Idempotency) | processing key (130s) 防并发 + processed key (24h) 防回放，崩溃后可重试 |
+| D-122 | Resume 永久失败清理策略 | ClearAgentStatus + DeleteByCheckpoint + checkpoint DEL，避免 conversation 卡在 asking_user |
 
 ---
 
@@ -116,6 +118,7 @@
 
 | 日期       | 版本 | 变更                                                                                                 |
 | ---------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| 2026-07-16 | v3.20 | 新增 D-121（两阶段幂等性）、D-122（Resume 永久失败清理策略） |
 | 2026-07-15 | v3.19 | 新增 D-116（Question 持久化表）、D-117（Conversation 状态机）、D-118（Pull-on-Notification 模式）；更新 D-085（partial answer + 幂等检查）、D-113（被 D-116 替代） |
 | 2026-07-15 | v3.18 | 新增 D-115（Daemon 内置函数自动注册），删除 `register-functions` CLI 命令 |
 | 2026-07-14 | v3.17 | 新增 D-112（Checkpoint 清理策略）、D-113（interruptIDs 内存存储）、D-114（agent-resume IPC-only）；更新 D-085（5 参数）、D-036（加入 agent-resume） |
@@ -307,3 +310,70 @@ HITL 使用 Pull-on-Notification 模式：Agent 中断时广播轻量 conversati
 
 - `UpdateTypeConversation` 为 ephemeral（Seq=0）
 - 保留 `agent_question` ephemeral 广播（向后兼容）
+
+---
+
+## D-121: 两阶段幂等性 (Two-Phase Idempotency)
+
+### 决策
+
+Agent 任务执行使用两阶段 Redis key 区分"执行中"和"已完成":
+
+- `agent:processing:{messageID}` (TTL 130s): 执行前 SETNX，防止并发重复执行
+- `agent:processed:{messageID}` (TTL 24h): 执行成功后 SET，防止回放重复
+
+Resume task 同理:
+
+- `agent:resume:processing:{checkpointID}` (TTL 130s)
+- `agent:resume:{checkpointID}` (TTL 24h)
+
+### 原因
+
+1. **崩溃恢复**: processing key 130s 自然过期后，Asynq 重试可重新执行
+2. **并发保护**: processing key 防止同一消息被并发处理
+3. **回放保护**: processed key (24h) 防止已完成的消息被重复处理
+4. **Fail-open** (D-072): Redis 不可用时跳过两阶段检查
+
+### 实现
+
+- `internal/agent/task_handler.go`: 步骤 5 两阶段检查 + 步骤 7 收尾标记
+- `internal/agent/resume_handler.go`: 同样的两阶段模式
+- `IdempotencyStore.CheckProcessed`: 只检查不设置（Redis EXISTS）
+- `IdempotencyStore.DeleteKey`: 清理 processing key（Redis DEL）
+
+### 约束
+
+- Processing key TTL 与 conversation lock TTL (D-075) 一致 (130s)
+- HITL interrupt: 不设置 processed key，让 processing key 自然过期
+- Task handler transient error: 不设置 processed key，删除 processing key，返回 error 给 Asynq 自动重试
+- Resume handler transient error: 不设置 processed key，删除 processing key，发送用户错误消息，返回 nil（用户需手动重试，因 HITL 场景用户已投入交互成本）
+
+---
+
+## D-122: Resume 永久失败清理策略
+
+### 决策
+
+Resume 永久失败时执行完整清理:
+
+1. ClearAgentStatus (conversation → idle)
+2. DeleteByCheckpoint (soft-delete Questions)
+3. Delete checkpoint from Redis (D-112)
+4. 发送用户友好的错误消息
+
+### 原因
+
+1. **避免永久卡死**: 清理后 conversation 不再卡在 `asking_user`
+2. **数据一致性**: Questions 使用 GORM soft-delete，数据可恢复
+3. **用户体验**: 发送错误消息告知用户重新发送
+
+### 实现
+
+- `internal/agent/resume_handler.go`: `cleanupAfterResumeFailure` 函数
+- 所有操作 non-fatal，失败仅记日志
+
+### 约束
+
+- 仅限"不可恢复"的失败: checkpoint 过期、agent config not found、build 失败、DB 错误
+- Transient errors (LLM timeout) 不触发清理 — Questions 保留供重试
+- HITL re-interrupt 不触发清理 — conversation 进入新的 asking_user 周期，Questions 和 checkpoint 保留供后续 resume 使用

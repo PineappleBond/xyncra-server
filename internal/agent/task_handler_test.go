@@ -21,7 +21,9 @@ import (
 
 // mockIdempotencyStore implements IdempotencyStore for testing.
 type mockIdempotencyStore struct {
-	markProcessedFn func(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	markProcessedFn  func(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	checkProcessedFn func(ctx context.Context, key string) (bool, error)
+	deleteKeyFn      func(ctx context.Context, key string) error
 }
 
 func (m *mockIdempotencyStore) MarkProcessed(ctx context.Context, key string, ttl time.Duration) (bool, error) {
@@ -29,6 +31,20 @@ func (m *mockIdempotencyStore) MarkProcessed(ctx context.Context, key string, tt
 		return m.markProcessedFn(ctx, key, ttl)
 	}
 	return false, nil
+}
+
+func (m *mockIdempotencyStore) CheckProcessed(ctx context.Context, key string) (bool, error) {
+	if m.checkProcessedFn != nil {
+		return m.checkProcessedFn(ctx, key)
+	}
+	return false, nil
+}
+
+func (m *mockIdempotencyStore) DeleteKey(ctx context.Context, key string) error {
+	if m.deleteKeyFn != nil {
+		return m.deleteKeyFn(ctx, key)
+	}
+	return nil
 }
 
 // newTestHandler creates an AgentExecutor (with mocks) and a task handler for testing.
@@ -128,8 +144,8 @@ func TestNewAgentTaskHandler_MissingFields(t *testing.T) {
 
 func TestNewAgentTaskHandler_IdempotencyDuplicate(t *testing.T) {
 	idem := &mockIdempotencyStore{
-		markProcessedFn: func(_ context.Context, _ string, _ time.Duration) (bool, error) {
-			return true, nil // duplicate
+		checkProcessedFn: func(_ context.Context, _ string) (bool, error) {
+			return true, nil // already processed/in-progress
 		},
 	}
 	handler, mockStore, mockBS := newTestHandler(idem, nil)
@@ -156,11 +172,20 @@ func TestNewAgentTaskHandler_IdempotencyDuplicate(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewAgentTaskHandler_IdempotencyFirstTime(t *testing.T) {
-	var capturedKey string
+	var capturedProcessingKey string
+	var capturedProcessedKey string
 	idem := &mockIdempotencyStore{
+		checkProcessedFn: func(_ context.Context, _ string) (bool, error) {
+			return false, nil // not yet processed
+		},
 		markProcessedFn: func(_ context.Context, key string, _ time.Duration) (bool, error) {
-			capturedKey = key
-			return false, nil // first time
+			// Capture both processing and processed keys.
+			if capturedProcessingKey == "" {
+				capturedProcessingKey = key
+			} else {
+				capturedProcessedKey = key
+			}
+			return false, nil
 		},
 	}
 	handler, _, mockBS := newTestHandler(idem, nil)
@@ -177,8 +202,10 @@ func TestNewAgentTaskHandler_IdempotencyFirstTime(t *testing.T) {
 	err := handler(context.Background(), task)
 	assert.NoError(t, err)
 
-	// Idempotency key should contain the message ID.
-	assert.Equal(t, "agent:processed:msg-1", capturedKey)
+	// Processing key should be set before execution.
+	assert.Equal(t, "agent:processing:msg-1", capturedProcessingKey)
+	// Processed key should be set after execution.
+	assert.Equal(t, "agent:processed:msg-1", capturedProcessedKey)
 
 	// Executor SHOULD have been called → typing broadcast sent.
 	assert.NotEmpty(t, mockBS.calls, "executor should have been called")
@@ -190,7 +217,7 @@ func TestNewAgentTaskHandler_IdempotencyFirstTime(t *testing.T) {
 
 func TestNewAgentTaskHandler_IdempotencyError_FailOpen(t *testing.T) {
 	idem := &mockIdempotencyStore{
-		markProcessedFn: func(_ context.Context, _ string, _ time.Duration) (bool, error) {
+		checkProcessedFn: func(_ context.Context, _ string) (bool, error) {
 			return false, fmt.Errorf("redis connection refused")
 		},
 	}
@@ -445,15 +472,18 @@ func TestNewAgentTaskHandler_NullJSONPayload(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 16. Idempotency TTL is exactly 24 hours
+// 16. Two-phase idempotency: processing key TTL=130s, processed key TTL=24h
 // ---------------------------------------------------------------------------
 
 func TestNewAgentTaskHandler_IdempotencyTTLValue(t *testing.T) {
-	var capturedTTL time.Duration
+	var capturedTTLs []time.Duration
 	idem := &mockIdempotencyStore{
+		checkProcessedFn: func(_ context.Context, _ string) (bool, error) {
+			return false, nil // not yet processed
+		},
 		markProcessedFn: func(_ context.Context, _ string, ttl time.Duration) (bool, error) {
-			capturedTTL = ttl
-			return false, nil // first time, not duplicate
+			capturedTTLs = append(capturedTTLs, ttl)
+			return false, nil
 		},
 	}
 	handler, _, _ := newTestHandler(idem, nil)
@@ -469,7 +499,11 @@ func TestNewAgentTaskHandler_IdempotencyTTLValue(t *testing.T) {
 
 	err := handler(context.Background(), task)
 	assert.NoError(t, err)
-	assert.Equal(t, 24*time.Hour, capturedTTL, "idempotency TTL must be 24 hours")
+
+	// Two MarkProcessed calls: processing key (130s) then processed key (24h).
+	require.Len(t, capturedTTLs, 2, "expected two MarkProcessed calls")
+	assert.Equal(t, 130*time.Second, capturedTTLs[0], "processing key TTL must be 130s (lock TTL, D-075)")
+	assert.Equal(t, 24*time.Hour, capturedTTLs[1], "processed key TTL must be 24 hours")
 }
 
 // ---------------------------------------------------------------------------
@@ -644,4 +678,298 @@ func TestAgentTaskHandler_DeviceID_Propagated(t *testing.T) {
 	// a panic or was dropped, the test would fail here.
 	require.GreaterOrEqual(t, len(mockStore.sendMessageCalls), 1)
 	assert.Equal(t, "conv-device-1", mockStore.sendMessageCalls[0].msg.ConversationID)
+}
+
+// ---------------------------------------------------------------------------
+// 23. T-01: Processing key exists → skip execution
+// ---------------------------------------------------------------------------
+
+// TestNewAgentTaskHandler_ProcessingKeyExists_SkipsExecution verifies that when
+// the processing key exists (another instance is executing), the handler skips
+// execution and does NOT call the executor.
+func TestNewAgentTaskHandler_ProcessingKeyExists_SkipsExecution(t *testing.T) {
+	var checkedKeys []string
+	idem := &mockIdempotencyStore{
+		checkProcessedFn: func(_ context.Context, key string) (bool, error) {
+			checkedKeys = append(checkedKeys, key)
+			// processing key exists (concurrent execution in progress)
+			if key == "agent:processing:msg-1" {
+				return true, nil
+			}
+			return false, nil
+		},
+	}
+	handler, mockStore, mockBS := newTestHandler(idem, nil)
+
+	payload := AgentProcessPayload{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "user/alice",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
+
+	err := handler(context.Background(), task)
+	assert.NoError(t, err, "processing key exists should return nil (skip)")
+
+	// Both keys should have been checked.
+	assert.Contains(t, checkedKeys, "agent:processed:msg-1")
+	assert.Contains(t, checkedKeys, "agent:processing:msg-1")
+
+	// Executor should NOT have been called.
+	assert.Empty(t, mockStore.sendMessageCalls, "executor must not be called when processing key exists")
+	assert.Empty(t, mockBS.calls, "no broadcasts should occur when processing key exists")
+}
+
+// ---------------------------------------------------------------------------
+// 24. T-02: Transient error → no processed key, return error to Asynq
+// ---------------------------------------------------------------------------
+
+// TestNewAgentTaskHandler_TransientError_NoProcessedKey_ReturnsError verifies
+// that when the executor returns a transient error (e.g. ErrLLMTimeout), the
+// handler does NOT set the processed key, does NOT delete the processing key,
+// and returns the error to MQ for retry.
+func TestNewAgentTaskHandler_TransientError_NoProcessedKey_ReturnsError(t *testing.T) {
+	var markProcessedKeys []string
+	var deleteKeys []string
+	idem := &mockIdempotencyStore{
+		checkProcessedFn: func(_ context.Context, _ string) (bool, error) {
+			return false, nil // not yet processed
+		},
+		markProcessedFn: func(_ context.Context, key string, _ time.Duration) (bool, error) {
+			markProcessedKeys = append(markProcessedKeys, key)
+			return false, nil
+		},
+		deleteKeyFn: func(_ context.Context, key string) error {
+			deleteKeys = append(deleteKeys, key)
+			return nil
+		},
+	}
+
+	// Build a handler with a context manager that returns ErrLLMTimeout (transient).
+	registry := NewRegistry()
+	registry.Register(&AgentConfig{
+		ID: "test-agent", Name: "Test", Model: "gpt-4", APIKeyEnv: "",
+	})
+	mockStore := &mockStoreAPI{}
+	mockBS := &mockBroadcastServer{}
+	mockCtxMgr := &mockContextManager{err: ErrLLMTimeout}
+	bh := NewBroadcastHelper(mockBS, testLogger{})
+	sb := NewStreamBridge()
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{})
+	handler := NewAgentTaskHandler(executor, idem, nil, testLogger{})
+
+	payload := AgentProcessPayload{
+		MessageID:      "msg-transient",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "user/alice",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
+
+	err := handler(context.Background(), task)
+	assert.Error(t, err, "transient error should be returned to MQ for retry")
+	assert.ErrorIs(t, err, ErrLLMTimeout)
+
+	// markProcessedFn should only be called once (processing key), NOT for processed key.
+	require.Len(t, markProcessedKeys, 1, "only processing key should be marked, not processed key")
+	assert.Equal(t, "agent:processing:msg-transient", markProcessedKeys[0])
+
+	// deleteKeyFn should NOT be called (processing key left to expire).
+	assert.Empty(t, deleteKeys, "processing key should not be deleted on transient error")
+}
+
+// ---------------------------------------------------------------------------
+// 25. T-03: DeleteKey called after non-transient execution
+// ---------------------------------------------------------------------------
+
+// TestNewAgentTaskHandler_DeleteKey_CalledAfterExecution verifies that
+// deleteKeyFn is called with the processing key after executor completes
+// (non-transient error or success path).
+func TestNewAgentTaskHandler_DeleteKey_CalledAfterExecution(t *testing.T) {
+	var deletedKeys []string
+	idem := &mockIdempotencyStore{
+		checkProcessedFn: func(_ context.Context, _ string) (bool, error) {
+			return false, nil
+		},
+		deleteKeyFn: func(_ context.Context, key string) error {
+			deletedKeys = append(deletedKeys, key)
+			return nil
+		},
+	}
+	handler, _, _ := newTestHandler(idem, nil)
+
+	payload := AgentProcessPayload{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "user/alice",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
+
+	err := handler(context.Background(), task)
+	assert.NoError(t, err)
+
+	// DeleteKey should be called once with the processing key.
+	require.Len(t, deletedKeys, 1, "DeleteKey should be called once after execution")
+	assert.Equal(t, "agent:processing:msg-1", deletedKeys[0],
+		"DeleteKey should target the processing key")
+}
+
+// ---------------------------------------------------------------------------
+// 26. T-04: CheckProcessed both keys return error → fail-open, executor called
+// ---------------------------------------------------------------------------
+
+// TestNewAgentTaskHandler_CheckProcessedBothKeysError_FailOpen verifies that
+// when both CheckProcessed calls return errors, the handler still proceeds
+// with execution (fail-open, D-072).
+func TestNewAgentTaskHandler_CheckProcessedBothKeysError_FailOpen(t *testing.T) {
+	var checkedKeys []string
+	idem := &mockIdempotencyStore{
+		checkProcessedFn: func(_ context.Context, key string) (bool, error) {
+			checkedKeys = append(checkedKeys, key)
+			return false, fmt.Errorf("redis connection refused")
+		},
+	}
+	handler, _, mockBS := newTestHandler(idem, nil)
+
+	payload := AgentProcessPayload{
+		MessageID:      "msg-failopen",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "user/alice",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
+
+	err := handler(context.Background(), task)
+	assert.NoError(t, err)
+
+	// Both keys should have been checked.
+	require.Len(t, checkedKeys, 2, "both processed and processing keys should be checked")
+	assert.Contains(t, checkedKeys, "agent:processed:msg-failopen")
+	assert.Contains(t, checkedKeys, "agent:processing:msg-failopen")
+
+	// Executor SHOULD have been called despite both checks failing (fail-open).
+	assert.NotEmpty(t, mockBS.calls,
+		"executor should be called when both CheckProcessed calls fail (fail-open)")
+}
+
+// ---------------------------------------------------------------------------
+// 27. T-05: HITL interrupt → no processed key, no processing key deleted (D-084, D-121)
+// ---------------------------------------------------------------------------
+
+// TestNewAgentTaskHandler_HITLInterrupt_NoProcessedKey verifies that when the
+// executor returns ErrHITLInterrupted, neither the processed key is set nor
+// the processing key is deleted. The conversation lock is also held (D-084).
+func TestNewAgentTaskHandler_HITLInterrupt_NoProcessedKey(t *testing.T) {
+	var markProcessedKeys []string
+	var deleteKeys []string
+	idem := &mockIdempotencyStore{
+		checkProcessedFn: func(_ context.Context, _ string) (bool, error) {
+			return false, nil // not yet processed
+		},
+		markProcessedFn: func(_ context.Context, key string, _ time.Duration) (bool, error) {
+			markProcessedKeys = append(markProcessedKeys, key)
+			return false, nil
+		},
+		deleteKeyFn: func(_ context.Context, key string) error {
+			deleteKeys = append(deleteKeys, key)
+			return nil
+		},
+	}
+
+	// Build a handler with a context manager that returns ErrHITLInterrupted.
+	registry := NewRegistry()
+	registry.Register(&AgentConfig{
+		ID: "test-agent", Name: "Test", Model: "gpt-4", APIKeyEnv: "",
+	})
+	mockStore := &mockStoreAPI{}
+	mockBS := &mockBroadcastServer{}
+	mockCtxMgr := &mockContextManager{err: ErrHITLInterrupted}
+	bh := NewBroadcastHelper(mockBS, testLogger{})
+	sb := NewStreamBridge()
+	executor := NewAgentExecutor(registry, mockCtxMgr, nil, sb, bh, mockStore, 0, testLogger{})
+	handler := NewAgentTaskHandler(executor, idem, nil, testLogger{})
+
+	payload := AgentProcessPayload{
+		MessageID:      "msg-hitl",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "user/alice",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
+
+	err := handler(context.Background(), task)
+	assert.NoError(t, err, "HITL interrupt should return nil to MQ (D-073)")
+
+	// markProcessedFn should only be called once (processing key), NOT for processed key.
+	require.Len(t, markProcessedKeys, 1, "only processing key should be marked, not processed key")
+	assert.Equal(t, "agent:processing:msg-hitl", markProcessedKeys[0])
+
+	// deleteKeyFn should NOT be called — processing key expires naturally (D-121).
+	assert.Empty(t, deleteKeys, "processing key should not be deleted on HITL interrupt")
+
+	// No error message should be persisted (HITL is not an error).
+	assert.Empty(t, mockStore.sendMessageCalls, "no error message for HITL interrupt")
+}
+
+// ---------------------------------------------------------------------------
+// 28. T-06: Permanent error → processed key set, processing key deleted (D-121)
+// ---------------------------------------------------------------------------
+
+// TestNewAgentTaskHandler_PermanentError_IdempotencyCleanup verifies that when
+// the executor returns a permanent (non-transient, non-HITL) error, the
+// processed key is set (24h) and the processing key is deleted.
+func TestNewAgentTaskHandler_PermanentError_IdempotencyCleanup(t *testing.T) {
+	var markProcessedKeys []string
+	var markProcessedTTLs []time.Duration
+	var deleteKeys []string
+	idem := &mockIdempotencyStore{
+		checkProcessedFn: func(_ context.Context, _ string) (bool, error) {
+			return false, nil // not yet processed
+		},
+		markProcessedFn: func(_ context.Context, key string, ttl time.Duration) (bool, error) {
+			markProcessedKeys = append(markProcessedKeys, key)
+			markProcessedTTLs = append(markProcessedTTLs, ttl)
+			return false, nil
+		},
+		deleteKeyFn: func(_ context.Context, key string) error {
+			deleteKeys = append(deleteKeys, key)
+			return nil
+		},
+	}
+
+	// ErrContextLoad is a permanent error (not transient, not HITL).
+	handler, mockStore, _ := newTestHandler(idem, nil)
+
+	payload := AgentProcessPayload{
+		MessageID:      "msg-permanent",
+		ConversationID: "conv-1",
+		AgentID:        "agent/test-agent",
+		SenderID:       "user/alice",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	task := &mq.Task{Type: mq.TypeAgentProcess, Payload: payloadBytes}
+
+	err := handler(context.Background(), task)
+	assert.NoError(t, err, "permanent error should return nil to MQ (D-073)")
+
+	// markProcessedFn should be called twice: processing key (130s) + processed key (24h).
+	require.Len(t, markProcessedKeys, 2, "both processing and processed keys should be marked")
+	assert.Equal(t, "agent:processing:msg-permanent", markProcessedKeys[0])
+	assert.Equal(t, 130*time.Second, markProcessedTTLs[0])
+	assert.Equal(t, "agent:processed:msg-permanent", markProcessedKeys[1])
+	assert.Equal(t, 24*time.Hour, markProcessedTTLs[1])
+
+	// deleteKeyFn should be called once with the processing key.
+	require.Len(t, deleteKeys, 1, "processing key should be deleted")
+	assert.Equal(t, "agent:processing:msg-permanent", deleteKeys[0])
+
+	// Error message should have been persisted (D-067).
+	assert.NotEmpty(t, mockStore.sendMessageCalls, "error message should be persisted for permanent error")
 }

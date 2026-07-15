@@ -151,7 +151,10 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 	}
 
 	// 7. Check remaining pending count.
-	allQuestions, _ := qs.GetByCheckpoint(ctx, checkpointID)
+	allQuestions, err := qs.GetByCheckpoint(ctx, checkpointID)
+	if err != nil {
+		return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: get all questions: %w", err))
+	}
 	total := int64(len(allQuestions))
 	pending, err := qs.CountPendingByCheckpoint(ctx, checkpointID)
 	if err != nil {

@@ -28,11 +28,18 @@ type IdempotencyStore interface {
 	// Returns true if the key was already processed (duplicate), false if this is the first time.
 	// TTL controls how long the processed marker persists.
 	MarkProcessed(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	// CheckProcessed checks if a key exists without setting it.
+	// Returns (true, nil) if the key exists, (false, nil) otherwise.
+	CheckProcessed(ctx context.Context, key string) (bool, error)
+	// DeleteKey removes a key. Used to clean up processing markers.
+	DeleteKey(ctx context.Context, key string) error
 }
 
 // redisClient is the subset of redis.Client used by RedisIdempotencyStore.
 type redisClient interface {
 	SetNX(ctx context.Context, key string, value any, expiration time.Duration) *redis.BoolCmd
+	Exists(ctx context.Context, keys ...string) *redis.IntCmd
+	Del(ctx context.Context, keys ...string) *redis.IntCmd
 }
 
 // RedisIdempotencyStore implements IdempotencyStore using Redis SETNX.
@@ -54,6 +61,21 @@ func (s *RedisIdempotencyStore) MarkProcessed(ctx context.Context, key string, t
 	}
 	// SetNX returns true if the key was SET (first time), false if it already existed (duplicate).
 	return !result, nil
+}
+
+// CheckProcessed checks if a key exists without setting it.
+// Returns (true, nil) if the key exists, (false, nil) otherwise.
+func (s *RedisIdempotencyStore) CheckProcessed(ctx context.Context, key string) (bool, error) {
+	n, err := s.client.Exists(ctx, key).Result()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// DeleteKey removes a key. Used to clean up processing markers.
+func (s *RedisIdempotencyStore) DeleteKey(ctx context.Context, key string) error {
+	return s.client.Del(ctx, key).Err()
 }
 
 // NewAgentTaskHandler returns an mq.TaskHandler-compatible function that
@@ -137,16 +159,27 @@ func NewAgentTaskHandler(
 			}
 		}
 
-		// 5. Idempotency check (Redis SETNX, 24h TTL).
+		// 5. Two-phase idempotency check (D-121).
+		// Phase 1: Check if already fully processed (replay protection).
+		// Phase 2: Check if currently processing (concurrency protection).
 		if idempotency != nil {
-			dup, err := idempotency.MarkProcessed(ctx, "agent:processed:"+payload.MessageID, 24*time.Hour)
-			if err != nil {
-				logger.Error("agent task: idempotency check failed", "error", err)
-				// Continue processing — fail-open for idempotency.
-			} else if dup {
-				logger.Debug("agent task: skipping duplicate", "message_id", payload.MessageID)
+			processedKey := "agent:processed:" + payload.MessageID
+			processingKey := "agent:processing:" + payload.MessageID
+
+			processed, err1 := idempotency.CheckProcessed(ctx, processedKey)
+			processing, err2 := idempotency.CheckProcessed(ctx, processingKey)
+
+			// Fail-open: only skip if check succeeded and key exists (D-072).
+			if (err1 == nil && processed) || (err2 == nil && processing) {
+				logger.Debug("agent task: skipping duplicate/in-progress",
+					"message_id", payload.MessageID)
 				releaseLock()
 				return nil
+			}
+
+			// Mark as in-progress with lock-matching TTL (130s, D-075).
+			if _, err := idempotency.MarkProcessed(ctx, processingKey, 130*time.Second); err != nil {
+				logger.Error("agent task: processing mark failed (non-fatal)", "error", err)
 			}
 		}
 
@@ -160,11 +193,22 @@ func NewAgentTaskHandler(
 		}
 		execErr := executor.ExecuteWithErrorMessage(ctx, execPayload)
 
-		// 7. HITL interrupt: do NOT release the lock (D-084).
+		// 7. HITL interrupt: hold lock, let processing key expire naturally (D-084).
 		if execErr != nil && isHITLInterrupt(execErr) {
 			logger.Info("agent task: HITL interrupted, holding conversation lock",
 				"conversation_id", payload.ConversationID)
 			return nil // D-073: always return nil to MQ
+		}
+
+		// Mark as processed (24h) for replay protection. Clean up processing key.
+		// Only for non-transient errors — transient errors should allow retry.
+		if idempotency != nil && (execErr == nil || !isTransientError(execErr)) {
+			processedKey := "agent:processed:" + payload.MessageID
+			processingKey := "agent:processing:" + payload.MessageID
+			if _, err := idempotency.MarkProcessed(ctx, processedKey, 24*time.Hour); err != nil {
+				logger.Error("agent task: processed mark failed (non-fatal)", "error", err)
+			}
+			_ = idempotency.DeleteKey(ctx, processingKey)
 		}
 
 		// Normal path: release the lock.
@@ -176,11 +220,9 @@ func NewAgentTaskHandler(
 		if execErr != nil {
 			// Error already persisted as user-friendly message (D-067).
 			logger.Error("agent task: execution failed", "error", execErr)
-			// Return transient errors to MQ for retry (D-073 refinement):
-			// LLM timeouts and rate limits are recoverable via Asynq retry.
-			// Permanent errors (agent not found, unmarshal, etc.) return nil.
+			// Return transient errors to MQ for retry (D-073 refinement).
 			if isTransientError(execErr) {
-				return execErr
+				return execErr // Asynq retry; processing key expires at 130s
 			}
 		}
 
