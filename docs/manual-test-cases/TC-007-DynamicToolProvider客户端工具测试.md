@@ -168,6 +168,8 @@ daemon 启动时自动注册 3 个内置函数（D-115）：
 | `get_device_info` | 设备基本信息（hostname、OS、arch） | diagnostic |
 | `get_time` | 设备当前时间（UTC + timezone） | diagnostic |
 
+> **可选**: 通过 `--device-info` flag 传入自定义设备元数据（JSON 格式），如 `'{"name":"MacBook","os":"darwin","app_version":"1.2.3"}'`。默认为空。
+
 ---
 
 ## 4. 测试数据字典
@@ -272,6 +274,7 @@ flowchart TD
   --user-id alice \
   --device-id alice-phone \
   --server ws://localhost:18080/ws \
+  --device-info '{"name":"alice-cli","os":"linux","type":"cli"}' \
   > "$E2E_HOME/alice-daemon.log" 2>&1 &
 ALICE_PID=$!
 sleep 3
@@ -897,6 +900,7 @@ redis-cli -p 16379 -n 15 SMEMBERS "xyncra:conn:user:alice"
   --user-id alice \
   --device-id alice-tablet \
   --server ws://localhost:18080/ws \
+  --device-info '{"name":"alice-tablet","os":"linux","type":"cli"}' \
   > "$E2E_HOME/alice-tablet-daemon.log" 2>&1 &
 sleep 3
 

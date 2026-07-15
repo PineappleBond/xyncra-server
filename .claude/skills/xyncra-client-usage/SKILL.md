@@ -92,6 +92,16 @@ The `listen` daemon automatically registers these functions on startup. No separ
 
 These functions are registered via `system.register_functions` RPC and can be invoked by the server/agent through ReverseRPC.
 
+### Device Info
+
+The `listen` daemon accepts an optional `--device-info` flag to attach custom device metadata to function registration:
+
+```bash
+xyncra-client listen --device-info '{"name":"MacBook","os":"darwin","app_version":"1.2.3"}'
+```
+
+This metadata is sent to the server via `system.register_functions` RPC and stored in the FunctionRegistry. Default is empty (no metadata).
+
 ## Exit Codes (D-042)
 
 0=success, 1=general error, 2=precondition not met (lock conflict), 3=timeout (kill only)
