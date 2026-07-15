@@ -20,13 +20,13 @@ import (
 )
 
 // AgentResumePayload is the MQ task payload for TypeAgentResume.
+// Answers are NOT included — they are persisted in the Question table (D-116).
+// The resume handler reads answered Questions from DB to build the targets map.
 type AgentResumePayload struct {
 	ConversationID string `json:"conversation_id"`
 	CheckpointID   string `json:"checkpoint_id"`
-	InterruptID    string `json:"interrupt_id"`
-	Answer         string `json:"answer"`
+	AgentID        string `json:"agent_id"`
 	SenderID       string `json:"sender_id"` // human user who sent the answer
-	AgentID        string `json:"agent_id"`  // agent to resume (e.g. "agent/xxx")
 	DeviceID       string `json:"device_id"` // Phase 6 (D-102)
 }
 
@@ -107,25 +107,25 @@ func NewAgentResumeHandler(
 		// task reuses the same lock. If the lock is still held (expected for
 		// HITL), we proceed without failing. If it's not held (e.g. TTL
 		// expired), we acquire a new one.
-		lockExists := false
+		weOwnLock := false
 		if lock != nil {
 			acquired, err := lock.Acquire(ctx, payload.ConversationID, 130*time.Second)
 			if err != nil {
 				logger.Error("agent resume: lock acquire failed",
 					"conversation_id", payload.ConversationID, "error", err)
+				// fail-open: proceed without lock
 			} else if !acquired {
 				// Lock already held by the initial HITL execution — this is
-				// expected (D-084). We still own it and must release on completion.
-				lockExists = true
+				// expected (D-084). We do NOT own it.
 				logger.Debug("agent resume: lock already held (HITL in progress)",
 					"conversation_id", payload.ConversationID)
 			} else {
-				lockExists = true
+				weOwnLock = true
 			}
 		}
 
 		releaseLock := func() {
-			if lockExists && lock != nil {
+			if weOwnLock && lock != nil {
 				if err := lock.Release(ctx, payload.ConversationID); err != nil {
 					logger.Error("agent resume: lock release failed",
 						"conversation_id", payload.ConversationID, "error", err)
@@ -183,27 +183,42 @@ func NewAgentResumeHandler(
 		}
 		defer clearTyping()
 
-		// ResumeWithParams passes the user's answer back to the interrupted agent.
-		// Build the Targets map:
-		// TODO(Phase 2): Currently uses payload.InterruptID directly.
-		// Phase 2 will read all answered Questions from QuestionStore to build
-		// the full targets map for multi-interrupt checkpoints.
-		// For now, use the interrupt_id from payload if available.
-		targets := make(map[string]any)
-		storedIDs := []string{}
-		if payload.InterruptID != "" {
-			storedIDs = append(storedIDs, payload.InterruptID)
+		// Read answered Questions from DB to build the Targets map (D-116).
+		// Answers are persisted in the Question table, not in the MQ payload.
+		if executor.questionStore == nil {
+			logger.Error("agent resume: questionStore is nil, cannot read answers",
+				"checkpoint_id", payload.CheckpointID)
+			releaseLock()
+			return nil
 		}
-		if len(storedIDs) == 0 {
-			logger.Info("agent resume: no interrupt IDs found for checkpoint",
+		questions, err := executor.questionStore.GetByCheckpoint(ctx, payload.CheckpointID)
+		if err != nil {
+			logger.Error("agent resume: get questions failed",
+				"checkpoint_id", payload.CheckpointID, "error", err)
+			execPayload := ExecutePayload{
+				ConversationID: payload.ConversationID,
+				AgentID:        payload.AgentID,
+				SenderID:       payload.SenderID,
+				DeviceID:       payload.DeviceID,
+			}
+			executor.sendErrorMessage(ctx, execPayload,
+				"抱歉，恢复执行失败，请重新发送消息。")
+			releaseLock()
+			return nil // D-073
+		}
+
+		targets := make(map[string]any)
+		for _, q := range questions {
+			if q.Status == model.QuestionStatusAnswered && q.InterruptID != "" {
+				targets[q.InterruptID] = q.Answer
+			}
+		}
+		if len(targets) == 0 {
+			logger.Info("agent resume: no answered questions found for checkpoint",
 				"checkpoint_id", payload.CheckpointID)
 		} else {
-			// Use stored IDs (authoritative source from Eino checkpoint)
-			for _, id := range storedIDs {
-				targets[id] = payload.Answer
-			}
-			logger.Debug("agent resume: using interrupt IDs for targets",
-				"interrupt_ids", storedIDs,
+			logger.Debug("agent resume: built targets from DB questions",
+				"targets_count", len(targets),
 				"checkpoint_id", payload.CheckpointID)
 		}
 		params := &adk.ResumeParams{
@@ -229,12 +244,25 @@ func NewAgentResumeHandler(
 				}
 				executor.sendErrorMessage(ctx, execPayload,
 					"抱歉，等待时间过长，请重新发送消息。")
+
+				// Clear conversation status so the conversation is not stuck in asking_user.
+				if clearErr := executor.store.ConversationStore().ClearAgentStatus(ctx, payload.ConversationID); clearErr != nil {
+					logger.Error("agent resume: clear conversation status failed after checkpoint expiry (non-fatal)",
+						"conversation_id", payload.ConversationID, "error", clearErr)
+				}
+			}
+			// Return transient errors: log + notify user, but return nil to MQ (M-3: idempotency makes retry dead code).
+			if isTransientError(err) {
+				execPayload := ExecutePayload{
+					ConversationID: payload.ConversationID,
+					AgentID:        payload.AgentID,
+					SenderID:       payload.SenderID,
+					DeviceID:       payload.DeviceID,
+				}
+				executor.sendErrorMessage(ctx, execPayload,
+					"抱歉，服务暂时不可用，请稍后重试。")
 			}
 			releaseLock()
-			// Return transient errors to MQ for retry.
-			if isTransientError(err) {
-				return err
-			}
 			return nil
 		}
 
@@ -253,11 +281,18 @@ func NewAgentResumeHandler(
 				partialText := fullResponse.String()
 				executor.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, partialText, true)
 				clearTyping()
-				releaseLock()
-				// Return transient stream errors (LLM timeout, rate limit) for retry.
+				// Transient stream errors: log + notify user, return nil to MQ (M-3).
 				if isTransientError(chunk.Err) {
-					return chunk.Err
+					execPayload := ExecutePayload{
+						ConversationID: payload.ConversationID,
+						AgentID:        payload.AgentID,
+						SenderID:       payload.SenderID,
+						DeviceID:       payload.DeviceID,
+					}
+					executor.sendErrorMessage(ctx, execPayload,
+						"抱歉，服务暂时不可用，请稍后重试。")
 				}
+				releaseLock()
 				return nil
 			}
 			if chunk.Content != "" {
@@ -279,6 +314,7 @@ func NewAgentResumeHandler(
 			// Update conversation state to asking_user (D-083).
 			if err := executor.store.ConversationStore().UpdateAgentStatus(ctx, payload.ConversationID,
 				model.AgentStatusAskingUser, payload.AgentID, payload.CheckpointID); err != nil {
+				releaseLock()
 				return fmt.Errorf("agent resume: update agent status: %w", err)
 			}
 
@@ -294,6 +330,7 @@ func NewAgentResumeHandler(
 					CreatedAt:      time.Now(),
 				}
 				if err := executor.questionStore.Create(ctx, question); err != nil {
+					releaseLock()
 					return fmt.Errorf("agent resume: create question: %w", err)
 				}
 			}
@@ -355,7 +392,25 @@ func NewAgentResumeHandler(
 			"checkpoint_id", payload.CheckpointID,
 		)
 
-		// Clean up checkpoint and interruptID mapping after successful resume (D-112, D-113).
+		// Phase 2 cleanup: clear conversation status, delete questions, delete checkpoint.
+		// All cleanup operations are non-fatal — errors are logged but do not affect
+		// the resume result.
+
+		// 1. Clear Conversation agent status (reset to idle).
+		if err := executor.store.ConversationStore().ClearAgentStatus(ctx, payload.ConversationID); err != nil {
+			logger.Error("agent resume: clear conversation status failed (non-fatal)",
+				"conversation_id", payload.ConversationID, "error", err)
+		}
+
+		// 2. Delete Questions for this checkpoint (D-116).
+		if executor.questionStore != nil {
+			if err := executor.questionStore.DeleteByCheckpoint(ctx, payload.CheckpointID); err != nil {
+				logger.Error("agent resume: delete questions failed (non-fatal)",
+					"checkpoint_id", payload.CheckpointID, "error", err)
+			}
+		}
+
+		// 3. Delete checkpoint from Redis (D-112).
 		executor.cleanupAfterResume(ctx, payload.CheckpointID, logger)
 
 		releaseLock()

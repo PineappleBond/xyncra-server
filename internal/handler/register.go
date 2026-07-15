@@ -67,7 +67,7 @@ func RegisterAll(h *server.DefaultMessageHandler, deps Dependencies) {
 	h.RegisterMethod("set_typing", NewSetTypingHandler(deps.Store, deps.BroadcastFn))
 	h.RegisterMethod("stream_text", NewStreamTextHandler(deps.Store, deps.BroadcastFn))
 	h.RegisterMethod("reload_agents", NewReloadAgentsHandler(deps.AgentRegistry))
-	h.RegisterMethod("agent_resume", NewAgentResumeHandler(deps.Broker))
+	h.RegisterMethod("agent_resume", NewAgentResumeHandler(deps.Store, deps.Broker))
 	// Phase 2: register function registry handler (nil-safe per D-063).
 	if deps.FunctionRegistry != nil {
 		h.RegisterMethod("system.register_functions", NewRegisterFunctionsHandler(deps.FunctionRegistry))

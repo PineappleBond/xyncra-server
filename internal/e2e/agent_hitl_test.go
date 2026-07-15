@@ -160,8 +160,6 @@ func TestAgentHITL_AE_HITL_003(t *testing.T) {
 	original := agent.AgentResumePayload{
 		ConversationID: "conv-resume-003",
 		CheckpointID:   "ckpt-003",
-		InterruptID:    "intr-003",
-		Answer:         "I prefer Beijing",
 		SenderID:       "user-003",
 		AgentID:        "agent/test-bot",
 	}
@@ -175,8 +173,6 @@ func TestAgentHITL_AE_HITL_003(t *testing.T) {
 
 	assert.Equal(t, original.ConversationID, decoded.ConversationID)
 	assert.Equal(t, original.CheckpointID, decoded.CheckpointID)
-	assert.Equal(t, original.InterruptID, decoded.InterruptID)
-	assert.Equal(t, original.Answer, decoded.Answer)
 	assert.Equal(t, original.SenderID, decoded.SenderID)
 	assert.Equal(t, original.AgentID, decoded.AgentID)
 

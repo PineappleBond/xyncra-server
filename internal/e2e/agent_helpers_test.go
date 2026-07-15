@@ -171,7 +171,10 @@ func setupAgentE2E(t *testing.T, opts ...agent.ExecutorOption) *agentE2EEnv {
 		base.store,
 		5, // maxConcurrent: lower for tests
 		testLogger{t: t},
-		opts...,
+		append([]agent.ExecutorOption{
+			agent.WithQuestionStore(base.store.QuestionStore()),
+			agent.WithCheckPointStore(checkpointStore),
+		}, opts...)...,
 	)
 
 	// 12. Idempotency store (Redis SETNX).
@@ -251,14 +254,41 @@ func setupAgentE2EWeakNet(t *testing.T, cfg llmWeakNetConfig, opts ...agent.Exec
 // task delivery. This tests the HITL resume pipeline: lock acquire → agent
 // build → ResumeWithParams → stream bridge → broadcast → persist.
 // Production uses agent_resume RPC (D-085) which enqueues via MQ.
+//
+// Phase 2 (D-116): answers are persisted to the Question table before the
+// resume task is enqueued. This helper simulates that by writing the answer
+// to DB via QuestionStore, then building a payload without answers.
 func triggerAgentResume(t *testing.T, env *agentE2EEnv, convID, checkpointID, interruptID, agentUserID, senderID, deviceID, answer string) error {
 	t.Helper()
+
+	// Write the answer to the Question table (simulates agent_resume RPC handler).
+	qs := env.store.QuestionStore()
+	require.NotNil(t, qs, "QuestionStore must be available for resume")
+
+	// Look up the pending question for this checkpoint.
+	questions, err := qs.GetPendingByCheckpoint(context.Background(), checkpointID)
+	require.NoError(t, err, "get pending questions should succeed")
+
+	// Find the matching question by interruptID (or use the first one if interruptID is empty).
+	var targetQ *model.Question
+	for _, q := range questions {
+		if interruptID != "" && q.InterruptID == interruptID {
+			targetQ = q
+			break
+		}
+		if interruptID == "" {
+			targetQ = q
+			break
+		}
+	}
+	require.NotNil(t, targetQ, "expected a pending question for checkpoint %s", checkpointID)
+
+	err = qs.UpdateAnswer(context.Background(), targetQ.ID, answer, senderID, deviceID)
+	require.NoError(t, err, "UpdateAnswer should succeed")
 
 	payload := agent.AgentResumePayload{
 		ConversationID: convID,
 		CheckpointID:   checkpointID,
-		InterruptID:    interruptID,
-		Answer:         answer,
 		SenderID:       senderID,
 		AgentID:        agentUserID,
 		DeviceID:       deviceID,

@@ -218,7 +218,6 @@ func makeResumeTask(checkpointID string) *mq.Task {
 		ConversationID: "conv-1",
 		CheckpointID:   checkpointID,
 		AgentID:        "agent/test",
-		Answer:         "yes",
 	}
 	raw, _ := json.Marshal(payload)
 	return &mq.Task{Type: mq.TypeAgentResume, Payload: raw}

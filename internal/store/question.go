@@ -109,3 +109,27 @@ func (qs *QuestionStore) DeleteByConversation(ctx context.Context, conversationI
 	}
 	return nil
 }
+
+// CountPendingByCheckpoint returns the count of pending questions for a checkpoint.
+func (qs *QuestionStore) CountPendingByCheckpoint(ctx context.Context, checkpointID string) (int64, error) {
+	var count int64
+	err := qs.db.WithContext(ctx).
+		Model(&model.Question{}).
+		Where("checkpoint_id = ? AND status = ?", checkpointID, model.QuestionStatusPending).
+		Count(&count).Error
+	if err != nil {
+		return 0, classifyError(fmt.Errorf("store: count pending questions: %w", err))
+	}
+	return count, nil
+}
+
+// DeleteByCheckpoint soft-deletes all questions for a checkpoint.
+func (qs *QuestionStore) DeleteByCheckpoint(ctx context.Context, checkpointID string) error {
+	result := qs.db.WithContext(ctx).
+		Where("checkpoint_id = ?", checkpointID).
+		Delete(&model.Question{})
+	if result.Error != nil {
+		return classifyError(fmt.Errorf("store: delete questions by checkpoint: %w", result.Error))
+	}
+	return nil
+}
