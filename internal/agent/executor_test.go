@@ -49,6 +49,7 @@ type sendMessageCall struct {
 func (m *mockStoreAPI) ConversationStore() *store.ConversationStore { panic("not implemented") }
 func (m *mockStoreAPI) MessageStore() *store.MessageStore           { panic("not implemented") }
 func (m *mockStoreAPI) UserUpdateStore() *store.UserUpdateStore     { panic("not implemented") }
+func (m *mockStoreAPI) QuestionStore() *store.QuestionStore         { panic("not implemented") }
 func (m *mockStoreAPI) SendMessage(ctx context.Context, msg *model.Message, memberIDs []string) (*store.SendMessageResult, error) {
 	m.sendMessageCalls = append(m.sendMessageCalls, sendMessageCall{msg: msg, memberIDs: memberIDs})
 	if m.sendMessageErr != nil {
@@ -691,7 +692,6 @@ func TestCleanupAfterResume_DeleteFails_LogsError(t *testing.T) {
 
 	e := &AgentExecutor{}
 	e.checkpointStore = fs
-	e.registerInterruptIDs("cp-log", []string{"intr-log"})
 
 	// Use a captureLogger to verify the log output.
 	logger := &captureLogger{}
@@ -710,8 +710,4 @@ func TestCleanupAfterResume_DeleteFails_LogsError(t *testing.T) {
 		"log should contain checkpoint_id field")
 	assert.True(t, argsContains(lastInfo.args, "error", fs.deleteErr),
 		"log should contain the original error")
-
-	// Despite the Delete failure, interruptIDs should still be cleaned (D-113).
-	assert.Nil(t, e.getInterruptIDs("cp-log"),
-		"interruptIDs should be deleted even when store.Delete fails")
 }

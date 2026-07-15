@@ -62,11 +62,9 @@ type AgentExecutor struct {
 	// memory leaks.
 	checkpointStore DeletableCheckPointStore
 
-	// interruptIDs maps checkpointID -> []interruptID. Populated when an
-	// interrupt event is detected; consumed during resume to build the
-	// correct ResumeParams.Targets when the client does not supply an
-	// explicit interrupt ID.
-	interruptIDs sync.Map // map[string][]string
+	// questionStore persists HITL questions to survive server restarts (Phase 1).
+	// Optional: when nil, Question persistence is skipped (D-063 nil-safe).
+	questionStore *store.QuestionStore
 }
 
 // DeletableCheckPointStore extends compose.CheckPointStore with a Delete
@@ -77,28 +75,8 @@ type DeletableCheckPointStore interface {
 	Delete(ctx context.Context, key string) error
 }
 
-// registerInterruptIDs stores interrupt IDs for a checkpoint so they can be
-// retrieved during resume.
-func (e *AgentExecutor) registerInterruptIDs(checkpointID string, ids []string) {
-	if checkpointID == "" || len(ids) == 0 {
-		return
-	}
-	e.interruptIDs.Store(checkpointID, ids)
-}
-
-// getInterruptIDs retrieves previously registered interrupt IDs for a checkpoint.
-func (e *AgentExecutor) getInterruptIDs(checkpointID string) []string {
-	v, ok := e.interruptIDs.Load(checkpointID)
-	if !ok {
-		return nil
-	}
-	ids, _ := v.([]string)
-	return ids
-}
-
-// cleanupAfterResume removes the checkpoint and interruptID mapping after
-// a successful resume. Non-fatal: errors are logged but do not affect the
-// resume result (D-112, D-113).
+// cleanupAfterResume removes the checkpoint after a successful resume.
+// Non-fatal: errors are logged but do not affect the resume result (D-112).
 func (e *AgentExecutor) cleanupAfterResume(ctx context.Context, checkpointID string, logger Logger) {
 	if e.checkpointStore != nil {
 		logger.Info("agent resume: attempting checkpoint cleanup",
@@ -115,7 +93,6 @@ func (e *AgentExecutor) cleanupAfterResume(ctx context.Context, checkpointID str
 		logger.Info("agent resume: checkpointStore is nil, skipping cleanup",
 			"checkpoint_id", checkpointID)
 	}
-	e.interruptIDs.Delete(checkpointID)
 }
 
 // ExecutorOption configures an AgentExecutor.
@@ -156,6 +133,14 @@ func WithLLMMetrics(m LLMMetrics) ExecutorOption {
 func WithCheckPointStore(store DeletableCheckPointStore) ExecutorOption {
 	return func(e *AgentExecutor) {
 		e.checkpointStore = store
+	}
+}
+
+// WithQuestionStore sets the QuestionStore for HITL question persistence.
+// When not set, Question creation is skipped (D-063 nil-safe).
+func WithQuestionStore(qs *store.QuestionStore) ExecutorOption {
+	return func(e *AgentExecutor) {
+		e.questionStore = qs
 	}
 }
 
@@ -383,24 +368,44 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 			"conversation_id", payload.ConversationID,
 			"checkpoint_id", checkpointID,
 		)
-		// Register interrupt IDs for later resume (multi-turn HITL).
-		if info.InterruptID != "" {
-			e.registerInterruptIDs(checkpointID, []string{info.InterruptID})
+
+		// 1. Update conversation state to asking_user (D-083: failure aborts HITL).
+		if err := e.store.ConversationStore().UpdateAgentStatus(ctx, payload.ConversationID,
+			model.AgentStatusAskingUser, payload.AgentID, checkpointID); err != nil {
+			return fmt.Errorf("execute agent: update agent status: %w", err)
 		}
-		// Close the stream (D-052) so clients exit the streaming state.
+
+		// 2. Persist Question to DB (D-063: nil-safe, skip when questionStore is nil).
+		if e.questionStore != nil {
+			question := &model.Question{
+				ID:             uuid.New().String(),
+				ConversationID: payload.ConversationID,
+				CheckpointID:   checkpointID,
+				InterruptID:    info.InterruptID,
+				QuestionText:   info.Question,
+				Status:         model.QuestionStatusPending,
+				CreatedAt:      time.Now(),
+			}
+			if err := e.questionStore.Create(ctx, question); err != nil {
+				return fmt.Errorf("execute agent: create question: %w", err)
+			}
+		}
+
+		// 3. Close the stream (D-052) so clients exit the streaming state.
 		partialText := fullResponse.String()
 		e.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, partialText, true)
-		// Broadcast agent status → asking_user.
+
+		// 4. Broadcast lightweight conversation update (pull notification pattern).
+		e.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID)
+
+		// 5. Still broadcast ephemeral agent_question for online clients (backward compat, D-087).
 		e.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")
-		// Broadcast the question to the human user.
 		e.broadcaster.SendAgentQuestion(ctx, payload.SenderID, payload.AgentID, payload.ConversationID,
 			info.Question, checkpointID, info.InterruptID)
-		// Broadcast checkpoint created.
 		e.broadcaster.SendAgentCheckpointCreated(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, checkpointID)
-		// Do NOT persist a message — the agent is paused, not done.
-		// Do NOT return an error — this is a controlled pause.
-		// The conversation lock is held by the task handler; for HITL it
-		// will NOT be released (D-084). We signal this via ErrHITLInterrupted.
+
+		// 6. Do NOT register interruptIDs — they are now persisted in the Question table.
+		// 7. Return ErrHITLInterrupted — conversation lock is held (D-084).
 		return fmt.Errorf("execute agent: %w", ErrHITLInterrupted)
 	}
 

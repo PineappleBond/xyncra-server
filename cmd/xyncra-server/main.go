@@ -281,7 +281,8 @@ func main() {
 		10, // maxConcurrent: limit parallel LLM calls
 		srv.Logger(),
 		agent.WithLLMMetrics(llmMetrics),
-		agent.WithCheckPointStore(checkpointStore), // D-112: checkpoint cleanup after resume
+		agent.WithCheckPointStore(checkpointStore),         // D-112: checkpoint cleanup after resume
+		agent.WithQuestionStore(dataStore.QuestionStore()), // HITL questions persistence
 	)
 
 	// Idempotency store for agent task deduplication (D-Phase5-2).

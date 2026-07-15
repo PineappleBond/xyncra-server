@@ -26,6 +26,7 @@ type getConversationParams struct {
 type getConversationResponse struct {
 	Conversation *model.Conversation `json:"conversation"`
 	UnreadCount  int64               `json:"unread_count"`
+	Questions    []*model.Question   `json:"questions"` // HITL questions (nil-safe)
 }
 
 // --------------------------------------------------------------------------
@@ -94,9 +95,19 @@ func (h *getConversationHandler) HandleRequest(ctx context.Context, client *serv
 		unreadCount = 0
 	}
 
-	// 7. Return response.
+	// 7. Fetch HITL questions for this conversation (D-063 nil-safe).
+	var questions []*model.Question
+	if h.store.QuestionStore() != nil {
+		questions, _ = h.store.QuestionStore().GetByConversation(ctx, conv.ID)
+	}
+	if questions == nil {
+		questions = []*model.Question{} // return empty array, not null
+	}
+
+	// 8. Return response.
 	return marshalResponse(getConversationResponse{
 		Conversation: conv,
 		UnreadCount:  unreadCount,
+		Questions:    questions,
 	})
 }

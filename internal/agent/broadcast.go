@@ -226,6 +226,23 @@ func (bh *BroadcastHelper) SendAgentTimeout(ctx context.Context, humanUserID, ag
 	bh.broadcastEphemeral(humanUserID, protocol.UpdateTypeAgentTimeout, payload)
 }
 
+// SendConversationUpdate broadcasts a lightweight conversation update notification
+// (Seq=0, ephemeral). This implements the pull-on-notification pattern: the client
+// receives a conversation_id and fetches full conversation state (including
+// questions) via get_conversation RPC.
+func (bh *BroadcastHelper) SendConversationUpdate(ctx context.Context, humanUserID, conversationID string) {
+	_ = ctx // reserved for future cancellation
+	payload, err := json.Marshal(map[string]string{
+		"conversation_id": conversationID,
+		"action":          "update",
+	})
+	if err != nil {
+		bh.logger.Error("broadcast: marshal conversation update payload failed", "error", err)
+		return
+	}
+	bh.broadcastEphemeral(humanUserID, protocol.UpdateTypeConversation, payload)
+}
+
 // broadcastEphemeral sends a single ephemeral update (Seq=0) to one user.
 func (bh *BroadcastHelper) broadcastEphemeral(targetUserID, updateType string, payload json.RawMessage) {
 	updates := &protocol.PackageDataUpdates{

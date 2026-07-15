@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -183,47 +184,27 @@ func NewAgentResumeHandler(
 		defer clearTyping()
 
 		// ResumeWithParams passes the user's answer back to the interrupted agent.
-		// Build the Targets map: always use the interrupt IDs registered during the
-		// original interrupt to ensure consistency with Eino's checkpoint. The client
-		// may provide an interrupt_id, but we validate it against the stored IDs to
-		// prevent mismatches that would cause isResumeTarget=false.
+		// Build the Targets map:
+		// TODO(Phase 2): Currently uses payload.InterruptID directly.
+		// Phase 2 will read all answered Questions from QuestionStore to build
+		// the full targets map for multi-interrupt checkpoints.
+		// For now, use the interrupt_id from payload if available.
 		targets := make(map[string]any)
-		storedIDs := executor.getInterruptIDs(payload.CheckpointID)
+		storedIDs := []string{}
+		if payload.InterruptID != "" {
+			storedIDs = append(storedIDs, payload.InterruptID)
+		}
 		if len(storedIDs) == 0 {
 			logger.Info("agent resume: no interrupt IDs found for checkpoint",
 				"checkpoint_id", payload.CheckpointID)
-			// Fallback: if no stored IDs, use client-provided ID (backward compatibility)
-			if payload.InterruptID != "" {
-				targets[payload.InterruptID] = payload.Answer
-				logger.Debug("agent resume: using client-provided interrupt ID (no stored IDs)",
-					"interrupt_id", payload.InterruptID,
-					"checkpoint_id", payload.CheckpointID)
-			}
 		} else {
 			// Use stored IDs (authoritative source from Eino checkpoint)
 			for _, id := range storedIDs {
 				targets[id] = payload.Answer
 			}
-			// Log if client provided a different ID (for debugging)
-			if payload.InterruptID != "" {
-				clientIDMatched := false
-				for _, id := range storedIDs {
-					if id == payload.InterruptID {
-						clientIDMatched = true
-						break
-					}
-				}
-				if !clientIDMatched {
-					logger.Info("agent resume: client-provided interrupt ID does not match stored IDs (using stored IDs)",
-						"client_interrupt_id", payload.InterruptID,
-						"stored_interrupt_ids", storedIDs,
-						"checkpoint_id", payload.CheckpointID)
-				} else {
-					logger.Debug("agent resume: client-provided interrupt ID matches stored IDs",
-						"interrupt_id", payload.InterruptID,
-						"checkpoint_id", payload.CheckpointID)
-				}
-			}
+			logger.Debug("agent resume: using interrupt IDs for targets",
+				"interrupt_ids", storedIDs,
+				"checkpoint_id", payload.CheckpointID)
 		}
 		params := &adk.ResumeParams{
 			Targets: targets,
@@ -295,10 +276,31 @@ func NewAgentResumeHandler(
 
 		// 10. Check for another interrupt (multi-turn HITL).
 		if info, ok := <-interruptCh; ok && info != nil {
-			// Register interrupt IDs for the next resume.
-			if info.InterruptID != "" {
-				executor.registerInterruptIDs(payload.CheckpointID, []string{info.InterruptID})
+			// Update conversation state to asking_user (D-083).
+			if err := executor.store.ConversationStore().UpdateAgentStatus(ctx, payload.ConversationID,
+				model.AgentStatusAskingUser, payload.AgentID, payload.CheckpointID); err != nil {
+				return fmt.Errorf("agent resume: update agent status: %w", err)
 			}
+
+			// Persist Question to DB (D-063: nil-safe).
+			if executor.questionStore != nil {
+				question := &model.Question{
+					ID:             uuid.New().String(),
+					ConversationID: payload.ConversationID,
+					CheckpointID:   payload.CheckpointID,
+					InterruptID:    info.InterruptID,
+					QuestionText:   info.Question,
+					Status:         model.QuestionStatusPending,
+					CreatedAt:      time.Now(),
+				}
+				if err := executor.questionStore.Create(ctx, question); err != nil {
+					return fmt.Errorf("agent resume: create question: %w", err)
+				}
+			}
+
+			// Broadcast conversation update (pull notification pattern).
+			executor.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID)
+
 			executor.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")
 			executor.broadcaster.SendAgentQuestion(ctx, payload.SenderID, payload.AgentID, payload.ConversationID,
 				info.Question, payload.CheckpointID, info.InterruptID)

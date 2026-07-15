@@ -15,12 +15,11 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Resume handler cleanup tests (D-112, D-113)
+// Resume handler cleanup tests (D-112)
 //
-// The cleanup logic (checkpoint deletion + interruptID cleanup) is embedded
+// The cleanup logic (checkpoint deletion) is embedded
 // in the resume handler closure. These tests verify the building blocks
-// (registerInterruptIDs / getInterruptIDs) and the DeletableCheckPointStore
-// contract used by the cleanup path.
+// and the DeletableCheckPointStore contract used by the cleanup path.
 // ---------------------------------------------------------------------------
 
 // fakeDeletableStore is a minimal DeletableCheckPointStore for cleanup tests.
@@ -58,75 +57,6 @@ func (s *fakeDeletableStore) Delete(_ context.Context, key string) error {
 	}
 	delete(s.data, key)
 	return nil
-}
-
-// ---------------------------------------------------------------------------
-// interruptIDs sync.Map tests (D-113)
-// ---------------------------------------------------------------------------
-
-// TestRegisterInterruptIDs_And_Get verifies the store-then-load round trip.
-func TestRegisterInterruptIDs_And_Get(t *testing.T) {
-	e := &AgentExecutor{}
-
-	// Register IDs for a checkpoint.
-	e.registerInterruptIDs("cp-1", []string{"intr-a", "intr-b"})
-
-	// Retrieve them.
-	got := e.getInterruptIDs("cp-1")
-	assert.Equal(t, []string{"intr-a", "intr-b"}, got)
-}
-
-// TestGetInterruptIDs_NotFound returns nil for unknown checkpoint.
-func TestGetInterruptIDs_NotFound(t *testing.T) {
-	e := &AgentExecutor{}
-
-	got := e.getInterruptIDs("nonexistent")
-	assert.Nil(t, got)
-}
-
-// TestRegisterInterruptIDs_EmptyCheckpointID is a no-op.
-func TestRegisterInterruptIDs_EmptyCheckpointID(t *testing.T) {
-	e := &AgentExecutor{}
-
-	e.registerInterruptIDs("", []string{"intr-a"})
-	got := e.getInterruptIDs("")
-	assert.Nil(t, got, "empty checkpoint ID should not be stored")
-}
-
-// TestRegisterInterruptIDs_EmptyIDs is a no-op.
-func TestRegisterInterruptIDs_EmptyIDs(t *testing.T) {
-	e := &AgentExecutor{}
-
-	e.registerInterruptIDs("cp-1", nil)
-	got := e.getInterruptIDs("cp-1")
-	assert.Nil(t, got, "nil IDs should not be stored")
-
-	e.registerInterruptIDs("cp-2", []string{})
-	got = e.getInterruptIDs("cp-2")
-	assert.Nil(t, got, "empty IDs slice should not be stored")
-}
-
-// TestInterruptIDs_Delete verifies that interruptIDs.Delete removes the entry.
-func TestInterruptIDs_Delete(t *testing.T) {
-	e := &AgentExecutor{}
-
-	// Register then delete.
-	e.registerInterruptIDs("cp-1", []string{"intr-a"})
-	e.interruptIDs.Delete("cp-1")
-
-	got := e.getInterruptIDs("cp-1")
-	assert.Nil(t, got, "interrupt IDs should be nil after Delete")
-}
-
-// TestInterruptIDs_Overwrite verifies that a second register overwrites the first.
-func TestInterruptIDs_Overwrite(t *testing.T) {
-	e := &AgentExecutor{}
-
-	e.registerInterruptIDs("cp-1", []string{"intr-a"})
-	e.registerInterruptIDs("cp-1", []string{"intr-b", "intr-c"})
-
-	got := e.getInterruptIDs("cp-1")
-	assert.Equal(t, []string{"intr-b", "intr-c"}, got)
 }
 
 // ---------------------------------------------------------------------------
@@ -201,18 +131,17 @@ func TestWithCheckPointStore_NilOption(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// cleanupAfterResume direct tests (D-112, D-113)
+// cleanupAfterResume direct tests (D-112)
 // ---------------------------------------------------------------------------
 
 // TestCleanupAfterResume_Success verifies that a successful cleanup deletes
-// the checkpoint from the store and removes the interruptID mapping.
+// the checkpoint from the store.
 func TestCleanupAfterResume_Success(t *testing.T) {
 	fs := newFakeDeletableStore()
 	_ = fs.Set(context.Background(), "cp-1", []byte("data"))
 
 	e := &AgentExecutor{}
 	e.checkpointStore = fs
-	e.registerInterruptIDs("cp-1", []string{"intr-a"})
 
 	e.cleanupAfterResume(context.Background(), "cp-1", noopLogger{})
 
@@ -222,36 +151,29 @@ func TestCleanupAfterResume_Success(t *testing.T) {
 	_, ok, err := fs.Get(context.Background(), "cp-1")
 	require.NoError(t, err)
 	assert.False(t, ok, "checkpoint should be deleted")
-	// interruptIDs should be cleaned.
-	assert.Nil(t, e.getInterruptIDs("cp-1"), "interruptIDs should be deleted")
 }
 
 // TestCleanupAfterResume_NilStore verifies that cleanup does not panic when
-// checkpointStore is nil, and still cleans up interruptIDs.
+// checkpointStore is nil.
 func TestCleanupAfterResume_NilStore(t *testing.T) {
 	e := &AgentExecutor{
 		checkpointStore: nil,
 	}
-	e.registerInterruptIDs("cp-2", []string{"intr-b"})
 
 	// Should not panic.
 	assert.NotPanics(t, func() {
 		e.cleanupAfterResume(context.Background(), "cp-2", noopLogger{})
 	})
-	// interruptIDs should still be cleaned.
-	assert.Nil(t, e.getInterruptIDs("cp-2"), "interruptIDs should be deleted even with nil store")
 }
 
 // TestCleanupAfterResume_DeleteFails verifies that when store.Delete returns
-// an error, cleanupAfterResume does not return an error (non-fatal) and still
-// cleans up interruptIDs.
+// an error, cleanupAfterResume does not return an error (non-fatal).
 func TestCleanupAfterResume_DeleteFails(t *testing.T) {
 	fs := newFakeDeletableStore()
 	fs.deleteErr = fmt.Errorf("simulated redis failure")
 
 	e := &AgentExecutor{}
 	e.checkpointStore = fs
-	e.registerInterruptIDs("cp-3", []string{"intr-c"})
 
 	// Should not panic.
 	assert.NotPanics(t, func() {
@@ -259,8 +181,6 @@ func TestCleanupAfterResume_DeleteFails(t *testing.T) {
 	})
 	// Delete should have been attempted.
 	assert.Equal(t, 1, fs.deleteCnt, "Delete should have been called once")
-	// interruptIDs should still be cleaned despite store failure.
-	assert.Nil(t, e.getInterruptIDs("cp-3"), "interruptIDs should be deleted even on store error")
 }
 
 // ---------------------------------------------------------------------------

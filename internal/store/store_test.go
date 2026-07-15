@@ -76,6 +76,7 @@ func cleanAll(t *testing.T, s *Store, ctx context.Context) {
 	s.db.WithContext(ctx).Where("1=1").Unscoped().Delete(&model.UserUpdate{})
 	s.db.WithContext(ctx).Where("1=1").Unscoped().Delete(&model.Message{})
 	s.db.WithContext(ctx).Where("1=1").Unscoped().Delete(&model.Conversation{})
+	s.db.WithContext(ctx).Where("1=1").Unscoped().Delete(&model.Question{})
 }
 
 // newTestConv creates a conversation with all required time fields set.

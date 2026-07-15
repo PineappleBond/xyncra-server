@@ -24,6 +24,10 @@ var (
 
 	// ErrContextDeadlineExceeded indicates the context deadline was exceeded.
 	ErrContextDeadlineExceeded = errors.New("store: context deadline exceeded")
+
+	// ErrConflict indicates a conflict with the current state of the resource
+	// (e.g. updating a Question that has already been answered).
+	ErrConflict = errors.New("store: conflict")
 )
 
 // classifyError translates GORM and driver-level errors into store-level errors.
