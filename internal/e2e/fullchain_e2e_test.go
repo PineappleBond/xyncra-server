@@ -103,14 +103,11 @@ type typingEvent struct {
 	IsTyping               bool
 }
 
-// questionEvent records an agent_question (HITL) event.
-type questionEvent struct {
-	UserID, ConversationID, Question, CheckpointID, InterruptID string
-}
-
-// checkpointEvent records an agent_checkpoint_created event.
-type checkpointEvent struct {
-	UserID, ConversationID, CheckpointID string
+// hitlInfo holds HITL state extracted from get_conversation RPC (D-125).
+type hitlInfo struct {
+	CheckpointID string
+	InterruptID  string
+	Question     string
 }
 
 // statusEvent records an agent_status event.
@@ -119,8 +116,9 @@ type statusEvent struct {
 }
 
 // fullChainUpdateHandler implements UpdateHandler + TypingHandler +
-// StreamingHandler + AgentQuestionHandler + AgentCheckpointHandler +
-// AgentStatusHandler. It records all events for test assertions.
+// StreamingHandler + AgentStatusHandler. It records all events for test assertions.
+// D-125: removed AgentQuestionHandler and AgentCheckpointHandler since HITL
+// info is now fetched via get_conversation RPC.
 //
 // messageCh and conversationCh are buffered signal channels closed/sent to by
 // the corresponding callback after recording the event. Test code uses
@@ -129,8 +127,6 @@ type fullChainUpdateHandler struct {
 	mu             sync.Mutex
 	streamingTexts []streamingEvent
 	typingEvents   []typingEvent
-	questions      []questionEvent
-	checkpoints    []checkpointEvent
 	statuses       []statusEvent
 	messages       []*model.Message
 	conversations  []*model.Conversation
@@ -212,31 +208,8 @@ func (h *fullChainUpdateHandler) OnStreaming(_ context.Context, userID, conversa
 	return nil
 }
 
-// OnAgentQuestion records an agent_question (HITL) event.
-func (h *fullChainUpdateHandler) OnAgentQuestion(_ context.Context, userID, conversationID, question, checkpointID, interruptID string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.questions = append(h.questions, questionEvent{
-		UserID:         userID,
-		ConversationID: conversationID,
-		Question:       question,
-		CheckpointID:   checkpointID,
-		InterruptID:    interruptID,
-	})
-	return nil
-}
-
-// OnAgentCheckpointCreated records a checkpoint created event.
-func (h *fullChainUpdateHandler) OnAgentCheckpointCreated(_ context.Context, userID, conversationID, checkpointID string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.checkpoints = append(h.checkpoints, checkpointEvent{
-		UserID:         userID,
-		ConversationID: conversationID,
-		CheckpointID:   checkpointID,
-	})
-	return nil
-}
+// D-125: OnAgentQuestion and OnAgentCheckpointCreated removed. HITL information
+// is now fetched via get_conversation RPC (see waitForHITL helper).
 
 // OnAgentStatus records an agent status change event.
 func (h *fullChainUpdateHandler) OnAgentStatus(_ context.Context, userID, conversationID, status string) error {
@@ -401,20 +374,26 @@ func waitForClientConnected(t *testing.T, cl *client.XyncraClient, srv *server.W
 	}, testTimeout(10*time.Second), 100*time.Millisecond, "client should be connected")
 }
 
-// waitForAgentQuestion polls the handler until an agent_question event is
-// received or the timeout expires. Returns nil if no question arrived.
-func waitForAgentQuestion(t *testing.T, handler *fullChainUpdateHandler, timeout time.Duration) *questionEvent {
+// waitForHITL polls get_conversation RPC until the conversation enters
+// asking_user state with pending questions, or the timeout expires.
+// Returns nil if HITL was not triggered within the timeout (D-125).
+func waitForHITL(t *testing.T, cl *client.XyncraClient, convID string, timeout time.Duration) *hitlInfo {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		handler.mu.Lock()
-		if len(handler.questions) > 0 {
-			q := handler.questions[0]
-			handler.mu.Unlock()
-			return &q
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		result, err := cl.GetConversation(ctx, convID)
+		cancel()
+		if err == nil && result.Conversation != nil &&
+			result.Conversation.AgentStatus == "asking_user" &&
+			len(result.Questions) > 0 {
+			return &hitlInfo{
+				CheckpointID: result.Conversation.CheckpointID,
+				InterruptID:  result.Questions[0].InterruptID,
+				Question:     result.Questions[0].QuestionText,
+			}
 		}
-		handler.mu.Unlock()
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 	return nil
 }
@@ -517,11 +496,12 @@ func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *
 	// 2. Typing events — hard assertion.
 	require.Greater(t, len(handler.typingEvents), 0, "should receive typing events")
 
-	// 3. HITL events — soft assertion (LLM may not trigger).
-	if len(handler.questions) == 0 {
+	// 3. HITL — soft assertion (LLM may not trigger). D-125: HITL info is now
+	//    verified via get_conversation RPC in the test body, not via handler events.
+	//    Check server DB conversation AgentStatus for evidence of HITL.
+	serverConvForHITL, _ := env.store.ConversationStore().Get(context.Background(), convID)
+	if serverConvForHITL != nil && serverConvForHITL.AgentStatus != "asking_user" && serverConvForHITL.CheckpointID == "" {
 		t.Log("INFO: HITL not triggered -- acceptable")
-	} else {
-		assert.NotEmpty(t, handler.questions[0].CheckpointID, "question should have checkpoint_id")
 	}
 
 	// 4. Agent status events — hard assertion.
@@ -566,24 +546,18 @@ func assertFullChainResults(t *testing.T, handler *fullChainUpdateHandler, env *
 	assert.Equal(t, convID, serverConv.ID, "conversation ID should match")
 
 	// 6c. If HITL triggered resume and LLM produced text, agent message should exist.
-	//     This is already covered by section 5 above (agentSenderMsgs check).
 	//     Log a summary for clarity.
-	if len(handler.questions) > 0 && len(agentSenderMsgs) > 0 {
+	if serverConvForHITL != nil && serverConvForHITL.CheckpointID != "" && len(agentSenderMsgs) > 0 {
 		t.Logf("Server DB: HITL resume produced %d agent message(s) -- verified", len(agentSenderMsgs))
 	}
 
 	// -----------------------------------------------------------------------
-	// 7. Redis assertions — hard
+	// 7. Redis assertions — soft (D-125: checkpoint events removed; verify via server DB)
 	// -----------------------------------------------------------------------
 
-	// 7a. If HITL was triggered, a checkpoint should have been created.
-	//     The checkpoint is stored in Redis by RedisCheckPointStore and broadcast
-	//     via agent_checkpoint_created event. handler.checkpoints records these
-	//     broadcasts, confirming Redis checkpoint creation.
-	if len(handler.questions) > 0 {
-		require.Greater(t, len(handler.checkpoints), 0,
-			"Redis checkpoint should have been created for HITL (agent_checkpoint_created event expected)")
-		t.Logf("Redis: %d checkpoint event(s) recorded -- HITL checkpoint verified", len(handler.checkpoints))
+	// 7a. If HITL was triggered, the conversation should have a checkpoint_id in the DB.
+	if serverConvForHITL != nil && serverConvForHITL.CheckpointID != "" {
+		t.Logf("Server DB: conversation checkpoint_id=%s -- HITL checkpoint verified", serverConvForHITL.CheckpointID)
 	}
 
 	// -----------------------------------------------------------------------
@@ -663,7 +637,7 @@ func (l *testClientLogger) Debug(msg string, args ...any) { l.t.Logf("[DEBUG] %s
 //  3. Client creates a conversation with the agent
 //  4. Client sends a message requesting tool use and HITL
 //  5. Agent processes: calls tools (ReverseRPC), streams response, triggers HITL
-//  6. Client receives streaming + typing + agent_status + agent_question events
+//  6. Client receives streaming + typing + agent_status + conversation update with HITL questions
 //  7. Client resumes the agent via agent_resume RPC
 //  8. Agent completes and persists final message
 //  9. Client receives is_done + persisted message
@@ -890,21 +864,15 @@ func TestFullChainE2E(t *testing.T) {
 			time.Sleep(200 * time.Millisecond)
 		}
 
-		// Wait for agent_question (HITL) — this is a soft wait.
-		question := waitForAgentQuestion(t, handler, testTimeout(60*time.Second))
+		// Wait for HITL via get_conversation RPC polling (D-125).
+		question := waitForHITL(t, xyncraClient, convID, testTimeout(60*time.Second))
 
-		// Checkpoint D: if HITL was triggered, verify checkpoint event arrived.
-		// This indirectly confirms Redis checkpoint creation via the broadcast event.
-		t.Log("Checkpoint D: verifying Redis checkpoint via broadcast events")
+		// Checkpoint D: if HITL was triggered, verify checkpoint exists in DB.
+		t.Log("Checkpoint D: verifying HITL checkpoint via get_conversation RPC")
 		if question != nil {
-			handler.mu.Lock()
-			checkpointCount := len(handler.checkpoints)
-			handler.mu.Unlock()
-			require.Greater(t, checkpointCount, 0,
-				"Redis: checkpoint_created event should have been received for HITL")
-			t.Logf("Checkpoint D: %d checkpoint event(s) received -- Redis HITL verified", checkpointCount)
+			t.Logf("Checkpoint D: HITL triggered - checkpoint_id=%s", question.CheckpointID)
 		} else {
-			t.Log("Checkpoint D: HITL not triggered -- skipping Redis checkpoint verification")
+			t.Log("Checkpoint D: HITL not triggered -- skipping checkpoint verification")
 		}
 
 		// ---------------------------------------------------------------

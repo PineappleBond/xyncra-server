@@ -24,5 +24,22 @@ type Conversation struct {
 	LastReadMessageID1     uint32    // UserID1's read cursor position (D-012)
 	LastReadMessageID2     uint32    // UserID2's read cursor position (D-012)
 
+	// HITL state machine fields (D-125). Mirrors the server-side model so that
+	// get_conversation responses deserialise correctly.
+	AgentStatus       string    `gorm:"size:32;not null;default:'idle';index" json:"agent_status"`
+	AgentID           string    `gorm:"size:64" json:"agent_id"`
+	CheckpointID      string    `gorm:"size:36" json:"checkpoint_id"`
+	AgentLastActivity time.Time `json:"agent_last_activity"`
+
 	DeletedAt gorm.DeletedAt `gorm:"index:idx_conversation_user1_deleted,priority:2;index:idx_conversation_user2_deleted,priority:2;index:idx_conversation_lastmsg_deleted,priority:2;index"`
 }
+
+// Agent status constants for the HITL state machine (D-125).
+const (
+	AgentStatusIdle        = "idle"
+	AgentStatusThinking    = "thinking"
+	AgentStatusToolCalling = "tool_calling"
+	AgentStatusGenerating  = "generating"
+	AgentStatusAskingUser  = "asking_user"
+	AgentStatusTimeout     = "timeout"
+)

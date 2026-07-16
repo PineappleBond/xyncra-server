@@ -153,8 +153,8 @@ Hint: Start with 'xyncra-client listen --user-id <user> --device-id <device>'
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|------|------|
 | `conversation_id` | string | 是 | 会话 ID |
-| `checkpoint_id` | string | 是 | Agent 执行检查点 ID（来自 `agent_question` 事件） |
-| `interrupt_id` | string | 否 | 中断 ID（来自 `agent_question` 事件，未提供时 daemon 从内存查找） |
+| `checkpoint_id` | string | 是 | Agent 执行检查点 ID（来自 `[hitl]` 输出，通过 `get_conversation` RPC 获取，D-125） |
+| `interrupt_id` | string | 否 | 中断 ID（来自 `[hitl]` 输出，未提供时 daemon 从内存查找） |
 | `answer` | string | 是 | 对 Agent 问题的回答 |
 | `agent_id` | string | 是 | Agent ID（如 `agent/hitl-bot`） |
 

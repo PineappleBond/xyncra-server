@@ -803,9 +803,11 @@ type SearchMessagesResult struct {
 }
 
 // GetConversationResult is the response payload for the GetConversation RPC.
+// Includes HITL questions when the conversation is in asking_user state (D-125).
 type GetConversationResult struct {
 	Conversation *model.Conversation `json:"conversation"`
 	UnreadCount  int64               `json:"unread_count"`
+	Questions    []*model.Question   `json:"questions"` // HITL pending questions (D-125)
 }
 
 // DeleteConversationResult holds the result of a delete_conversation RPC.

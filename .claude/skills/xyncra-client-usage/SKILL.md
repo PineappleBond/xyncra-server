@@ -187,8 +187,6 @@ type Package struct {
 | `"typing"` | `{user_id, conversation_id, is_typing, timestamp}` | Typing indicator |
 | `"streaming"` | `{user_id, conversation_id, stream_id, text, is_done, timestamp}` | Cumulative text (NOT delta) |
 | `"agent_status"` | `{user_id, conversation_id, status, timestamp}` | Status: thinking/tool_calling/generating/idle/asking_user |
-| `"agent_question"` | `{user_id, conversation_id, question, checkpoint_id, interrupt_id, timestamp}` | HITL question from agent |
-| `"agent_checkpoint_created"` | `{user_id, conversation_id, checkpoint_id, timestamp}` | Checkpoint saved |
 | `"agent_timeout"` | `{user_id, conversation_id, reason, timestamp}` | Agent timed out |
 
 ### sync_updates Pagination

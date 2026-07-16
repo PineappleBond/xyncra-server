@@ -212,10 +212,10 @@ func TestErrCheckpointNotFound_Defined(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestProtocol_AgentUpdateTypes_Defined(t *testing.T) {
+	// D-125: removed UpdateTypeAgentQuestion and UpdateTypeAgentCheckpointCreated
+	// (HITL info now delivered via conversation update + get_conversation RPC).
 	types := []string{
 		protocol.UpdateTypeAgentStatus,
-		protocol.UpdateTypeAgentQuestion,
-		protocol.UpdateTypeAgentCheckpointCreated,
 		protocol.UpdateTypeAgentTimeout,
 	}
 	for _, typ := range types {

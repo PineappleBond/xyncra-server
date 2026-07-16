@@ -9,19 +9,17 @@ import (
 )
 
 func TestUpdateTypeAgentConstants(t *testing.T) {
-	// Verify D-087 constants have the expected string values.
+	// Verify D-087 constants have the expected string values (D-125: removed
+	// agent_question and agent_checkpoint_created; see PRODUCT_DECISIONS.md).
 	assert.Equal(t, "agent_status", UpdateTypeAgentStatus)
-	assert.Equal(t, "agent_question", UpdateTypeAgentQuestion)
-	assert.Equal(t, "agent_checkpoint_created", UpdateTypeAgentCheckpointCreated)
 	assert.Equal(t, "agent_timeout", UpdateTypeAgentTimeout)
 }
 
 func TestUpdateTypeAgentConstants_Distinct(t *testing.T) {
-	// All agent ephemeral types must be distinct.
+	// All agent ephemeral types must be distinct (D-125: removed
+	// agent_question and agent_checkpoint_created).
 	types := []string{
 		UpdateTypeAgentStatus,
-		UpdateTypeAgentQuestion,
-		UpdateTypeAgentCheckpointCreated,
 		UpdateTypeAgentTimeout,
 	}
 	seen := make(map[string]bool)

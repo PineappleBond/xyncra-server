@@ -29,15 +29,15 @@ This command is IPC-only (D-036, D-114) — it requires the listen daemon
 to be running. Start the daemon with 'xyncra-client listen' first.
 
 Typical workflow:
-  1. Run 'xyncra-client listen' to receive agent_question events
-  2. Note the checkpoint_id and interrupt_id from the event
+  1. Run 'xyncra-client listen' to receive HITL notifications
+  2. Note the checkpoint_id and interrupt_id from the HITL notification
   3. Run 'xyncra-client agent-resume' with the answer`,
 		RunE: runAgentResume,
 	}
 
 	cmd.Flags().String("conversation-id", "", "Conversation ID (required)")
-	cmd.Flags().String("checkpoint-id", "", "Checkpoint ID from agent_question event (required)")
-	cmd.Flags().String("interrupt-id", "", "Interrupt ID from agent_question event (optional)")
+	cmd.Flags().String("checkpoint-id", "", "Checkpoint ID from HITL notification (required)")
+	cmd.Flags().String("interrupt-id", "", "Interrupt ID from HITL notification (optional)")
 	cmd.Flags().String("answer", "", "Answer to the agent's question (required)")
 	cmd.Flags().String("agent-id", "", "Agent ID to resume (e.g. agent/xxx, required)")
 

@@ -3,7 +3,7 @@
 //
 // # Architecture
 //
-// The package centers on ClientDB, which aggregates eight domain-specific
+// The package centers on ClientDB, which aggregates nine domain-specific
 // sub-stores (Conversations, Messages, UserUpdates, SyncStates, Drafts, Queue,
 // RPCLogs, NotificationLogs). Each sub-store encapsulates all CRUD and query
 // operations for its domain model.

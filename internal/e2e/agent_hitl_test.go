@@ -20,74 +20,16 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/PineappleBond/xyncra-server/internal/agent"
-	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
 
 // ---------------------------------------------------------------------------
-// TestAgentHITL_AE_HITL_001 — Agent interrupts and asks question (D-085, D-087)
+// TestAgentHITL_AE_HITL_001 — (removed D-125)
 // ---------------------------------------------------------------------------
 
-// TestAgentHITL_AE_HITL_001 verifies that when the agent triggers a HITL
-// interrupt, the agent_question ephemeral update is broadcast to the human
-// user with the correct question, checkpoint_id, and interrupt_id fields.
-func TestAgentHITL_AE_HITL_001(t *testing.T) {
-	// Scenario: AE-HITL-001
-	// Verifies: agent_question ephemeral update sent to client (D-085, D-087)
-	// Strategy: Directly test BroadcastHelper.SendAgentQuestion since triggering
-	// a real Eino interrupt via mock LLM is not feasible.
-	env := setupAgentE2E(t)
-	userID := "user-hitl-001"
-	agentUserID := "agent/test-bot"
-	convID := "conv-hitl-001"
-
-	// Create a conversation so the user is a valid broadcast target.
-	createAgentConversation(t, env, userID, agentUserID)
-
-	// Connect user WebSocket.
-	conn := connectClient(t, env.addr, userID, "device-1")
-	defer conn.Close()
-
-	// Drain any initial push updates.
-	drainPushUpdates(t, conn)
-
-	// Create a BroadcastHelper using the test WebSocket server.
-	broadcaster := agent.NewBroadcastHelper(env.srv, testLogger{})
-
-	// Broadcast an agent_question ephemeral update.
-	question := "Which city do you prefer?"
-	checkpointID := "ckpt-001"
-	interruptID := "intr-001"
-	broadcaster.SendAgentQuestion(context.Background(), userID, agentUserID, convID,
-		question, checkpointID, interruptID)
-
-	// Wait for the agent_question ephemeral update.
-	updates := waitForEphemeral(t, conn, protocol.UpdateTypeAgentQuestion, 30*time.Second)
-
-	// Verify the update contents.
-	var found bool
-	for _, u := range updates.Updates {
-		if u.Type != protocol.UpdateTypeAgentQuestion {
-			continue
-		}
-		found = true
-		assert.Equal(t, uint32(0), u.Seq, "agent_question should be ephemeral (Seq=0)")
-
-		var payload struct {
-			UserID         string `json:"user_id"`
-			ConversationID string `json:"conversation_id"`
-			Question       string `json:"question"`
-			CheckpointID   string `json:"checkpoint_id"`
-			InterruptID    string `json:"interrupt_id"`
-		}
-		require.NoError(t, json.Unmarshal(u.Payload, &payload))
-		assert.Equal(t, agentUserID, payload.UserID, "user_id should be the agent")
-		assert.Equal(t, convID, payload.ConversationID)
-		assert.Equal(t, question, payload.Question, "question should match")
-		assert.Equal(t, checkpointID, payload.CheckpointID, "checkpoint_id should match")
-		assert.Equal(t, interruptID, payload.InterruptID, "interrupt_id should match")
-	}
-	assert.True(t, found, "should find an agent_question update")
-}
+// TestAgentHITL_AE_HITL_001 was removed as part of D-125 (remove redundant HITL
+// ephemeral events). The agent_question ephemeral update no longer exists; HITL
+// information is now delivered via conversation update (agent_status field) and
+// the get_conversation RPC (questions array). See PRODUCT_DECISIONS.md D-125.
 
 // ---------------------------------------------------------------------------
 // TestAgentHITL_AE_HITL_002 — Checkpoint saved to Redis (D-083)
@@ -257,58 +199,11 @@ func TestAgentHITL_AE_HITL_005(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestAgentHITL_AE_HITL_006 — agent_checkpoint_created notification (D-087)
+// TestAgentHITL_AE_HITL_006 — (removed D-125)
 // ---------------------------------------------------------------------------
 
-// TestAgentHITL_AE_HITL_006 verifies that after a checkpoint is created,
-// an agent_checkpoint_created ephemeral update is broadcast to the human user.
-func TestAgentHITL_AE_HITL_006(t *testing.T) {
-	// Scenario: AE-HITL-006
-	// Verifies: ephemeral notification sent after checkpoint creation (D-087)
-	// Strategy: Directly test BroadcastHelper.SendAgentCheckpointCreated.
-	env := setupAgentE2E(t)
-	userID := "user-hitl-006"
-	agentUserID := "agent/test-bot"
-	convID := "conv-hitl-006"
-
-	// Create a conversation so the user is a valid broadcast target.
-	createAgentConversation(t, env, userID, agentUserID)
-
-	// Connect user WebSocket.
-	conn := connectClient(t, env.addr, userID, "device-1")
-	defer conn.Close()
-
-	// Drain any initial push updates.
-	drainPushUpdates(t, conn)
-
-	// Create a BroadcastHelper.
-	broadcaster := agent.NewBroadcastHelper(env.srv, testLogger{})
-
-	// Broadcast an agent_checkpoint_created ephemeral update.
-	checkpointID := "ckpt-006"
-	broadcaster.SendAgentCheckpointCreated(context.Background(), userID, agentUserID, convID, checkpointID)
-
-	// Wait for the agent_checkpoint_created ephemeral update.
-	updates := waitForEphemeral(t, conn, protocol.UpdateTypeAgentCheckpointCreated, 30*time.Second)
-
-	// Verify the update contents.
-	var found bool
-	for _, u := range updates.Updates {
-		if u.Type != protocol.UpdateTypeAgentCheckpointCreated {
-			continue
-		}
-		found = true
-		assert.Equal(t, uint32(0), u.Seq, "agent_checkpoint_created should be ephemeral (Seq=0)")
-
-		var payload struct {
-			UserID         string `json:"user_id"`
-			ConversationID string `json:"conversation_id"`
-			CheckpointID   string `json:"checkpoint_id"`
-		}
-		require.NoError(t, json.Unmarshal(u.Payload, &payload))
-		assert.Equal(t, agentUserID, payload.UserID, "user_id should be the agent")
-		assert.Equal(t, convID, payload.ConversationID)
-		assert.Equal(t, checkpointID, payload.CheckpointID, "checkpoint_id should match")
-	}
-	assert.True(t, found, "should find an agent_checkpoint_created update")
-}
+// TestAgentHITL_AE_HITL_006 was removed as part of D-125 (remove redundant HITL
+// ephemeral events). The agent_checkpoint_created ephemeral update no longer
+// exists; HITL information is now delivered via conversation update
+// (agent_status + checkpoint_id fields) and the get_conversation RPC.
+// See PRODUCT_DECISIONS.md D-125.
