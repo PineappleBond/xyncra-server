@@ -2,9 +2,9 @@
 
 > **测试编号**: TC-003
 > **测试类型**: 端到端集成测试 + 韧性测试
-> **覆盖范围**: HITL 完整流程、Question 持久化 (D-116)、多设备竞态、并行多 Question、服务器重启恢复 (Scenario 1-7)
+> **覆盖范围**: HITL 完整流程、Question 持久化 (D-116)、多设备竞态、并行多 Question、服务器重启恢复 (Scenario 1-7)、HITL 超时自动清理 (D-123)、Conversation updated_at 同步优化 (D-124)
 > **环境**: Docker E2E (D-043)
-> **最后更新**: 2026-07-15
+> **最后更新**: 2026-07-16
 
 ---
 
@@ -20,6 +20,7 @@
 **覆盖的关键决策**：
 - 基础流程：D-083 (CheckpointStore)、D-084 (并发锁)、D-085 (agent_resume RPC)、D-087 (Ephemeral Update)、D-092 (ReverseRPC)
 - 韧性设计：D-116 (Question 持久化表)、D-112 (Checkpoint 清理)、D-071 (幂等性)、D-114 (agent-resume IPC-only)
+- 自动清理：D-123 (HITL 超时自动清理)、D-124 (Conversation updated_at 同步优化)
 
 ---
 
@@ -102,7 +103,18 @@ curl -s http://localhost:18080/health
 # 预期: {"status":"ok"}
 ```
 
-### 3.4 创建测试工作目录
+### 3.4 安装容器内工具
+
+> **注意**: E2E 容器默认不包含 sqlite3，需要在容器重启后重新安装。
+
+```bash
+docker exec xyncra-server-xyncra-server-e2e-1 apk add --no-cache sqlite
+# 预期: OK: xx MiB in xx packages
+```
+
+> **提示**: 每次服务器重启（阶段 9-11）后，都需要重新执行此命令安装 sqlite3。
+
+### 3.5 创建测试工作目录
 
 ```bash
 export E2E_HOME=$(mktemp -d /tmp/xe2e-XXXXXX)
@@ -202,13 +214,9 @@ flowchart TD
 
     subgraph PartIII [Part III: 并行多 Question — Scenario 3]
         direction TB
-        P7Choice{方式?}
-        P7Choice -->|方式 A| P7A1[步骤 A1-A2:\n🟢 创建 hitl-parent\n+ hitl-child-a/b\n🟢 reload_agents]
-        P7A1 --> P7A3[步骤 A3-A4:\n🔵 发送消息触发并行委派\n🟡 验证 ≥2 条 Question\n🟡 不同 interrupt_id]
-        P7Choice -->|方式 B| P7B1[步骤 B:\n🔵 hitl-bot 触发 1 条 Question\n🟡 手动 INSERT 第 2 条]
-        P7A3 --> P7Shared
-        P7B1 --> P7Shared
-        P7Shared[步骤 7.3-7.5:\n🔵 回答 Q1 → partial\n🟡 Q1=answered, Q2=pending\n🔵 回答 Q2 → complete\n🟡 全部 answered → Agent 恢复]
+        P7B1[步骤 7.1:\n🔵 hitl-bot 触发 1 条 Question\n🟡 手动 INSERT 第 2 条]
+        P7B1 --> P7B2[步骤 7.2:\n🟡 验证 updated_at 字段 (D-124)]
+        P7B2 --> P7Shared[步骤 7.3-7.5:\n🔵 回答 Q1 → partial\n🟡 Q1=answered, Q2=pending\n🔵 回答 Q2 → complete\n🟡 全部 answered → Agent 恢复]
     end
 
     P7Shared --> PartIV
@@ -291,11 +299,11 @@ echo "HITL_CONV_ID=$HITL_CONV_ID"
 sleep 15  # 等待 Agent 处理并触发 HITL
 ```
 
-#### 步骤 2.3: 验证 agent_question 推送 (D-087)
+#### 步骤 2.3: 验证 conversation update 包含 HITL questions (D-125)
 
 ```bash
-cat "$E2E_HOME/alice-daemon.log" | grep -i "agent_question\|agent_checkpoint" | tail -5
-# 预期: 看到 agent_question 或 agent_checkpoint_created 事件
+cat "$E2E_HOME/alice-daemon.log" | grep -i "\[hitl\]\|conversation.*update" | tail -5
+# 预期: 看到 [hitl] 输出或 conversation update 事件（D-125 移除了冗余的 agent_question 事件）
 ```
 
 #### 步骤 2.4: 验证 Question 持久化到 DB (D-116)
@@ -310,8 +318,9 @@ $DB "SELECT id, conversation_id, checkpoint_id, interrupt_id, question_text, sta
 #### 步骤 2.5: 验证 Conversation agent_status (D-116)
 
 ```bash
-$DB "SELECT id, agent_status, agent_id, checkpoint_id FROM conversations WHERE id='$HITL_CONV_ID';"
+$DB "SELECT id, agent_status, agent_id, checkpoint_id, updated_at FROM conversations WHERE id='$HITL_CONV_ID';"
 # 预期: agent_status=asking_user, agent_id=agent/hitl-bot, checkpoint_id 非空
+# D-124: updated_at 应为当前时间（UpdateAgentStatus 更新）
 ```
 
 #### 步骤 2.6: 验证 Redis Checkpoint (D-083)
@@ -560,164 +569,9 @@ $R GET "agent:checkpoint:$CHECKPOINT_ID"
 
 **目标**: 验证多个并行 Question 的创建（一对多关系）、逐个回答（partial）、全部回答后自动 resume。
 
-提供两种触发方式：
+> **说明**: Eino 框架当前不支持多 Agent 同时触发中断（第一个子代理触发 HITL 后，父代理循环被中断）。因此本阶段使用手动插入第二条 Question 的方式验证 partial answer + auto-resume 逻辑。数据库和业务逻辑仍支持一个会话同时存在多个 Question，为未来框架升级预留能力。
 
-- **方式 A**（推荐）：配置双子代理，各自触发 `ask_user`，产生 Composite Interrupt
-- **方式 B**（Fallback）：手动在 DB 中插入第二条 Question
-
-#### 方式 A: 双子代理 Composite Interrupt
-
-##### 步骤 A1: 创建 Agent 配置
-
-```bash
-# 子代理 1: 负责文件 A 操作，需要 HITL 确认
-cat > agents/hitl-child-a.md << 'EOF'
----
-id: hitl-child-a
-name: HITL Child A
-description: "处理文件 A 操作 — 需要用户确认"
-model: qwen3.7-plus
-api_key_env: XYNCRA_TEST_REAL_API_KEY
-base_url: "https://coding.dashscope.aliyuncs.com/v1"
-parameters:
-  temperature: 0.3
-  max_tokens: 300
-context:
-  max_tokens: 4000
-  max_messages: 10
-middleware:
-  enable_client_tools: false
----
-
-你是文件管理助手，专门负责处理"文件A"相关的操作。
-无论用户请求什么，你都必须先使用 ask_user 工具确认：
-"确认对文件A执行此操作？(回复'确认'或'取消')"
-收到确认后，回复"文件A操作已确认"。
-EOF
-
-# 子代理 2: 负责文件 B 操作，需要 HITL 确认
-cat > agents/hitl-child-b.md << 'EOF'
----
-id: hitl-child-b
-name: HITL Child B
-description: "处理文件 B 操作 — 需要用户确认"
-model: qwen3.7-plus
-api_key_env: XYNCRA_TEST_REAL_API_KEY
-base_url: "https://coding.dashscope.aliyuncs.com/v1"
-parameters:
-  temperature: 0.3
-  max_tokens: 300
-context:
-  max_tokens: 4000
-  max_messages: 10
-middleware:
-  enable_client_tools: false
----
-
-你是文件管理助手，专门负责处理"文件B"相关的操作。
-无论用户请求什么，你都必须先使用 ask_user 工具确认：
-"确认对文件B执行此操作？(回复'确认'或'取消')"
-收到确认后，回复"文件B操作已确认"。
-EOF
-
-# 父代理: 并行委派给两个子代理
-cat > agents/hitl-parent.md << 'EOF'
----
-id: hitl-parent
-name: HITL Parent
-description: "并行协调助手 — 同时委派两个子任务"
-model: qwen3.7-plus
-api_key_env: XYNCRA_TEST_REAL_API_KEY
-base_url: "https://coding.dashscope.aliyuncs.com/v1"
-parameters:
-  temperature: 0.3
-  max_tokens: 500
-context:
-  max_tokens: 8000
-  max_messages: 20
-sub_agents:
-  - hitl-child-a
-  - hitl-child-b
----
-
-你是一个并行协调助手。你拥有两个子助手：
-- "HITL Child A" — 负责文件A相关操作
-- "HITL Child B" — 负责文件B相关操作
-
-当用户要求同时处理文件A和文件B时，你应该**同时**委派任务给两个子助手。
-重要：尽量并行调用两个子助手，不要串行等待。
-EOF
-```
-
-##### 步骤 A2: 重载 Agent 配置
-
-```bash
-# 通过 WebSocket RPC 调用 reload_agents
-# 逐个复制 agent 文件到容器中（避免 docker cp agents/ 导致目录嵌套）
-docker cp agents/hitl-parent.md xyncra-server-xyncra-server-e2e-1:/app/agents/
-docker cp agents/hitl-child-a.md xyncra-server-xyncra-server-e2e-1:/app/agents/
-docker cp agents/hitl-child-b.md xyncra-server-xyncra-server-e2e-1:/app/agents/
-
-# 触发 reload（通过 curl 或 WebSocket）
-curl -s http://localhost:18080/rpc \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"reload_agents","params":{},"id":1}'
-# 预期: 重新加载成功
-
-sleep 3
-```
-
-##### 步骤 A3: 创建会话并触发并行 HITL
-
-```bash
-PARENT_CONV_ID=$(./bin/xyncra-client create-conversation \
-  --user-id alice \
-  --device-id test-device-alice \
-  --server ws://localhost:18080/ws \
-  --peer-id "agent/hitl-parent" | grep "Conversation ID:" | awk '{print $3}')
-echo "PARENT_CONV_ID=$PARENT_CONV_ID"
-
-./bin/xyncra-client send \
-  --user-id alice \
-  --device-id test-device-alice \
-  --server ws://localhost:18080/ws \
-  --conversation-id "$PARENT_CONV_ID" \
-  --content "请同时删除文件A和文件B"
-
-sleep 25  # 等待父代理并行委派 + 两个子代理各自触发 HITL
-```
-
-##### 步骤 A4: 验证 Composite Interrupt — 多条 Question
-
-```bash
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
-
-$DB "SELECT id, checkpoint_id, interrupt_id, question_text, status FROM questions WHERE conversation_id='$PARENT_CONV_ID' ORDER BY created_at;"
-# 预期: ≥2 条记录，status=pending
-# 关键：两条 Question 应有**不同的 interrupt_id**（来自不同子代理的中断）
-# 且共享同一 **checkpoint_id**（Composite Interrupt 合并为一个 checkpoint）
-```
-
-```bash
-CHECKPOINT_ID=$($DB "SELECT DISTINCT checkpoint_id FROM questions WHERE conversation_id='$PARENT_CONV_ID' LIMIT 1;")
-Q1_ID=$($DB "SELECT id FROM questions WHERE conversation_id='$PARENT_CONV_ID' AND status='pending' ORDER BY created_at LIMIT 1;")
-Q2_ID=$($DB "SELECT id FROM questions WHERE conversation_id='$PARENT_CONV_ID' AND status='pending' ORDER BY created_at LIMIT 1 OFFSET 1;")
-echo "CHECKPOINT_ID=$CHECKPOINT_ID"
-echo "Q1_ID=$Q1_ID"
-echo "Q2_ID=$Q2_ID"
-
-# 验证 interrupt_id 不同（来自不同子代理）
-$DB "SELECT interrupt_id, COUNT(*) FROM questions WHERE conversation_id='$PARENT_CONV_ID' GROUP BY interrupt_id;"
-# 预期: 2 个不同的 interrupt_id，各 COUNT=1
-```
-
-> **如果只产生 1 条 Question**: 可能 Eino 框架未支持并行子代理 Composite Interrupt，或 LLM 串行委派了子任务。此时切换到**方式 B**。
-
----
-
-#### 方式 B: Fallback — 手动插入 Question
-
-> 如果方式 A 未能产生多 Question，使用此方式验证后续逻辑。
+#### 步骤 7.1: 触发单条 Question 并手动插入第二条
 
 ```bash
 # 使用 hitl-bot 触发单条 Question
@@ -754,12 +608,23 @@ $DB "SELECT id, interrupt_id, question_text, status FROM questions WHERE convers
 # 预期: 2 条记录，status=pending，共享同一 checkpoint_id
 ```
 
----
-
 #### 共享流程: 部分回答 → 全部回答 → Resume
 
-> 以下使用 `$CHECKPOINT_ID`、`$Q1_ID`、`$Q2_ID` 变量，适用于方式 A（`$PARENT_CONV_ID`）或方式 B（`$NEW_CONV_ID`）。
-> 统一使用 `$MULTI_CONV_ID` 指代当前测试会话。
+> 以下使用 `$CHECKPOINT_ID`、`$Q1_ID`、`$Q2_ID` 变量，会话 ID 为 `$NEW_CONV_ID`。
+> 统一使用 `$MULTI_CONV_ID` 指代当前测试会话（即 `$NEW_CONV_ID`）。
+
+##### 步骤 7.2: 验证 updated_at 字段 (D-124)
+
+```bash
+# D-124: 验证 UpdateAgentStatus 更新了 updated_at
+DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+$DB "SELECT id, updated_at FROM conversations WHERE id='$NEW_CONV_ID';"
+# 预期: updated_at 为当前时间（HITL 中断时 UpdateAgentStatus 调用）
+
+# 记录 updated_at 用于后续比较
+UPDATED_AT_BEFORE=$($DB "SELECT updated_at FROM conversations WHERE id='$NEW_CONV_ID';")
+echo "UPDATED_AT_BEFORE=$UPDATED_AT_BEFORE"
+```
 
 ##### 步骤 7.3: 回答 Q1（部分回答）
 
@@ -1241,6 +1106,121 @@ $R EXISTS "agent:checkpoint:$PA_CHECKPOINT_ID"
 
 ---
 
+# Part VI: HITL 超时自动清理 (D-123)
+
+### 阶段 12: HITL 超时自动清理
+
+**目标**: 验证后台清理任务能够自动清理超过 24h 未响应的 `asking_user` 会话，恢复会话状态为 `idle`，并发送 `agent_timeout` 通知。
+
+> **说明**: 由于实际等待 24h 不现实，本阶段通过手动修改 `updated_at` 为 25 小时前来模拟超时场景。
+
+#### 步骤 12.1: 创建新的 HITL 中断
+
+```bash
+# 创建新会话
+TO_CONV_ID=$(./bin/xyncra-client create-conversation \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --peer-id "agent/hitl-bot" | grep "Conversation ID:" | awk '{print $3}')
+echo "TO_CONV_ID=$TO_CONV_ID"
+
+./bin/xyncra-client send \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --conversation-id "$TO_CONV_ID" \
+  --content "删除所有数据"
+
+sleep 15
+
+DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+# 确认 HITL 中断已触发
+$DB "SELECT id, agent_status, updated_at FROM conversations WHERE id='$TO_CONV_ID';"
+# 预期: agent_status=asking_user, updated_at 为当前时间
+```
+
+#### 步骤 12.2: 手动修改 updated_at 和 agent_last_activity 为 25 小时前（模拟超时）
+
+```bash
+DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+# 将 updated_at 和 agent_last_activity 都设置为 25 小时前
+# 注意：后台清理任务使用 agent_last_activity 判断超时，必须同时修改两个字段
+$DB "UPDATE conversations SET updated_at = datetime('now', '-25 hours'), agent_last_activity = datetime('now', '-25 hours') WHERE id='$TO_CONV_ID';"
+
+# 验证修改成功
+$DB "SELECT id, agent_status, updated_at, agent_last_activity FROM conversations WHERE id='$TO_CONV_ID';"
+# 预期: updated_at 和 agent_last_activity 均为 25 小时前
+```
+
+#### 步骤 12.3: 等待后台清理任务执行
+
+```bash
+# 等待 6 分钟（清理间隔 5 分钟 + buffer）
+sleep 360
+```
+
+#### 步骤 12.4: 验证会话已被自动清理
+
+```bash
+DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+# 验证 agent_status 已恢复为 idle
+$DB "SELECT id, agent_status, agent_id, checkpoint_id, updated_at FROM conversations WHERE id='$TO_CONV_ID';"
+# 预期: 
+# - agent_status=idle
+# - agent_id="" (已清空)
+# - checkpoint_id="" (已清空)
+# - updated_at 为当前时间（清理任务更新）
+
+# 验证 Questions 已被软删除
+$DB "SELECT id, status, deleted_at FROM questions WHERE conversation_id='$TO_CONV_ID';"
+# 预期: deleted_at 非空（软删除）
+
+# 验证 Redis checkpoint 已清理
+R="redis-cli -p 16379 -n 15"
+TO_CHECKPOINT_ID="从步骤 12.1 获取"
+$R EXISTS "agent:checkpoint:$TO_CHECKPOINT_ID"
+# 预期: 0（已清理）
+```
+
+#### 步骤 12.5: 验证 agent_timeout 通知
+
+```bash
+export E2E_HOME=$(cat /tmp/xe2e-home-path.txt)
+
+# 检查 daemon 日志，确认收到 agent_timeout 通知
+cat "$E2E_HOME/alice-daemon.log" | grep -i "agent_timeout" | tail -3
+# 预期: 看到 agent_timeout 事件，包含 conversation_id 和 reason
+```
+
+#### 步骤 12.6: 验证会话恢复正常
+
+```bash
+# 发送新消息，验证会话可以正常处理
+./bin/xyncra-client send \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --conversation-id "$TO_CONV_ID" \
+  --content "你好"
+
+sleep 10
+
+./bin/xyncra-client sync-updates --user-id alice --device-id test-device-alice
+
+./bin/xyncra-client get-messages \
+  --user-id alice \
+  --device-id test-device-alice \
+  --conversation-id "$TO_CONV_ID" \
+  --limit 3
+# 预期: Agent 正常响应
+```
+
+---
+
 ## 7. 数据库验证汇总
 
 ### 7.1 Server DB 验证命令速查
@@ -1316,7 +1296,7 @@ sqlite3 "$ALICE_DB" "SELECT sender_id, content FROM messages WHERE conversation_
 | 阶段 6.5 | 上线后能看到 asking_user 状态 | ✅ | pull-on-notification |
 | 阶段 6.6 | Resume 成功 + Checkpoint 清理 | ✅ | D-112 |
 | **Part III: 并行多 Question** | | | |
-| 阶段 7.A4 | 双子代理产生 ≥2 条 Question（不同 interrupt_id） | ✅ | Composite Interrupt |
+| 阶段 7.2 | 验证 updated_at 字段 (D-124) | ✅ | UpdateAgentStatus 更新 updated_at |
 | 阶段 7.4 | Q1=answered, Q2=pending, 不触发 resume | ✅ | D-116 Phase 2 |
 | 阶段 7.5 | 全部 answered → Agent 恢复 | ✅ | Targets map 组装 |
 | **Part IV: 多设备竞态** | | | |
@@ -1329,6 +1309,10 @@ sqlite3 "$ALICE_DB" "SELECT sender_id, content FROM messages WHERE conversation_
 | 阶段 10.4 | 崩溃后 Asynq 重试 → Agent 重新执行 | ✅ | Scenario 5, D-071 |
 | **阶段 11.4** | **部分回答后重启，answer 仍在 DB** | ✅ | **Scenario 6, D-116 Phase 2 核心** |
 | 阶段 11.5 | 补齐后 Agent 恢复 | ✅ | |
+| **Part VI: HITL 超时自动清理** | | | |
+| 阶段 12.4 | 超时会话自动清理（agent_status=idle） | ✅ | D-123 |
+| 阶段 12.5 | 发送 agent_timeout 通知 | ✅ | D-087 |
+| 阶段 12.6 | 清理后会话恢复正常 | ✅ | |
 
 ---
 
@@ -1347,6 +1331,10 @@ sqlite3 "$ALICE_DB" "SELECT sender_id, content FROM messages WHERE conversation_
 | Device B 重复回答未被拒绝 | 幂等检查基于 checkpoint 而非 Question.status | Phase 2 改为 Question.status 检查 |
 | 部分回答后 Agent 直接恢复 | 未实现 "全部 answered 才 resume" | 检查 RPC handler 的 partial 检查 |
 | 重启后 answer 丢失 | answer 仅在 MQ payload 中 | D-116 Phase 2: answer-first 写入 |
+| 会话永久卡在 asking_user | 后台清理任务未启动或配置错误 | 检查 `cmd/xyncra-server/main.go` 中 HITL cleanup goroutine 是否启动 (D-123) |
+| 超时清理未触发 | updated_at 未正确更新 | 检查 `UpdateAgentStatus`/`ClearAgentStatus` 是否在 Updates map 中包含 `"updated_at": time.Now()` (D-124) |
+| 客户端重复拉取 conversation | updated_at 比较逻辑错误 | 检查客户端 `payload.updated_at <= local.updated_at` 比较逻辑 (D-124) |
+| daemon 日志出现 RPC timeout 错误 | `get_conversation` RPC 超时 | 轻微问题，不影响核心流程。可能是网络延迟或服务器负载高导致。检查服务器性能和网络连接 |
 
 ---
 
@@ -1397,12 +1385,15 @@ cp .env.test.example .env.test
 | 阶段 9 (等待期重启) | ❌ | 阶段 5 完成后 | Scenario 4 |
 | 阶段 10 (执行期崩溃) | ❌ | 阶段 9 完成后 | Scenario 5+7 |
 | 阶段 11 (部分回答重启) | ❌ | 阶段 10 完成后 | Scenario 6 |
+| 阶段 12 (超时自动清理) | ✅* | 环境准备（独立会话） | D-123 |
 
-> *阶段 7、8 可在基础流程完成后独立执行（使用独立会话/设备），但建议按顺序执行以避免干扰。
+> *阶段 7、8、12 可在基础流程完成后独立执行（使用独立会话/设备），但建议按顺序执行以避免干扰。
 >
-> **推荐执行顺序**: 1→2→3→4→5 → 6 → 7 → 8 → 9 → 10 → 11（阶段 7=并行多Q, 阶段 8=多设备）
+> **推荐执行顺序**: 1→2→3→4→5 → 6 → 7 → 8 → 9 → 10 → 11 → 12（阶段 7=并行多Q, 阶段 8=多设备, 阶段 12=超时清理）
 >
 > **Phase 2 依赖**: 阶段 8（部分）、阶段 11（完全）依赖 D-116 Phase 2 完成。
+>
+> **D-123/D-124 依赖**: 阶段 12 依赖 D-123（HITL 超时自动清理）实现；阶段 7.2、2.5 验证 D-124（updated_at 同步优化）。
 
 ---
 
@@ -1457,6 +1448,12 @@ cp .env.test.example .env.test
 | 阶段 9: 等待期重启 | ✅ / ❌ | Scenario 4 |
 | 阶段 10: 执行期崩溃 | ✅ / ❌ | Scenario 5+7, D-071 |
 | **阶段 11: 部分回答重启** | ✅ / ❌ | **Scenario 6, D-116 Phase 2** |
+
+#### Part VI: HITL 超时自动清理 (D-123)
+
+| 阶段 | 结果 | 备注 |
+|------|------|------|
+| 阶段 12: 超时自动清理 | ✅ / ❌ | D-123, 后台 goroutine 清理过期 asking_user |
 
 **发现的问题**：
 1. (描述)

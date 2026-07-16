@@ -28,10 +28,10 @@ const (
 	UpdateTypeStreaming     = "streaming"      // ephemeral: Seq=0, cumulative text streaming
 
 	// Phase 8B: Agent ephemeral Update types (D-087). All use Seq=0 (D-050).
-	UpdateTypeAgentStatus            = "agent_status"             // ephemeral: Seq=0, agent status (thinking/tool_calling/generating/idle/asking_user)
-	UpdateTypeAgentQuestion          = "agent_question"           // ephemeral: Seq=0, agent asking user a question during HITL
-	UpdateTypeAgentCheckpointCreated = "agent_checkpoint_created" // ephemeral: Seq=0, checkpoint was saved
-	UpdateTypeAgentTimeout           = "agent_timeout"            // ephemeral: Seq=0, agent execution timed out
+	// D-125: agent_question and agent_checkpoint_created removed (redundant with
+	// conversation update pull-on-notification pattern, D-118/D-124).
+	UpdateTypeAgentStatus  = "agent_status"  // ephemeral: Seq=0, agent status (thinking/tool_calling/generating/idle/asking_user)
+	UpdateTypeAgentTimeout = "agent_timeout" // ephemeral: Seq=0, agent execution timed out
 )
 
 // Package is the top-level message envelope for the WebSocket protocol.

@@ -22,7 +22,7 @@ import (
 )
 
 func TestCLIUpdateHandler_OnMessage(t *testing.T) {
-	h := newCLIUpdateHandler()
+	h := newCLIUpdateHandler(nil)
 	msg := &model.Message{
 		MessageID:      42,
 		SenderID:       "alice",
@@ -54,7 +54,7 @@ func TestCLIUpdateHandler_OnMessage(t *testing.T) {
 }
 
 func TestCLIUpdateHandler_OnMessage_Nil(t *testing.T) {
-	h := newCLIUpdateHandler()
+	h := newCLIUpdateHandler(nil)
 	// Should not panic.
 	if err := h.OnMessage(context.Background(), nil); err != nil {
 		t.Fatalf("OnMessage(nil) error: %v", err)
@@ -62,7 +62,7 @@ func TestCLIUpdateHandler_OnMessage_Nil(t *testing.T) {
 }
 
 func TestCLIUpdateHandler_OnDeleteMessage(t *testing.T) {
-	h := newCLIUpdateHandler()
+	h := newCLIUpdateHandler(nil)
 
 	output := captureStdout(func() {
 		if err := h.OnDeleteMessage(context.Background(), "msg-123", "conv-456"); err != nil {
@@ -82,7 +82,7 @@ func TestCLIUpdateHandler_OnDeleteMessage(t *testing.T) {
 }
 
 func TestCLIUpdateHandler_OnMarkRead(t *testing.T) {
-	h := newCLIUpdateHandler()
+	h := newCLIUpdateHandler(nil)
 
 	output := captureStdout(func() {
 		if err := h.OnMarkRead(context.Background(), "conv-789", 100); err != nil {
@@ -102,7 +102,7 @@ func TestCLIUpdateHandler_OnMarkRead(t *testing.T) {
 }
 
 func TestCLIUpdateHandler_OnConversation(t *testing.T) {
-	h := newCLIUpdateHandler()
+	h := newCLIUpdateHandler(nil)
 	conv := &model.Conversation{
 		ID:    "conv-abc",
 		Title: "My Chat",
@@ -126,7 +126,7 @@ func TestCLIUpdateHandler_OnConversation(t *testing.T) {
 }
 
 func TestCLIUpdateHandler_OnConversation_Nil(t *testing.T) {
-	h := newCLIUpdateHandler()
+	h := newCLIUpdateHandler(nil)
 	// Should not panic.
 	if err := h.OnConversation(context.Background(), nil); err != nil {
 		t.Fatalf("OnConversation(nil) error: %v", err)
@@ -134,7 +134,7 @@ func TestCLIUpdateHandler_OnConversation_Nil(t *testing.T) {
 }
 
 func TestCLIUpdateHandler_OnGap(t *testing.T) {
-	h := newCLIUpdateHandler()
+	h := newCLIUpdateHandler(nil)
 
 	output := captureStdout(func() {
 		if err := h.OnGap(context.Background(), 999); err != nil {
@@ -985,7 +985,7 @@ func TestCLIUpdateHandler_OnTyping_Matrix(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newCLIUpdateHandler()
+			h := newCLIUpdateHandler(nil)
 			output := captureStdout(func() {
 				require.NoError(t, h.OnTyping(context.Background(), tc.userID, "conv-1", tc.isTyping))
 			})
@@ -1013,7 +1013,7 @@ func TestCLIUpdateHandler_OnStreaming_Matrix(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newCLIUpdateHandler()
+			h := newCLIUpdateHandler(nil)
 			output := captureStdout(func() {
 				require.NoError(t, h.OnStreaming(context.Background(), tc.userID, "conv-1", "stream-1", "hello", tc.isDone))
 			})
@@ -1027,47 +1027,6 @@ func TestCLIUpdateHandler_OnStreaming_Matrix(t *testing.T) {
 // ---------------------------------------------------------------------------
 // HITL handler output tests (D-087)
 // ---------------------------------------------------------------------------
-
-// TestCLIUpdateHandler_OnAgentQuestion verifies the output format of the
-// OnAgentQuestion HITL handler.
-func TestCLIUpdateHandler_OnAgentQuestion(t *testing.T) {
-	h := newCLIUpdateHandler()
-
-	output := captureStdout(func() {
-		err := h.OnAgentQuestion(context.Background(),
-			"agent/weather-bot", "conv-123",
-			"What city?", "cp-abc", "intr-xyz")
-		if err != nil {
-			t.Fatalf("OnAgentQuestion() error: %v", err)
-		}
-	})
-
-	assert.Contains(t, output, "[agent_question]")
-	assert.Contains(t, output, "agent=agent/weather-bot")
-	assert.Contains(t, output, "conv=conv-123")
-	assert.Contains(t, output, "checkpoint_id=cp-abc")
-	assert.Contains(t, output, "interrupt_id=intr-xyz")
-	assert.Contains(t, output, "What city?")
-}
-
-// TestCLIUpdateHandler_OnAgentCheckpointCreated verifies the output format of
-// the OnAgentCheckpointCreated handler.
-func TestCLIUpdateHandler_OnAgentCheckpointCreated(t *testing.T) {
-	h := newCLIUpdateHandler()
-
-	output := captureStdout(func() {
-		err := h.OnAgentCheckpointCreated(context.Background(),
-			"agent/weather-bot", "conv-123", "cp-abc")
-		if err != nil {
-			t.Fatalf("OnAgentCheckpointCreated() error: %v", err)
-		}
-	})
-
-	assert.Contains(t, output, "[agent_checkpoint]")
-	assert.Contains(t, output, "agent=agent/weather-bot")
-	assert.Contains(t, output, "conv=conv-123")
-	assert.Contains(t, output, "checkpoint_id=cp-abc")
-}
 
 // TestCLIUpdateHandler_OnAgentStatus verifies the output format of the
 // OnAgentStatus handler.
@@ -1093,7 +1052,7 @@ func TestCLIUpdateHandler_OnAgentStatus(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newCLIUpdateHandler()
+			h := newCLIUpdateHandler(nil)
 			output := captureStdout(func() {
 				require.NoError(t, h.OnAgentStatus(context.Background(), tc.userID, tc.convID, tc.status))
 			})
@@ -1104,10 +1063,129 @@ func TestCLIUpdateHandler_OnAgentStatus(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// HITL display via OnConversation (D-125)
+// ---------------------------------------------------------------------------
+
+// TestCLIUpdateHandler_OnConversation_HITL verifies that when a conversation
+// has agent_status="asking_user" and pending questions in the local DB,
+// OnConversation outputs HITL information including checkpoint_id,
+// interrupt_id, question text, and status (D-125).
+func TestCLIUpdateHandler_OnConversation_HITL(t *testing.T) {
+	// Create a ClientDB with a pending question.
+	db, err := store.NewInMemory("cli-hitl-test")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	convID := "conv-hitl-cli"
+	ctx := context.Background()
+
+	// Insert a pending question into the question store.
+	err = db.Questions.Upsert(ctx, &model.Question{
+		ID:             "q-hitl-1",
+		ConversationID: convID,
+		CheckpointID:   "cp-42",
+		InterruptID:    "int-99",
+		QuestionText:   "Are you sure?",
+		Status:         "pending",
+	})
+	require.NoError(t, err)
+
+	// Create a handler wired to the ClientDB.
+	h := newCLIUpdateHandler(db)
+
+	conv := &model.Conversation{
+		ID:           convID,
+		Title:        "Test HITL",
+		AgentID:      "agent/bot1",
+		AgentStatus:  model.AgentStatusAskingUser,
+		CheckpointID: "cp-42",
+	}
+
+	output := captureStdout(func() {
+		require.NoError(t, h.OnConversation(ctx, conv))
+	})
+
+	// Verify basic conversation info is present.
+	assert.Contains(t, output, "[conversation]")
+	assert.Contains(t, output, "id="+convID)
+
+	// Verify HITL info is displayed (D-125).
+	assert.Contains(t, output, "[hitl]")
+	assert.Contains(t, output, "agent=agent/bot1")
+	assert.Contains(t, output, "checkpoint_id=cp-42")
+	assert.Contains(t, output, "interrupt_id=int-99")
+	assert.Contains(t, output, "Are you sure?")
+	assert.Contains(t, output, "pending")
+}
+
+// TestCLIUpdateHandler_OnConversation_HITL_NoQuestions verifies that when a
+// conversation has agent_status="asking_user" but no questions in the DB,
+// no HITL block is displayed (D-125).
+func TestCLIUpdateHandler_OnConversation_HITL_NoQuestions(t *testing.T) {
+	db, err := store.NewInMemory("cli-hitl-empty-test")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	h := newCLIUpdateHandler(db)
+
+	conv := &model.Conversation{
+		ID:          "conv-no-q",
+		Title:       "No Questions",
+		AgentID:     "agent/bot2",
+		AgentStatus: model.AgentStatusAskingUser,
+	}
+
+	output := captureStdout(func() {
+		require.NoError(t, h.OnConversation(context.Background(), conv))
+	})
+
+	// Should have basic conversation info.
+	assert.Contains(t, output, "[conversation]")
+	// Should NOT have HITL block since no questions exist.
+	assert.NotContains(t, output, "[hitl]")
+}
+
+// TestCLIUpdateHandler_OnConversation_HITL_NonAskingUser verifies that when
+// agent_status is not "asking_user", no HITL block is displayed even if
+// questions exist in the DB (D-125).
+func TestCLIUpdateHandler_OnConversation_HITL_NonAskingUser(t *testing.T) {
+	db, err := store.NewInMemory("cli-hitl-idle-test")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+
+	// Insert a question even though status is idle.
+	require.NoError(t, db.Questions.Upsert(ctx, &model.Question{
+		ID:             "q-idle",
+		ConversationID: "conv-idle",
+		CheckpointID:   "cp-1",
+		QuestionText:   "Should not appear",
+		Status:         "pending",
+	}))
+
+	h := newCLIUpdateHandler(db)
+
+	conv := &model.Conversation{
+		ID:          "conv-idle",
+		Title:       "Idle",
+		AgentID:     "agent/bot3",
+		AgentStatus: model.AgentStatusIdle, // not asking_user
+	}
+
+	output := captureStdout(func() {
+		require.NoError(t, h.OnConversation(ctx, conv))
+	})
+
+	assert.Contains(t, output, "[conversation]")
+	assert.NotContains(t, output, "[hitl]")
+}
+
 // TestCLIUpdateHandler_OnAgentTimeout verifies the output format of the
 // OnAgentTimeout handler.
 func TestCLIUpdateHandler_OnAgentTimeout(t *testing.T) {
-	h := newCLIUpdateHandler()
+	h := newCLIUpdateHandler(nil)
 
 	output := captureStdout(func() {
 		err := h.OnAgentTimeout(context.Background(),

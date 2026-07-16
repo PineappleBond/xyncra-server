@@ -229,18 +229,6 @@ type StreamingHandler interface {
 	OnStreaming(ctx context.Context, userID string, conversationID string, streamID string, text string, isDone bool) error
 }
 
-// AgentQuestionHandler is an optional interface that UpdateHandler implementations
-// may adopt to receive agent HITL question events (D-087).
-type AgentQuestionHandler interface {
-	OnAgentQuestion(ctx context.Context, userID, conversationID, question, checkpointID, interruptID string) error
-}
-
-// AgentCheckpointHandler is an optional interface that UpdateHandler implementations
-// may adopt to receive agent checkpoint created events (D-087).
-type AgentCheckpointHandler interface {
-	OnAgentCheckpointCreated(ctx context.Context, userID, conversationID, checkpointID string) error
-}
-
 // AgentStatusHandler is an optional interface that UpdateHandler implementations
 // may adopt to receive agent status change events (D-087).
 type AgentStatusHandler interface {

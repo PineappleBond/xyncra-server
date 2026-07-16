@@ -220,37 +220,6 @@ func TestSendAgentStatus_BroadcastsToHumanUser(t *testing.T) {
 	assert.Equal(t, uint32(0), mock.calls[0].updates.Updates[0].Seq, "must be ephemeral (D-050)")
 }
 
-func TestSendAgentQuestion_IncludesCheckpointAndInterruptID(t *testing.T) {
-	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock, noopLogger{})
-
-	bh.SendAgentQuestion(context.Background(), "user/alice", "agent/bot1", "conv-1",
-		"What color?", "cp-123", "int-456")
-
-	require.Len(t, mock.calls, 1)
-	assert.Equal(t, protocol.UpdateTypeAgentQuestion, mock.calls[0].updates.Updates[0].Type)
-
-	var payload AgentQuestionPayload
-	err := json.Unmarshal(mock.calls[0].updates.Updates[0].Payload, &payload)
-	require.NoError(t, err)
-	assert.Equal(t, "agent/bot1", payload.UserID)
-	assert.Equal(t, "conv-1", payload.ConversationID)
-	assert.Equal(t, "What color?", payload.Question)
-	assert.Equal(t, "cp-123", payload.CheckpointID)
-	assert.Equal(t, "int-456", payload.InterruptID)
-}
-
-func TestSendAgentCheckpointCreated(t *testing.T) {
-	mock := &mockBroadcastServer{}
-	bh := NewBroadcastHelper(mock, noopLogger{})
-
-	bh.SendAgentCheckpointCreated(context.Background(), "user/alice", "agent/bot1", "conv-1", "cp-789")
-
-	require.Len(t, mock.calls, 1)
-	assert.Equal(t, protocol.UpdateTypeAgentCheckpointCreated, mock.calls[0].updates.Updates[0].Type)
-	assert.Equal(t, uint32(0), mock.calls[0].updates.Updates[0].Seq)
-}
-
 func TestSendAgentTimeout(t *testing.T) {
 	mock := &mockBroadcastServer{}
 	bh := NewBroadcastHelper(mock, noopLogger{})

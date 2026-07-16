@@ -70,7 +70,7 @@
 | D-084 | HITL Resume 与并发锁协调 | HITL 中断期间保持会话锁，防止新任务冲突 |
 | D-085 | agent_resume RPC 规范 | 新 RPC + MQ task type，复用现有锁和幂等机制；支持 partial answer，幂等检查 Question.status |
 | D-086 | MCP Server 配置格式 | YAML `mcp_servers` 段，支持 SSE 和 stdio 传输 |
-| D-087 | Agent Ephemeral Update 类型扩展 | 新增 agent_status/agent_question/agent_checkpoint_created/agent_timeout（Seq=0） |
+| D-087 | Agent Ephemeral Update 类型扩展 | agent_status/agent_timeout（Seq=0） |
 | D-088 | 真实 LLM 测试分离 | 构建标签 `real_llm` + 环境变量双重门控，mock 测试与真实 LLM 测试分离 |
 | D-089 | 真实 LLM 测试环境变量 | `XYNCRA_TEST_` 前缀，`.env.test` 存储，配置模板可提交 |
 | D-090 | 真实 LLM 测试成本控制 | 14 个核心场景、最便宜模型、短对话、构建标签防意外运行 |
@@ -106,6 +106,7 @@
 | D-122 | Resume 永久失败清理策略 | ClearAgentStatus + DeleteByCheckpoint + checkpoint DEL，避免 conversation 卡在 asking_user |
 | D-123 | HITL 超时自动清理 | 后台 goroutine 定期扫描 `asking_user` 状态会话，清理超过 24h 未响应的 HITL 会话，释放锁和 checkpoint |
 | D-124 | Conversation 同步优化（updated_at 广播） | 广播时携带 `updated_at` 时间戳，客户端比较后决定是否拉取，减少不必要的 RPC |
+| D-125 | 移除冗余 HITL Ephemeral 事件 | 消除广播冗余，HITL 通知完全由 conversation update 承载 |
 
 ---
 
@@ -120,6 +121,7 @@
 
 | 日期       | 版本 | 变更                                                                                                 |
 | ---------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| 2026-07-16 | v3.22 | D-125（移除冗余 HITL Ephemeral 事件 agent_question/agent_checkpoint_created）；更新 D-087（缩减为 2 种类型）、D-120（删除向后兼容约束） |
 | 2026-07-16 | v3.21 | 新增 D-123（HITL 超时自动清理）、D-124（Conversation 同步优化 - updated_at 广播） |
 | 2026-07-16 | v3.20 | 新增 D-121（两阶段幂等性）、D-122（Resume 永久失败清理策略） |
 | 2026-07-15 | v3.19 | 新增 D-116（Question 持久化表）、D-117（Conversation 状态机）、D-118（Pull-on-Notification 模式）；更新 D-085（partial answer + 幂等检查）、D-113（被 D-116 替代） |
@@ -312,7 +314,6 @@ HITL 使用 Pull-on-Notification 模式：Agent 中断时广播轻量 conversati
 ### 约束
 
 - `UpdateTypeConversation` 为 ephemeral（Seq=0）
-- 保留 `agent_question` ephemeral 广播（向后兼容）
 
 ---
 
@@ -490,3 +491,32 @@ func (c *SyncManager) handleConversationUpdate(payload *ConversationUpdatePayloa
 - 旧服务端不提供 `updated_at` 时（值为 0 或缺失），客户端执行拉取
 - `UpdateAgentStatus` / `ClearAgentStatus` 返回 `(time.Time, error)`，调用方将 `time.Time` 转为 Unix 秒级时间戳填入 payload
 - 时间戳精度为秒级，同一秒内的多次更新可能产生相同时间戳（客户端缓存 `updated_at` 比较时仍能正确判断）
+
+---
+
+## D-125: 移除冗余 HITL Ephemeral 事件
+
+### 决策
+
+移除 `agent_question` 和 `agent_checkpoint_created` 两个 ephemeral push 类型（D-087 缩减）。HITL 中断的通知完全由 `conversation update`（D-118/D-124 Pull-on-Notification 模式）承载。保留 `agent_status`（实时 UI 中间状态）和 `agent_timeout`（错误路径通知）。
+
+### 原因
+
+1. **消除广播冗余**：移除前每次 HITL 发 4 个事件，移除后发 2 个（`conversation update` + `agent_status`）
+2. **单一数据源**：Questions 已在 DB 中（D-116），conversation update 触发客户端拉取 `get_conversation`，questions 列表自然包含在响应中
+3. **产品未上线，无兼容负担**：当前无外部客户端依赖这两个事件类型
+
+### 实现
+
+- 服务端删除 `UpdateTypeAgentQuestion` 和 `UpdateTypeAgentCheckpointCreated` 常量（`pkg/protocol/protocol.go`）
+- 删除 `SendAgentQuestion()` 和 `SendAgentCheckpointCreated()` 方法（`internal/agent/broadcast.go`）
+- 删除 `AgentQuestionPayload` 和 `AgentCheckpointCreatedPayload` struct
+- 客户端 SDK 删除对应 handler 接口和事件处理分支
+- 客户端 SDK 增强 conversation update 处理：解析 `get_conversation` 响应中的 `questions` 字段并存储到本地 SQLite
+- CLI daemon 增强 `OnConversation` handler：检测 `agent_status == "asking_user"` 后以 `[hitl]` 格式展示
+
+### 约束
+
+- CLI daemon `OnConversation` handler 需增强：检测 `agent_status == "asking_user"` 后以 `[hitl]` 格式展示 checkpoint_id、interrupt_id、question_text
+- 客户端新增 `Question` 本地表（`pkg/store/model/question.go`）和 `QuestionStore`（`pkg/store/question_store.go`），用于缓存 `get_conversation` 返回的 questions
+- Questions 存储为 best-effort：upsert 失败只记日志，不阻断流程

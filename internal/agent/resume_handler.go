@@ -398,9 +398,6 @@ func NewAgentResumeHandler(
 			executor.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, resumeHitlUpdatedAt)
 
 			executor.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")
-			executor.broadcaster.SendAgentQuestion(ctx, payload.SenderID, payload.AgentID, payload.ConversationID,
-				info.Question, payload.CheckpointID, info.InterruptID)
-			executor.broadcaster.SendAgentCheckpointCreated(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, payload.CheckpointID)
 			// D-084: Do NOT release lock on HITL re-interrupt.
 			// Delete processing key to allow subsequent resume (D-121).
 			if idempotency != nil {

@@ -520,12 +520,12 @@ func waitForAgentReply(t *testing.T, conn *wsConn, agentID string, timeout time.
 		updates := waitForUpdate(t, conn, remaining)
 
 		for _, u := range updates.Updates {
-			// Skip ephemeral updates: streaming, typing, agent_status, agent_question.
+			// Skip ephemeral updates: streaming, typing, agent_status, agent_timeout.
+			// D-125: removed UpdateTypeAgentQuestion and UpdateTypeAgentCheckpointCreated
+			// (HITL info now delivered via conversation update + get_conversation RPC).
 			if u.Type == protocol.UpdateTypeStreaming ||
 				u.Type == protocol.UpdateTypeTyping ||
 				u.Type == protocol.UpdateTypeAgentStatus ||
-				u.Type == protocol.UpdateTypeAgentQuestion ||
-				u.Type == protocol.UpdateTypeAgentCheckpointCreated ||
 				u.Type == protocol.UpdateTypeAgentTimeout {
 				continue
 			}

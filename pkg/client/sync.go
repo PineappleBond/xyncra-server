@@ -80,25 +80,6 @@ type streamingUpdatePayload struct {
 	Timestamp      int64  `json:"timestamp"`
 }
 
-// agentQuestionPayload is the JSON structure of an "agent_question" ephemeral update (D-087).
-type agentQuestionPayload struct {
-	UserID         string `json:"user_id"`
-	ConversationID string `json:"conversation_id"`
-	Question       string `json:"question"`
-	CheckpointID   string `json:"checkpoint_id"`
-	InterruptID    string `json:"interrupt_id"`
-	Timestamp      int64  `json:"timestamp"`
-}
-
-// agentCheckpointCreatedPayload is the JSON structure of an
-// "agent_checkpoint_created" ephemeral update (D-087).
-type agentCheckpointCreatedPayload struct {
-	UserID         string `json:"user_id"`
-	ConversationID string `json:"conversation_id"`
-	CheckpointID   string `json:"checkpoint_id"`
-	Timestamp      int64  `json:"timestamp"`
-}
-
 // agentStatusPayload is the JSON structure of an "agent_status" ephemeral update (D-087).
 type agentStatusPayload struct {
 	UserID         string `json:"user_id"`
@@ -313,9 +294,7 @@ func (sm *syncManager) dispatchUpdateTx(ctx context.Context, tx *gorm.DB, update
 		// received (should never happen per D-051). Returns nil for graceful
 		// degradation rather than erroring on an unknown type.
 		return nil
-	case protocol.UpdateTypeAgentQuestion,
-		protocol.UpdateTypeAgentCheckpointCreated,
-		protocol.UpdateTypeAgentStatus,
+	case protocol.UpdateTypeAgentStatus,
 		protocol.UpdateTypeAgentTimeout:
 		// Defense-in-depth: ephemeral agent updates should never have Seq > 0.
 		return nil
@@ -461,6 +440,7 @@ func (sm *syncManager) fetchAndUpsertConversationTx(ctx context.Context, tx *gor
 
 	var result struct {
 		Conversation *model.Conversation `json:"conversation"`
+		Questions    []*model.Question   `json:"questions"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
 		return fmt.Errorf("unmarshal get_conversation response: %w", err)
@@ -471,6 +451,24 @@ func (sm *syncManager) fetchAndUpsertConversationTx(ctx context.Context, tx *gor
 
 	if err := sm.db.Conversations.UpsertTx(ctx, tx, result.Conversation); err != nil {
 		return fmt.Errorf("upsert fetched conversation: %w", err)
+	}
+
+	// Clear stale questions before upserting new ones (D-125).
+	// When agent_status != asking_user: HITL ended, clean all.
+	// When new questions exist: replace with latest set.
+	if sm.db.Questions != nil {
+		if result.Conversation.AgentStatus != "asking_user" || len(result.Questions) > 0 {
+			_ = sm.db.Questions.DeleteByConversationTx(ctx, tx, result.Conversation.ID)
+		}
+	}
+
+	// Upsert questions (best-effort, D-125).
+	if sm.db.Questions != nil && len(result.Questions) > 0 {
+		for _, q := range result.Questions {
+			if err := sm.db.Questions.Upsert(ctx, q); err != nil {
+				sm.logger.Error("upsert question", "error", err, "question_id", q.ID)
+			}
+		}
 	}
 	return nil
 }
@@ -579,20 +577,6 @@ func (sm *syncManager) notifyHandler(ctx context.Context, update *protocol.Packa
 				_ = sh.OnStreaming(ctx, sp.UserID, sp.ConversationID, sp.StreamID, sp.Text, sp.IsDone)
 			}
 		}
-	case protocol.UpdateTypeAgentQuestion:
-		var qp agentQuestionPayload
-		if err := json.Unmarshal(update.Payload, &qp); err == nil {
-			if qh, ok := sm.handler.(AgentQuestionHandler); ok {
-				_ = qh.OnAgentQuestion(ctx, qp.UserID, qp.ConversationID, qp.Question, qp.CheckpointID, qp.InterruptID)
-			}
-		}
-	case protocol.UpdateTypeAgentCheckpointCreated:
-		var cp agentCheckpointCreatedPayload
-		if err := json.Unmarshal(update.Payload, &cp); err == nil {
-			if ch, ok := sm.handler.(AgentCheckpointHandler); ok {
-				_ = ch.OnAgentCheckpointCreated(ctx, cp.UserID, cp.ConversationID, cp.CheckpointID)
-			}
-		}
 	case protocol.UpdateTypeAgentStatus:
 		var sp agentStatusPayload
 		if err := json.Unmarshal(update.Payload, &sp); err == nil {
@@ -673,6 +657,7 @@ func (sm *syncManager) handleEphemeralConversationUpdate(ctx context.Context, up
 
 	var result struct {
 		Conversation *model.Conversation `json:"conversation"`
+		Questions    []*model.Question   `json:"questions"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
 		sm.logger.Error("unmarshal get_conversation response", "error", err)
@@ -690,6 +675,24 @@ func (sm *syncManager) handleEphemeralConversationUpdate(ctx context.Context, up
 	if err := sm.db.Conversations.Upsert(ctx, result.Conversation); err != nil {
 		sm.logger.Error("upsert fetched conversation",
 			"error", err, "conversation_id", peek.ConversationID)
+	}
+
+	// Clear stale questions before upserting new ones (D-125).
+	// When agent_status != asking_user: HITL ended, clean all.
+	// When new questions exist: replace with latest set.
+	if sm.db.Questions != nil {
+		if result.Conversation.AgentStatus != "asking_user" || len(result.Questions) > 0 {
+			_ = sm.db.Questions.DeleteByConversation(ctx, result.Conversation.ID)
+		}
+	}
+
+	// Upsert questions (best-effort, D-125).
+	if sm.db.Questions != nil && len(result.Questions) > 0 {
+		for _, q := range result.Questions {
+			if err := sm.db.Questions.Upsert(ctx, q); err != nil {
+				sm.logger.Error("upsert question", "error", err, "question_id", q.ID)
+			}
+		}
 	}
 
 	if sm.handler != nil {

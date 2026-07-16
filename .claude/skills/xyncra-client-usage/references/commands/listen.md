@@ -59,25 +59,30 @@ xyncra-client listen --user-id alice --device-id dev1 --server ws://10.0.0.1:808
 [gap] seq=99
 ```
 
-### HITL Event Output (D-085)
+### HITL Event Output (D-085, D-125)
 
-当 Agent 触发 Human-in-the-Loop 流程时，daemon 会输出以下事件到 stdout：
+当 Agent 触发 Human-in-the-Loop 流程时，CLI daemon 的 `OnConversation` handler 检测到 `agent_status == "asking_user"` 后以 `[hitl]` 格式展示 checkpoint_id、interrupt_id、question_text：
 
 ```
-[agent_question] agent=agent/hitl-bot conv=<conv-uuid> checkpoint_id=<uuid> interrupt_id=<uuid> question="是否需要执行此操作？"
-[agent_checkpoint] agent=agent/hitl-bot conv=<conv-uuid> checkpoint_id=<uuid>
+[hitl] conv=<conv-uuid> agent=agent/hitl-bot checkpoint_id=<uuid>
+  [1] interrupt_id=<uuid> question="是否需要执行此操作？" (pending)
 [agent_status] agent=agent/hitl-bot conv=<conv-uuid> status=thinking
 [agent_timeout] agent=agent/hitl-bot conv=<conv-uuid> reason="agent execution timed out"
 ```
 
 | 事件 | 说明 | 关键字段 |
 |------|------|---------|
-| `agent_question` | Agent 请求用户输入（HITL 中断） | `checkpoint_id`, `interrupt_id`, `question` |
-| `agent_checkpoint` | Agent 保存检查点 | `checkpoint_id` |
+| `[hitl]` | HITL 通知（通过 `conversation update` 触发，D-118/D-124/D-125） | `checkpoint_id`, `interrupt_id`, `question` |
 | `agent_status` | Agent 状态变更 | `status` (thinking/tool_calling/generating/idle/asking_user) |
 | `agent_timeout` | Agent 执行超时 | `reason` |
 
-> 收到 `agent_question` 后，使用 `xyncra-client agent-resume` 回复用户输入。详见 [agent-resume](./agent-resume.md)。
+> 收到 `[hitl]` 输出后，使用 `xyncra-client agent-resume` 回复用户输入。详见 [agent-resume](./agent-resume.md)。
+
+**工作原理** (D-125):
+
+- HITL 通知完全由 `conversation update` 承载（Pull-on-Notification 模式，D-118/D-124）
+- 当 conversation update 到达且 `agent_status == "asking_user"` 时，daemon 调用 `get_conversation` RPC 获取 HITL questions
+- Questions 以 `[hitl]` 格式展示到 stdout，不再依赖冗余的 `agent_question` / `agent_checkpoint_created` ephemeral 事件
 
 ### Daemon Lifecycle
 

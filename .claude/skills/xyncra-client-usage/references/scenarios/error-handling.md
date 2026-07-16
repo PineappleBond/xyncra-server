@@ -279,7 +279,7 @@ Hint: Checkpoint TTL is 24h. Please resend the message to trigger a new HITL.
 **Exit Code**: `1`
 
 **Diagnosis**:
-- 从 `agent_question` 事件发生到执行 `agent-resume` 之间超过了 24 小时
+- 从收到 `[hitl]` 通知到执行 `agent-resume` 之间超过了 24 小时
 - daemon 在此期间重启过，内存中的 checkpoint 数据丢失
 
 **Resolution**:
@@ -289,7 +289,7 @@ Hint: Checkpoint TTL is 24h. Please resend the message to trigger a new HITL.
 ./xyncra-client send --user-id alice --device-id dev1 \
   -c <conv-uuid> --agent-id agent/hitl-bot --content "帮我查天气"
 
-# 等待新的 agent_question 事件
+# 等待新的 [hitl] 通知
 # 然后使用新的 checkpoint_id 和 interrupt_id 进行 resume
 ./xyncra-client agent-resume \
   --conversation-id <conv-uuid> \
@@ -303,13 +303,13 @@ Hint: Checkpoint TTL is 24h. Please resend the message to trigger a new HITL.
 
 ### Error 9: agent-resume — Interrupt ID 不匹配
 
-**Cause**: 使用了过时的 `interrupt_id`。多轮 HITL 中，每次 `agent_question` 事件都会生成新的 `interrupt_id`。
+**Cause**: 使用了过时的 `interrupt_id`。多轮 HITL 中，每次 `[hitl]` 通知都会生成新的 `interrupt_id`。
 
 **Error Message**:
 
 ```
 Error: agent-resume failed: interrupt not found
-Hint: Use the interrupt_id from the latest agent_question event.
+Hint: Use the interrupt_id from the latest [hitl] output.
 ```
 
 **Exit Code**: `1`
@@ -321,8 +321,9 @@ Hint: Use the interrupt_id from the latest agent_question event.
 **Resolution**:
 
 ```bash
-# 查看 listen 输出，找到最新的 agent_question 事件
-# [agent_question] agent=agent/hitl-bot conv=<conv-uuid> checkpoint_id=cp-new interrupt_id=int-new question="..."
+# 查看 listen 输出，找到最新的 [hitl] 通知
+# [hitl] conv=<conv-uuid> agent=agent/hitl-bot checkpoint_id=cp-new
+#   [1] interrupt_id=int-new question="..." (pending)
 
 # 使用最新的 ID
 ./xyncra-client agent-resume \
@@ -339,7 +340,7 @@ Hint: Use the interrupt_id from the latest agent_question event.
 
 ### Error 10: 多轮 HITL — Resume 后又触发新的 HITL
 
-**Cause**: Agent resume 后继续执行，可能需要更多用户输入，再次触发 `agent_question`。
+**Cause**: Agent resume 后继续执行，可能需要更多用户输入，再次触发 HITL 中断。
 
 **现象**：
 
@@ -347,10 +348,11 @@ Hint: Use the interrupt_id from the latest agent_question event.
 # 第一轮 resume 成功
 Agent resumed.
 
-# listen 输出中立即出现新的 agent_question
+# listen 输出中立即出现新的 [hitl] 通知
 [agent_status] agent=agent/hitl-bot conv=<conv-uuid> status=thinking
 [agent_status] agent=agent/hitl-bot conv=<conv-uuid> status=asking_user
-[agent_question] agent=agent/hitl-bot conv=<conv-uuid> checkpoint_id=cp-002 interrupt_id=int-002 question="需要包含空气质量信息吗？"
+[hitl] conv=<conv-uuid> agent=agent/hitl-bot checkpoint_id=cp-002
+  [1] interrupt_id=int-002 question="需要包含空气质量信息吗？" (pending)
 ```
 
 **这不是错误**。这是 Agent 的正常行为——在一次执行中多次请求用户输入。
@@ -370,7 +372,7 @@ Agent resumed.
 
 循环此过程直到 Agent 输出 `[agent_status] status=idle`，表示执行完成。
 
-> 提示：在脚本中，可以用循环监听 `agent_question` 事件并自动回复，实现完全自动化的 HITL 流程。参见 [HITL Shell 脚本自动化](../scenarios/advanced.md#hitlhuman-in-the-loop完整流程)。
+> 提示：在脚本中，可以用循环监听 `[hitl]` 输出并自动回复，实现完全自动化的 HITL 流程。参见 [HITL Shell 脚本自动化](../scenarios/advanced.md#hitlhuman-in-the-loop完整流程)。
 
 ---
 

@@ -399,11 +399,9 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 		// 4. Broadcast lightweight conversation update (pull notification pattern, D-124).
 		e.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, hitlUpdatedAt)
 
-		// 5. Still broadcast ephemeral agent_question for online clients (backward compat, D-087).
+		// 5. Broadcast agent status (D-125: redundant agent_question and
+		// agent_checkpoint_created removed; conversation update carries the data).
 		e.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")
-		e.broadcaster.SendAgentQuestion(ctx, payload.SenderID, payload.AgentID, payload.ConversationID,
-			info.Question, checkpointID, info.InterruptID)
-		e.broadcaster.SendAgentCheckpointCreated(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, checkpointID)
 
 		// 6. Do NOT register interruptIDs — they are now persisted in the Question table.
 		// 7. Return ErrHITLInterrupted — conversation lock is held (D-084).

@@ -40,6 +40,9 @@ type ClientDB struct {
 
 	// NotificationLogs provides notification log operations.
 	NotificationLogs *NotificationLogStore
+
+	// Questions provides HITL question operations (D-125).
+	Questions *QuestionStore
 }
 
 // New opens a SQLite database at the given path, configures PRAGMAs for
@@ -96,6 +99,7 @@ func newClientDB(db *gorm.DB) (*ClientDB, error) {
 		Queue:            &QueueStore{db: db},
 		RPCLogs:          &RPCLogStore{db: db},
 		NotificationLogs: &NotificationLogStore{db: db},
+		Questions:        &QuestionStore{db: db},
 	}
 
 	// AutoMigrate all models (D-023).
@@ -119,6 +123,7 @@ func (c *ClientDB) AutoMigrate(ctx context.Context) error {
 		&model.RetryTask{},
 		&model.RPCLog{},
 		&model.NotificationLog{},
+		&model.Question{},
 	)
 }
 

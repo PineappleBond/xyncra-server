@@ -7,28 +7,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
+	"github.com/PineappleBond/xyncra-server/pkg/store/model"
 )
 
 // ---------------------------------------------------------------------------
 // Mock handler that implements UpdateHandler + all 3 new agent optional interfaces
 // ---------------------------------------------------------------------------
-
-// questionRecord holds the arguments passed to OnAgentQuestion.
-type questionRecord struct {
-	userID         string
-	conversationID string
-	question       string
-	checkpointID   string
-	interruptID    string
-}
-
-// checkpointRecord holds the arguments passed to OnAgentCheckpointCreated.
-type checkpointRecord struct {
-	userID         string
-	conversationID string
-	checkpointID   string
-}
 
 // statusRecord holds the arguments passed to OnAgentStatus.
 type statusRecord struct {
@@ -45,41 +33,15 @@ type timeoutRecord struct {
 }
 
 // agentMockHandler is a mock that implements UpdateHandler (via embedding
-// mockUpdateHandler), AgentQuestionHandler, AgentCheckpointHandler,
-// AgentStatusHandler, and AgentTimeoutHandler for testing agent ephemeral events.
+// mockUpdateHandler), AgentStatusHandler, and AgentTimeoutHandler for testing
+// agent ephemeral events.
+// D-125: removed AgentQuestionHandler and AgentCheckpointHandler since the
+// corresponding ephemeral events were removed.
 type agentMockHandler struct {
 	mockUpdateHandler
-	mu          sync.Mutex
-	questions   []questionRecord
-	checkpoints []checkpointRecord
-	statuses    []statusRecord
-	timeouts    []timeoutRecord
-}
-
-// OnAgentQuestion records the HITL question event (implements AgentQuestionHandler).
-func (h *agentMockHandler) OnAgentQuestion(ctx context.Context, userID, conversationID, question, checkpointID, interruptID string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.questions = append(h.questions, questionRecord{
-		userID:         userID,
-		conversationID: conversationID,
-		question:       question,
-		checkpointID:   checkpointID,
-		interruptID:    interruptID,
-	})
-	return nil
-}
-
-// OnAgentCheckpointCreated records the checkpoint event (implements AgentCheckpointHandler).
-func (h *agentMockHandler) OnAgentCheckpointCreated(ctx context.Context, userID, conversationID, checkpointID string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.checkpoints = append(h.checkpoints, checkpointRecord{
-		userID:         userID,
-		conversationID: conversationID,
-		checkpointID:   checkpointID,
-	})
-	return nil
+	mu       sync.Mutex
+	statuses []statusRecord
+	timeouts []timeoutRecord
 }
 
 // OnAgentStatus records the status event (implements AgentStatusHandler).
@@ -110,67 +72,10 @@ func (h *agentMockHandler) OnAgentTimeout(ctx context.Context, userID, conversat
 // JSON unmarshal tests
 // ---------------------------------------------------------------------------
 
-func TestAgentQuestionPayload_Unmarshal(t *testing.T) {
-	raw := `{
-		"user_id": "agent/bot",
-		"conversation_id": "conv-123",
-		"question": "Are you sure?",
-		"checkpoint_id": "cp-abc",
-		"interrupt_id": "int-xyz",
-		"timestamp": 1700000000
-	}`
-
-	var p agentQuestionPayload
-	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		t.Fatalf("unmarshal agentQuestionPayload: %v", err)
-	}
-
-	if p.UserID != "agent/bot" {
-		t.Errorf("UserID: got %q, want %q", p.UserID, "agent/bot")
-	}
-	if p.ConversationID != "conv-123" {
-		t.Errorf("ConversationID: got %q, want %q", p.ConversationID, "conv-123")
-	}
-	if p.Question != "Are you sure?" {
-		t.Errorf("Question: got %q, want %q", p.Question, "Are you sure?")
-	}
-	if p.CheckpointID != "cp-abc" {
-		t.Errorf("CheckpointID: got %q, want %q", p.CheckpointID, "cp-abc")
-	}
-	if p.InterruptID != "int-xyz" {
-		t.Errorf("InterruptID: got %q, want %q", p.InterruptID, "int-xyz")
-	}
-	if p.Timestamp != 1700000000 {
-		t.Errorf("Timestamp: got %d, want %d", p.Timestamp, 1700000000)
-	}
-}
-
-func TestAgentCheckpointCreatedPayload_Unmarshal(t *testing.T) {
-	raw := `{
-		"user_id": "agent/bot",
-		"conversation_id": "conv-456",
-		"checkpoint_id": "cp-def",
-		"timestamp": 1700000001
-	}`
-
-	var p agentCheckpointCreatedPayload
-	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		t.Fatalf("unmarshal agentCheckpointCreatedPayload: %v", err)
-	}
-
-	if p.UserID != "agent/bot" {
-		t.Errorf("UserID: got %q, want %q", p.UserID, "agent/bot")
-	}
-	if p.ConversationID != "conv-456" {
-		t.Errorf("ConversationID: got %q, want %q", p.ConversationID, "conv-456")
-	}
-	if p.CheckpointID != "cp-def" {
-		t.Errorf("CheckpointID: got %q, want %q", p.CheckpointID, "cp-def")
-	}
-	if p.Timestamp != 1700000001 {
-		t.Errorf("Timestamp: got %d, want %d", p.Timestamp, 1700000001)
-	}
-}
+// D-125: TestAgentQuestionPayload_Unmarshal and
+// TestAgentCheckpointCreatedPayload_Unmarshal were removed because the
+// corresponding payload types (agentQuestionPayload, agentCheckpointCreatedPayload)
+// were deleted as part of removing redundant HITL ephemeral events.
 
 func TestAgentStatusPayload_Unmarshal(t *testing.T) {
 	raw := `{
@@ -255,89 +160,8 @@ func mustMarshal(t *testing.T, v any) json.RawMessage {
 	return data
 }
 
-func TestNotifyHandler_AgentQuestion(t *testing.T) {
-	handler := &agentMockHandler{}
-	sm := newAgentTestSyncManager(t, handler)
-	ctx := context.Background()
-
-	payload := mustMarshal(t, agentQuestionPayload{
-		UserID:         "agent/bot",
-		ConversationID: "conv-q",
-		Question:       "Proceed?",
-		CheckpointID:   "cp-1",
-		InterruptID:    "int-1",
-		Timestamp:      1700000000,
-	})
-
-	update := &protocol.PackageDataUpdate{
-		Seq:     0,
-		Type:    protocol.UpdateTypeAgentQuestion,
-		Payload: payload,
-	}
-
-	sm.notifyHandler(ctx, update)
-
-	handler.mu.Lock()
-	defer handler.mu.Unlock()
-
-	if len(handler.questions) != 1 {
-		t.Fatalf("expected 1 question event, got %d", len(handler.questions))
-	}
-	q := handler.questions[0]
-	if q.userID != "agent/bot" {
-		t.Errorf("userID: got %q, want %q", q.userID, "agent/bot")
-	}
-	if q.conversationID != "conv-q" {
-		t.Errorf("conversationID: got %q, want %q", q.conversationID, "conv-q")
-	}
-	if q.question != "Proceed?" {
-		t.Errorf("question: got %q, want %q", q.question, "Proceed?")
-	}
-	if q.checkpointID != "cp-1" {
-		t.Errorf("checkpointID: got %q, want %q", q.checkpointID, "cp-1")
-	}
-	if q.interruptID != "int-1" {
-		t.Errorf("interruptID: got %q, want %q", q.interruptID, "int-1")
-	}
-}
-
-func TestNotifyHandler_AgentCheckpointCreated(t *testing.T) {
-	handler := &agentMockHandler{}
-	sm := newAgentTestSyncManager(t, handler)
-	ctx := context.Background()
-
-	payload := mustMarshal(t, agentCheckpointCreatedPayload{
-		UserID:         "agent/bot",
-		ConversationID: "conv-cp",
-		CheckpointID:   "cp-42",
-		Timestamp:      1700000001,
-	})
-
-	update := &protocol.PackageDataUpdate{
-		Seq:     0,
-		Type:    protocol.UpdateTypeAgentCheckpointCreated,
-		Payload: payload,
-	}
-
-	sm.notifyHandler(ctx, update)
-
-	handler.mu.Lock()
-	defer handler.mu.Unlock()
-
-	if len(handler.checkpoints) != 1 {
-		t.Fatalf("expected 1 checkpoint event, got %d", len(handler.checkpoints))
-	}
-	cp := handler.checkpoints[0]
-	if cp.userID != "agent/bot" {
-		t.Errorf("userID: got %q, want %q", cp.userID, "agent/bot")
-	}
-	if cp.conversationID != "conv-cp" {
-		t.Errorf("conversationID: got %q, want %q", cp.conversationID, "conv-cp")
-	}
-	if cp.checkpointID != "cp-42" {
-		t.Errorf("checkpointID: got %q, want %q", cp.checkpointID, "cp-42")
-	}
-}
+// D-125: TestNotifyHandler_AgentQuestion and TestNotifyHandler_AgentCheckpointCreated
+// were removed because the corresponding ephemeral events were removed.
 
 func TestNotifyHandler_AgentStatus(t *testing.T) {
 	handler := &agentMockHandler{}
@@ -420,33 +244,18 @@ func TestNotifyHandler_AgentTimeout(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNotifyHandler_AgentEvents_DroppedWhenHandlerNotImplemented(t *testing.T) {
-	// mockUpdateHandler does not implement AgentQuestionHandler etc.,
+	// mockUpdateHandler does not implement AgentStatusHandler etc.,
 	// so agent events should be silently dropped (no panic, no error).
 	handler := &mockUpdateHandler{}
 	sm := newAgentTestSyncManager(t, handler)
 	ctx := context.Background()
 
-	// Send all four agent event types.
+	// Send all agent event types (D-125: only agent_status and agent_timeout remain).
 	for _, tc := range []struct {
 		name    string
 		typ     string
 		payload any
 	}{
-		{
-			name: "agent_question",
-			typ:  protocol.UpdateTypeAgentQuestion,
-			payload: agentQuestionPayload{
-				UserID: "agent/bot", ConversationID: "conv-1",
-				Question: "ok?", CheckpointID: "cp-1", InterruptID: "int-1",
-			},
-		},
-		{
-			name: "agent_checkpoint_created",
-			typ:  protocol.UpdateTypeAgentCheckpointCreated,
-			payload: agentCheckpointCreatedPayload{
-				UserID: "agent/bot", ConversationID: "conv-1", CheckpointID: "cp-2",
-			},
-		},
 		{
 			name: "agent_status",
 			typ:  protocol.UpdateTypeAgentStatus,
@@ -486,9 +295,8 @@ func TestDispatchUpdateTx_AgentEphemeralTypes_ReturnNil(t *testing.T) {
 	// The defensive case in dispatchUpdateTx should return nil (not "unknown
 	// update type" error). ApplyUpdate with Seq=1 will go through dedup,
 	// dispatchUpdateTx, and advance localMaxSeq.
+	// D-125: removed UpdateTypeAgentQuestion and UpdateTypeAgentCheckpointCreated.
 	for _, typ := range []string{
-		protocol.UpdateTypeAgentQuestion,
-		protocol.UpdateTypeAgentCheckpointCreated,
 		protocol.UpdateTypeAgentStatus,
 		protocol.UpdateTypeAgentTimeout,
 	} {
@@ -519,7 +327,7 @@ func TestNotifyHandler_MultipleAgentEvents(t *testing.T) {
 	sm := newAgentTestSyncManager(t, handler)
 	ctx := context.Background()
 
-	// Send 2 status events, 1 question, 1 checkpoint.
+	// Send 3 status events and 1 timeout event (D-125: removed question and checkpoint).
 	events := []*protocol.PackageDataUpdate{
 		{
 			Seq:     0,
@@ -532,19 +340,14 @@ func TestNotifyHandler_MultipleAgentEvents(t *testing.T) {
 			Payload: mustMarshal(t, agentStatusPayload{UserID: "agent/bot", ConversationID: "conv-m", Status: "asking_user"}),
 		},
 		{
-			Seq:  0,
-			Type: protocol.UpdateTypeAgentQuestion,
-			Payload: mustMarshal(t, agentQuestionPayload{
-				UserID: "agent/bot", ConversationID: "conv-m",
-				Question: "Confirm?", CheckpointID: "cp-99", InterruptID: "int-99",
-			}),
+			Seq:     0,
+			Type:    protocol.UpdateTypeAgentStatus,
+			Payload: mustMarshal(t, agentStatusPayload{UserID: "agent/bot", ConversationID: "conv-m", Status: "running"}),
 		},
 		{
-			Seq:  0,
-			Type: protocol.UpdateTypeAgentCheckpointCreated,
-			Payload: mustMarshal(t, agentCheckpointCreatedPayload{
-				UserID: "agent/bot", ConversationID: "conv-m", CheckpointID: "cp-99",
-			}),
+			Seq:     0,
+			Type:    protocol.UpdateTypeAgentTimeout,
+			Payload: mustMarshal(t, agentTimeoutPayload{UserID: "agent/bot", ConversationID: "conv-m", Reason: "timeout"}),
 		},
 	}
 
@@ -555,13 +358,101 @@ func TestNotifyHandler_MultipleAgentEvents(t *testing.T) {
 	handler.mu.Lock()
 	defer handler.mu.Unlock()
 
-	if len(handler.statuses) != 2 {
-		t.Errorf("expected 2 status events, got %d", len(handler.statuses))
+	if len(handler.statuses) != 3 {
+		t.Errorf("expected 3 status events, got %d", len(handler.statuses))
 	}
-	if len(handler.questions) != 1 {
-		t.Errorf("expected 1 question event, got %d", len(handler.questions))
+	if len(handler.timeouts) != 1 {
+		t.Errorf("expected 1 timeout event, got %d", len(handler.timeouts))
 	}
-	if len(handler.checkpoints) != 1 {
-		t.Errorf("expected 1 checkpoint event, got %d", len(handler.checkpoints))
+}
+
+// ---------------------------------------------------------------------------
+// Conversation update → questions parse flow (D-125)
+// ---------------------------------------------------------------------------
+
+// TestConversationUpdate_ParsesAndStoresQuestions verifies that when an
+// ephemeral conversation update triggers a get_conversation RPC and the
+// response includes HITL questions, those questions are parsed and stored
+// in the local QuestionStore (D-125).
+func TestConversationUpdate_ParsesAndStoresQuestions(t *testing.T) {
+	convID := "conv-q-parse"
+	serverConv := &model.Conversation{
+		ID:           convID,
+		UserID1:      "test-user",
+		UserID2:      "agent/bot",
+		Type:         "1-on-1",
+		AgentStatus:  "asking_user",
+		CheckpointID: "cp-test",
 	}
+
+	// Questions that the get_conversation RPC should return.
+	questions := []*model.Question{
+		{ID: "q-1", ConversationID: convID, CheckpointID: "cp-test", InterruptID: "int-1", QuestionText: "Proceed?", Status: "pending"},
+		{ID: "q-2", ConversationID: convID, CheckpointID: "cp-test", InterruptID: "int-2", QuestionText: "Are you sure?", Status: "pending"},
+	}
+
+	// Build a response that includes both conversation and questions.
+	resp := map[string]any{
+		"conversation": serverConv,
+		"questions":    questions,
+	}
+	respData, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+
+	db := newTestStore(t)
+	handler := &mockUpdateHandler{}
+	logger := &testLogger{t: t}
+
+	rpcFn := func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		if method == "get_conversation" {
+			return respData, nil
+		}
+		return json.RawMessage(`{}`), nil
+	}
+
+	sm := newSyncManager(db, handler, "test-user", rpcFn, 100, 50*time.Millisecond, logger)
+	sm.Start(context.Background())
+	t.Cleanup(func() { sm.Stop() })
+
+	// Send an ephemeral conversation update with updated_at > 0 (triggers RPC).
+	payload := conversationUpdatePayload{
+		ConversationID: convID,
+		Action:         "update",
+		UpdatedAt:      time.Now().Unix(),
+	}
+	payloadData, _ := json.Marshal(payload)
+	update := &protocol.PackageDataUpdate{
+		Seq:     0, // ephemeral
+		Type:    protocol.UpdateTypeConversation,
+		Payload: payloadData,
+	}
+
+	require.NoError(t, sm.ApplyUpdate(context.Background(), update))
+
+	// Verify questions are stored in the local QuestionStore.
+	got, err := db.Questions.GetByConversation(context.Background(), convID)
+	require.NoError(t, err)
+	require.Len(t, got, 2, "should have stored 2 questions from get_conversation response")
+
+	// Verify question content.
+	qMap := make(map[string]*model.Question)
+	for _, q := range got {
+		qMap[q.ID] = q
+	}
+	require.Contains(t, qMap, "q-1")
+	assert.Equal(t, "Proceed?", qMap["q-1"].QuestionText)
+	assert.Equal(t, "pending", qMap["q-1"].Status)
+	assert.Equal(t, "int-1", qMap["q-1"].InterruptID)
+
+	require.Contains(t, qMap, "q-2")
+	assert.Equal(t, "Are you sure?", qMap["q-2"].QuestionText)
+
+	// Verify conversation was also upserted.
+	localConv, err := db.Conversations.Get(context.Background(), convID)
+	require.NoError(t, err)
+	require.NotNil(t, localConv)
+	assert.Equal(t, "asking_user", localConv.AgentStatus)
+	assert.Equal(t, "cp-test", localConv.CheckpointID)
 }

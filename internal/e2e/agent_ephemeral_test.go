@@ -226,12 +226,12 @@ func TestAgentEph_AE_EPH_004(t *testing.T) {
 	require.NoError(t, json.Unmarshal(syncResp.Data, &syncData))
 
 	// Verify that no ephemeral types appear in sync_updates.
+	// D-125: removed UpdateTypeAgentQuestion and UpdateTypeAgentCheckpointCreated
+	// (HITL info now delivered via conversation update + get_conversation RPC).
 	ephemeralTypes := []string{
 		protocol.UpdateTypeTyping,
 		protocol.UpdateTypeStreaming,
 		protocol.UpdateTypeAgentStatus,
-		protocol.UpdateTypeAgentQuestion,
-		protocol.UpdateTypeAgentCheckpointCreated,
 		protocol.UpdateTypeAgentTimeout,
 	}
 	for _, u := range syncData.Updates {

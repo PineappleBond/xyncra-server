@@ -32,11 +32,20 @@ const defaultCleanupInterval = 1 * time.Hour
 // ---------------------------------------------------------------------------
 
 // cliUpdateHandler is an UpdateHandler that prints received updates to stdout.
-type cliUpdateHandler struct{}
+type cliUpdateHandler struct {
+	// questionsDB is the client-side question store for HITL display (D-125).
+	questionsDB *store.QuestionStore
+}
 
-// newCLIUpdateHandler creates a new cliUpdateHandler.
-func newCLIUpdateHandler() *cliUpdateHandler {
-	return &cliUpdateHandler{}
+// newCLIUpdateHandler creates a new cliUpdateHandler. If clientDB is non-nil,
+// its Questions store is used to display pending HITL questions in
+// OnConversation (D-125).
+func newCLIUpdateHandler(clientDB *store.ClientDB) *cliUpdateHandler {
+	h := &cliUpdateHandler{}
+	if clientDB != nil {
+		h.questionsDB = clientDB.Questions
+	}
+	return h
 }
 
 // OnMessage prints a new or updated message to stdout.
@@ -62,11 +71,29 @@ func (h *cliUpdateHandler) OnMarkRead(_ context.Context, conversationID string, 
 }
 
 // OnConversation prints a conversation state change to stdout.
-func (h *cliUpdateHandler) OnConversation(_ context.Context, conv *model.Conversation) error {
+// When the agent status is "asking_user", it also displays pending HITL
+// questions from the local question store (D-125).
+func (h *cliUpdateHandler) OnConversation(ctx context.Context, conv *model.Conversation) error {
 	if conv == nil {
 		return nil
 	}
 	fmt.Fprintf(os.Stdout, "[conversation] id=%s title=%q\n", conv.ID, conv.Title)
+
+	// HITL display: when agent is asking_user, show pending questions (D-125).
+	if conv.AgentStatus == model.AgentStatusAskingUser && h.questionsDB != nil {
+		questions, err := h.questionsDB.GetByConversation(ctx, conv.ID)
+		if err == nil && len(questions) > 0 {
+			fmt.Fprintf(os.Stdout, "[hitl] conv=%s agent=%s checkpoint_id=%s\n",
+				conv.ID, conv.AgentID, conv.CheckpointID)
+			for i, q := range questions {
+				if q.Status == "pending" {
+					fmt.Fprintf(os.Stdout, "  [%d] interrupt_id=%s question=%q (%s)\n",
+						i+1, q.InterruptID, q.QuestionText, q.Status)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -106,20 +133,6 @@ func (h *cliUpdateHandler) OnStreaming(_ context.Context, userID, conversationID
 	}
 	fmt.Fprintf(os.Stdout, "[%s] user=%s conv=%s stream=%s status=%s text=%q\n",
 		prefix, userID, conversationID, streamID, status, text)
-	return nil
-}
-
-// OnAgentQuestion prints an agent HITL question event to stdout (D-087).
-func (h *cliUpdateHandler) OnAgentQuestion(_ context.Context, userID, conversationID, question, checkpointID, interruptID string) error {
-	fmt.Fprintf(os.Stdout, "[agent_question] agent=%s conv=%s checkpoint_id=%s interrupt_id=%s question=%q\n",
-		userID, conversationID, checkpointID, interruptID, question)
-	return nil
-}
-
-// OnAgentCheckpointCreated prints a checkpoint created event to stdout (D-087).
-func (h *cliUpdateHandler) OnAgentCheckpointCreated(_ context.Context, userID, conversationID, checkpointID string) error {
-	fmt.Fprintf(os.Stdout, "[agent_checkpoint] agent=%s conv=%s checkpoint_id=%s\n",
-		userID, conversationID, checkpointID)
 	return nil
 }
 
@@ -251,7 +264,7 @@ func runListen(cmd *cobra.Command, _ []string) error {
 	ipcServer := NewIPCServer(cliCtx.SocketPath())
 
 	// Create the update handler and logger.
-	handler := newCLIUpdateHandler()
+	handler := newCLIUpdateHandler(db)
 	logger := newCLILogger()
 
 	// Build the server URL with user_id query parameter (D-005).
