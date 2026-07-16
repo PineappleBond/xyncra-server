@@ -59,4 +59,18 @@
 //   - Reconnect handshake: on each (re)connect the client sends a
 //     system.reconnect request carrying last_seen_seq and re-registers its
 //     function handlers, enabling the server to replay missed requests.
+//
+// # Lifecycle (D-111)
+//
+//   - Start(ctx) blocks until the client stops (context cancellation, Stop()
+//     call, or 4001 replacement).
+//   - Stop() cancels the internal context and triggers async shutdown. Safe
+//     to call multiple times.
+//   - Done() returns a channel that is closed when the client has fully
+//     stopped.
+//   - On 4001 Close Frame (device replaced), the client cancels its context
+//     and exits gracefully. The monitor goroutine returns, Start() unblocks,
+//     shutdown() runs, and Done() closes.
+//   - Shutdown is protected by sync.Once, ensuring cleanup runs exactly once
+//     regardless of caller.
 package client

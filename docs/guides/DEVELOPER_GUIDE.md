@@ -1,6 +1,6 @@
 # Xyncra Server 开发者指南
 
-> Last updated: 2026-07-15
+> Last updated: 2026-07-16
 
 本文档面向 Xyncra Server 的开发者，介绍项目结构、开发环境搭建、编码规范和常见开发任务的步骤。
 
@@ -12,20 +12,27 @@
 
 ```
 xyncra-server/
-├── cmd/xyncra-server/main.go      # 程序入口：配置解析、组件初始化、启动服务
+├── cmd/
+│   ├── xyncra-server/main.go      # 服务端入口：配置解析、组件初始化、启动服务
+│   └── xyncra-client/main.go      # 客户端 CLI 入口
 ├── configs/config.example.env     # 环境变量配置示例
 ├── docs/
 │   ├── API.md                     # WebSocket 协议 API 文档
 │   ├── PRODUCT_DECISIONS.md       # 产品决策文档（所有开发者必须遵守）
 │   └── DEVELOPER_REFERENCE.md     # 详细实现指南和代码示例
 ├── internal/
-│   ├── e2e/                       # 端到端集成测试
+│   ├── agent/                     # Agent 系统（Eino 构建、中间件、配置、动态工具）
 │   ├── cleanup/                   # UserUpdate 过期清理
+│   ├── cli/                       # CLI 命令与 IPC 通信
+│   ├── e2e/                       # 端到端集成测试
 │   ├── handler/                   # RPC Handler（业务逻辑）
 │   ├── mq/                        # 消息队列（Asynq/Redis）
-│   ├── server/                    # WebSocket 服务器核心
+│   ├── server/                    # WebSocket 服务器核心（含 ReverseRPC、函数注册表）
 │   └── store/                     # 数据持久化层（GORM）
-├── pkg/protocol/                  # WebSocket 协议类型定义
+├── pkg/
+│   ├── client/                    # 客户端库（连接管理、同步、选项）
+│   ├── protocol/                  # WebSocket 协议类型定义
+│   └── store/                     # 客户端侧数据模型
 └── scripts/test.sh                # 测试运行脚本
 ```
 
@@ -61,6 +68,8 @@ go run ./cmd/xyncra-server/ -addr :9090 -redis-addr localhost:6380 -db-driver po
 | `-db-driver`      | `XYNCRA_DB_DRIVER`          | `sqlite`         | 数据库驱动（sqlite/postgres/mysql）|
 | `-db-dsn`         | `XYNCRA_DB_DSN`             | `xyncra.db`      | 数据库 DSN / 连接字符串            |
 | `-max-conns`      | `XYNCRA_MAX_CONNS_PER_USER` | `0`（无限制）    | 每用户最大连接数                   |
+| `-agents-dir`     | `XYNCRA_AGENTS_DIR`         | `agents`         | Agent 配置文件目录路径             |
+| `-max-functions-per-device` | `XYNCRA_MAX_FUNCTIONS_PER_DEVICE` | `200` | 每个设备最大注册函数数量       |
 
 ### 运行测试
 
@@ -113,14 +122,23 @@ type MethodHandler interface {
 
 ```go
 type StoreAPI interface {
+    // Sub-store access
     ConversationStore() *ConversationStore
     MessageStore() *MessageStore
     UserUpdateStore() *UserUpdateStore
-    SendMessage(ctx context.Context, msg *model.Message, updates []model.UserUpdate,
-        convID string, lastMessageAt time.Time, lastProcessedMessageID uint32) error
-    Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error
+    QuestionStore() *QuestionStore
+
+    // Composite operations
+    SendMessage(ctx context.Context, msg *model.Message, memberIDs []string) (*SendMessageResult, error)
+
+    // Transaction support
+    Transaction(ctx context.Context, fn func(tx *gorm.DB) error)
     BeginTx(ctx context.Context) (*Tx, error)
+
+    // Schema
     AutoMigrate(ctx context.Context) error
+
+    // Health
     Ping(ctx context.Context) error
     HealthCheck(ctx context.Context) error
 }
@@ -242,12 +260,12 @@ type Broker interface {
 
 - 在代码注释中引用相关产品决策编号（如 `D-011`）
 - 在测试断言消息中引用产品决策编号
-- 所有功能实现必须遵守 `docs/PRODUCT_DECISIONS.md` 中的决策
+- 所有功能实现必须遵守 `docs/decisions/PRODUCT_DECISIONS.md` 中的决策
 
 ---
 
 ## 相关文档
 
-- [产品决策文档](./PRODUCT_DECISIONS.md) — 核心架构决策，所有开发者必须遵守
-- [API 文档](./API.md) — WebSocket 协议说明
+- [产品决策文档](../decisions/PRODUCT_DECISIONS.md) — 核心架构决策，所有开发者必须遵守
+- [API 文档](../API.md) — WebSocket 协议说明
 - [详细实现指南](./DEVELOPER_REFERENCE.md) — 代码示例和详细步骤

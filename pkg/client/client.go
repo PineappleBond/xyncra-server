@@ -56,20 +56,13 @@ type XyncraClient struct {
 	requestHandlers map[string]RequestHandlerFunc
 
 	// Lifecycle.
-	ctx     context.Context
-	cancel  context.CancelFunc
-	done    chan struct{}
-	wg      sync.WaitGroup
-	muState sync.Mutex
-	closed  bool
-
-	// replacedWake is closed by Reconnect() to wake the connection monitor
-	// from its dormant state after a device replacement (D-111). When the
-	// monitor detects replaced=true, it waits on this channel instead of
-	// returning, allowing the daemon to resume connectivity when triggered
-	// by an IPC command.
-	replacedWake   chan struct{}
-	replacedWakeMu sync.Mutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	done         chan struct{}
+	wg           sync.WaitGroup
+	muState      sync.Mutex
+	closed       bool
+	shutdownOnce sync.Once
 
 	logger Logger
 }
@@ -120,7 +113,6 @@ func New(opts ...ClientOption) (*XyncraClient, error) {
 		pending:         make(map[string]chan *protocol.PackageDataResponse),
 		requestHandlers: make(map[string]RequestHandlerFunc),
 		done:            make(chan struct{}),
-		replacedWake:    make(chan struct{}),
 		logger:          o.logger,
 	}
 
@@ -137,6 +129,15 @@ func New(opts ...ClientOption) (*XyncraClient, error) {
 		onDisconnect: func(replaced bool) {
 			if replaced {
 				c.logger.Info("connection replaced by newer instance (4001)")
+				// Cancel the client context immediately so that any blocking
+				// operation (e.g. FullSync's RPC call) unblocks right away.
+				// Without this, the monitor would remain stuck in FullSync
+				// until the RPC times out, delaying graceful exit (D-111).
+				c.muState.Lock()
+				if c.cancel != nil {
+					c.cancel()
+				}
+				c.muState.Unlock()
 			} else {
 				c.logger.Info("connection lost")
 			}
@@ -217,6 +218,12 @@ func (c *XyncraClient) Start(ctx context.Context) error {
 
 // Stop gracefully shuts down the client, stopping all background goroutines
 // and closing the underlying connection. It is idempotent.
+//
+// Stop launches shutdown in a separate goroutine so that it never blocks the
+// caller. This is critical when Stop is invoked from a wg-tracked goroutine
+// (e.g. the 4001 path inside connectionMonitorWithInitialConnect): calling
+// shutdown() synchronously there would deadlock on wg.Wait. Use Done() to wait
+// for full shutdown completion.
 func (c *XyncraClient) Stop() {
 	c.muState.Lock()
 	if c.closed {
@@ -228,7 +235,7 @@ func (c *XyncraClient) Stop() {
 		c.cancel()
 	}
 	c.muState.Unlock()
-	c.shutdown()
+	go c.shutdown()
 }
 
 // Close is an alias for Stop.
@@ -236,27 +243,12 @@ func (c *XyncraClient) Close() {
 	c.Stop()
 }
 
-// Reconnect wakes the connection monitor from its dormant state after a device
-// replacement (D-111). When the connection was replaced (4001), the monitor
-// enters a dormant state; calling Reconnect triggers it to re-establish the
-// WebSocket connection. This is safe to call even when already connected — it
-// is a no-op if the connection is active.
-//
-// It is typically called by IPC handlers (e.g. sync_updates) that need an
-// active server connection.
+// Reconnect is a no-op retained for API compatibility. Under the current
+// D-111 behaviour the daemon exits gracefully on device replacement (4001
+// Close Frame), so there is no dormant monitor to wake. If the process has
+// already called Stop(), Reconnect is safely ignored.
 func (c *XyncraClient) Reconnect() {
-	c.replacedWakeMu.Lock()
-	defer c.replacedWakeMu.Unlock()
-	select {
-	case <-c.replacedWake:
-		// Already closed and reset — nothing to do.
-	default:
-		// Close to wake the monitor, then create a fresh channel for the
-		// next dormancy cycle. This ensures the channel lifecycle:
-		// open → closed → new open → closed → new open ...
-		close(c.replacedWake)
-		c.replacedWake = make(chan struct{})
-	}
+	// no-op
 }
 
 // DeviceID returns the device identifier used by this client.
@@ -264,52 +256,58 @@ func (c *XyncraClient) DeviceID() string {
 	return c.connMgr.DeviceID()
 }
 
+// Done returns a channel that is closed when the client has fully shut down
+// (all goroutines exited, connections closed). It can be used by callers to
+// detect client completion, e.g. after a 4001 device replacement triggers
+// graceful exit (D-111).
+func (c *XyncraClient) Done() <-chan struct{} {
+	return c.done
+}
+
 // shutdown performs the ordered teardown of all subsystems. It is safe to call
-// multiple times; the muState guard ensures only one caller proceeds.
+// multiple times; shutdownOnce ensures the cleanup runs exactly once regardless
+// of whether it is triggered by Stop() or Start().
+//
+// When invoked from Start() (after ctx cancellation), shutdown runs synchronously
+// so that Start() returns only after full cleanup. When invoked from Stop(), it
+// runs in a separate goroutine (see Stop) to avoid deadlock when Stop is called
+// from a wg-tracked goroutine.
 func (c *XyncraClient) shutdown() {
-	c.muState.Lock()
-	if c.closed {
-		c.muState.Unlock()
-		return
-	}
-	c.closed = true
-	if c.cancel != nil {
-		c.cancel()
-	}
-	c.muState.Unlock()
+	c.shutdownOnce.Do(func() {
+		// 1. Close the connection (stops readPump/writePump).
+		c.connMgr.Close()
 
-	// 1. Close the connection (stops readPump/writePump).
-	c.connMgr.Close()
+		// 2. Stop sync and retry managers.
+		c.syncMgr.Stop()
+		c.retryMgr.Stop()
 
-	// 2. Stop sync and retry managers.
-	c.syncMgr.Stop()
-	c.retryMgr.Stop()
-
-	// 3. Fail all pending RPCs.
-	c.mu.Lock()
-	for id, ch := range c.pending {
-		ch <- &protocol.PackageDataResponse{
-			ID:   id,
-			Code: ErrorCodeConnectionError,
-			Msg:  "client shutting down",
+		// 3. Fail all pending RPCs.
+		c.mu.Lock()
+		for id, ch := range c.pending {
+			ch <- &protocol.PackageDataResponse{
+				ID:   id,
+				Code: ErrorCodeConnectionError,
+				Msg:  "client shutting down",
+			}
+			delete(c.pending, id)
 		}
-		delete(c.pending, id)
-	}
-	c.mu.Unlock()
+		c.mu.Unlock()
 
-	// 4. Wait for goroutines with a timeout.
-	finished := make(chan struct{})
-	go func() {
-		c.wg.Wait()
-		close(finished)
-	}()
-	select {
-	case <-finished:
-	case <-time.After(5 * time.Second):
-		c.logger.Error("shutdown: goroutine wait timed out")
-	}
+		// 4. Wait for goroutines with a timeout.
+		finished := make(chan struct{})
+		go func() {
+			c.wg.Wait()
+			close(finished)
+		}()
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			c.logger.Error("shutdown: goroutine wait timed out")
+		}
 
-	c.logger.Info("client stopped")
+		close(c.done)
+		c.logger.Info("client stopped")
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -371,25 +369,16 @@ func (c *XyncraClient) connectionMonitorWithInitialConnect() {
 			return
 		case <-c.connMgr.Disconnected():
 			// If this connection was replaced by a newer instance from the
-			// same device (server sent 4001), enter dormant state — do not
-			// reconnect immediately. The daemon stays alive with IPC
-			// available (D-044, D-111). When an IPC command triggers
-			// Reconnect(), the monitor wakes up and resumes connectivity.
+			// same device (server sent 4001 Close Frame), do not reconnect.
+			// Initiate graceful exit of the daemon process (D-111).
 			if c.connMgr.Replaced() {
-				c.logger.Info("connection replaced by newer device instance, entering dormant state (D-111)")
-				// Capture the wake channel reference under the lock so that
-				// Reconnect() (which closes + replaces the channel) cannot
-				// race with the select below.
-				c.replacedWakeMu.Lock()
-				wakeCh := c.replacedWake
-				c.replacedWakeMu.Unlock()
-				select {
-				case <-c.ctx.Done():
-					return
-				case <-wakeCh:
-					c.logger.Info("woken up for reconnection after replacement")
-					// Fall through to the reconnect loop below.
-				}
+				c.logger.Info("connection replaced by newer device instance (4001), initiating graceful exit (D-111)")
+				// Cancel the context and return. Start() will unblock from
+				// <-c.ctx.Done() and call shutdown() synchronously. We must NOT
+				// call c.Stop() here: that would deadlock because shutdown()
+				// calls wg.Wait(), and this goroutine is tracked by wg.
+				c.cancel()
+				return
 			}
 			c.logger.Info("connection lost, reconnecting...")
 			for {

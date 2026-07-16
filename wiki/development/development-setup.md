@@ -269,13 +269,13 @@ make fmt && make vet && make test
 
 ```bash
 # SQLite（开发默认）
--driver sqlite -dsn xyncra.db
+-db-driver sqlite -db-dsn xyncra.db
 
 # PostgreSQL
--driver postgres -dsn "host=localhost user=xyncra password=secret dbname=xyncra port=5432 sslmode=disable"
+-db-driver postgres -db-dsn "host=localhost user=xyncra password=secret dbname=xyncra port=5432 sslmode=disable"
 
 # MySQL
--driver mysql -dsn "xyncra:secret@tcp(localhost:3306)/xyncra?parseTime=true"
+-db-driver mysql -db-dsn "xyncra:secret@tcp(localhost:3306)/xyncra?parseTime=true"
 ```
 
 ### 自定义认证

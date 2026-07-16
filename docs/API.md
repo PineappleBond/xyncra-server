@@ -1,6 +1,6 @@
 # Xyncra WebSocket API 文档
 
-> Last updated: 2026-07-08
+> Last updated: 2026-07-16
 
 ---
 
@@ -23,21 +23,30 @@
   - [mark_as_read](#mark_as_read)
   - [set_typing](#set_typing)
   - [stream_text](#stream_text)
+  - [reload_agents](#reload_agents)
+  - [agent_resume](#agent_resume)
+  - [system.register_functions](#systemregister_functions)
+  - [system.reconnect](#systemreconnect)
 - [错误码](#错误码)
 - [数据模型](#数据模型)
   - [Conversation](#conversation)
   - [Message](#message)
   - [UserUpdate](#userupdate)
+  - [Question](#question)
+  - [FunctionInfo](#functioninfo)
 
 ---
 
 ## 连接
 
 ```
-ws://host:port/ws?user_id={user_id}
+ws://host:port/ws?user_id={user_id}&device_id={device_id}
 ```
 
-通过 URL 查询参数 `user_id` 标识客户端身份 (D-002, D-005)。
+通过 URL 查询参数 `user_id` 标识客户端身份 (D-002, D-005)，`device_id` 标识具体设备 (D-093)。
+
+- `user_id`（必填）：用户唯一标识
+- `device_id`（必填）：设备唯一标识，用于定向 RPC 调用和函数注册。同 `(user_id, device_id)` 新连接会替换旧连接
 
 **注意**：默认的 `user_id` 查询参数认证仅适用于开发环境。生产环境中应由业务服务器在反向代理层注入已认证的 `user_id` (D-002)。
 
@@ -1042,6 +1051,260 @@ ws://host:port/ws?user_id={user_id}
 
 ---
 
+### reload_agents
+
+重新加载 Agent 配置 (D-076)。从磁盘目录重新扫描并加载所有 Agent 配置文件。
+
+**参数**：
+
+无参数。
+
+**请求示例**：
+
+```json
+{
+  "id": "ra-001",
+  "method": "reload_agents",
+  "params": {}
+}
+```
+
+**响应**：
+
+```json
+{
+  "count": 5
+}
+```
+
+| 字段  | 类型 | 说明                 |
+|-------|------|----------------------|
+| count | int  | 加载的 Agent 数量    |
+
+**错误**：
+
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -300 | reload agents from "agents": ... | 重新加载 Agent 配置失败 |
+
+**注意**：当 AgentRegistry 为 nil 时（未配置 Agent 目录），返回 `{"count": 0}` 而不报错 (D-063)。
+
+---
+
+### agent_resume
+
+恢复被 HITL 中断暂停的 Agent (D-085, D-116)。客户端在回答 Agent 的问题后调用此方法，将答案持久化到数据库并在所有问题回答完毕后触发 Agent 继续执行。
+
+支持并行子代理场景：当一个 checkpoint 下有多个 Question 时，每次调用回答一个问题。只有当所有 Question 都回答后才会入队 MQ 任务恢复 Agent。
+
+**参数**：
+
+| 字段            | 类型   | 必填 | 默认值 | 说明                                              |
+|-----------------|--------|------|--------|---------------------------------------------------|
+| conversation_id | string | 是   | -      | 会话 ID                                           |
+| answer          | string | 是   | -      | 用户的回答                                        |
+| agent_id        | string | 是   | -      | Agent 标识符                                      |
+| checkpoint_id   | string | 否   | -      | HITL checkpoint ID（不提供时从 Conversation 推断） |
+| interrupt_id    | string | 否   | -      | 指定回答哪个 interrupt（多问题时使用）             |
+
+**请求示例**：
+
+```json
+{
+  "id": "ar-001",
+  "method": "agent_resume",
+  "params": {
+    "conversation_id": "conv-uuid-001",
+    "answer": "确认删除",
+    "agent_id": "my-smart-agent",
+    "checkpoint_id": "",
+    "interrupt_id": ""
+  }
+}
+```
+
+**响应**（部分回答，仍有待回答问题）：
+
+```json
+{
+  "status": "partial",
+  "answered": 1,
+  "total": 2,
+  "pending": 1
+}
+```
+
+**响应**（全部回答完毕，已入队恢复任务）：
+
+```json
+{
+  "status": "queued",
+  "answered": 2,
+  "total": 2
+}
+```
+
+| 字段     | 类型   | 说明                                           |
+|----------|--------|------------------------------------------------|
+| status   | string | `"partial"` 或 `"queued"`                      |
+| answered | int    | 已回答的问题数                                 |
+| total    | int    | 该 checkpoint 下的总问题数                     |
+| pending  | int    | 剩余待回答问题数（仅 status="partial" 时返回） |
+
+**错误**：
+
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -100 | conversation_id, answer and agent_id are required | 缺少必填字段 |
+| -100 | checkpoint_id is required and cannot be inferred from conversation | checkpoint_id 无法推断 |
+| -101 | conversation not found | 会话不存在 |
+| -101 | no pending question found for the given checkpoint/interrupt | 无匹配的待回答问题 |
+| -101 | question not found | 问题不存在 |
+| -300 | agent_resume: ... | 服务器内部错误 |
+| **-409** | **question_already_answered** | **问题已被回答（多设备冲突/幂等检查，D-116）** |
+
+**注意**：答案持久化到 Question 表，MQ 任务 payload 中**不包含答案** (D-116)。服务器重启后答案不会丢失。
+
+---
+
+### system.register_functions
+
+注册设备函数清单 (D-098, D-099)。客户端连接后发送此请求声明自身可调用的函数能力。服务端按 `(user_id, device_id)` 存储函数清单，供 Agent 动态工具注入使用。
+
+此方法为全量替换模式：每次调用会覆盖该设备之前注册的所有函数。空的 `functions` 列表是合法的，会清除该设备的所有已注册函数。
+
+**参数**：
+
+| 字段        | 类型              | 必填 | 默认值 | 说明                                               |
+|-------------|-------------------|------|--------|----------------------------------------------------|
+| device_id   | string            | 否   | -      | 设备 ID（将被连接认证的 device_id 覆盖，D-093）    |
+| device_info | map[string]string | 否   | -      | 设备元信息（如 name, type 等）                     |
+| functions   | FunctionInfo[]    | 是   | -      | 函数清单（详见 [FunctionInfo](#functioninfo) 模型）|
+
+**请求示例**：
+
+```json
+{
+  "id": "rf-001",
+  "method": "system.register_functions",
+  "params": {
+    "device_id": "desktop-abc123",
+    "device_info": {
+      "name": "My MacBook Pro",
+      "type": "desktop"
+    },
+    "functions": [
+      {
+        "name": "read_file",
+        "description": "读取本地文件内容",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {"type": "string", "description": "文件路径"}
+          },
+          "required": ["path"]
+        },
+        "returns": {"type": "string", "description": "文件内容"},
+        "tags": ["filesystem", "read"],
+        "timeout_ms": 5000
+      }
+    ]
+  }
+}
+```
+
+**响应**：
+
+```json
+{
+  "status": "ok",
+  "count": 1,
+  "device_id": "desktop-abc123"
+}
+```
+
+| 字段      | 类型   | 说明                                       |
+|-----------|--------|--------------------------------------------|
+| status    | string | `"ok"`                                     |
+| count     | int    | 注册的函数数量                             |
+| device_id | string | 实际使用的设备 ID（来自连接认证，非请求参数）|
+
+**错误**：
+
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params | 参数 JSON 解析失败 |
+| -100 | function name must not be empty | 函数名为空 |
+| -100 | function name exceeds maximum length | 函数名超过最大长度（255 字符） |
+| -100 | duplicate function name in registration | 注册列表中有重复函数名 |
+| -100 | max functions per device exceeded | 函数数量超过上限（默认 200） |
+| -300 | internal error | 服务器内部错误 |
+
+**注意**：
+- 请求参数中的 `device_id` 会被忽略，服务端使用连接认证时的 `device_id` 作为权威来源 (D-093)
+- 此方法为 nil-safe：当 FunctionRegistry 未配置时不会注册此方法 (D-063)
+- 设备断开连接时自动清理函数清单
+
+---
+
+### system.reconnect
+
+重连握手与请求补发 (D-108)。客户端重连后发送此请求，服务端查找该设备的 pending 请求并按 seq 顺序异步补发。
+
+**参数**：
+
+| 字段          | 类型   | 必填 | 默认值 | 说明                                        |
+|---------------|--------|------|--------|---------------------------------------------|
+| last_seen_seq | uint64 | 否   | 0      | 客户端最后收到的 seq，服务端补发 seq > 此值的请求 |
+
+**请求示例**：
+
+```json
+{
+  "id": "re-001",
+  "method": "system.reconnect",
+  "params": {
+    "last_seen_seq": 42
+  }
+}
+```
+
+**响应**：
+
+```json
+{
+  "status": "ok",
+  "replayed": 3,
+  "total": 5
+}
+```
+
+| 字段     | 类型   | 说明                                   |
+|----------|--------|----------------------------------------|
+| status   | string | `"ok"`                                 |
+| replayed | int    | 正在异步补发的请求数量                 |
+| total    | int    | 该设备的 pending 请求总数（含不符合补发条件的） |
+
+**错误**：
+
+此方法采用 fail-open 策略 (D-072)：查询 pending 请求失败时仍返回 `{"status": "ok", "replayed": 0, "total": 0}` 而非报错。
+
+| Code | 错误信息 | 说明 |
+|------|----------|------|
+| -100 | invalid params: ... | 参数 JSON 解析失败 |
+
+**行为说明**：
+
+- 补发是异步的：响应立即返回，补发在后台 goroutine 中逐个执行 (D-109)
+- 每个补发的请求使用 `replayTimeout`（默认 10 秒）作为超时
+- 补发失败的请求 `retry_count++`，超过 `max_retries` 后从 pending store 中删除
+- 补发成功的请求从 pending store 中移除
+- 原调用方已离开，补发结果记录到日志
+- 此方法为 nil-safe：当 PendingStore 未配置时返回 `{"status": "ok", "replayed": 0, "total": 0}` (D-063)
+
+---
+
 ## 错误码
 
 所有错误响应的 `code` 字段使用结构化错误码 (D-017)。负数表示错误，分段分配：
@@ -1057,6 +1320,7 @@ ws://host:port/ws?user_id={user_id}
 | -201 | Forbidden | 禁止访问 |
 | **-300** | **InternalError** | **服务器内部错误** |
 | -301 | Unavailable | 服务不可用 |
+| **-409** | **Conflict** | **资源状态冲突（如 HITL 问题已被回答，幂等检查）** |
 
 **向后兼容**：旧客户端检查 `code < 0` 判断错误仍然有效。
 
@@ -1078,6 +1342,10 @@ ws://host:port/ws?user_id={user_id}
 | mark_as_read | -100 (validation), -101 (not found), -200 (not a member), -300 (internal) |
 | set_typing | -100 (validation), -101 (not found), -200 (not a member) |
 | stream_text | -100 (validation), -101 (not found), -200 (not a member) |
+| reload_agents | -300 (internal) |
+| agent_resume | -100 (validation), -101 (not found), -300 (internal), -409 (conflict) |
+| system.register_functions | -100 (validation), -300 (internal) |
+| system.reconnect | -100 (validation) |
 
 ---
 
@@ -1102,6 +1370,10 @@ ws://host:port/ws?user_id={user_id}
 | LastMessageAt          | time.Time    | 最后消息时间                             |
 | LastReadMessageID1     | uint32       | UserID1 的已读游标位置 (D-012)           |
 | LastReadMessageID2     | uint32       | UserID2 的已读游标位置 (D-012)           |
+| AgentStatus            | string       | Agent 状态机：`idle` / `thinking` / `tool_calling` / `generating` / `asking_user` / `timeout` |
+| AgentID                | string       | 当前执行的 Agent 标识符（nullable）       |
+| CheckpointID           | string       | 当前 HITL checkpoint ID（nullable）       |
+| AgentLastActivity      | time.Time    | Agent 最后活动时间                        |
 | DeletedAt              | gorm.DeletedAt | 软删除时间戳（null 表示未删除）         |
 
 ### Message
@@ -1130,3 +1402,42 @@ ws://host:port/ws?user_id={user_id}
 | Type      | string    | 更新类型（message / delete_message / mark_read / conversation） |
 | Payload   | []byte    | 更新内容（JSON 编码的字节数组）                       |
 | CreatedAt | time.Time | 创建时间                                              |
+
+### Question
+
+HITL (Human-in-the-Loop) 问题实体 (D-085, D-116)。Agent 暂停等待用户回答时创建，用于离线用户支持、多设备同步和服务器重启恢复。
+
+| 字段             | 类型           | 说明                                                  |
+|------------------|----------------|-------------------------------------------------------|
+| ID               | string         | 问题唯一 ID（UUID，主键）                             |
+| ConversationID   | string         | 所属会话 ID（FK -> Conversation）                     |
+| CheckpointID     | string         | 关联的 Eino checkpoint ID                             |
+| InterruptID      | string         | Eino interrupt address ID                             |
+| QuestionText     | string         | 问题内容                                              |
+| Status           | string         | 状态：`pending` / `answered`                          |
+| Answer           | string         | 用户回答（nullable）                                  |
+| AnsweredBy       | string         | 回答者 user_id                                        |
+| AnsweredDeviceID | string         | 回答设备 ID                                           |
+| CreatedAt        | time.Time      | 创建时间                                              |
+| AnsweredAt       | *time.Time     | 回答时间（nullable）                                  |
+| DeletedAt        | gorm.DeletedAt | 软删除时间戳（null 表示未删除）                       |
+
+### FunctionInfo
+
+客户端设备声明的可调用函数描述 (D-098, D-099)。用于 `system.register_functions` 请求中。
+
+| 字段        | 类型             | 说明                                                    |
+|-------------|------------------|---------------------------------------------------------|
+| name        | string           | 函数唯一标识符（设备范围内，最长 255 字符）             |
+| description | string           | 函数功能描述（可选）                                    |
+| parameters  | map[string]any   | JSON Schema (draft 7) 描述的输入参数（可选）            |
+| returns     | ReturnInfo       | 函数返回值描述（可选）                                  |
+| tags        | string[]         | 标签列表，用于过滤（可选）                              |
+| timeout_ms  | int              | 函数超时时间（毫秒），0 表示使用 Agent 默认值（可选）   |
+
+#### ReturnInfo
+
+| 字段        | 类型   | 说明                 |
+|-------------|--------|----------------------|
+| type        | string | 返回值类型           |
+| description | string | 返回值描述（可选）   |

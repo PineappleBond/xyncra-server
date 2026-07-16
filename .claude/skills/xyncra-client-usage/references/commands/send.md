@@ -21,7 +21,7 @@ xyncra-client send [flags]
 | Flag | Short | Type | Default | Required | Description |
 |------|-------|------|---------|----------|-------------|
 | `--conversation-id` | `-c` | string | `""` | Yes | Conversation ID (required) |
-| `--content` | `-m` | string | `""` | Yes | Message content (required) |
+| `--content` | `-m` | string | `""` | Yes | Message content (must be explicitly provided, empty string `""` is allowed) |
 | `--reply-to` | | uint32 | `0` | No | Message sequence number to reply to |
 
 ## Examples
@@ -36,6 +36,12 @@ Send a reply to a specific message:
 
 ```bash
 xyncra-client send --user-id alice --device-id dev1 -c <conv-uuid> -m "I agree" --reply-to 42
+```
+
+Send with empty content (legal, e.g. for triggering agent without text):
+
+```bash
+xyncra-client send --user-id alice --device-id dev1 -c <conv-uuid> -m ""
 ```
 
 Send via environment variables (no flags):

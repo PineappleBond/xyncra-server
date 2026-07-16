@@ -102,6 +102,11 @@ var luaAdd = redis.NewScript(`
 
 	redis.call('SET', infoKey, data, 'PX', ttl)
 	redis.call('SADD', newUserKey, connID)
+	-- D-010: align user SET TTL with info key TTL (MAX semantics).
+	local setPTTL = redis.call('PTTL', newUserKey)
+	if setPTTL < 0 or ttl > setPTTL then
+		redis.call('PEXPIRE', newUserKey, ttl)
+	end
 	return 1
 `)
 
@@ -137,17 +142,37 @@ var luaUpdate = redis.NewScript(`
 // so, resets its TTL in a single round-trip. This replaces the previous
 // Exists + Get + Expire sequence (P2-003/A2-005).
 //
-// KEYS[1] = infoKey, ARGV[1] = ttl (ms)
+// KEYS[1] = infoKey, KEYS[2] = userKey, ARGV[1] = ttl (ms)
 // Returns 1 if refreshed, 0 if the key does not exist.
 var luaRefresh = redis.NewScript(`
 	local infoKey = KEYS[1]
+	local userKey = KEYS[2]
 	local ttl = tonumber(ARGV[1])
 
 	if redis.call('EXISTS', infoKey) == 0 then
 		return 0
 	end
 	redis.call('PEXPIRE', infoKey, ttl)
+	-- D-010: also refresh user SET TTL (MAX semantics).
+	local setPTTL = redis.call('PTTL', userKey)
+	if setPTTL < 0 or ttl > setPTTL then
+		redis.call('PEXPIRE', userKey, ttl)
+	end
 	return 1
+`)
+
+// luaCleanupEmptySet atomically deletes a user SET only if it is empty.
+// This prevents the TOCTOU race between SCard and DEL where a concurrent
+// SADD could add a new connection between the two calls (D-010).
+//
+// KEYS[1] = userKey
+// Returns 1 if the key was deleted, 0 if it was non-empty or did not exist.
+var luaCleanupEmptySet = redis.NewScript(`
+	local userKey = KEYS[1]
+	if redis.call('SCARD', userKey) == 0 then
+		return redis.call('DEL', userKey)
+	end
+	return 0
 `)
 
 // --------------------------------------------------------------------------
@@ -433,6 +458,11 @@ func (s *RedisConnectionStore) Remove(ctx context.Context, connID string) error 
 			connID, info.UserID, classifyRedisError(err))
 	}
 
+	// D-010: atomically clean up empty user SET to prevent orphan keys.
+	// Uses Lua script to avoid TOCTOU race between SCard and DEL.
+	userKey := s.userKey(info.UserID)
+	_ = luaCleanupEmptySet.Run(ctx, s.client, []string{userKey}).Err()
+
 	return nil
 }
 
@@ -579,8 +609,9 @@ func (s *RedisConnectionStore) Refresh(ctx context.Context, connID string) error
 	}
 
 	ttl := s.resolveTTL(info.TTL)
+	userKey := s.userKey(info.UserID)
 
-	result, err := luaRefresh.Run(ctx, s.client, []string{infoKey},
+	result, err := luaRefresh.Run(ctx, s.client, []string{infoKey, userKey},
 		fmt.Sprintf("%d", ttl.Milliseconds())).Int()
 	if err != nil {
 		return fmt.Errorf("server: refresh connection [connID=%s]: %w", connID, classifyRedisError(err))
@@ -677,6 +708,9 @@ func (s *RedisConnectionStore) ListByUser(ctx context.Context, userID string, li
 	// Lazy cleanup: remove stale IDs from the user set.
 	if len(staleIDs) > 0 {
 		_ = s.client.SRem(ctx, userKey, staleIDs).Err()
+		// D-010: atomically clean up empty user SET to prevent orphan keys.
+		// Uses Lua script to avoid TOCTOU race between SCard and DEL.
+		_ = luaCleanupEmptySet.Run(ctx, s.client, []string{userKey}).Err()
 	}
 
 	if result == nil {

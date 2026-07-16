@@ -47,10 +47,10 @@ export XYNCRA_DB_DSN="host=localhost user=xyncra dbname=xyncra port=5432"
 
 ### 配置文件
 
-除了上述方式，还可以使用 `.env` 文件。服务器在启动时会读取当前目录下的 `.env` 文件（如果存在）：
+除了上述方式，还可以通过外部工具使用 `.env` 文件。服务器本身不会自动加载 `.env` 文件，但可以通过 `docker-compose` 的 `env_file` 或 `direnv` 等方式使用：
 
 ```bash
-# .env 文件示例
+# .env 文件示例（需要配合外部工具加载）
 XYNCRA_ADDR=:8080
 XYNCRA_REDIS_ADDR=localhost:6379
 XYNCRA_DB_DRIVER=sqlite
@@ -286,6 +286,7 @@ timeout:
 |--------|------|
 | `get_weather` | 获取城市天气信息 |
 | `get_current_time` | 获取当前时间 |
+| `ask_user` | 向用户提问（HITL 工具） |
 | `retrieve_tool_result` | 检索之前的工具调用结果 |
 
 客户端工具通过 `system.register_functions` RPC 注册，Agent 可通过 ReverseRPC 调用。

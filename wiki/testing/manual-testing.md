@@ -288,6 +288,7 @@ sequenceDiagram
    ```
    docs/testing/manual/tc-{NNN}_{short_description}.md
    ```
+   > 注意：如果 `docs/testing/manual/` 目录不存在，需先执行 `mkdir -p docs/testing/manual` 创建。
 
 5. **执行与记录**：
    - 执行测试，记录结果
@@ -298,7 +299,7 @@ sequenceDiagram
 
 ```bash
 # 创建新用例
-cat > docs/testing/manual/tc-008_my_new_scenario.md << 'TEMPLATE'
+mkdir -p docs/testing/manual && cat > docs/testing/manual/tc-008_my_new_scenario.md << 'TEMPLATE'
 # TC-008: 新场景名称
 
 ## 测试信息

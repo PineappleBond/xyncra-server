@@ -332,7 +332,7 @@
 | `internal/cli/kill_test.go` | Updated test for new kill error behavior |
 | `internal/cli/logs.go` | Added --limit > 0 validation in tail and search commands |
 | `internal/cli/e2e/cli_e2e_p1_test.go` | Updated tests for kill and logs fixes |
-| `docs/e2e-manual-test-report-2026-07-09.md` | This report |
+| `docs/testing/reports/e2e-manual-test-report-2026-07-09.md` | This report |
 
 ---
 

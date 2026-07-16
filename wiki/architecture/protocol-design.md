@@ -109,7 +109,7 @@ const (
 | `send_message` | C→S | `{conversation_id, client_message_id, content, type?, reply_to?}` | 发送消息，幂等（D-006） |
 | `sync_updates` | C→S | `{after_seq, limit}` | 增量同步，gap 填充（D-029） |
 | `create_conversation` | C→S | `{user_id, title}` | find-or-create（D-011） |
-| `list_conversations` | C→S | 本地读取（D-035） | 会话列表 |
+| `list_conversations` | C→S | `{offset?, limit?}` | 服务端分页查询 |
 | `get_conversation` | C→S | `{conversation_id}` | 单会话 + 未读 + HITL 问题 |
 | `get_messages` | C→S | `{conversation_id, after_message_id, limit}` | 消息分页，支持按需拉取（D-126） |
 | `search_messages` | C→S | `{conversation_id, query}` | 全文搜索 |
@@ -117,8 +117,8 @@ const (
 | `restore_conversation` | C→S | `{conversation_id}` | 级联恢复（D-015） |
 | `delete_message` | C→S | `{message_id}` | 仅发送者可删（D-014） |
 | `mark_as_read` | C→S | `{conversation_id, message_id}` | MAX 语义更新读指针（D-012） |
-| `set_typing` | C→S | `{user_id, conversation_id, is_typing}` | 瞬时推送（Seq=0） |
-| `stream_text` | C→S | `{stream_id, user_id, conversation_id, text, is_done}` | 瞬时推送（Seq=0） |
+| `set_typing` | C→S | `{conversation_id, is_typing}` | 瞬时推送（Seq=0） |
+| `stream_text` | C→S | `{stream_id, conversation_id, text, is_done}` | 瞬时推送（Seq=0） |
 | `agent_resume` | C→S | `{conversation_id}` | HITL 中断后恢复 Agent（D-085） |
 
 ### 系统方法（`system.` 命名空间）

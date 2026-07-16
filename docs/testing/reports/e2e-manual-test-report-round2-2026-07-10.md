@@ -245,7 +245,7 @@
 | `internal/cli/messages.go` | IPC handler captures server response for mark-as-read |
 | `internal/cli/send.go` | Add --client-msg-id optional flag |
 | `docs/CLI_E2E_TEST_STRATEGY_ROUND2.md` | Updated with test results |
-| `docs/e2e-manual-test-report-round2-2026-07-10.md` | This report |
+| `docs/testing/reports/e2e-manual-test-report-round2-2026-07-10.md` | This report |
 | `docs/PRODUCT_DECISIONS.md` | Added D-046, D-047 |
 
 ---

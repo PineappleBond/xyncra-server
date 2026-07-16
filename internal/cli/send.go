@@ -24,12 +24,11 @@ func newSendCommand() *cobra.Command {
 	}
 
 	cmd.Flags().StringP("conversation-id", "c", "", "Conversation ID (required)")
-	cmd.Flags().StringP("content", "m", "", "Message content (required)")
+	cmd.Flags().StringP("content", "m", "", "Message content (empty string allowed)")
 	cmd.Flags().Uint32("reply-to", 0, "Message ID to reply to")
 	cmd.Flags().String("client-msg-id", "", "Client message ID for idempotency (auto-generated UUID if empty)")
 
 	_ = cmd.MarkFlagRequired("conversation-id")
-	_ = cmd.MarkFlagRequired("content")
 
 	return cmd
 }
@@ -53,7 +52,7 @@ func runSend(cmd *cobra.Command, args []string) error {
 	if convID == "" {
 		return errors.New("send: --conversation-id is required")
 	}
-	if content == "" {
+	if !cmd.Flags().Changed("content") {
 		return errors.New("send: --content is required")
 	}
 

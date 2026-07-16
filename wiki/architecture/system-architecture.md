@@ -125,6 +125,8 @@ Xyncra 是一个基于 Go 语言的实时消息 + AI Agent 服务器。系统以
 | `UserUpdateStore` | `user_updates` | 用户级 Update 序列（fan-out 存储） |
 | `QuestionStore` | `questions` | HITL 问题持久化 |
 
+**Conversation 模型约束**：`Conversation` 模型使用 `UserID1`/`UserID2` 双字段（`internal/store/model/conversation.go`），当前仅支持 **1-on-1 私聊**。群组场景需要扩展为多成员模型。
+
 **`SendMessage` 原子操作**（`store.go:SendMessage`）：
 ```
 1. 事务内读取 conversation 的 LastProcessedMessageID
@@ -139,14 +141,10 @@ Xyncra 是一个基于 Go 语言的实时消息 + AI Agent 服务器。系统以
 基于 Asynq（Redis）的异步任务队列。`internal/mq/handler.go` 中注册 MQ 任务处理器。
 
 | 任务类型 | 处理器 | 说明 |
-|----------|--------|------|
+|---------|--------|------|
 | `mq:send_message` | NewSendMessageTaskHandler | 广播实时消息给接收方 |
-| `mq:sync_updates` | - | fan-out 用户更新 |
-| `mq:push_notification` | - | 推送通知 |
-| `mq:presence_broadcast` | - | 在线状态变更 |
-| `mq:conversation_sync` | - | 会话状态同步 |
 | `mq:agent_process` | AgentTaskHandler | Agent AI 处理 |
-| `mq:agent_resume` | ResumeHandler | HITL 恢复后继续 Agent |
+| `mq:agent_resume` | NewAgentResumeHandler | HITL 恢复后继续 Agent |
 
 ### 5. Agent 层 (`internal/agent`)
 
@@ -165,6 +163,42 @@ Xyncra 是一个基于 Go 语言的实时消息 + AI Agent 服务器。系统以
 | `ConversationLock` | 会话级并发锁（同一会话串行处理） |
 | `TokenCounter` | Token 计数和裁剪 |
 | `CheckpointStore` | HITL 断点持久化（D-083） |
+
+**MCP Server 集成**（D-086）：
+- 通过 `MCPBridge`（`internal/agent/tools/mcp.go`）管理 MCP 服务器连接
+- 支持 **SSE** 和 **stdio** 两种传输协议
+- Agent 配置的 `mcp_servers` 列表在 `AgentBuilder.Build()` 阶段连接，失败即跳过（fail-open）
+- 支持按名称过滤工具列表
+
+**内置工具**（`internal/agent/tools/`）：
+所有工具通过 `tools.Registry`（工厂模式）管理，预注册于 `DefaultRegistry`：
+
+| 工具名 | 说明 |
+|--------|------|
+| `get_weather` | 模拟天气数据（开发/演示用） |
+| `get_current_time` | 获取指定时区的当前时间 |
+| `retrieve_tool_result` | 按 ID 检索之前截断的工具结果 |
+| `ask_user` | HITL 中断，暂停 Agent 等待用户确认 |
+
+工具注册在 `tools/registry.go:init()` 中完成，Agent 的 `tools` 字段引用工具名，未注册的工具跳过。
+
+**Middleware**（D-079，`internal/agent/middleware.go`）：
+可选 Eino ADK 中间件，按固定顺序链式执行：
+
+| 中间件 | 配置字段 | 说明 |
+|--------|----------|------|
+| `DynamicToolProvider` | `middleware.enable_client_tools` | 将客户端注册的函数动态注入为 Agent 工具（D-101） |
+| `PatchToolCalls` | `middleware.enable_patch_tool_calls` | 修复 LLM 工具调用的格式问题 |
+| `Summarization` | `middleware.enable_summarization` | 上下文超阈值时自动摘要（默认阈值 160K tokens） |
+| `ToolReduction` | `middleware.enable_tool_reduction` | 截断工具返回结果（默认阈值 50K 字符，D-080） |
+| `LLMLogger` | 代码注入 | 记录所有 LLM 请求/响应/工具调用到专用日志 |
+
+中间件初始化失败跳过（fail-open），无中间件时返回 nil。
+
+**SubAgent**（D-081，`internal/agent/subagent.go`）：
+- Agent 配置的 `sub_agents` 字段声明子代理 ID 列表
+- `AgentBuilder.Build()` 调用 `resolveSubAgents()` 查找子代理、构建子 Agent，通过 `adk.NewAgentTool` 包装为工具
+- 递归深度限制为 1 层（子代理的 `SubAgents` 被清空）
 
 ### 6. Client 层 (`pkg/client`)
 

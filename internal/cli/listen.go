@@ -334,6 +334,17 @@ func runListen(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Watch for client completion (including 4001 replacement exit, D-111).
+	// When the client stops itself (e.g. device replacement triggers graceful
+	// exit), cancel the signal context so xc.Start() unblocks and runListen
+	// returns, allowing the defer chain (socket/lock cleanup) to execute.
+	// This is defensive: c.Stop() already cancels the internal context which
+	// unblocks Start(), but cancelling here ensures robustness.
+	go func() {
+		<-xc.Done()
+		cancel()
+	}()
+
 	// Start automatic log cleanup goroutine (D-040).
 	go startLogCleanup(ctx, db, defaultCleanupInterval, defaultLogRetention, logger)
 

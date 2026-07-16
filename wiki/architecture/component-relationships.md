@@ -134,11 +134,11 @@ Handler 作为 MQ 的生产者：
 | 发送消息 | `mq:send_message` | `sendMessageHandler` | 广播实时消息 |
 | 发送给 Agent | `mq:agent_process` | `sendMessageHandler` | Agent AI 处理 |
 | Agent 恢复 | `mq:agent_resume` | `agentResumeHandler` | HITL 恢复 |
-| 会话创建 | `mq:sync_updates` | `createConversationHandler` | 广播新会话 |
-| 会话删除 | `mq:conversation_sync` | `deleteConversationHandler` | 广播删除 |
-| 会话恢复 | `mq:conversation_sync` | `restoreConversationHandler` | 广播恢复 |
-| 消息删除 | `mq:sync_updates` | `deleteMessageHandler` | 广播删除 |
-| 读指针更新 | `mq:sync_updates` | `markAsReadHandler` | 广播读指针 |
+| 会话创建 | `mq:send_message` | `createConversationHandler` | 广播新会话 |
+| 会话删除 | `mq:send_message` | `deleteConversationHandler` | 广播删除 |
+| 会话恢复 | `mq:send_message` | `restoreConversationHandler` | 广播恢复 |
+| 消息删除 | `mq:send_message` | `deleteMessageHandler` | 广播删除 |
+| 读指针更新 | `mq:send_message` | `markAsReadHandler` | 广播读指针 |
 
 Handler 作为 MQ 的消费者（`internal/mq/handler.go`）：
 
@@ -146,7 +146,7 @@ Handler 作为 MQ 的消费者（`internal/mq/handler.go`）：
 |----------|--------|------|
 | `mq:send_message` | `NewSendMessageTaskHandler` | 调用 `BroadcastUpdates` 推送 |
 | `mq:agent_process` | `AgentTaskHandler` | 执行 Agent 处理管道 |
-| `mq:agent_resume` | `ResumeHandler` | 恢复 HITL 中断的 Agent |
+| `mq:agent_resume` | `NewAgentResumeHandler` | 恢复 HITL 中断的 Agent |
 
 ### 关键设计
 

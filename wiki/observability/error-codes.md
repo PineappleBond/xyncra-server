@@ -18,7 +18,7 @@ Xyncra Server 定义了层次化的错误码体系，涵盖协议层、服务器
 
 ### 协议层错误码（pkg/protocol）
 
-定义在 `pkg/protocol/errors.go`：
+定义在 `pkg/protocol/protocol.go`：
 
 | 错误码 | 常量名 | HTTP 类比 | 说明 |
 |--------|--------|-----------|------|
@@ -65,7 +65,7 @@ Xyncra Server 定义了层次化的错误码体系，涵盖协议层、服务器
 | `ErrContextDeadlineExceeded` | `errors.New("store: context deadline exceeded")` | 上下文超时 |
 | `ErrConflict` | `errors.New("store: conflict")` | 资源状态冲突 |
 
-### 客户端错误码（pkg/client）
+### 客户端错误码（pkg/client/options.go）
 
 | 错误码 | 常量名 | 说明 |
 |--------|--------|------|

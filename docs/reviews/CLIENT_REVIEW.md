@@ -194,6 +194,24 @@ sequenceDiagram
 
 ## 3. 审查发现详表
 
+### 修复状态标注（2026-07-16 更新）
+
+| 发现 | 状态 | 说明 |
+| --- | --- | --- |
+| H-1 | ✅ 已修复 | `ApplyUpdate` 使用 `db.Transaction` 包裹 NotificationLog + dispatchUpdate + SetLocalMaxSeq |
+| H-2 | ✅ 已修复 | 同上，所有 DB 操作在同一事务中 |
+| H-3 | ✅ 已修复 | `SyncManager` 新增 `applyMu sync.Mutex` 串行化 `ApplyUpdates` |
+| H-4 | ✅ 已修复 | 5 个 IPC mutation handler 均在 RPC 成功后写入本地 DB |
+| H-5 | ⚠️ 部分修复 | IPC 路径已修复；standalone `markAsReadStandalone` 未写本地游标 |
+| M-1 | ✅ 已修复 | dispatchUpdate 失败时事务回滚，错误通过 `NewSyncError` 传播 |
+| M-2 | ✅ 已修复 | handleMessage 中会话不存在时记录错误日志（`logger.Error`） |
+| M-3 | ✅ 已修复 | standalone 模式执行 mutation 后输出 "daemon not running" 提示 |
+| M-4 | ✅ 已修复 | send 成功后调用 `clearDraft` 清理对应 draft |
+| M-5 | ✅ 已修复 | kill 命令进程不存在时返回 nil（exit 0） |
+| M-6 | ✅ 已修复 | handleConversation 未知 action 返回错误并记录日志 |
+| L-1 | ✅ 已修复 | `runCleanup` 使用 `db.Transaction` 包裹两种日志清理 |
+| L-2~L-7 | ⏳ 待修复 | 低优先级改进，均未修复 |
+
 ### 🔴 高严重度
 
 #### H-1: NotificationLog 先于业务数据写入，dispatchUpdate 失败导致数据永久丢失

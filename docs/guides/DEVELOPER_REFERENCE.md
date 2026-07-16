@@ -1,6 +1,6 @@
 # Xyncra Server 开发参考指南
 
-> Last updated: 2026-07-15
+> Last updated: 2026-07-16
 
 本文档包含 Xyncra Server 开发的详细实现指南和代码示例。快速入门请参见 [DEVELOPER_GUIDE.md](./DEVELOPER_GUIDE.md)。
 
@@ -225,6 +225,7 @@ var (
     ErrForeignKeyViolation   = errors.New("store: foreign key violation")
     ErrConnectionFailed      = errors.New("store: connection failed")
     ErrContextDeadlineExceeded = errors.New("store: context deadline exceeded")
+    ErrConflict              = errors.New("store: conflict")
 )
 ```
 

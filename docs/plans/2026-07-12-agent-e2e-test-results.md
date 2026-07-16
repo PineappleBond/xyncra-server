@@ -219,6 +219,6 @@ source .env.test && go test -tags real_llm ./internal/e2e/ -run "^TestAgentRealL
 
 ## 相关文档
 
-- 产品决策：`docs/PRODUCT_DECISIONS.md`（D-088/D-089/D-090）
+- 产品决策：`docs/decisions/PRODUCT_DECISIONS.md`（D-088/D-089/D-090）
 - 测试场景文档：`docs/plans/2026-07-11-agent-e2e-test-scenarios.md`
 - 客户端协议：`.claude/skills/xyncra-client-usage/SKILL.md` Server Protocol 章节

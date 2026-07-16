@@ -1,3 +1,7 @@
+---
+updated: 2026-07-16
+---
+
 # Xyncra Server Wiki
 
 Xyncra 项目的多视角知识库。每个视角独立成库，包含索引和详细话题文档。

@@ -314,9 +314,9 @@ The agent runtime implements a **conversation state machine** with 6 defined sta
 
 **Stale cleanup** — A background task (Redis distributed lock per conversation) detects conversations stuck in `asking_user` past a configurable threshold, resets them to `idle`, and cleans up pending questions.
 
-📖 Full scenario analysis: [docs/DESIGN_HITL_RESILIENCE.md](docs/DESIGN_HITL_RESILIENCE.md)
+📖 Full scenario analysis: [docs/design/DESIGN_HITL_RESILIENCE.md](docs/design/DESIGN_HITL_RESILIENCE.md)
 
-📖 Agent configuration details: [docs/PRODUCT_DECISIONS.md](docs/PRODUCT_DECISIONS.md) (D-054 through D-124) and [docs/PRODUCT_DECISIONS_DETAILS.md](docs/PRODUCT_DECISIONS_DETAILS.md)
+📖 Agent configuration details: [docs/decisions/PRODUCT_DECISIONS.md](docs/decisions/PRODUCT_DECISIONS.md) (D-054 through D-124) and [docs/decisions/PRODUCT_DECISIONS_DETAILS.md](docs/decisions/PRODUCT_DECISIONS_DETAILS.md)
 
 ---
 
@@ -356,7 +356,7 @@ Xyncra is designed for **internal network deployment** behind a reverse proxy:
 - ✅ Accepts any Origin (internal deployment model)
 - ✅ Functional options for all configuration overrides
 
-📖 Design rationale: [docs/PRODUCT_DECISIONS.md](docs/PRODUCT_DECISIONS.md) (D-001 through D-005)
+📖 Design rationale: [docs/decisions/PRODUCT_DECISIONS.md](docs/decisions/PRODUCT_DECISIONS.md) (D-001 through D-005)
 
 ---
 
@@ -388,12 +388,26 @@ xyncra-server/
 ├── scripts/                  # Shell scripts
 ├── docs/
 │   ├── API.md                    # WebSocket protocol reference
-│   ├── PRODUCT_DECISIONS.md      # Architecture decisions
-│   ├── PRODUCT_DECISIONS_DETAILS.md # Detailed decision specifications
-│   ├── DEVELOPER_GUIDE.md        # Developer onboarding guide
-│   ├── DEVELOPER_REFERENCE.md    # Developer reference
-│   ├── DESIGN_HITL_RESILIENCE.md # HITL failure scenarios & recovery design
-│   └── manual-test-cases/        # Manual test case documents
+│   ├── decisions/
+│   │   ├── PRODUCT_DECISIONS.md      # Architecture decisions
+│   │   └── PRODUCT_DECISIONS_DETAILS.md # Detailed decision specs
+│   ├── design/
+│   │   ├── DESIGN_HITL_RESILIENCE.md  # HITL failure scenarios & recovery
+│   │   ├── DESIGN_CLIENT_FUNCTION_AGENT_TOOLS.md # Client function agent tools design
+│   │   └── DESIGN_TYPING_EPHEMERAL_PUSH.md # Typing/ephemeral push design
+│   ├── guides/
+│   │   ├── DEVELOPER_GUIDE.md        # Developer onboarding guide
+│   │   └── DEVELOPER_REFERENCE.md    # Developer reference
+│   ├── reviews/
+│   │   ├── CLIENT_REVIEW.md          # Client code review report
+│   │   └── REVIEW_CLIENT_QUERY_ARCHITECTURE.md # Client query architecture review
+│   ├── CLI_E2E_TEST_STRATEGY.md       # CLI E2E test strategy
+│   ├── CLI_E2E_TEST_STRATEGY_ROUND2.md # CLI E2E test strategy round 2
+│   ├── IMPLEMENTATION_PHASES.md      # Implementation phases
+│   ├── manual-test-cases/            # Manual test case documents
+│   ├── plans/                        # Design plans
+│   ├── testing/                      # Test documents & reports
+│   └── superpowers/                  # AI-generated specs
 ├── Dockerfile
 ├── docker-compose.yml
 └── docker-compose.e2e.yml    # E2E test environment
@@ -425,11 +439,11 @@ make vet
 | Document                                                   | Description                                           |
 | ---------------------------------------------------------- | ----------------------------------------------------- |
 | [API Reference](docs/API.md)                               | Complete WebSocket protocol specification             |
-| [Product Decisions](docs/PRODUCT_DECISIONS.md)             | Architecture decisions (D-001 to D-124, 111 defined) |
-| [Product Decisions Details](docs/PRODUCT_DECISIONS_DETAILS.md) | Detailed decision specifications                  |
-| [Developer Guide](docs/DEVELOPER_GUIDE.md)                 | Project structure, coding conventions, how-to guides  |
-| [Developer Reference](docs/DEVELOPER_REFERENCE.md)         | Developer reference documentation                     |
-| [HITL Resilience Design](docs/DESIGN_HITL_RESILIENCE.md)   | HITL failure scenarios, recovery matrix, data model   |
+| [Product Decisions](docs/decisions/PRODUCT_DECISIONS.md)   | Architecture decisions (D-001 to D-124, 111 defined) |
+| [Product Decisions Details](docs/decisions/PRODUCT_DECISIONS_DETAILS.md) | Detailed decision specifications                  |
+| [Developer Guide](docs/guides/DEVELOPER_GUIDE.md)          | Project structure, coding conventions, how-to guides  |
+| [Developer Reference](docs/guides/DEVELOPER_REFERENCE.md)  | Developer reference documentation                     |
+| [HITL Resilience Design](docs/design/DESIGN_HITL_RESILIENCE.md) | HITL failure scenarios, recovery matrix, data model |
 | [Manual Test Cases](docs/manual-test-cases/)               | End-to-end manual test scenarios (in Chinese)         |
 | [Package Docs](internal/)                                  | Per-package design documents (in Chinese)             |
 
@@ -445,7 +459,7 @@ Contributions are welcome! Here's how to get started:
 
 When contributing code:
 
-- Follow existing patterns and naming conventions (see [Developer Guide](docs/DEVELOPER_GUIDE.md))
+- Follow existing patterns and naming conventions (see [Developer Guide](docs/guides/DEVELOPER_GUIDE.md))
 - Reference product decision IDs in comments (e.g., `D-011`)
 - Write tests — handler tests use in-memory stores, E2E tests require Redis
 - Use `fmt.Errorf("context: %w", err)` for error wrapping

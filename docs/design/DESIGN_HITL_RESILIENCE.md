@@ -466,6 +466,7 @@ sequenceDiagram
 | `answered_device_id` | string | 回答设备 |
 | `created_at` | timestamp | 创建时间 |
 | `answered_at` | timestamp | 回答时间（nullable） |
+| `deleted_at` | timestamp | 软删除时间戳（nullable，GORM DeletedAt） |
 
 ### Key Relationships
 

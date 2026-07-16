@@ -666,8 +666,10 @@ ws://server:8080/ws?user_id=alice&device_id=macbook
 | ID | string | UUID 主键 |
 | UserID1 | string | 用户 1（字典序较小） |
 | UserID2 | string | 用户 2（字典序较大） |
-| Type | string | 1-on-1 |
+| Type | string | 1-on-1 / group / channel |
 | Title | string | 会话标题 |
+| AvatarURL | string | 会话头像 URL |
+| Description | string | 会话描述 |
 | Pinned | bool | 是否置顶 |
 | Muted | bool | 是否静音 |
 | LastProcessedMessageID | uint32 | 最后处理的消息序号 |
@@ -676,6 +678,7 @@ ws://server:8080/ws?user_id=alice&device_id=macbook
 | AgentStatus | string | Agent 状态：idle/thinking/tool_calling/generating/asking_user/timeout |
 | AgentID | string | 当前 Agent ID |
 | CheckpointID | string | 当前 HITL checkpoint ID |
+| AgentLastActivity | timestamp | Agent 最后活动时间 |
 | DeletedAt | timestamp | 软删除时间 |
 
 ### Message

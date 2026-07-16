@@ -19,6 +19,7 @@ type StoreAPI interface {
 
     SendMessage(ctx context.Context, msg *model.Message, memberIDs []string) (*SendMessageResult, error)
     Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error
+    BeginTx(ctx context.Context) (*Tx, error)
     AutoMigrate(ctx context.Context) error
     Ping(ctx context.Context) error
     HealthCheck(ctx context.Context) error
@@ -307,7 +308,7 @@ if deps.ReverseRPC != nil && deps.ReverseRPC.PendingStore() != nil {
 
 - 阅读 `README.md` 的架构图和项目结构
 - 阅读 `docs/API.md` 了解协议
-- 阅读 `wiki/OPS.md` 了解部署
+- 阅读 `wiki/devops/index.md` 了解部署
 
 **第 2 层：运行和测试（1 小时）**
 

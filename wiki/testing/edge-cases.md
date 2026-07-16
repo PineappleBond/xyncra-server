@@ -88,10 +88,10 @@ func TestFullChainReconnect_MultipleCycles(t *testing.T) {
 
 ```bash
 # 终端 1: Alice 连接
-xyncra-client connect --user-id alice --device-id phone
+xyncra-client listen --user-id alice --device-id phone
 
 # 终端 2: Bob 连接
-xyncra-client connect --user-id bob --device-id laptop
+xyncra-client listen --user-id bob --device-id laptop
 
 # 模拟断连：暂停服务器进程
 kill -STOP $(pgrep xyncra-server)
@@ -152,7 +152,7 @@ Server 重启 → 初始化组件
 
 ```bash
 # 1. 准备工作
-xyncra-client daemon start
+xyncra-client listen
 
 # 2. 发送消息
 xyncra-client send --conversation-id conv-xxx --content "消息 1"
@@ -401,10 +401,10 @@ Agent 创建检查点 → Broadcast to ALL devices of user
 
 ```bash
 # 终端 1: 手机端
-xyncra-client connect --user-id alice --device-id phone
+xyncra-client listen --user-id alice --device-id phone
 
 # 终端 2: 笔记本端
-xyncra-client connect --user-id alice --device-id laptop
+xyncra-client listen --user-id alice --device-id laptop
 
 # 终端 3: 发送 HITL 触发消息
 xyncra-client send --conversation-id conv-xxx --content "帮我操作"

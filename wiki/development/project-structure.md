@@ -43,18 +43,25 @@ xyncra-server/
 CLI 客户端入口。使用 Cobra 命令框架，支持子命令：
 
 ```
-xyncra-client listen            # 启动守护进程（维持 WebSocket 长连接）
-xyncra-client send              # 发送消息
+xyncra-client listen              # 启动守护进程（维持 WebSocket 长连接）
+xyncra-client send                # 发送消息
 xyncra-client create-conversation # 创建会话
 xyncra-client list-conversations  # 列出会话
-xyncra-client get-messages      # 获取消息
-xyncra-client search-messages   # 搜索消息
-xyncra-client mark-as-read      # 标记已读
-xyncra-client sync              # 强制同步
-xyncra-client set-typing        # 发送输入中指示
-xyncra-client stream-text       # 发送流式文本更新
-xyncra-client agent-resume      # 恢复 HITL 暂停的 agent
-xyncra-client reload-agents     # 热重载 agent 配置
+xyncra-client delete-conversation # 删除会话
+xyncra-client restore-conversation # 恢复会话
+xyncra-client get-conversation    # 获取会话详情
+xyncra-client get-messages        # 获取消息
+xyncra-client delete-message      # 删除消息
+xyncra-client search-messages     # 搜索消息
+xyncra-client mark-as-read        # 标记已读
+xyncra-client sync                # 强制同步
+xyncra-client set-typing          # 发送输入中指示
+xyncra-client stream-text         # 发送流式文本更新
+xyncra-client agent-resume        # 恢复 HITL 暂停的 agent
+xyncra-client reload-agents       # 热重载 agent 配置
+xyncra-client draft               # 草稿管理
+xyncra-client logs                # 日志查看
+xyncra-client kill                # 终止守护进程
 ```
 
 ## `internal/` — 私有实现
@@ -80,7 +87,7 @@ xyncra-client reload-agents     # 热重载 agent 配置
 | `pending_store.go` | `PendingStore`：超时 ReverseRPC 请求持久化 |
 | `redis_pending_store.go` | Redis 实现的 PendingStore |
 | `reverse_rpc.go` | `ReverseRPC`：服务端发起 RPC 到客户端 |
-| `pending_store.go` | 待处理请求的存储接口 |
+| `doc.go` | 包文档 |
 
 关键抽象：
 - `Server` 接口 — `Start(ctx)`、`GracefulStop(ctx)`、`Store()`、`Broker()`、`ConnectionStore()`
@@ -131,7 +138,6 @@ Agent 执行引擎，共 40+ 个文件，按职责分组：
 | `executor.go` | `AgentExecutor`：Agent 执行调度 |
 | `eino_agent.go` | Eino 框架 Agent 构建 |
 | `middleware.go` | Eino 中间件配置（summarization, tool reduction） |
-| `tool_provider.go` | 工具提供者 |
 | `context.go` | Agent 上下文管理 |
 | `context_keys.go` | 上下文 key 定义 |
 | `stream_bridge.go` | 流式输出桥接 |
@@ -141,11 +147,15 @@ Agent 执行引擎，共 40+ 个文件，按职责分组：
 | `dynamic_tool_provider.go` | 动态工具提供者 |
 | `client_function_tool.go` | 客户端函数作为 Agent 工具 |
 | `hitl_cleanup.go` | HITL 超时清理 |
-| `hitl.go` | HITL 处理逻辑 |
+| `resume_handler.go` | HITL 恢复处理 |
 | `subagent.go` | 子 Agent 委托 |
 | `monitoring.go` | Agent 监控指标 |
 | `llm_logger.go` | LLM 调用日志 |
 | `token_counter.go` | Token 计数 |
+| `broadcast.go` | Agent 广播通信 |
+| `doc.go` | 包文档 |
+| `parser.go` | 解析器 |
+| `task_handler.go` | 任务处理 |
 | `errors.go` | 错误定义 |
 | `semaphore.go` | 并发控制信号量 |
 
@@ -154,6 +164,7 @@ Agent 执行引擎，共 40+ 个文件，按职责分组：
 | 工具 | 功能 |
 |------|------|
 | `get_weather` | 查询天气（示例工具） |
+| `ask_user` | 向用户提问（HITL 工具） |
 | `get_current_time` | 获取当前时间 |
 | `retrieve_tool_result` | 获取异步工具结果 |
 | MCP bridge | MCP 服务器集成 |
@@ -189,7 +200,7 @@ Asynq (Redis-backed) 消息队列抽象层：
 
 | 文件 | 职责 |
 |------|------|
-| `store.go` | `Store` 聚合对象、`StoreAPI` 接口、`SendMessage` 复合操作 |
+| `store.go` | `Store` 聚合对象、`StoreAPI` 接口（含 `BeginTx`）、`SendMessage` 复合操作 |
 | `db.go` | `Database` 包装、连接池配置、事务管理 |
 | `errors.go` | 哨兵错误、`classifyError` 跨方言错误分类 |
 | `conversation.go` | `ConversationStore`（CRUD + 搜索 + agent 状态） |

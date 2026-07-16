@@ -2,14 +2,13 @@
 
 ## 项目 License
 
-Xyncra Server 使用 **Apache License 2.0**。
+Xyncra Server 使用 **MIT License**。
 
-### Apache 2.0 核心要求
+### MIT 核心要求
 
 | 要求 | 说明 |
 |------|------|
-| 保留版权声明 | 在修改后的文件中保留原始版权声明 |
-| 声明变更 | 对修改过的文件进行标记说明 |
+| 保留版权声明 | 在修改后的文件中保留原始版权声明和许可声明 |
 | 包含许可证副本 | 分发时包含 `LICENSE` 文件 |
 | 免责声明 | 不提供任何形式的保证 |
 
@@ -17,29 +16,29 @@ Xyncra Server 使用 **Apache License 2.0**。
 
 ### 直接依赖 License 分析
 
-| 依赖 | License | 与 Apache 2.0 兼容 | 备注 |
-|------|---------|-------------------|------|
-| `cloudwego/eino` | Apache 2.0 | ✅ | 相同许可证 |
-| `cloudwego/eino-ext` | Apache 2.0 | ✅ | 相同许可证 |
+| 依赖 | License | 与 MIT 兼容 | 备注 |
+|------|---------|-------------|------|
+| `cloudwego/eino` | Apache 2.0 | ✅ | 宽松许可证 |
+| `cloudwego/eino-ext` | Apache 2.0 | ✅ | 宽松许可证 |
 | `gorilla/websocket` | BSD 2-Clause | ✅ | 宽松许可证 |
-| `gorm.io/gorm` | MIT | ✅ | 宽松许可证 |
+| `gorm.io/gorm` | MIT | ✅ | 相同许可证 |
 | `redis/go-redis/v9` | BSD 2-Clause | ✅ | 宽松许可证 |
-| `hibiken/asynq` | MIT | ✅ | 宽松许可证 |
-| `spf13/cobra` | Apache 2.0 | ✅ | 相同许可证 |
+| `hibiken/asynq` | MIT | ✅ | 相同许可证 |
+| `spf13/cobra` | Apache 2.0 | ✅ | 宽松许可证 |
 | `google/uuid` | BSD 3-Clause | ✅ | 宽松许可证 |
-| `stretchr/testify` | MIT | ✅ | 宽松许可证 |
-| `glebarez/sqlite` | MIT | ✅ | 宽松许可证 |
+| `stretchr/testify` | MIT | ✅ | 相同许可证 |
+| `glebarez/sqlite` | MIT | ✅ | 相同许可证 |
 | `gofrs/flock` | BSD 3-Clause | ✅ | 宽松许可证 |
-| `mark3labs/mcp-go` | MIT | ✅ | 宽松许可证 |
-| `alicebob/miniredis/v2` | MIT | ✅ | 宽松许可证 |
-| `nikolalohinski/gonja` | MIT | ✅ | 宽松许可证 |
-| `eino-contrib/jsonschema` | Apache 2.0 | ✅ | 相同许可证 |
-| `robfig/cron/v3` | MIT | ✅ | 宽松许可证 |
+| `mark3labs/mcp-go` | MIT | ✅ | 相同许可证 |
+| `alicebob/miniredis/v2` | MIT | ✅ | 相同许可证 |
+| `nikolalohinski/gonja` | MIT | ✅ | 相同许可证 |
+| `eino-contrib/jsonschema` | Apache 2.0 | ✅ | 宽松许可证 |
+| `robfig/cron/v3` | MIT | ✅ | 相同许可证 |
 
 ### 间接依赖 License 分析
 
-| 间接依赖 | License | 与 Apache 2.0 兼容 |
-|----------|---------|-------------------|
+| 间接依赖 | License | 与 MIT 兼容 |
+|----------|---------|-------------|
 | `bytedance/sonic` | Apache 2.0 | ✅ |
 | `anthropics/anthropic-sdk-go` | Apache 2.0 | ✅ |
 | `aws/aws-sdk-go-v2` | Apache 2.0 | ✅ |
@@ -49,7 +48,7 @@ Xyncra Server 使用 **Apache License 2.0**。
 
 | 风险等级 | 含义 | 本项目情况 |
 |----------|------|------------|
-| 低风险 | Apache 2.0 / MIT / BSD 兼容许可证 | 绝大多数依赖 |
+| 低风险 | MIT / Apache 2.0 / BSD / ISC 兼容许可证 | 绝大多数依赖 |
 | 中风险 | GPL 类弱传染性许可证 | 不存在 |
 | 高风险 | AGPL 类强传染性许可证 | 不存在 |
 
@@ -57,8 +56,8 @@ Xyncra Server 使用 **Apache License 2.0**。
 
 ### 发布前检查
 
-- [ ] 项目根目录包含 `LICENSE` 文件（Apache 2.0）
-- [ ] 所有依赖的许可证与 Apache 2.0 兼容
+- [ ] 项目根目录包含 `LICENSE` 文件（MIT）
+- [ ] 所有依赖的许可证与 MIT 兼容
 - [ ] Docker 镜像中不包含 GPL 代码
 - [ ] 第三方版权声明文件已包含（如需）
 - [ ] CLI 客户端输出包含版权信息
@@ -109,32 +108,37 @@ go-licenses csv ./... > DEPENDENCIES_LICENSES.csv
 ### 修改依赖时的合规检查
 
 1. 在 `go.mod` 中添加新依赖时，检查其许可证
-2. 确认许可证与 Apache 2.0 兼容
+2. 确认许可证与 MIT 兼容
 3. 如果使用 AGPL/GPL 许可证的库，需要特殊处理（本项目目前没有）
 
 ## 项目自身 License 声明
 
-Apache 2.0 许可证要求：
+MIT 许可证要求：
 - 所有源代码文件头部应包含许可证声明
-- NOTICE 文件（如有）应包含必要的声明
-- 衍生产品必须保留原始版权声明
+- 衍生产品必须保留原始版权声明和许可声明
 
 建议的文件头格式：
 
 ```go
-// Copyright (c) 2024 Xyncra Contributors
+// Copyright (c) 2026 PineappleBond
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
 ```
 
 ## License 合规工具
@@ -178,10 +182,10 @@ jobs:
 
 ### 二进制分发
 
-Apache 2.0 许可证要求：
+MIT 许可证要求：
 
 1. 包含 `LICENSE` 文件
-2. 包含 `NOTICE` 文件（如果有）
+2. 保留版权声明和许可声明
 3. 不歪曲原始作者的贡献
 
 ### Docker 镜像分发
@@ -203,7 +207,7 @@ COPY third_party/licenses/ /usr/share/licenses/xyncra-third-party/
 
 ```go
 // 模块的 LICENSE 文件在根目录
-// 引入 Xyncra 的项目会自动遵循 Apache 2.0
+// 引入 Xyncra 的项目会自动遵循 MIT License
 ```
 
 ## 第三方声明文件
@@ -212,7 +216,7 @@ COPY third_party/licenses/ /usr/share/licenses/xyncra-third-party/
 
 ```text
 Xyncra Server
-Copyright (c) 2024 Xyncra Contributors
+Copyright (c) 2026 PineappleBond
 
 This software includes the following third-party components:
 
@@ -232,11 +236,11 @@ This software includes the following third-party components:
 
 ### 问：我可以将 Xyncra Server 用于商业项目吗？
 
-答：可以。Apache 2.0 许可证允许商业使用，但需要保留版权声明和免责声明。
+答：可以。MIT 许可证允许商业使用，无需支付版税，只需保留版权声明和免责声明。
 
 ### 问：我需要公开我的修改吗？
 
-答：不需要。Apache 2.0 不要求公开修改，但需要标记修改过的文件。
+答：不需要。MIT 许可证不要求公开修改，也不需要标记修改过的文件。这是 MIT 比 Apache 2.0 更简洁的方面之一。
 
 ### 问：我可以重新分发包含 Xyncra 的 Docker 镜像吗？
 
@@ -248,11 +252,11 @@ This software includes the following third-party components:
 
 ### 问：MIT 和 Apache 2.0 有什么区别？
 
-答：两者都是宽松许可证。Apache 2.0 提供了明确的专利授权条款，而 MIT 更简洁。两者允许商业使用、修改和再分发。
+答：两者都是宽松许可证，允许商业使用、修改和再分发。主要区别在于 Apache 2.0 提供了明确的专利授权条款，而 MIT 更简洁、约束更少。MIT 只需保留版权声明和许可声明，而 Apache 2.0 还需要标记修改文件并包含 NOTICE 文件。
 
 ### 问：我需要为每个依赖单独声明吗？
 
-答：对于 Apache 2.0 和 MIT 许可证的库，仅需要在 NOTICE 文件中列出。对于 BSD 许可证，部分变体要求在文档中声明。
+答：对于 MIT、Apache 2.0 和 BSD 许可证的库，在 NOTICE 文件或文档中列出即可。部分 BSD 变体要求在文档中附加声明。
 
 ## 合规风险应对
 

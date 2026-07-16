@@ -1,7 +1,8 @@
 # Typing / Ephemeral Push 场景设计提案
 
 > 创建日期：2026-07-10
-> 状态：提案（未实施）
+> 状态：已实施（2026-07-10）
+> 实施决策：D-050（Ephemeral Push 模式）、D-051（流式文本 Ephemeral Push）、D-052（stream_text 与 send_message 协作）
 > 目的：梳理代码现状，并设计"Typing 指示器"类 ephemeral 业务的处理流程（SEQ=0，仅推送在线用户，离线不拉取）。
 
 ---
@@ -15,13 +16,13 @@
 `typing` 字符串仅在开发者文档中作为"假设新增 UpdateType 时的示例"出现过：
 
 > "当需要新增一种 Update 类型（如 `reaction`、`typing` 等）时，按以下步骤操作。"
-> —— [docs/DEVELOPER_GUIDE.md:522](DEVELOPER_GUIDE.md#L522)
+> —— [docs/guides/DEVELOPER_GUIDE.md:522](../guides/DEVELOPER_GUIDE.md#L522)
 
 此外，[internal/mq/mq.go:74](../internal/mq/mq.go#L74) 定义了常量 `TypePresenceBroadcast = "mq:presence_broadcast"`，但**未注册任何处理函数**（参见 [project-context.md:98](../.claude/skills/xyncra-task-planner/references/project-context.md#L98)）。Presence 是规划中但尚未实现的功能。
 
 ### 1.2 当前架构哲学
 
-整个 Xyncra 系统遵循 **"持久化优先 + 在线推送 best-effort + 离线 sync_updates 兜底"** 的哲学，记录在 [docs/PRODUCT_DECISIONS.md:292-305](PRODUCT_DECISIONS.md#L292-L305) 的决策 D-007 中：
+整个 Xyncra 系统遵循 **"持久化优先 + 在线推送 best-effort + 离线 sync_updates 兜底"** 的哲学，记录在 [docs/decisions/PRODUCT_DECISIONS.md:292-305](../decisions/PRODUCT_DECISIONS.md#L292-L305) 的决策 D-007 中：
 
 - 消息 / 会话变更 / 已读游标等**所有**业务数据先进 DB 事务
 - MQ 入队（用于 WebSocket 实时推送）是**异步 best-effort**，失败不阻塞主流程
@@ -35,7 +36,7 @@
 | 机制 | 文件位置 | 性质 | 是否 SEQ=0 | 是否离线不拉取 |
 |---|---|---|---|---|
 | `UpdateTypeGap` | [pkg/protocol/protocol.go:20-27](../pkg/protocol/protocol.go#L20-L27) | 同步修复用的运行时填充符，不入 store | 否（占位真实 seq） | 是（内部机制） |
-| D-007 fire-and-forget | [PRODUCT_DECISIONS.md:292-305](PRODUCT_DECISIONS.md#L292-L305) | 设计哲学 | 否 | 否 |
+| D-007 fire-and-forget | [PRODUCT_DECISIONS.md:292-305](../decisions/PRODUCT_DECISIONS.md#L292-L305) | 设计哲学 | 否 | 否 |
 | `BroadcastUpdates` | [websocket_server.go:640-655](../internal/server/websocket_server.go#L640-L655) | 在线推送管道 | 否 | 否（数据已持久化） |
 | `TypePresenceBroadcast` | [mq.go:74](../internal/mq/mq.go#L74) | 常量已定义，未注册 handler | — | — |
 | heartbeat `device_info` | [heartbeat.go:20-78](../internal/handler/heartbeat.go#L20-L78) | 仅日志，不持久化，不推送 | — | — |

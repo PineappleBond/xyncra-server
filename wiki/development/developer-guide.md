@@ -164,6 +164,7 @@ func TestMyMethodHandler(t *testing.T) {
 | `send_message` | `send_message.go` | 复杂 | `Store`, `Broker`, `AgentRegistry` |
 | `reload_agents` | `reload_agents.go` | 简单 | `AgentRegistry` |
 | `system.register_functions` | `register_functions.go` | 中等 | `FunctionRegistry` |
+| `system.reconnect` | `reconnect.go` | 中等 | `ReverseRPC` |
 
 ## 如何添加新的 Store 方法
 

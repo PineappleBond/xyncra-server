@@ -103,7 +103,7 @@ for each recipient:
     BroadcastUpdates(userID, updates: [{seq, type:"message", payload}])
 ```
 
-`BroadcastUpdates` 流程（`internal/server/websocket_server.go:846`）：
+`BroadcastUpdates` 流程（`internal/server/websocket_server.go` 中 `WebSocketServer.BroadcastUpdates`）：
 1. **本地广播**：遍历 `clientsByUser[userID]` 推送 PackageTypeUpdates
 2. **跨节点发布**：Redis Pub/Sub 发布（多节点时）
 

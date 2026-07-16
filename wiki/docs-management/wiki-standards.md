@@ -1,3 +1,7 @@
+---
+updated: 2026-07-16
+---
+
 # Wiki 规范
 
 ## 概述
@@ -247,7 +251,7 @@ status: stable # draft | stable | deprecated
 
 ### 索引文件要求
 
-索引文件的 Front Matter 可选，但 `wiki/index.md` 必须包含 `updated` 字段。
+索引文件的 Front Matter 可选，建议 `wiki/index.md` 也包含 `updated` 字段。
 
 ---
 

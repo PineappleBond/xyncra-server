@@ -19,8 +19,9 @@ Use this skill when working with the xyncra-client CLI tool.
 5. Drafts / logs? → draft save/get/delete, logs tail/search/stats/export/cleanup (local SQLite)
 6. Stop daemon? → `xyncra-client kill [--force]`
 7. Resume HITL-interrupted agent? → `xyncra-client agent-resume` (IPC-only, D-114)
-8. Writing tests or direct API client? → **Server Protocol** section below (WebSocket JSON-RPC, sync_updates HTTP, Agent reply flow)
-9. More details? → Check references/ links below
+8. Reload agent config? → `xyncra-client reload-agents` (IPC-only, D-076, D-036)
+9. Writing tests or direct API client? → **Server Protocol** section below (WebSocket JSON-RPC, sync_updates HTTP, Agent reply flow)
+10. More details? → Check references/ links below
 
 ## Command Table
 
@@ -39,6 +40,7 @@ Use this skill when working with the xyncra-client CLI tool.
 | `search-messages` | Local DB | Search messages in SQLite |
 | `sync-updates` | IPC-only | Trigger full sync via daemon (no fallback) |
 | `agent-resume` | IPC-only | Resume HITL-interrupted agent (D-036, D-114) |
+| `reload-agents` | IPC-only | Hot-reload Agent config (D-076, D-036) |
 | `draft save/get/delete` | Local DB | Manage message drafts |
 | `logs tail/search/stats/export/cleanup` | Local DB | View and manage logs |
 | `kill` | OS process | Terminate running daemon |
@@ -113,7 +115,8 @@ D-032: IPC priority, WS fallback | D-033: device-id = hostname SHA256[:8]
 D-034: XYNCRA_ env prefix | D-035: Query commands read local SQLite
 D-036: sync-updates IPC-only | D-037: --peer-id not --user-id | D-038: string UUID vs uint32
 D-039: kill SIGTERM/SIGKILL + cleanup | D-040: logs retain 7d | D-041: tabwriter | D-042: exit codes
-D-085: HITL event broadcasting | D-087: AgentTimeoutHandler | D-114: agent-resume IPC-only
+D-076: reload-agents 热加载 Agent 配置 | D-085: HITL event broadcasting | D-087: AgentTimeoutHandler
+D-114: agent-resume IPC-only
 D-115: Daemon 内置函数自动注册（消除 register-functions 独立进程）
 
 ## Server Protocol (for test writers and direct API clients)

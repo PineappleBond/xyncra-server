@@ -53,7 +53,15 @@ go.work.sum
 llm-logs-e2e/
 
 # === Claude Code / 工具 ===
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/xyncra-client-usage/
+!.claude/skills/xyncra-client-usage/**
+!.claude/skills/xyncra-manual-test/
+!.claude/skills/xyncra-manual-test/**
+!.claude/skills/xyncra-task-planner/
+!.claude/skills/xyncra-task-planner/**
 .codegraph/
 .superpowers/
 logs/

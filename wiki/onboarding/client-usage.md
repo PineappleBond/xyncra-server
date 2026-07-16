@@ -145,15 +145,21 @@ xyncra-client create-conversation --user-id alice --peer-id bob
 列出所有会话（读取本地数据库）。
 
 ```bash
-xyncra-client list-conversations
+xyncra-client list-conversations [flags]
 ```
+
+| 标志 | 默认值 | 说明 |
+|------|--------|------|
+| `--offset` | 0 | 分页偏移 |
+| `--limit` | 20 | 每页数量 |
 
 输出示例：
 
 ```
-Conversations:
-  1. conv-abc123  | bob          | 2026-07-16 12:00 | 5 unread
-  2. conv-def456  | charlie      | 2026-07-15 10:00 | 0 unread
+ID             PEER    TITLE     LAST MESSAGE
+--             ----    -----     ------------
+conv-abc123    bob     -         2026-07-16 12:00:00
+conv-def456    charlie Chat      2026-07-15 10:00:00
 ```
 
 #### get-conversation
@@ -208,7 +214,7 @@ xyncra-client get-messages --conversation-id conv-abc123
 | 标志 | 默认值 | 说明 |
 |------|--------|------|
 | `--conversation-id` / `-c` | - | 会话 ID |
-| `--after-message-id` | 0 | 分页游标 |
+| `--after-message-id` | 0 | 分页游标（消息序号） |
 | `--limit` | 50 | 每页数量 |
 
 #### search-messages
@@ -218,6 +224,13 @@ xyncra-client get-messages --conversation-id conv-abc123
 ```bash
 xyncra-client search-messages --conversation-id conv-abc123 --query "hello"
 ```
+
+| 标志 | 默认值 | 说明 |
+|------|--------|------|
+| `--conversation-id` / `-c` | - | 会话 ID |
+| `--query` / `-q` | - | 搜索关键词 |
+| `--after-message-id` | 0 | 分页游标 |
+| `--limit` | 50 | 每页数量 |
 
 #### delete-message
 
@@ -237,13 +250,13 @@ xyncra-client mark-as-read --conversation-id conv-abc123
 
 | 标志 | 说明 |
 |------|------|
-| `--message-id` | 已读到哪条消息（不指定则标记全部已读） |
+| `--message-id` | 已读到哪条消息序号（0 = 标记全部已读） |
 
 ### 同步命令
 
 #### sync-updates
 
-触发完整数据同步。
+触发完整数据同步。IPC-only 命令，需要守护进程运行（D-036）。
 
 ```bash
 xyncra-client sync-updates
@@ -253,28 +266,127 @@ xyncra-client sync-updates
 
 #### agent-resume
 
-恢复 HITL 中断的 Agent。
+恢复 HITL 中断的 Agent。IPC-only 命令（D-085、D-114）。
 
 ```bash
 xyncra-client agent-resume \
   --conversation-id conv-abc123 \
-  --agent-id weather-bot \
+  --agent-id agent:weather-bot \
+  --checkpoint-id cp-xxx \
   --answer "查询北京的天气"
 ```
 
+| 标志 | 说明 |
+|------|------|
+| `--conversation-id` | 会话 ID（必填） |
+| `--agent-id` | Agent ID（必填，如 `agent:weather-bot`） |
+| `--checkpoint-id` | HITL 通知中的检查点 ID（必填） |
+| `--interrupt-id` | HITL 通知中的中断 ID（可选） |
+| `--answer` | 用户的回答内容（必填） |
+
 #### reload-agents
 
-热加载 Agent 配置。
+热加载 Agent 配置。IPC-only 命令（D-076）。
 
 ```bash
 xyncra-client reload-agents
 ```
 
+### 日志命令
+
+`logs` 是包含多个子命令的父命令，用于管理客户端本地 RPC 和通知日志。
+
+```bash
+xyncra-client logs tail [flags]
+xyncra-client logs search [flags]
+xyncra-client logs stats [flags]
+xyncra-client logs export [flags]
+xyncra-client logs cleanup [flags]
+```
+
+#### logs tail
+
+显示最近的日志条目。
+
+```bash
+xyncra-client logs tail [flags]
+```
+
+| 标志 | 默认值 | 说明 |
+|------|--------|------|
+| `--type` | `rpc` | 日志类型：`rpc` 或 `notifications` |
+| `--limit` | 50 | 显示条数 |
+| `--since` | `1h` | 时间范围（如 `1h`、`30m`、`7d`） |
+
+#### logs search
+
+搜索日志条目。
+
+```bash
+xyncra-client logs search [flags]
+```
+
+| 标志 | 默认值 | 说明 |
+|------|--------|------|
+| `--type` | `rpc` | 日志类型：`rpc` 或 `notifications` |
+| `--method` | - | 按 RPC 方法过滤 |
+| `--error` | false | 仅显示错误 |
+| `--from` | - | 开始时间 |
+| `--to` | - | 结束时间 |
+| `--conversation-id` | - | 按会话 ID 过滤 |
+| `--request-id` | - | 按请求 ID 查询 |
+| `--limit` | 100 | 返回条数 |
+
+#### logs stats
+
+显示 RPC 日志统计。
+
+```bash
+xyncra-client logs stats [flags]
+```
+
+| 标志 | 默认值 | 说明 |
+|------|--------|------|
+| `--since` | `24h` | 统计时间窗口 |
+| `--interval` | - | 按间隔分组：`1m`、`5m`、`15m`、`1h`、`1d` |
+
+#### logs export
+
+导出日志到 CSV 或 JSON。
+
+```bash
+xyncra-client logs export [flags]
+```
+
+| 标志 | 默认值 | 说明 |
+|------|--------|------|
+| `--type` | `rpc` | 日志类型 |
+| `--format` | `csv` | 导出格式：`csv` 或 `json` |
+| `--output` / `-o` | stdout | 输出文件路径 |
+| `--method` | - | 按方法过滤 |
+| `--from` | - | 开始时间 |
+| `--to` | - | 结束时间 |
+| `--limit` | 1000 | 最大导出条数（上限 10000） |
+
+#### logs cleanup
+
+清理过期日志。
+
+```bash
+xyncra-client logs cleanup [flags]
+```
+
+| 标志 | 默认值 | 说明 |
+|------|--------|------|
+| `--retain` | `168h` | 保留时长 |
+| `--dry-run` | false | 试运行（仅显示将删除数量） |
+| `--type` | `all` | 清理类型：`rpc`、`notifications`、`all` |
+
 ### 其他命令
 
 #### draft
 
-管理消息草稿。
+管理消息草稿（本地 SQLite，不依赖网络）。
 
 ```bash
 # 保存草稿
@@ -285,46 +397,56 @@ xyncra-client draft get --conversation-id conv-abc123
 
 # 删除草稿
 xyncra-client draft delete --conversation-id conv-abc123
-
-# 列出所有草稿
-xyncra-client draft list
 ```
 
 #### set-typing
 
-发送正在输入指示器。
+发送正在输入指示器。IPC-only 命令（D-050）。
 
 ```bash
-xyncra-client set-typing --conversation-id conv-abc123 --is-typing true
+xyncra-client set-typing --conversation-id conv-abc123 [--stop]
 ```
+
+| 标志 | 说明 |
+|------|------|
+| `--conversation-id` / `-c` | 会话 ID（必填） |
+| `--stop` | 停止输入（不指定则发送开始输入） |
 
 #### stream-text
 
-发送流式文本。
+发送流式文本。IPC-only 命令（D-051）。
 
 ```bash
 xyncra-client stream-text \
   --conversation-id conv-abc123 \
   --stream-id stream-xxx \
   --text "Hello" \
-  --is-done false
+  [--done]
 ```
+
+| 标志 | 说明 |
+|------|------|
+| `--conversation-id` / `-c` | 会话 ID（必填） |
+| `--stream-id` | 流 ID（必填，客户端生成 UUID） |
+| `--text` | 累积文本内容（必填） |
+| `--done` | 标记流结束 |
 
 #### logs
 
-查看客户端日志。
-
-```bash
-xyncra-client logs
-```
+查看客户端日志（参见[日志命令](#日志命令)子命令）。
 
 #### kill
 
 停止守护进程。
 
 ```bash
-xyncra-client kill
+xyncra-client kill [flags]
 ```
+
+| 标志 | 默认值 | 说明 |
+|------|--------|------|
+| `--force` | false | 使用 SIGKILL 强制终止 |
+| `--timeout` | `5s` | 等待进程退出的超时时间 |
 
 ---
 
@@ -338,7 +460,9 @@ xyncra-client listen --user-id alice --device-id laptop
 
 # 2. 创建会话
 xyncra-client create-conversation --peer-id bob
-# 输出：ID = conv-abc123
+# 输出：Conversation created.
+#   Conversation ID: conv-abc123
+#   Peer: bob
 
 # 3. 发送消息
 xyncra-client send --conversation-id conv-abc123 --content "Hello Bob!"
@@ -347,7 +471,8 @@ xyncra-client send --conversation-id conv-abc123 --content "Hello Bob!"
 #     Message ID: 1
 #     UUID: msg-xxx
 #     Conversation: conv-abc123
-#     Duplicate: false
+#     Client Msg ID: <uuid>
+#   Duplicate: false
 
 # 4. 接收回复（自动显示在守护进程终端）
 # [new message] seq=2 from=bob conv=conv-abc123 "Hi Alice!"
@@ -444,7 +569,8 @@ Agent 处理消息时会推送一系列实时事件：
 ```bash
 xyncra-client agent-resume \
   --conversation-id conv-xxx \
-  --agent-id weather-bot \
+  --agent-id agent:weather-bot \
+  --checkpoint-id cp-xxx \
   --answer "确认删除"
 ```
 
@@ -467,7 +593,8 @@ export XYNCRA_DEBUG=1
 xyncra-client listen --user-id alice --device-id laptop
 ```
 
-启用后显示详细连接、RPC 和同步日志。
+`XYNCRA_DEBUG` 接受 `1` 或 `true`。启用后，调试日志（连接、重连、RPC 调用等）
+会输出到 stderr。
 
 ### 健康检查
 
@@ -482,7 +609,11 @@ ls -la ~/.xyncra/alice/laptop/xyncra.sock
 ### 查看客户端日志
 
 ```bash
-xyncra-client logs
+# 查看最近 RPC 日志
+xyncra-client logs tail
+
+# 查看最近通知日志
+xyncra-client logs tail --type notifications
 ```
 
 ### RPC 日志
@@ -492,7 +623,7 @@ xyncra-client logs
 ### 常用调试命令
 
 ```bash
-# 查看重连行为
+# 启用调试模式查看重连行为
 XYNCRA_DEBUG=1 xyncra-client listen --user-id alice --device-id laptop 2>&1 | grep -i reconnect
 
 # 检查连接状态
@@ -518,7 +649,7 @@ xyncra-client get-messages --conversation-id conv-abc123
 xyncra-client search-messages --conversation-id conv-abc123 --query "关键字"
 
 # 草稿数据
-xyncra-client draft list
+xyncra-client draft get --conversation-id conv-abc123
 ```
 
 本地数据库位置：`~/.xyncra/{user_id}/{device_id}/xyncra.db`
@@ -527,7 +658,7 @@ xyncra-client draft list
 
 ## 内置函数（ReverseRPC）
 
-守护进程自动注册三个内置函数，Agent 可以通过 ReverseRPC 调用：
+守护进程自动注册三个内置函数，Agent 可以通过 ReverseRPC 调用设备端功能（D-092、D-098）：
 
 ### ping
 
@@ -556,10 +687,10 @@ xyncra-client draft list
 {"method": "get_time", "params": {}}
 
 // 设备响应
-{"utc": "2026-07-16T12:00:00Z", "unix": 1781683200, "timezone": "Local"}
+{"utc": "2026-07-16T12:00:00.123456789Z", "unix": 1781683200, "timezone": "Local"}
 ```
 
-自定义函数可以通过 `system.register_functions` RPC 注册。
+三个函数的 tags 均为 `diagnostic`，用于服务器端诊断设备状态。
 
 ---
 
