@@ -104,6 +104,8 @@
 | D-118 | Pull-on-Notification 模式 | Update 事件为轻量通知（只含 conversation_id），客户端拉取 Conversation 获取最新状态 |
 | D-121 | 两阶段幂等性 (Two-Phase Idempotency) | processing key (130s) 防并发 + processed key (24h) 防回放，崩溃后可重试 |
 | D-122 | Resume 永久失败清理策略 | ClearAgentStatus + DeleteByCheckpoint + checkpoint DEL，避免 conversation 卡在 asking_user |
+| D-123 | HITL 超时自动清理 | 后台 goroutine 定期扫描 `asking_user` 状态会话，清理超过 24h 未响应的 HITL 会话，释放锁和 checkpoint |
+| D-124 | Conversation 同步优化（updated_at 广播） | 广播时携带 `updated_at` 时间戳，客户端比较后决定是否拉取，减少不必要的 RPC |
 
 ---
 
@@ -118,6 +120,7 @@
 
 | 日期       | 版本 | 变更                                                                                                 |
 | ---------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| 2026-07-16 | v3.21 | 新增 D-123（HITL 超时自动清理）、D-124（Conversation 同步优化 - updated_at 广播） |
 | 2026-07-16 | v3.20 | 新增 D-121（两阶段幂等性）、D-122（Resume 永久失败清理策略） |
 | 2026-07-15 | v3.19 | 新增 D-116（Question 持久化表）、D-117（Conversation 状态机）、D-118（Pull-on-Notification 模式）；更新 D-085（partial answer + 幂等检查）、D-113（被 D-116 替代） |
 | 2026-07-15 | v3.18 | 新增 D-115（Daemon 内置函数自动注册），删除 `register-functions` CLI 命令 |
@@ -377,3 +380,113 @@ Resume 永久失败时执行完整清理:
 - 仅限"不可恢复"的失败: checkpoint 过期、agent config not found、build 失败、DB 错误
 - Transient errors (LLM timeout) 不触发清理 — Questions 保留供重试
 - HITL re-interrupt 不触发清理 — conversation 进入新的 asking_user 周期，Questions 和 checkpoint 保留供后续 resume 使用
+
+---
+
+## D-123: HITL 超时自动清理
+
+### 决策
+
+后台 goroutine 定期扫描处于 `asking_user` 状态的 Conversation，清理超过 24h（默认超时阈值）未响应的 HITL 会话。清理步骤：
+
+1. ClearAgentStatus：释放会话锁，将 `agent_status` 重置为 `idle`（D-117 状态机）
+2. DeleteByCheckpoint：软删除关联的 Question 记录（D-116）
+3. DEL checkpoint from Redis：删除 Eino checkpoint（D-112）
+4. 发送用户友好的超时错误消息：持久化消息到会话中（D-067/D-082 模式）
+5. 广播 `agent_timeout` ephemeral 通知（D-087）
+
+使用 Redis SETNX 分布式锁防止多节点重复处理。所有清理步骤均为 non-fatal，失败仅记录日志。
+
+### 原因
+
+1. **避免会话永久卡死**：未被回答的 HITL 会话不应无限占用会话锁（D-075）
+2. **与 D-016 模式一致**：D-016（UserUpdate 清理）已有后台 goroutine 定期清理模式
+3. **与 D-122 模式一致**：D-122（Resume 永久失败清理）已定义清理步骤，超时清理复用相同步骤
+4. **用户体验**：发送超时消息告知用户 HITL 已过期，需重新发起
+
+### 实现
+
+- 后台 goroutine 使用 `time.NewTicker`，默认 5 分钟间隔
+- 查询条件：`agent_status = 'asking_user' AND agent_last_activity < NOW() - timeout`
+- Redis SETNX 分布式锁：`hitl:cleanup:{conversationID}`，per-conversation 粒度，TTL 覆盖单次清理周期
+- 清理函数复用 D-122 的 `cleanupAfterResumeFailure` 模式（所有操作 non-fatal）
+- 超时消息文本："抱歉，等待时间过长，会话已超时。请重新发送消息。"（与 D-082 checkpoint 过期消息一致）
+- 通过 `HITLCleanupConfig` 结构体配置（零值填充默认值）
+
+```go
+// 配置选项（零值填充默认值）
+type HITLCleanupConfig struct {
+    Interval  time.Duration // 清理间隔，默认 5 分钟
+    MaxAge    time.Duration // 超时阈值，默认 24h
+    BatchSize int           // 单次清理最大会话数，默认 100
+    LockTTL   time.Duration // 分布式锁 TTL，默认 30 秒
+}
+```
+
+### 约束
+
+- 仅清理 `agent_status = 'asking_user'` 且 `agent_last_activity` 超过超时阈值的会话
+- 所有清理步骤 non-fatal，失败仅记录日志（与 D-122 一致）
+- 超时消息使用 D-067/D-082 模式持久化中文消息
+- 状态转换：清理后 `agent_status` 从 `asking_user` 转为 `idle`（而非 `timeout`），简化状态机
+- 超时阈值默认 24h，与 D-084（HITL 锁 TTL 24h + buffer）一致
+
+---
+
+## D-124: Conversation 同步优化（updated_at 广播）
+
+### 决策
+
+Conversation 的 `updated_at` 字段在每次状态变更时由数据库自动更新（GORM `UpdatedAt`）。`SendConversationUpdate` 广播时在 payload 中包含 `updated_at`（Unix 秒级时间戳）。客户端收到 conversation update 通知后，比较 `payload.updated_at` 与本地缓存的 `updated_at`：若 payload 时间戳小于等于本地则跳过 `get_conversation` RPC，若大于本地或本地无缓存则执行拉取。
+
+服务端变更：`UpdateAgentStatus` / `ClearAgentStatus` 返回 `(time.Time, error)` 供调用方获取最新时间戳。
+
+### 原因
+
+1. **减少不必要的 RPC**：同一 Conversation 的状态可能频繁更新（如 agent_status 从 thinking → tool_calling → generating），每次 update 都触发 `get_conversation` 拉取是浪费。通过 `updated_at` 比较，客户端可以判断本地缓存是否已是最新
+2. **与 D-118 互补**：D-118 定义了 Pull-on-Notification 模式（Update 事件为轻量通知，客户端拉取 Conversation 获取最新状态）。D-124 在此基础上优化拉取决策——不是每次都拉，而是基于时间戳判断是否需要拉
+3. **向后兼容**：旧客户端忽略 `updated_at` 字段，仍按 D-118 模式执行拉取；旧服务端不提供 `updated_at` 时，客户端执行 RPC
+
+### 实现
+
+```go
+// 数据库层：Conversation.updated_at 由 GORM 自动维护（UpdatedAt）
+
+// 广播层：SendConversationUpdate payload 新增 updated_at
+type ConversationUpdatePayload struct {
+    ConversationID string `json:"conversation_id"`
+    UpdatedAt      int64  `json:"updated_at,omitempty"` // Unix 秒级时间戳，omitempty 向后兼容
+}
+
+// 服务端：UpdateAgentStatus / ClearAgentStatus 返回最新时间戳
+func (s *ConversationStore) UpdateAgentStatus(ctx context.Context, convID string, status string) (time.Time, error) {
+    result := s.db.WithContext(ctx).
+        Model(&model.Conversation{}).
+        Where("id = ?", convID).
+        Update("agent_status", status)
+    // 查询更新后的 updated_at
+    var conv model.Conversation
+    s.db.WithContext(ctx).Select("updated_at").Where("id = ?", convID).First(&conv)
+    return conv.UpdatedAt, result.Error
+}
+
+// 客户端：比较 updated_at 决定是否拉取
+func (c *SyncManager) handleConversationUpdate(payload *ConversationUpdatePayload) {
+    if payload.UpdatedAt > 0 {
+        localConv := c.conversationCache.Get(payload.ConversationID)
+        if localConv != nil && payload.UpdatedAt <= localConv.UpdatedAt.Unix() {
+            return // 本地已是最新（小于等于），跳过拉取
+        }
+    }
+    // 执行 get_conversation RPC
+    c.fetchConversation(payload.ConversationID)
+}
+```
+
+### 约束
+
+- `updated_at` 为 Unix 秒级时间戳（`int64`），使用 `omitempty` 向后兼容
+- 旧客户端不识别 `updated_at` 字段时，按 D-118 模式执行拉取
+- 旧服务端不提供 `updated_at` 时（值为 0 或缺失），客户端执行拉取
+- `UpdateAgentStatus` / `ClearAgentStatus` 返回 `(time.Time, error)`，调用方将 `time.Time` 转为 Unix 秒级时间戳填入 payload
+- 时间戳精度为秒级，同一秒内的多次更新可能产生相同时间戳（客户端缓存 `updated_at` 比较时仍能正确判断）

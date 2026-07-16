@@ -230,12 +230,19 @@ func (bh *BroadcastHelper) SendAgentTimeout(ctx context.Context, humanUserID, ag
 // (Seq=0, ephemeral). This implements the pull-on-notification pattern: the client
 // receives a conversation_id and fetches full conversation state (including
 // questions) via get_conversation RPC.
-func (bh *BroadcastHelper) SendConversationUpdate(ctx context.Context, humanUserID, conversationID string) {
+//
+// The updatedAt parameter is included in the payload as "updated_at" (Unix seconds)
+// when non-zero, allowing clients to detect stale updates (D-124).
+func (bh *BroadcastHelper) SendConversationUpdate(ctx context.Context, humanUserID, conversationID string, updatedAt time.Time) {
 	_ = ctx // reserved for future cancellation
-	payload, err := json.Marshal(map[string]string{
+	payloadMap := map[string]any{
 		"conversation_id": conversationID,
 		"action":          "update",
-	})
+	}
+	if !updatedAt.IsZero() {
+		payloadMap["updated_at"] = updatedAt.Unix()
+	}
+	payload, err := json.Marshal(payloadMap)
 	if err != nil {
 		bh.logger.Error("broadcast: marshal conversation update payload failed", "error", err)
 		return

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 	"github.com/stretchr/testify/assert"
@@ -384,4 +385,59 @@ func TestSendStreamUpdate_UnicodeAndSpecialChars(t *testing.T) {
 	var payload StreamingPayload
 	require.NoError(t, json.Unmarshal(mock.calls[0].updates.Updates[0].Payload, &payload))
 	assert.Equal(t, text, payload.Text)
+}
+
+// ---------------------------------------------------------------------------
+// C1-C2: SendConversationUpdate — updated_at field (D-124)
+// ---------------------------------------------------------------------------
+
+// TestSendConversationUpdate_IncludesUpdatedAt verifies that when updatedAt is
+// non-zero, the broadcast payload includes the "updated_at" field as a Unix
+// seconds timestamp (D-124).
+func TestSendConversationUpdate_IncludesUpdatedAt(t *testing.T) {
+	mock := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mock, noopLogger{})
+
+	ts := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	bh.SendConversationUpdate(context.Background(), "user/alice", "conv-123", ts)
+
+	require.Len(t, mock.calls, 1, "should broadcast to the human user")
+	assert.Equal(t, "user/alice", mock.calls[0].userID)
+
+	require.Len(t, mock.calls[0].updates.Updates, 1)
+	u := mock.calls[0].updates.Updates[0]
+	assert.Equal(t, protocol.UpdateTypeConversation, u.Type)
+	assert.Equal(t, uint32(0), u.Seq, "must be ephemeral (D-050)")
+
+	// Unmarshal as a map to verify JSON field presence.
+	var payloadMap map[string]any
+	require.NoError(t, json.Unmarshal(u.Payload, &payloadMap))
+
+	assert.Equal(t, "conv-123", payloadMap["conversation_id"])
+	assert.Equal(t, "update", payloadMap["action"])
+	assert.Equal(t, float64(ts.Unix()), payloadMap["updated_at"],
+		"updated_at should be present as Unix seconds")
+}
+
+// TestSendConversationUpdate_OmitsUpdatedAtWhenZero verifies that when
+// updatedAt is the zero value of time.Time, the broadcast payload does NOT
+// include the "updated_at" field (backward compatibility, D-124).
+func TestSendConversationUpdate_OmitsUpdatedAtWhenZero(t *testing.T) {
+	mock := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mock, noopLogger{})
+
+	bh.SendConversationUpdate(context.Background(), "user/alice", "conv-456", time.Time{})
+
+	require.Len(t, mock.calls, 1)
+	require.Len(t, mock.calls[0].updates.Updates, 1)
+	u := mock.calls[0].updates.Updates[0]
+
+	var payloadMap map[string]any
+	require.NoError(t, json.Unmarshal(u.Payload, &payloadMap))
+
+	assert.Equal(t, "conv-456", payloadMap["conversation_id"])
+	assert.Equal(t, "update", payloadMap["action"])
+	_, hasUpdatedAt := payloadMap["updated_at"]
+	assert.False(t, hasUpdatedAt,
+		"updated_at should be omitted when time.Time is zero (backward compat)")
 }

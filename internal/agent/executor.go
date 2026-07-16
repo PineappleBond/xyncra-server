@@ -370,8 +370,9 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 		)
 
 		// 1. Update conversation state to asking_user (D-083: failure aborts HITL).
-		if err := e.store.ConversationStore().UpdateAgentStatus(ctx, payload.ConversationID,
-			model.AgentStatusAskingUser, payload.AgentID, checkpointID); err != nil {
+		hitlUpdatedAt, err := e.store.ConversationStore().UpdateAgentStatus(ctx, payload.ConversationID,
+			model.AgentStatusAskingUser, payload.AgentID, checkpointID)
+		if err != nil {
 			return fmt.Errorf("execute agent: update agent status: %w", err)
 		}
 
@@ -395,8 +396,8 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 		partialText := fullResponse.String()
 		e.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, partialText, true)
 
-		// 4. Broadcast lightweight conversation update (pull notification pattern).
-		e.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID)
+		// 4. Broadcast lightweight conversation update (pull notification pattern, D-124).
+		e.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, hitlUpdatedAt)
 
 		// 5. Still broadcast ephemeral agent_question for online clients (backward compat, D-087).
 		e.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")

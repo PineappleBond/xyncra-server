@@ -360,6 +360,21 @@ func main() {
 	})
 	go cleaner.Run(ctx)
 
+	// Start the HITL timeout cleanup goroutine (D-123).
+	// Periodically scans conversations stuck in asking_user status and
+	// cleans up those exceeding 24h timeout, releasing locks and checkpoints.
+	hitlCleanup := agent.NewHITLCleanupTask(
+		agent.HITLCleanupConfig{},
+		dataStore.ConversationStore(),
+		dataStore.QuestionStore(),
+		checkpointStore,
+		broadcastHelper,
+		dataStore,
+		redisIdempotencyClient,
+		srv.Logger(),
+	)
+	go hitlCleanup.Run(ctx)
+
 	// ---------------------------------------------------------------
 	// Run
 	// ---------------------------------------------------------------

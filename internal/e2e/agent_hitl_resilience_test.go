@@ -101,7 +101,7 @@ func TestHITLResilience_Scenario1_SingleDevice(t *testing.T) {
 	assert.Equal(t, q.ID, questions[0].ID)
 
 	// Step 3: Update Conversation agent_status to asking_user.
-	err = env.store.ConversationStore().UpdateAgentStatus(ctx, convID,
+	_, err = env.store.ConversationStore().UpdateAgentStatus(ctx, convID,
 		model.AgentStatusAskingUser, agentUserID, checkpointID)
 	require.NoError(t, err)
 
@@ -219,7 +219,7 @@ func TestHITLResilience_Scenario3_ParallelSubAgentHITL(t *testing.T) {
 	assert.Equal(t, int64(1), pending, "1 question still pending after Q1 answer")
 
 	// Verify conversation still in asking_user state.
-	_ = env.store.ConversationStore().UpdateAgentStatus(ctx, convID,
+	_, _ = env.store.ConversationStore().UpdateAgentStatus(ctx, convID,
 		model.AgentStatusAskingUser, agentUserID, checkpointID)
 	fetchedConv, err := env.store.ConversationStore().Get(ctx, convID)
 	require.NoError(t, err)
@@ -383,7 +383,7 @@ func TestHITLResilience_Scenario4_ServerRestartDuringHITLWait(t *testing.T) {
 		"Question 2: Which option?")
 
 	// 3. Update Conversation agent_status.
-	err = env.store.ConversationStore().UpdateAgentStatus(ctx, convID,
+	_, err = env.store.ConversationStore().UpdateAgentStatus(ctx, convID,
 		model.AgentStatusAskingUser, agentUserID, checkpointID)
 	require.NoError(t, err)
 
@@ -563,7 +563,7 @@ func TestHITLResilience_Scenario7_ResumeTaskInQueueDuringRestart(t *testing.T) {
 	require.NoError(t, err)
 
 	// Update Conversation status.
-	err = env.store.ConversationStore().UpdateAgentStatus(ctx, convID,
+	_, err = env.store.ConversationStore().UpdateAgentStatus(ctx, convID,
 		model.AgentStatusAskingUser, agentUserID, checkpointID)
 	require.NoError(t, err)
 

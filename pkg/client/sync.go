@@ -43,12 +43,14 @@ type markReadPayload struct {
 }
 
 // conversationUpdatePayload is the JSON structure of a "conversation" update
-// emitted by delete_conversation and restore_conversation (D-013, D-015). The
-// server does not send a full model.Conversation; it only carries the
-// conversation ID and the action performed.
+// emitted by delete_conversation, restore_conversation (D-013, D-015), and the
+// lightweight "update" action broadcast by SendConversationUpdate (D-118, D-124).
+// UpdatedAt carries the server-side updated_at as Unix seconds so the client
+// can decide whether to pull (D-124).
 type conversationUpdatePayload struct {
 	ConversationID string `json:"conversation_id"`
-	Action         string `json:"action"` // "delete" or "restore"
+	Action         string `json:"action"` // "delete", "restore", "update", or "" (legacy create)
+	UpdatedAt      int64  `json:"updated_at,omitempty"`
 }
 
 // createConversationUpdatePayload is the JSON structure of a "create" action
@@ -210,7 +212,14 @@ func (sm *syncManager) Stop() {
 func (sm *syncManager) ApplyUpdate(ctx context.Context, update *protocol.PackageDataUpdate) error {
 	// 0. Ephemeral updates (Seq == 0) bypass seq continuity, dedup, and persistence.
 	if update.Seq == 0 {
-		sm.notifyHandler(ctx, update)
+		// D-124: Conversation "update" actions carry updated_at and trigger a
+		// conditional pull from the server. Other ephemeral types go straight
+		// to the handler.
+		if update.Type == protocol.UpdateTypeConversation {
+			sm.handleEphemeralConversationUpdate(ctx, update)
+		} else {
+			sm.notifyHandler(ctx, update)
+		}
 		return nil
 	}
 
@@ -394,6 +403,12 @@ func (sm *syncManager) handleConversationTx(ctx context.Context, tx *gorm.DB, pa
 		return sm.handleConversationRestoreTx(ctx, tx, peek.ConversationID)
 	case "create":
 		return sm.handleConversationCreateTx(ctx, tx, payload)
+	case "update":
+		// D-124: "update" action normally arrives as ephemeral (Seq=0) and is
+		// handled by handleEphemeralConversationUpdate. If it arrives as
+		// non-ephemeral (defensive), apply the same updated_at comparison
+		// logic and fetch if stale.
+		return sm.handleConversationUpdateTx(ctx, tx, peek.ConversationID, peek.UpdatedAt)
 	case "":
 		// No action field — treat as a full conversation record (backward
 		// compatibility with legacy create events that omit the action).
@@ -491,6 +506,33 @@ func (sm *syncManager) handleConversationUpsertTx(ctx context.Context, tx *gorm.
 	return nil
 }
 
+// handleConversationUpdateTx processes an "update" action for a conversation
+// within the given transaction (D-124). It compares the payload's updated_at
+// with the local conversation's UpdatedAt and skips the RPC if the local cache
+// is already up-to-date. This is the non-ephemeral counterpart to
+// handleEphemeralConversationUpdate's "update" branch.
+//
+// If updated_at is 0 (old server), the RPC is always executed for backward
+// compatibility.
+func (sm *syncManager) handleConversationUpdateTx(ctx context.Context, tx *gorm.DB, convID string, updatedAt int64) error {
+	// D-124: Skip RPC if local cache is up-to-date.
+	if updatedAt > 0 {
+		localConv, err := sm.db.Conversations.Get(ctx, convID)
+		if err == nil && localConv != nil && updatedAt <= localConv.UpdatedAt.Unix() {
+			sm.logger.Debug("skipping conversation update — local cache is current",
+				"conversation_id", convID,
+				"payload_updated_at", updatedAt,
+				"local_updated_at", localConv.UpdatedAt.Unix())
+			return nil
+		}
+		// err != nil (ErrNotFound) or localConv == nil → first fetch.
+		// updatedAt > localConv.UpdatedAt → stale cache.
+	}
+
+	// Local cache is stale or missing — fetch from server and upsert.
+	return sm.fetchAndUpsertConversationTx(ctx, tx, convID)
+}
+
 // ---------------------------------------------------------------------------
 // Post-commit handler notifications
 // ---------------------------------------------------------------------------
@@ -567,6 +609,91 @@ func (sm *syncManager) notifyHandler(ctx context.Context, update *protocol.Packa
 		}
 	case protocol.UpdateTypeGap:
 		_ = sm.handler.OnGap(ctx, update.Seq)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Ephemeral conversation update (D-118 pull-on-notification, D-124 optimization)
+// ---------------------------------------------------------------------------
+
+// handleEphemeralConversationUpdate processes an ephemeral (Seq=0) conversation
+// update. For the "update" action it implements the pull-on-notification pattern
+// (D-118) with the D-124 optimisation: compare the payload's updated_at against
+// the local conversation's UpdatedAt and skip the get_conversation RPC when the
+// local cache is already up-to-date.
+//
+// For non-"update" actions (delete, restore, create, legacy) it falls through
+// to the standard handler notification path.
+func (sm *syncManager) handleEphemeralConversationUpdate(ctx context.Context, update *protocol.PackageDataUpdate) {
+	var peek conversationUpdatePayload
+	if err := json.Unmarshal(update.Payload, &peek); err != nil {
+		sm.logger.Error("unmarshal ephemeral conversation update", "error", err)
+		return
+	}
+
+	// Only the "update" action uses the pull-on-notification pattern with
+	// D-124 timestamp comparison. Other actions fall through to the standard
+	// handler notification path.
+	if peek.Action != "update" {
+		sm.notifyHandler(ctx, update)
+		return
+	}
+
+	// D-124: If updated_at is present and the local cache is up-to-date, skip
+	// the RPC. updated_at == 0 means old server — always pull for backward
+	// compatibility.
+	if peek.UpdatedAt > 0 {
+		localConv, err := sm.db.Conversations.Get(ctx, peek.ConversationID)
+		if err == nil && localConv != nil && peek.UpdatedAt <= localConv.UpdatedAt.Unix() {
+			sm.logger.Debug("skipping conversation update — local cache is current",
+				"conversation_id", peek.ConversationID,
+				"payload_updated_at", peek.UpdatedAt,
+				"local_updated_at", localConv.UpdatedAt.Unix())
+			// Notify handler with local data (already up-to-date).
+			if sm.handler != nil {
+				_ = sm.handler.OnConversation(ctx, localConv)
+			}
+			return
+		}
+		// err != nil (ErrNotFound) or localConv == nil → first fetch, proceed.
+		// peek.UpdatedAt > localConv.UpdatedAt → stale cache, proceed.
+	}
+
+	// Local cache is stale or missing — fetch full conversation from server.
+	data, err := sm.rpcFn(ctx, "get_conversation", map[string]any{
+		"conversation_id": peek.ConversationID,
+	})
+	if err != nil {
+		sm.logger.Error("fetch conversation for update notification",
+			"error", err, "conversation_id", peek.ConversationID)
+		// Fall back to notifying handler with minimal data (D-118 degraded).
+		sm.notifyHandler(ctx, update)
+		return
+	}
+
+	var result struct {
+		Conversation *model.Conversation `json:"conversation"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		sm.logger.Error("unmarshal get_conversation response", "error", err)
+		sm.notifyHandler(ctx, update)
+		return
+	}
+	if result.Conversation == nil {
+		sm.logger.Error("get_conversation returned nil conversation",
+			"conversation_id", peek.ConversationID)
+		sm.notifyHandler(ctx, update)
+		return
+	}
+
+	// Upsert into local DB (best-effort; log on failure).
+	if err := sm.db.Conversations.Upsert(ctx, result.Conversation); err != nil {
+		sm.logger.Error("upsert fetched conversation",
+			"error", err, "conversation_id", peek.ConversationID)
+	}
+
+	if sm.handler != nil {
+		_ = sm.handler.OnConversation(ctx, result.Conversation)
 	}
 }
 

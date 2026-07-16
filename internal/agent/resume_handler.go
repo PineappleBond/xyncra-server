@@ -370,8 +370,9 @@ func NewAgentResumeHandler(
 		// 10. Check for another interrupt (multi-turn HITL).
 		if info, ok := <-interruptCh; ok && info != nil {
 			// Update conversation state to asking_user (D-083).
-			if err := executor.store.ConversationStore().UpdateAgentStatus(ctx, payload.ConversationID,
-				model.AgentStatusAskingUser, payload.AgentID, payload.CheckpointID); err != nil {
+			resumeHitlUpdatedAt, err := executor.store.ConversationStore().UpdateAgentStatus(ctx, payload.ConversationID,
+				model.AgentStatusAskingUser, payload.AgentID, payload.CheckpointID)
+			if err != nil {
 				releaseLock()
 				return fmt.Errorf("agent resume: update agent status: %w", err)
 			}
@@ -393,8 +394,8 @@ func NewAgentResumeHandler(
 				}
 			}
 
-			// Broadcast conversation update (pull notification pattern).
-			executor.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID)
+			// Broadcast conversation update (pull notification pattern, D-124).
+			executor.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, resumeHitlUpdatedAt)
 
 			executor.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")
 			executor.broadcaster.SendAgentQuestion(ctx, payload.SenderID, payload.AgentID, payload.ConversationID,
@@ -470,7 +471,7 @@ func NewAgentResumeHandler(
 		// the resume result.
 
 		// 1. Clear Conversation agent status (reset to idle).
-		if err := executor.store.ConversationStore().ClearAgentStatus(ctx, payload.ConversationID); err != nil {
+		if _, err := executor.store.ConversationStore().ClearAgentStatus(ctx, payload.ConversationID); err != nil {
 			logger.Error("agent resume: clear conversation status failed (non-fatal)",
 				"conversation_id", payload.ConversationID, "error", err)
 		}
@@ -496,7 +497,7 @@ func NewAgentResumeHandler(
 func cleanupAfterResumeFailure(ctx context.Context, executor *AgentExecutor,
 	conversationID, checkpointID string, logger Logger) {
 	// 1. Clear agent status (reset to idle).
-	if err := executor.store.ConversationStore().ClearAgentStatus(ctx, conversationID); err != nil {
+	if _, err := executor.store.ConversationStore().ClearAgentStatus(ctx, conversationID); err != nil {
 		logger.Error("agent resume: clear status after failure (non-fatal)",
 			"conversation_id", conversationID, "error", err)
 	}

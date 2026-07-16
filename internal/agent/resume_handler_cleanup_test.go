@@ -330,8 +330,9 @@ func TestCleanupAfterResumeFailure_CallsAllSteps(t *testing.T) {
 	ctx := context.Background()
 	convID := "conv-cleanup-1"
 	createTestConv(t, testStore, convID)
-	require.NoError(t, testStore.Conversations.UpdateAgentStatus(ctx, convID,
-		model.AgentStatusAskingUser, "agent/bot", "cp-cleanup"))
+	_, err := testStore.Conversations.UpdateAgentStatus(ctx, convID,
+		model.AgentStatusAskingUser, "agent/bot", "cp-cleanup")
+	require.NoError(t, err)
 
 	// Seed a Question for the checkpoint.
 	questionStore := testStore.Questions
@@ -394,8 +395,9 @@ func TestCleanupAfterResumeFailure_NilOptionalStores(t *testing.T) {
 	ctx := context.Background()
 	convID := "conv-nil-opt"
 	createTestConv(t, testStore, convID)
-	require.NoError(t, testStore.Conversations.UpdateAgentStatus(ctx, convID,
-		model.AgentStatusAskingUser, "agent/bot", "cp-nil"))
+	_, err := testStore.Conversations.UpdateAgentStatus(ctx, convID,
+		model.AgentStatusAskingUser, "agent/bot", "cp-nil")
+	require.NoError(t, err)
 
 	executor := &AgentExecutor{
 		store:           testStore,

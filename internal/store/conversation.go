@@ -280,44 +280,68 @@ func (cs *ConversationStore) UpdateLastRead(ctx context.Context, convID, userID 
 
 // UpdateAgentStatus updates conversation agent state machine fields.
 // This is called when the agent transitions to a new status (e.g., idle → thinking → asking_user).
-// The agent_last_activity field is automatically set to the current time.
-func (cs *ConversationStore) UpdateAgentStatus(ctx context.Context, conversationID, agentStatus, agentID, checkpointID string) error {
+// The agent_last_activity and updated_at fields are automatically set to the current time.
+// Returns the timestamp used for the update so callers can use it for broadcasts.
+func (cs *ConversationStore) UpdateAgentStatus(ctx context.Context, conversationID, agentStatus, agentID, checkpointID string) (time.Time, error) {
+	now := time.Now()
 	result := cs.db.WithContext(ctx).Model(&model.Conversation{}).
 		Where("id = ?", conversationID).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"agent_status":        agentStatus,
 			"agent_id":            agentID,
 			"checkpoint_id":       checkpointID,
-			"agent_last_activity": time.Now(),
+			"agent_last_activity": now,
+			"updated_at":          now,
 		})
 	if result.Error != nil {
-		return classifyError(fmt.Errorf("store: update agent status: %w", result.Error))
+		return time.Time{}, classifyError(fmt.Errorf("store: update agent status: %w", result.Error))
 	}
 	if result.RowsAffected == 0 {
-		return ErrNotFound
+		return time.Time{}, ErrNotFound
 	}
-	return nil
+	return now, nil
 }
 
 // ClearAgentStatus resets conversation agent state to idle.
 // This is called when the agent completes execution or when HITL is resolved.
 // It clears agent_id, checkpoint_id and resets agent_status to "idle".
-func (cs *ConversationStore) ClearAgentStatus(ctx context.Context, conversationID string) error {
+// Returns the timestamp used for the update so callers can use it for broadcasts.
+func (cs *ConversationStore) ClearAgentStatus(ctx context.Context, conversationID string) (time.Time, error) {
+	now := time.Now()
 	result := cs.db.WithContext(ctx).Model(&model.Conversation{}).
 		Where("id = ?", conversationID).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"agent_status":        model.AgentStatusIdle,
 			"agent_id":            "",
 			"checkpoint_id":       "",
-			"agent_last_activity": time.Now(),
+			"agent_last_activity": now,
+			"updated_at":          now,
 		})
 	if result.Error != nil {
-		return classifyError(fmt.Errorf("store: clear agent status: %w", result.Error))
+		return time.Time{}, classifyError(fmt.Errorf("store: clear agent status: %w", result.Error))
 	}
 	if result.RowsAffected == 0 {
-		return ErrNotFound
+		return time.Time{}, ErrNotFound
 	}
-	return nil
+	return now, nil
+}
+
+// ListStaleHITLConversations returns conversations stuck in asking_user status
+// with updated_at older than maxAge. Results are limited to the given count.
+// Used by the HITL timeout cleanup task (D-123).
+func (cs *ConversationStore) ListStaleHITLConversations(ctx context.Context, maxAge time.Duration, limit int) ([]*model.Conversation, error) {
+	cutoff := time.Now().Add(-maxAge)
+	var conversations []*model.Conversation
+	err := cs.db.WithContext(ctx).
+		Where("agent_status = ? AND agent_last_activity < ?",
+			model.AgentStatusAskingUser, cutoff).
+		Order("agent_last_activity ASC").
+		Limit(limit).
+		Find(&conversations).Error
+	if err != nil {
+		return nil, classifyError(fmt.Errorf("store: list stale HITL conversations: %w", err))
+	}
+	return conversations, nil
 }
 
 // escapeLikePattern escapes special LIKE characters (%, _, |) in the input so
