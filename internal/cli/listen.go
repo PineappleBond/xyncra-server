@@ -476,13 +476,23 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 			if err := db.Conversations.Restore(ctx, params.ConversationID); err != nil {
 				if errors.Is(err, store.ErrNotFound) {
 					// Local record doesn't exist (e.g. initiator's DB). Fetch
-					// from server and upsert so the local DB is consistent.
-					fetchResult, fetchErr := xc.GetConversation(ctx, params.ConversationID)
+					// from server via direct RPC and upsert so the local DB is
+					// consistent. We bypass xc.GetConversation because it now
+					// reads from the same local DB (D-035), which just returned
+					// ErrNotFound. A direct RPC is needed to reach the server.
+					data, fetchErr := xc.Call(ctx, "get_conversation", map[string]any{
+						"conversation_id": params.ConversationID,
+					})
 					if fetchErr != nil {
 						fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to fetch conversation after local restore miss: %v\n", fetchErr)
-					} else if fetchResult != nil && fetchResult.Conversation != nil {
-						if upsertErr := db.Conversations.Upsert(ctx, fetchResult.Conversation); upsertErr != nil {
-							fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to upsert fetched conversation locally: %v\n", upsertErr)
+					} else {
+						var fetchResult client.GetConversationResult
+						if unmarshalErr := json.Unmarshal(data, &fetchResult); unmarshalErr != nil {
+							fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to unmarshal fetched conversation: %v\n", unmarshalErr)
+						} else if fetchResult.Conversation != nil {
+							if upsertErr := db.Conversations.Upsert(ctx, fetchResult.Conversation); upsertErr != nil {
+								fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to upsert fetched conversation locally: %v\n", upsertErr)
+							}
 						}
 					}
 				} else {
@@ -631,6 +641,22 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
 		}
 		return NewIPCResponse(req.ID, json.RawMessage(data))
+	})
+
+	// reload_agents forwards the reload request to the server via WebSocket (D-076).
+	s.Register("reload_agents", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
+		data, err := xc.Call(ctx, "reload_agents", nil)
+		if err != nil {
+			if ce, ok := errors.AsType[*client.ClientError](err); ok {
+				return NewIPCErrorResponse(req.ID, int(ce.Code), ce.Message), nil
+			}
+			return NewIPCErrorResponse(req.ID, -300, err.Error()), nil
+		}
+		var result map[string]int
+		if err := json.Unmarshal(data, &result); err != nil {
+			return NewIPCErrorResponse(req.ID, -300, fmt.Sprintf("unmarshal: %v", err)), nil
+		}
+		return NewIPCResponse(req.ID, result)
 	})
 }
 

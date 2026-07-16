@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -524,4 +525,128 @@ func TestMessageStore_ListRecentByConversation_Empty(t *testing.T) {
 	msgs, err := db.Messages.ListRecentByConversation(ctx, convID, 10)
 	require.NoError(t, err)
 	assert.Empty(t, msgs)
+}
+
+// ---------------------------------------------------------------------------
+// Upsert tests
+// ---------------------------------------------------------------------------
+
+func TestMessageStore_Upsert_Create(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	convID := uid()
+	require.NoError(t, db.Conversations.Create(ctx, newTestConv(convID, uid(), uid(), "direct", "Test")))
+
+	clientMsgID := uid()
+	msg := newTestMsg(uid(), clientMsgID, convID, 1, "sender1", "Hello")
+
+	// Upsert on a non-existing record should create it.
+	err := db.Messages.Upsert(ctx, msg)
+	require.NoError(t, err)
+
+	got, err := db.Messages.Get(ctx, msg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, msg.ID, got.ID)
+	assert.Equal(t, clientMsgID, got.ClientMessageID)
+	assert.Equal(t, "sender1", got.SenderID)
+	assert.Equal(t, "Hello", got.Content)
+}
+
+func TestMessageStore_Upsert_Update(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	convID := uid()
+	require.NoError(t, db.Conversations.Create(ctx, newTestConv(convID, uid(), uid(), "direct", "Test")))
+
+	clientMsgID := uid()
+	senderID := "sender1"
+	msg := newTestMsg(uid(), clientMsgID, convID, 1, senderID, "Original content")
+	require.NoError(t, db.Messages.Create(ctx, msg))
+
+	// Upsert on an existing record should update it.
+	msg.Content = "Updated content"
+	msg.Status = "delivered"
+	err := db.Messages.Upsert(ctx, msg)
+	require.NoError(t, err)
+
+	got, err := db.Messages.Get(ctx, msg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Updated content", got.Content)
+	assert.Equal(t, "delivered", got.Status)
+}
+
+func TestMessageStore_Upsert_TOCTOU(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	convID := uid()
+	require.NoError(t, db.Conversations.Create(ctx, newTestConv(convID, uid(), uid(), "direct", "Test")))
+
+	clientMsgID := uid()
+	senderID := "sender1"
+	msgID := uid() // Use the same ID for both messages
+
+	// Concurrent inserts with the same (client_message_id, sender_id) and same ID.
+	// This simulates the TOCTOU race where both goroutines SELECT, find nothing,
+	// then both INSERT. One succeeds, the other hits duplicate key and retries
+	// as UPDATE via updateByCompositeKey.
+	msg1 := newTestMsg(msgID, clientMsgID, convID, 1, senderID, "First attempt")
+	msg2 := newTestMsg(msgID, clientMsgID, convID, 1, senderID, "Second attempt")
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errs[0] = db.Messages.Upsert(ctx, msg1)
+	}()
+	go func() {
+		defer wg.Done()
+		errs[1] = db.Messages.Upsert(ctx, msg2)
+	}()
+
+	wg.Wait()
+
+	// Both should succeed (TOCTOU retry handles the race).
+	assert.NoError(t, errs[0])
+	assert.NoError(t, errs[1])
+
+	// Verify only one record exists with the composite key.
+	got, err := db.Messages.GetByClientMessageID(ctx, clientMsgID, senderID)
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+	// Content should be whichever write won — either is acceptable.
+	assert.Contains(t, []string{"First attempt", "Second attempt"}, got.Content)
+}
+
+func TestMessageStore_Upsert_CompositeKey(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	convID := uid()
+	require.NoError(t, db.Conversations.Create(ctx, newTestConv(convID, uid(), uid(), "direct", "Test")))
+
+	clientMsgID := uid()
+	// Same client_message_id, different sender_ids → should NOT conflict.
+	msg1 := newTestMsg(uid(), clientMsgID, convID, 1, "senderA", "From A")
+	msg2 := newTestMsg(uid(), clientMsgID, convID, 2, "senderB", "From B")
+
+	require.NoError(t, db.Messages.Upsert(ctx, msg1))
+	require.NoError(t, db.Messages.Upsert(ctx, msg2))
+
+	// Both records should exist.
+	got1, err := db.Messages.GetByClientMessageID(ctx, clientMsgID, "senderA")
+	require.NoError(t, err)
+	assert.Equal(t, "From A", got1.Content)
+
+	got2, err := db.Messages.GetByClientMessageID(ctx, clientMsgID, "senderB")
+	require.NoError(t, err)
+	assert.Equal(t, "From B", got2.Content)
 }

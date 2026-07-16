@@ -24,8 +24,8 @@
 | D-032 | CLI IPC Fallback 策略 | IPC 优先，失败 fallback 到 WebSocket 短连接 |
 | D-033 | CLI 设备 ID 生成 | 主机名 SHA256 前 8 位十六进制，匿名化 |
 | D-034 | CLI 环境变量命名规范 | XYNCRA_ 前缀，flag > 环境变量 > 默认值 |
-| D-035 | CLI 查询命令使用本地数据库读取 | list-conversations/get-conversation/get-messages/search-messages 直接读本地 SQLite |
-| D-036 | 部分 CLI 命令为 IPC-only | sync-updates（状态一致性）、set-typing/stream-text（瞬时操作，daemon 离线无意义）、agent-resume（HITL 状态在 daemon 进程） |
+| D-035 | CLI 查询命令使用本地数据库读取 | list-conversations/get-conversation/get-messages/search-messages 直接读本地 SQLite。此决策同样适用于 XyncraClient 库 API 层。`ListConversations()`、`GetConversation()`、`GetMessages()`、`SearchMessages()` 四个方法从本地 SQLite 读取，与 CLI 命令行为一致 |
+| D-036 | 部分 CLI 命令为 IPC-only | sync-updates（状态一致性）、set-typing/stream-text（瞬时操作，daemon 离线无意义）、agent-resume（HITL 状态在 daemon 进程）、reload-agents（daemon 管理 agent 配置状态，daemon 离线时 reload 无意义） |
 | D-037 | CLI flag 不遮蔽全局 flag | create-conversation 使用 --peer-id 而非 --user-id |
 | D-038 | CLI 消息 ID flag 类型区分 | delete-message 用 --message-id (string UUID)，mark-as-read 用 --message-id (uint32) |
 | D-039 | CLI kill 命令行为规范 | 默认 SIGTERM，--force 升级 SIGKILL，进程退出后清理文件 |
@@ -107,6 +107,7 @@
 | D-123 | HITL 超时自动清理 | 后台 goroutine 定期扫描 `asking_user` 状态会话，清理超过 24h 未响应的 HITL 会话，释放锁和 checkpoint |
 | D-124 | Conversation 同步优化（updated_at 广播） | 广播时携带 `updated_at` 时间戳，客户端比较后决定是否拉取，减少不必要的 RPC |
 | D-125 | 移除冗余 HITL Ephemeral 事件 | 消除广播冗余，HITL 通知完全由 conversation update 承载 |
+| D-126 | 消息按需拉取（FetchMoreMessages） | 当本地消息数据不足时，FetchMoreMessages() 从服务器 RPC 拉取更多消息并写入本地 DB，与 Conversation 的 Pull-on-Notification（D-118）互补 |
 
 ---
 
@@ -121,6 +122,7 @@
 
 | 日期       | 版本 | 变更                                                                                                 |
 | ---------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| 2026-07-16 | v3.23 | D-035（扩展至 XyncraClient 库 API 层）、D-036（新增 reload-agents IPC-only）、D-126（FetchMoreMessages 消息按需拉取） |
 | 2026-07-16 | v3.22 | D-125（移除冗余 HITL Ephemeral 事件 agent_question/agent_checkpoint_created）；更新 D-087（缩减为 2 种类型）、D-120（删除向后兼容约束） |
 | 2026-07-16 | v3.21 | 新增 D-123（HITL 超时自动清理）、D-124（Conversation 同步优化 - updated_at 广播） |
 | 2026-07-16 | v3.20 | 新增 D-121（两阶段幂等性）、D-122（Resume 永久失败清理策略） |

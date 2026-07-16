@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
+	"github.com/PineappleBond/xyncra-server/pkg/store/model"
 )
 
 // ---------------------------------------------------------------------------
@@ -155,6 +156,708 @@ func TestStop_Idempotent(t *testing.T) {
 	c.Stop()
 	c.Stop()
 	c.Close()
+}
+
+// ---------------------------------------------------------------------------
+// Local DB query methods (D-035)
+// ---------------------------------------------------------------------------
+
+// TestListConversations_LocalDB verifies that ListConversations reads from the
+// local database and returns the correct conversations.
+func TestListConversations_LocalDB(t *testing.T) {
+	db := newTestStore(t)
+
+	// Seed conversations directly into the local DB.
+	conv1 := &model.Conversation{
+		ID:            "conv-1",
+		UserID1:       "test-user",
+		UserID2:       "peer1",
+		Title:         "Chat 1",
+		LastMessageAt: time.Now().Add(-1 * time.Hour),
+	}
+	conv2 := &model.Conversation{
+		ID:            "conv-2",
+		UserID1:       "test-user",
+		UserID2:       "peer2",
+		Title:         "Chat 2",
+		LastMessageAt: time.Now(),
+	}
+	if err := db.Conversations.Create(context.Background(), conv1); err != nil {
+		t.Fatalf("seed conv1: %v", err)
+	}
+	if err := db.Conversations.Create(context.Background(), conv2); err != nil {
+		t.Fatalf("seed conv2: %v", err)
+	}
+
+	c, err := New(
+		WithServerURL("ws://localhost:8080/ws"),
+		WithUserID("test-user"),
+		WithDB(db),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Stop()
+
+	result, err := c.ListConversations(context.Background(), 0, 10)
+	if err != nil {
+		t.Fatalf("ListConversations() error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(result.Conversations) != 2 {
+		t.Errorf("expected 2 conversations, got %d", len(result.Conversations))
+	}
+	// Verify ordering by LastMessageAt DESC.
+	if result.Conversations[0].ID != "conv-2" {
+		t.Errorf("expected first conversation to be conv-2 (most recent), got %s", result.Conversations[0].ID)
+	}
+}
+
+// TestListConversations_Empty verifies that ListConversations returns an empty
+// list when the local database has no conversations.
+func TestListConversations_Empty(t *testing.T) {
+	db := newTestStore(t)
+
+	c, err := New(
+		WithServerURL("ws://localhost:8080/ws"),
+		WithUserID("test-user"),
+		WithDB(db),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Stop()
+
+	result, err := c.ListConversations(context.Background(), 0, 10)
+	if err != nil {
+		t.Fatalf("ListConversations() error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(result.Conversations) != 0 {
+		t.Errorf("expected 0 conversations, got %d", len(result.Conversations))
+	}
+	if result.HasMore {
+		t.Error("expected HasMore=false for empty list")
+	}
+}
+
+// TestListConversations_HasMore verifies that ListConversations correctly
+// detects when there are more conversations available (limit+1 probe).
+func TestListConversations_HasMore(t *testing.T) {
+	db := newTestStore(t)
+
+	// Seed 3 conversations.
+	for i := 0; i < 3; i++ {
+		conv := &model.Conversation{
+			ID:            fmt.Sprintf("conv-%d", i),
+			UserID1:       "test-user",
+			UserID2:       fmt.Sprintf("peer%d", i),
+			LastMessageAt: time.Now().Add(time.Duration(i) * time.Second),
+		}
+		if err := db.Conversations.Create(context.Background(), conv); err != nil {
+			t.Fatalf("seed conv: %v", err)
+		}
+	}
+
+	c, err := New(
+		WithServerURL("ws://localhost:8080/ws"),
+		WithUserID("test-user"),
+		WithDB(db),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Stop()
+
+	// Query with limit=2, should return 2 and HasMore=true.
+	result, err := c.ListConversations(context.Background(), 0, 2)
+	if err != nil {
+		t.Fatalf("ListConversations() error: %v", err)
+	}
+	if len(result.Conversations) != 2 {
+		t.Errorf("expected 2 conversations, got %d", len(result.Conversations))
+	}
+	if !result.HasMore {
+		t.Error("expected HasMore=true")
+	}
+}
+
+// TestGetConversation_LocalDB verifies that GetConversation reads from the local
+// database and returns the conversation with unread count and questions.
+func TestGetConversation_LocalDB(t *testing.T) {
+	db := newTestStore(t)
+	ctx := context.Background()
+
+	// Seed a conversation.
+	conv := &model.Conversation{
+		ID:                 "conv-get",
+		UserID1:            "test-user",
+		UserID2:            "peer1",
+		Type:               "1-on-1",
+		Title:              "Test Chat",
+		LastReadMessageID1: 10,
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("seed conv: %v", err)
+	}
+
+	// Seed messages: 5 unread (MessageID 11..15).
+	for i := uint32(11); i <= 15; i++ {
+		msg := &model.Message{
+			ID:              fmt.Sprintf("msg-%d", i),
+			ClientMessageID: fmt.Sprintf("cid-%d", i),
+			ConversationID:  "conv-get",
+			MessageID:       i,
+			SenderID:        "peer1",
+			Content:         "hello",
+			CreatedAt:       time.Now(),
+		}
+		if err := db.Messages.Create(ctx, msg); err != nil {
+			t.Fatalf("seed msg: %v", err)
+		}
+	}
+
+	// Seed a HITL question.
+	q := &model.Question{
+		ID:             "q-1",
+		ConversationID: "conv-get",
+		CheckpointID:   "ckpt-1",
+		InterruptID:    "int-1",
+		QuestionText:   "Are you sure?",
+		Status:         "pending",
+		CreatedAt:      time.Now(),
+	}
+	if err := db.Questions.Upsert(ctx, q); err != nil {
+		t.Fatalf("seed question: %v", err)
+	}
+
+	c, err := New(
+		WithServerURL("ws://localhost:8080/ws"),
+		WithUserID("test-user"),
+		WithDB(db),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Stop()
+
+	result, err := c.GetConversation(ctx, "conv-get")
+	if err != nil {
+		t.Fatalf("GetConversation() error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Conversation.ID != "conv-get" {
+		t.Errorf("expected ID=conv-get, got %s", result.Conversation.ID)
+	}
+	if result.UnreadCount != 5 {
+		t.Errorf("expected UnreadCount=5, got %d", result.UnreadCount)
+	}
+	if len(result.Questions) != 1 {
+		t.Errorf("expected 1 question, got %d", len(result.Questions))
+	}
+	if result.Questions[0].QuestionText != "Are you sure?" {
+		t.Errorf("expected question text 'Are you sure?', got %s", result.Questions[0].QuestionText)
+	}
+}
+
+// TestGetConversation_NotFound verifies that GetConversation returns an error
+// when the conversation is not found in the local database.
+func TestGetConversation_NotFound(t *testing.T) {
+	db := newTestStore(t)
+
+	c, err := New(
+		WithServerURL("ws://localhost:8080/ws"),
+		WithUserID("test-user"),
+		WithDB(db),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Stop()
+
+	_, err = c.GetConversation(context.Background(), "nonexistent-conv")
+	if err == nil {
+		t.Fatal("expected error for nonexistent conversation, got nil")
+	}
+}
+
+// TestGetMessages_LocalDB verifies that GetMessages reads from the local
+// database and returns messages in the correct order.
+func TestGetMessages_LocalDB(t *testing.T) {
+	db := newTestStore(t)
+	ctx := context.Background()
+
+	// Seed a conversation.
+	conv := &model.Conversation{
+		ID:      "conv-msgs",
+		UserID1: "test-user",
+		UserID2: "peer1",
+		Title:   "Test",
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("seed conv: %v", err)
+	}
+
+	// Seed messages with MessageID 1..5.
+	for i := uint32(1); i <= 5; i++ {
+		msg := &model.Message{
+			ID:              fmt.Sprintf("msg-%d", i),
+			ClientMessageID: fmt.Sprintf("cid-%d", i),
+			ConversationID:  "conv-msgs",
+			MessageID:       i,
+			SenderID:        "peer1",
+			Content:         fmt.Sprintf("Message %d", i),
+			CreatedAt:       time.Now(),
+		}
+		if err := db.Messages.Create(ctx, msg); err != nil {
+			t.Fatalf("seed msg: %v", err)
+		}
+	}
+
+	c, err := New(
+		WithServerURL("ws://localhost:8080/ws"),
+		WithUserID("test-user"),
+		WithDB(db),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Stop()
+
+	result, err := c.GetMessages(ctx, "conv-msgs", 0, 10)
+	if err != nil {
+		t.Fatalf("GetMessages() error: %v", err)
+	}
+	if len(result.Messages) != 5 {
+		t.Errorf("expected 5 messages, got %d", len(result.Messages))
+	}
+	// Verify ordering by MessageID ASC.
+	if result.Messages[0].MessageID != 1 {
+		t.Errorf("expected first message MessageID=1, got %d", result.Messages[0].MessageID)
+	}
+	if result.Messages[4].MessageID != 5 {
+		t.Errorf("expected last message MessageID=5, got %d", result.Messages[4].MessageID)
+	}
+}
+
+// TestGetMessages_AfterMsgID verifies that GetMessages respects the afterMsgID
+// parameter for pagination.
+func TestGetMessages_AfterMsgID(t *testing.T) {
+	db := newTestStore(t)
+	ctx := context.Background()
+
+	conv := &model.Conversation{
+		ID:      "conv-after",
+		UserID1: "test-user",
+		UserID2: "peer1",
+		Title:   "Test",
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("seed conv: %v", err)
+	}
+
+	for i := uint32(1); i <= 5; i++ {
+		msg := &model.Message{
+			ID:              fmt.Sprintf("msg-%d", i),
+			ClientMessageID: fmt.Sprintf("cid-%d", i),
+			ConversationID:  "conv-after",
+			MessageID:       i,
+			SenderID:        "peer1",
+			Content:         fmt.Sprintf("Message %d", i),
+			CreatedAt:       time.Now(),
+		}
+		if err := db.Messages.Create(ctx, msg); err != nil {
+			t.Fatalf("seed msg: %v", err)
+		}
+	}
+
+	c, err := New(
+		WithServerURL("ws://localhost:8080/ws"),
+		WithUserID("test-user"),
+		WithDB(db),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Stop()
+
+	// Fetch messages after MessageID=3, should get 4 and 5.
+	result, err := c.GetMessages(ctx, "conv-after", 3, 10)
+	if err != nil {
+		t.Fatalf("GetMessages() error: %v", err)
+	}
+	if len(result.Messages) != 2 {
+		t.Errorf("expected 2 messages, got %d", len(result.Messages))
+	}
+	if result.Messages[0].MessageID != 4 {
+		t.Errorf("expected first message MessageID=4, got %d", result.Messages[0].MessageID)
+	}
+}
+
+// TestGetMessages_HasMore verifies that GetMessages correctly detects when
+// there are more messages available (limit+1 probe).
+func TestGetMessages_HasMore(t *testing.T) {
+	db := newTestStore(t)
+	ctx := context.Background()
+
+	conv := &model.Conversation{
+		ID:      "conv-hasmore",
+		UserID1: "test-user",
+		UserID2: "peer1",
+		Title:   "Test",
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("seed conv: %v", err)
+	}
+
+	for i := uint32(1); i <= 5; i++ {
+		msg := &model.Message{
+			ID:              fmt.Sprintf("msg-%d", i),
+			ClientMessageID: fmt.Sprintf("cid-%d", i),
+			ConversationID:  "conv-hasmore",
+			MessageID:       i,
+			SenderID:        "peer1",
+			Content:         fmt.Sprintf("Message %d", i),
+			CreatedAt:       time.Now(),
+		}
+		if err := db.Messages.Create(ctx, msg); err != nil {
+			t.Fatalf("seed msg: %v", err)
+		}
+	}
+
+	c, err := New(
+		WithServerURL("ws://localhost:8080/ws"),
+		WithUserID("test-user"),
+		WithDB(db),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Stop()
+
+	// Query with limit=3, should return 3 and HasMore=true.
+	result, err := c.GetMessages(ctx, "conv-hasmore", 0, 3)
+	if err != nil {
+		t.Fatalf("GetMessages() error: %v", err)
+	}
+	if len(result.Messages) != 3 {
+		t.Errorf("expected 3 messages, got %d", len(result.Messages))
+	}
+	if !result.HasMore {
+		t.Error("expected HasMore=true")
+	}
+}
+
+// TestSearchMessages_LocalDB verifies that SearchMessages reads from the local
+// database and returns messages in DESC order (newest first).
+func TestSearchMessages_LocalDB(t *testing.T) {
+	db := newTestStore(t)
+	ctx := context.Background()
+
+	conv := &model.Conversation{
+		ID:      "conv-search",
+		UserID1: "test-user",
+		UserID2: "peer1",
+		Title:   "Test",
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("seed conv: %v", err)
+	}
+
+	msg1 := &model.Message{
+		ID:              "msg-1",
+		ClientMessageID: "cid-1",
+		ConversationID:  "conv-search",
+		MessageID:       1,
+		SenderID:        "peer1",
+		Content:         "hello world",
+		CreatedAt:       time.Now(),
+	}
+	msg2 := &model.Message{
+		ID:              "msg-2",
+		ClientMessageID: "cid-2",
+		ConversationID:  "conv-search",
+		MessageID:       2,
+		SenderID:        "peer1",
+		Content:         "goodbye world",
+		CreatedAt:       time.Now(),
+	}
+	msg3 := &model.Message{
+		ID:              "msg-3",
+		ClientMessageID: "cid-3",
+		ConversationID:  "conv-search",
+		MessageID:       3,
+		SenderID:        "peer1",
+		Content:         "hello there",
+		CreatedAt:       time.Now(),
+	}
+	if err := db.Messages.Create(ctx, msg1); err != nil {
+		t.Fatalf("seed msg1: %v", err)
+	}
+	if err := db.Messages.Create(ctx, msg2); err != nil {
+		t.Fatalf("seed msg2: %v", err)
+	}
+	if err := db.Messages.Create(ctx, msg3); err != nil {
+		t.Fatalf("seed msg3: %v", err)
+	}
+
+	c, err := New(
+		WithServerURL("ws://localhost:8080/ws"),
+		WithUserID("test-user"),
+		WithDB(db),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Stop()
+
+	result, err := c.SearchMessages(ctx, "conv-search", "hello", 0, 10)
+	if err != nil {
+		t.Fatalf("SearchMessages() error: %v", err)
+	}
+	if len(result.Messages) != 2 {
+		t.Errorf("expected 2 messages matching 'hello', got %d", len(result.Messages))
+	}
+	// Verify DESC order: msg-3 (newest) should come before msg-1.
+	if result.Messages[0].ID != "msg-3" {
+		t.Errorf("expected first result to be msg-3 (DESC order), got %s", result.Messages[0].ID)
+	}
+	if result.Messages[1].ID != "msg-1" {
+		t.Errorf("expected second result to be msg-1, got %s", result.Messages[1].ID)
+	}
+}
+
+// TestSearchMessages_NoResult verifies that SearchMessages returns an empty
+// list when no messages match the query.
+func TestSearchMessages_NoResult(t *testing.T) {
+	db := newTestStore(t)
+	ctx := context.Background()
+
+	conv := &model.Conversation{
+		ID:      "conv-noresult",
+		UserID1: "test-user",
+		UserID2: "peer1",
+		Title:   "Test",
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("seed conv: %v", err)
+	}
+
+	msg := &model.Message{
+		ID:              "msg-1",
+		ClientMessageID: "cid-1",
+		ConversationID:  "conv-noresult",
+		MessageID:       1,
+		SenderID:        "peer1",
+		Content:         "hello world",
+		CreatedAt:       time.Now(),
+	}
+	if err := db.Messages.Create(ctx, msg); err != nil {
+		t.Fatalf("seed msg: %v", err)
+	}
+
+	c, err := New(
+		WithServerURL("ws://localhost:8080/ws"),
+		WithUserID("test-user"),
+		WithDB(db),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Stop()
+
+	result, err := c.SearchMessages(ctx, "conv-noresult", "nonexistent", 0, 10)
+	if err != nil {
+		t.Fatalf("SearchMessages() error: %v", err)
+	}
+	if len(result.Messages) != 0 {
+		t.Errorf("expected 0 messages, got %d", len(result.Messages))
+	}
+	if result.HasMore {
+		t.Error("expected HasMore=false for empty result")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FetchMoreMessages (D-126)
+// ---------------------------------------------------------------------------
+
+// TestFetchMoreMessages_Success verifies that FetchMoreMessages fetches from
+// the server via RPC, persists to local DB, and returns the results.
+func TestFetchMoreMessages_Success(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+	server.SetRPCHandler("get_messages", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		msgs := []model.Message{
+			{
+				ID:              "msg-remote-1",
+				ClientMessageID: "cid-remote-1",
+				ConversationID:  "conv-fetch",
+				MessageID:       1,
+				SenderID:        "peer1",
+				Content:         "Remote message 1",
+				CreatedAt:       time.Now(),
+			},
+			{
+				ID:              "msg-remote-2",
+				ClientMessageID: "cid-remote-2",
+				ConversationID:  "conv-fetch",
+				MessageID:       2,
+				SenderID:        "peer1",
+				Content:         "Remote message 2",
+				CreatedAt:       time.Now(),
+			},
+		}
+		return json.Marshal(GetMessagesResult{Messages: msgs, HasMore: false})
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	result, err := c.FetchMoreMessages(context.Background(), "conv-fetch", 0, 10)
+	if err != nil {
+		t.Fatalf("FetchMoreMessages() error: %v", err)
+	}
+	if len(result.Messages) != 2 {
+		t.Errorf("expected 2 messages, got %d", len(result.Messages))
+	}
+
+	// Verify messages were persisted to local DB.
+	localMsgs, err := c.db.Messages.ListByConversation(context.Background(), "conv-fetch", 0, 10)
+	if err != nil {
+		t.Fatalf("ListByConversation() error: %v", err)
+	}
+	if len(localMsgs) != 2 {
+		t.Errorf("expected 2 messages in local DB, got %d", len(localMsgs))
+	}
+}
+
+// TestFetchMoreMessages_RPCFail verifies that FetchMoreMessages returns an
+// error when the RPC call fails.
+func TestFetchMoreMessages_RPCFail(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+	server.SetRPCHandler("get_messages", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return nil, fmt.Errorf("server error")
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	_, err := c.FetchMoreMessages(context.Background(), "conv-fetch", 0, 10)
+	if err == nil {
+		t.Fatal("expected error from FetchMoreMessages, got nil")
+	}
+}
+
+// TestFetchMoreMessages_UpsertConflict verifies that FetchMoreMessages handles
+// duplicate key errors gracefully (best-effort persistence).
+func TestFetchMoreMessages_UpsertConflict(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+	server.SetRPCHandler("get_messages", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		msgs := []model.Message{
+			{
+				ID:              "msg-existing",
+				ClientMessageID: "cid-existing",
+				ConversationID:  "conv-conflict",
+				MessageID:       1,
+				SenderID:        "peer1",
+				Content:         "Existing message",
+				CreatedAt:       time.Now(),
+			},
+		}
+		return json.Marshal(GetMessagesResult{Messages: msgs, HasMore: false})
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Pre-seed the message in local DB.
+	existingMsg := &model.Message{
+		ID:              "msg-existing",
+		ClientMessageID: "cid-existing",
+		ConversationID:  "conv-conflict",
+		MessageID:       1,
+		SenderID:        "peer1",
+		Content:         "Existing message",
+		CreatedAt:       time.Now(),
+	}
+	if err := c.db.Messages.Create(context.Background(), existingMsg); err != nil {
+		t.Fatalf("seed msg: %v", err)
+	}
+
+	// FetchMoreMessages should succeed even though the message already exists.
+	result, err := c.FetchMoreMessages(context.Background(), "conv-conflict", 0, 10)
+	if err != nil {
+		t.Fatalf("FetchMoreMessages() error: %v", err)
+	}
+	if len(result.Messages) != 1 {
+		t.Errorf("expected 1 message, got %d", len(result.Messages))
+	}
+}
+
+// TestFetchMoreMessages_EmptyResult verifies that FetchMoreMessages handles
+// an empty result from the server correctly.
+func TestFetchMoreMessages_EmptyResult(t *testing.T) {
+	server := newMockWSServer(t)
+	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
+	})
+	server.SetRPCHandler("get_messages", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
+		return json.Marshal(GetMessagesResult{Messages: []model.Message{}, HasMore: false})
+	})
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = c.Start(ctx) }()
+	if err := server.AcceptConnection(5 * time.Second); err != nil {
+		t.Fatalf("server did not accept connection: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	result, err := c.FetchMoreMessages(context.Background(), "conv-empty", 0, 10)
+	if err != nil {
+		t.Fatalf("FetchMoreMessages() error: %v", err)
+	}
+	if len(result.Messages) != 0 {
+		t.Errorf("expected 0 messages, got %d", len(result.Messages))
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -609,200 +1312,6 @@ func TestSyncUpdates_CorrectParams(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Additional RPC convenience methods — parameter validation
 // ---------------------------------------------------------------------------
-
-// TestListConversations_CorrectParams verifies that ListConversations sends the
-// correct method name and parameters.
-func TestListConversations_CorrectParams(t *testing.T) {
-	server := newMockWSServer(t)
-	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
-		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
-	})
-
-	var receivedReq protocol.PackageDataRequest
-	server.SetRPCHandler("list_conversations", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
-		receivedReq = *req
-		return json.RawMessage(`{"conversations":[],"has_more":false}`), nil
-	})
-
-	c := newTestClient(t, server)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() { _ = c.Start(ctx) }()
-	if err := server.AcceptConnection(5 * time.Second); err != nil {
-		t.Fatalf("server did not accept connection: %v", err)
-	}
-	time.Sleep(200 * time.Millisecond)
-
-	result, err := c.ListConversations(context.Background(), 10, 25)
-	if err != nil {
-		t.Fatalf("ListConversations failed: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-
-	if receivedReq.Method != "list_conversations" {
-		t.Errorf("expected method list_conversations, got %s", receivedReq.Method)
-	}
-	var params map[string]any
-	if err := json.Unmarshal(receivedReq.Params, &params); err != nil {
-		t.Fatalf("unmarshal params: %v", err)
-	}
-	if offset, _ := params["offset"].(float64); int(offset) != 10 {
-		t.Errorf("expected offset=10, got %v", params["offset"])
-	}
-	if limit, _ := params["limit"].(float64); int(limit) != 25 {
-		t.Errorf("expected limit=25, got %v", params["limit"])
-	}
-}
-
-// TestGetMessages_CorrectParams verifies that GetMessages sends the correct
-// method name and parameters.
-func TestGetMessages_CorrectParams(t *testing.T) {
-	server := newMockWSServer(t)
-	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
-		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
-	})
-
-	var receivedReq protocol.PackageDataRequest
-	server.SetRPCHandler("get_messages", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
-		receivedReq = *req
-		return json.RawMessage(`{"messages":[],"has_more":false}`), nil
-	})
-
-	c := newTestClient(t, server)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() { _ = c.Start(ctx) }()
-	if err := server.AcceptConnection(5 * time.Second); err != nil {
-		t.Fatalf("server did not accept connection: %v", err)
-	}
-	time.Sleep(200 * time.Millisecond)
-
-	result, err := c.GetMessages(context.Background(), "conv-42", 100, 50)
-	if err != nil {
-		t.Fatalf("GetMessages failed: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-
-	if receivedReq.Method != "get_messages" {
-		t.Errorf("expected method get_messages, got %s", receivedReq.Method)
-	}
-	var params map[string]any
-	if err := json.Unmarshal(receivedReq.Params, &params); err != nil {
-		t.Fatalf("unmarshal params: %v", err)
-	}
-	if params["conversation_id"] != "conv-42" {
-		t.Errorf("expected conversation_id=conv-42, got %v", params["conversation_id"])
-	}
-	if afterMsg, _ := params["after_msg_id"].(float64); uint32(afterMsg) != 100 {
-		t.Errorf("expected after_msg_id=100, got %v", params["after_msg_id"])
-	}
-	if limit, _ := params["limit"].(float64); int(limit) != 50 {
-		t.Errorf("expected limit=50, got %v", params["limit"])
-	}
-}
-
-// TestSearchMessages_CorrectParams verifies that SearchMessages sends the
-// correct method name and parameters.
-func TestSearchMessages_CorrectParams(t *testing.T) {
-	server := newMockWSServer(t)
-	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
-		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
-	})
-
-	var receivedReq protocol.PackageDataRequest
-	server.SetRPCHandler("search_messages", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
-		receivedReq = *req
-		return json.RawMessage(`{"messages":[],"has_more":false}`), nil
-	})
-
-	c := newTestClient(t, server)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() { _ = c.Start(ctx) }()
-	if err := server.AcceptConnection(5 * time.Second); err != nil {
-		t.Fatalf("server did not accept connection: %v", err)
-	}
-	time.Sleep(200 * time.Millisecond)
-
-	result, err := c.SearchMessages(context.Background(), "conv-7", "hello world", 5, 20)
-	if err != nil {
-		t.Fatalf("SearchMessages failed: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-
-	if receivedReq.Method != "search_messages" {
-		t.Errorf("expected method search_messages, got %s", receivedReq.Method)
-	}
-	var params map[string]any
-	if err := json.Unmarshal(receivedReq.Params, &params); err != nil {
-		t.Fatalf("unmarshal params: %v", err)
-	}
-	if params["conversation_id"] != "conv-7" {
-		t.Errorf("expected conversation_id=conv-7, got %v", params["conversation_id"])
-	}
-	if params["query"] != "hello world" {
-		t.Errorf("expected query='hello world', got %v", params["query"])
-	}
-	if afterMsg, _ := params["after_msg_id"].(float64); uint32(afterMsg) != 5 {
-		t.Errorf("expected after_msg_id=5, got %v", params["after_msg_id"])
-	}
-	if limit, _ := params["limit"].(float64); int(limit) != 20 {
-		t.Errorf("expected limit=20, got %v", params["limit"])
-	}
-}
-
-// TestGetConversation_CorrectParams verifies that GetConversation sends the
-// correct method name and parameters.
-func TestGetConversation_CorrectParams(t *testing.T) {
-	server := newMockWSServer(t)
-	server.SetRPCHandler("sync_updates", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
-		return json.Marshal(SyncUpdatesResult{Updates: nil, HasMore: false, LatestSeq: 0})
-	})
-
-	var receivedReq protocol.PackageDataRequest
-	server.SetRPCHandler("get_conversation", func(req *protocol.PackageDataRequest) (json.RawMessage, error) {
-		receivedReq = *req
-		return json.RawMessage(`{"conversation":{"id":"conv-99"},"unread_count":5}`), nil
-	})
-
-	c := newTestClient(t, server)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() { _ = c.Start(ctx) }()
-	if err := server.AcceptConnection(5 * time.Second); err != nil {
-		t.Fatalf("server did not accept connection: %v", err)
-	}
-	time.Sleep(200 * time.Millisecond)
-
-	result, err := c.GetConversation(context.Background(), "conv-99")
-	if err != nil {
-		t.Fatalf("GetConversation failed: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-
-	if receivedReq.Method != "get_conversation" {
-		t.Errorf("expected method get_conversation, got %s", receivedReq.Method)
-	}
-	var params map[string]any
-	if err := json.Unmarshal(receivedReq.Params, &params); err != nil {
-		t.Fatalf("unmarshal params: %v", err)
-	}
-	if params["conversation_id"] != "conv-99" {
-		t.Errorf("expected conversation_id=conv-99, got %v", params["conversation_id"])
-	}
-}
 
 // TestDeleteConversation_CorrectParams verifies that DeleteConversation sends
 // the correct method name and parameters.
@@ -1352,5 +1861,66 @@ func TestStop_CleanExit(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start() did not return after Stop()")
+	}
+}
+
+// TestGetConversation_UserID2 verifies that GetConversation correctly uses
+// LastReadMessageID2 when the current user is UserID2 (not UserID1).
+func TestGetConversation_UserID2(t *testing.T) {
+	db := newTestStore(t)
+	ctx := context.Background()
+
+	// Seed a conversation where the test user is UserID2.
+	conv := &model.Conversation{
+		ID:                 "conv-user2",
+		UserID1:            "peer1",
+		UserID2:            "test-user",
+		Type:               "1-on-1",
+		Title:              "User2 Chat",
+		LastReadMessageID2: 10, // user2 has read up to message 10
+	}
+	if err := db.Conversations.Create(ctx, conv); err != nil {
+		t.Fatalf("seed conv: %v", err)
+	}
+
+	// Seed messages: 5 unread (MessageID 11..15).
+	for i := uint32(11); i <= 15; i++ {
+		msg := &model.Message{
+			ID:              fmt.Sprintf("msg-u2-%d", i),
+			ClientMessageID: fmt.Sprintf("cid-u2-%d", i),
+			ConversationID:  "conv-user2",
+			MessageID:       i,
+			SenderID:        "peer1",
+			Content:         "hello from peer1",
+			CreatedAt:       time.Now(),
+		}
+		if err := db.Messages.Create(ctx, msg); err != nil {
+			t.Fatalf("seed msg: %v", err)
+		}
+	}
+
+	c, err := New(
+		WithServerURL("ws://localhost:8080/ws"),
+		WithUserID("test-user"), // user is UserID2
+		WithDB(db),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer c.Stop()
+
+	result, err := c.GetConversation(ctx, "conv-user2")
+	if err != nil {
+		t.Fatalf("GetConversation() error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Conversation.ID != "conv-user2" {
+		t.Errorf("expected ID=conv-user2, got %s", result.Conversation.ID)
+	}
+	// Verify unread count is based on LastReadMessageID2 (10), so messages 11..15 = 5 unread.
+	if result.UnreadCount != 5 {
+		t.Errorf("expected UnreadCount=5 (using LastReadMessageID2), got %d", result.UnreadCount)
 	}
 }

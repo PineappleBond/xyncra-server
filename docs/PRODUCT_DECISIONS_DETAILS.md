@@ -703,6 +703,8 @@ CLI 命令（如 send）优先通过 Unix Socket IPC 连接到运行中的 liste
 
 `list-conversations`、`get-conversation`、`get-messages`、`search-messages` 四个查询命令直接读取本地 SQLite 数据库，不通过 IPC 转发到守护进程。使用 `store.New()` 打开数据库（WAL 模式支持并发读），读取完成后关闭连接。
 
+此决策同样适用于 XyncraClient 库 API 层。`ListConversations()`、`GetConversation()`、`GetMessages()`、`SearchMessages()` 四个方法从本地 SQLite 读取，与 CLI 命令行为一致。库 API 调用者（如其他 Go 程序嵌入 XyncraClient）也享有本地优先、离线可用的特性。
+
 ### 原因
 
 1. **本地优先架构**：数据已由 `listen` 守护进程同步到本地，无需再经网络获取
@@ -730,6 +732,7 @@ CLI 命令（如 send）优先通过 Unix Socket IPC 连接到运行中的 liste
 - `set-typing`：发送瞬时 typing 指示器（daemon 离线时发送无意义）
 - `stream-text`：发送瞬时流式文本（daemon 离线时发送无意义，D-051）
 - `agent-resume`：HITL resume 操作（D-114）
+- `reload-agents`：daemon 管理 agent 配置状态，daemon 离线时 reload 无意义
 
 ### 原因
 
@@ -753,6 +756,11 @@ CLI 命令（如 send）优先通过 Unix Socket IPC 连接到运行中的 liste
 
 1. **HITL 状态存在于 daemon 进程**：interruptIDs 映射（D-113）和 WebSocket 连接均在 daemon 内存中，resume 需要通过 daemon 的 WebSocket 连接发送到服务端
 2. **独立连接无法 resume**：resume 需要精确的 (userID, deviceID) 路由，只有 daemon 持有此状态
+
+**reload-agents**：
+
+1. **daemon 管理 agent 配置状态**：AgentRegistry 运行在 daemon 进程中，reload 操作需要调用 daemon 内的 `AgentRegistry.Reload()` 方法
+2. **独立连接无法 reload**：reload 的结果（新的 Agent 配置）只存在于 daemon 内存中，独立 WebSocket 连接调用 reload 不会影响 daemon 的状态，毫无意义
 
 ### 错误信息
 
@@ -2947,10 +2955,41 @@ func (c *SyncManager) handleConversationUpdate(payload *ConversationUpdatePayloa
 
 ---
 
+## D-126: 消息按需拉取（FetchMoreMessages）
+
+### 决策
+
+FetchMoreMessages() 作为 XyncraClient 库 API，从服务器 RPC 拉取消息并 upsert 到本地 DB。
+
+### 理由
+
+1. **与 Conversation 的 Pull-on-Notification（D-118）互补**：D-118 在 Conversation 层面实现了按需拉取（收到通知后拉取最新状态），D-126 在消息层面提供相同的按需拉取能力
+2. **消息层面的按需拉取**：当本地消息数据不足时（如本地消息数量不够、需要同步服务器端最新消息），需要一种机制从服务器获取更多消息
+3. **RPC 拉取后写入本地 DB**：通过 RPC 拉取的消息写入本地 SQLite，保证离线可用（与 D-035 本地优先架构一致）
+4. **Upsert 失败为 best-effort**：upsert 失败只记日志，不阻断流程（与 D-045 conversation upsert 模式一致）
+
+### 实现要点
+
+- `FetchMoreMessages(conversationID, afterMsgID, limit)` 方法接受分页参数，分页方向与 `GetMessages` 相同（获取 MessageID > afterMsgID 的消息，即向前/获取更新的消息）
+- 通过 RPC 调用服务端 `get_messages` 接口获取消息列表
+- 拉取到的消息通过 `MessageStore.Upsert` 写入本地 SQLite
+- Upsert 失败仅记录日志，不返回错误给调用方
+- 返回拉取到的消息列表（无论是否成功写入本地 DB）
+
+### 约束
+
+- 仅适用于 XyncraClient 库 API，不暴露为 CLI 命令
+- 需要 daemon 运行中（IPC 可用）或 WebSocket 连接可用
+- 拉取的消息按 `afterMsgID` 分页，分页方向与 `GetMessages` / `get-messages --after-message-id` 相同（向前/获取更新的消息），区别在于本方法从服务器 RPC 拉取并写入本地 DB
+- Upsert 使用 (client_message_id, sender_id) 复合键作为唯一键，已存在的消息会被更新
+
+---
+
 ## 版本历史
 
 | 日期       | 版本 | 变更                                                                                                 |
 | ---------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| 2026-07-16 | v3.23 | D-035（扩展至 XyncraClient 库 API 层）、D-036（新增 reload-agents IPC-only）、D-126（FetchMoreMessages 消息按需拉取） |
 | 2026-07-16 | v3.22 | D-125（移除冗余 HITL Ephemeral 事件 agent_question/agent_checkpoint_created）；更新 D-087（缩减为 2 种类型）、D-120（删除向后兼容约束） |
 | 2026-07-16 | v3.21 | 新增 D-123（HITL 超时自动清理）、D-124（Conversation 同步优化 - updated_at 广播） |
 | 2026-07-15 | v3.19 | 新增 D-116（Question 持久化表）、D-117（Conversation 状态机）、D-118（Pull-on-Notification 模式）；更新 D-085（partial answer + 幂等检查）、D-113（被 D-116 替代） |

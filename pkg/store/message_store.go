@@ -226,6 +226,62 @@ func (ms *MessageStore) CreateTx(ctx context.Context, tx *gorm.DB, msg *model.Me
 	return nil
 }
 
+// Upsert creates the message if it does not exist, or updates it if it does.
+// Uniqueness is determined by the composite index (client_message_id, sender_id).
+// If a concurrent insert causes a duplicate key error, the operation retries as
+// an update to handle the TOCTOU race between SELECT and INSERT.
+func (ms *MessageStore) Upsert(ctx context.Context, msg *model.Message) error {
+	var existing model.Message
+	err := ms.db.WithContext(ctx).
+		Where("client_message_id = ? AND sender_id = ?", msg.ClientMessageID, msg.SenderID).
+		First(&existing).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if createErr := ms.db.WithContext(ctx).Create(msg).Error; createErr != nil {
+				if errors.Is(classifyError(createErr), ErrDuplicateKey) {
+					return ms.updateByCompositeKey(ctx, msg)
+				}
+				return classifyError(fmt.Errorf("store: upsert message create: %w", createErr))
+			}
+			return nil
+		}
+		return classifyError(fmt.Errorf("store: upsert message lookup: %w", err))
+	}
+	return ms.updateByCompositeKey(ctx, msg)
+}
+
+// updateByCompositeKey updates a message identified by (client_message_id, sender_id).
+// It first looks up the existing record by composite key, then updates its fields
+// using the primary key. This avoids the GORM Save() pitfall where WHERE clauses
+// are silently ignored (TOCTOU race between SELECT and UPDATE).
+func (ms *MessageStore) updateByCompositeKey(ctx context.Context, msg *model.Message) error {
+	var existing model.Message
+	err := ms.db.WithContext(ctx).
+		Where("client_message_id = ? AND sender_id = ?", msg.ClientMessageID, msg.SenderID).
+		First(&existing).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		return classifyError(fmt.Errorf("store: update by composite key lookup: %w", err))
+	}
+	// Update mutable fields using the existing record's primary key.
+	result := ms.db.WithContext(ctx).
+		Model(&existing).
+		Updates(map[string]interface{}{
+			"conversation_id": msg.ConversationID,
+			"message_id":      msg.MessageID,
+			"content":         msg.Content,
+			"type":            msg.Type,
+			"reply_to":        msg.ReplyTo,
+			"status":          msg.Status,
+		})
+	if result.Error != nil {
+		return classifyError(fmt.Errorf("store: upsert message update: %w", result.Error))
+	}
+	return nil
+}
+
 // SoftDeleteTx performs a soft delete within the given transaction.
 func (ms *MessageStore) SoftDeleteTx(ctx context.Context, tx *gorm.DB, id string) error {
 	result := tx.WithContext(ctx).Delete(&model.Message{}, "id = ?", id)

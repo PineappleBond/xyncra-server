@@ -893,76 +893,130 @@ func (c *XyncraClient) CreateConversation(ctx context.Context, userID2, title st
 }
 
 // ListConversations returns a paginated list of conversations for the current user.
+// It reads from the local database (D-035).
 func (c *XyncraClient) ListConversations(ctx context.Context, offset, limit int) (*ListConversationsResult, error) {
-	params := map[string]any{
-		"offset": offset,
-		"limit":  limit,
-	}
-	data, err := c.Call(ctx, "list_conversations", params)
+	convs, err := c.db.Conversations.GetByUser(ctx, c.opts.userID, offset, limit+1)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("client: list conversations: %w", err)
 	}
-	var result ListConversationsResult
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("client: unmarshal list_conversations result: %w", err)
+	hasMore := len(convs) > limit
+	if hasMore {
+		convs = convs[:limit]
 	}
-	return &result, nil
+	result := make([]model.Conversation, len(convs))
+	for i, conv := range convs {
+		result[i] = *conv
+	}
+	return &ListConversationsResult{
+		Conversations: result,
+		HasMore:       hasMore,
+	}, nil
 }
 
 // GetMessages returns messages for the given conversation, optionally starting
-// after the specified message ID.
+// after the specified message ID. It reads from the local database (D-035).
 func (c *XyncraClient) GetMessages(ctx context.Context, convID string, afterMsgID uint32, limit int) (*GetMessagesResult, error) {
-	params := map[string]any{
-		"conversation_id": convID,
-		"after_msg_id":    afterMsgID,
-		"limit":           limit,
-	}
-	data, err := c.Call(ctx, "get_messages", params)
+	msgs, err := c.db.Messages.ListByConversation(ctx, convID, afterMsgID, limit+1)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("client: get messages: %w", err)
 	}
-	var result GetMessagesResult
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("client: unmarshal get_messages result: %w", err)
+	hasMore := len(msgs) > limit
+	if hasMore {
+		msgs = msgs[:limit]
 	}
-	return &result, nil
+	result := make([]model.Message, len(msgs))
+	for i, msg := range msgs {
+		result[i] = *msg
+	}
+	return &GetMessagesResult{
+		Messages: result,
+		HasMore:  hasMore,
+	}, nil
+}
+
+// FetchMoreMessages fetches messages from the server via RPC "get_messages",
+// persists them to the local database via Upsert, and returns the results.
+// This is the on-demand pull path when local data is insufficient (D-126).
+//
+// The pagination direction is the same as GetMessages: it fetches messages
+// with MessageID greater than afterMsgID (forward/newer), not backward.
+// The difference from GetMessages is that this method fetches from the server
+// via RPC and writes the results to the local DB, whereas GetMessages reads
+// directly from the local DB (D-035).
+func (c *XyncraClient) FetchMoreMessages(ctx context.Context, convID string, afterMsgID uint32, limit int) (*GetMessagesResult, error) {
+	data, err := c.Call(ctx, "get_messages", map[string]any{
+		"conversation_id":  convID,
+		"after_message_id": afterMsgID,
+		"limit":            limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("client: fetch more messages RPC: %w", err)
+	}
+	var rpcResult struct {
+		Messages []model.Message `json:"messages"`
+		HasMore  bool            `json:"has_more"`
+	}
+	if err := json.Unmarshal(data, &rpcResult); err != nil {
+		return nil, fmt.Errorf("client: fetch more messages unmarshal: %w", err)
+	}
+	for i := range rpcResult.Messages {
+		if upsertErr := c.db.Messages.Upsert(ctx, &rpcResult.Messages[i]); upsertErr != nil {
+			c.logger.Error("upsert message to local DB failed", "error", upsertErr, "message_id", rpcResult.Messages[i].ID)
+		}
+	}
+	return &GetMessagesResult{
+		Messages: rpcResult.Messages,
+		HasMore:  rpcResult.HasMore,
+	}, nil
 }
 
 // SearchMessages searches for messages matching the given query within a
-// conversation.
+// conversation. It reads from the local database (D-035).
 func (c *XyncraClient) SearchMessages(ctx context.Context, convID, query string, afterMsgID uint32, limit int) (*SearchMessagesResult, error) {
-	params := map[string]any{
-		"conversation_id": convID,
-		"query":           query,
-		"after_msg_id":    afterMsgID,
-		"limit":           limit,
-	}
-	data, err := c.Call(ctx, "search_messages", params)
+	msgs, err := c.db.Messages.SearchByConversation(ctx, convID, query, afterMsgID, limit+1)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("client: search messages: %w", err)
 	}
-	var result SearchMessagesResult
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("client: unmarshal search_messages result: %w", err)
+	hasMore := len(msgs) > limit
+	if hasMore {
+		msgs = msgs[:limit]
 	}
-	return &result, nil
+	result := make([]model.Message, len(msgs))
+	for i, msg := range msgs {
+		result[i] = *msg
+	}
+	return &SearchMessagesResult{
+		Messages: result,
+		HasMore:  hasMore,
+	}, nil
 }
 
 // GetConversation returns the conversation identified by convID, including the
-// current unread count.
+// current unread count and HITL questions. It reads from the local database (D-035).
 func (c *XyncraClient) GetConversation(ctx context.Context, convID string) (*GetConversationResult, error) {
-	params := map[string]any{
-		"conversation_id": convID,
-	}
-	data, err := c.Call(ctx, "get_conversation", params)
+	conv, err := c.db.Conversations.Get(ctx, convID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("client: get conversation: %w", err)
 	}
-	var result GetConversationResult
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("client: unmarshal get_conversation result: %w", err)
+	var lastRead uint32
+	if conv.UserID1 == c.opts.userID {
+		lastRead = conv.LastReadMessageID1
+	} else {
+		lastRead = conv.LastReadMessageID2
 	}
-	return &result, nil
+	unreadCount, err := c.db.Messages.CountUnread(ctx, convID, lastRead)
+	if err != nil {
+		return nil, fmt.Errorf("client: count unread: %w", err)
+	}
+	questions, err := c.db.Questions.GetByConversation(ctx, convID)
+	if err != nil {
+		return nil, fmt.Errorf("client: get questions: %w", err)
+	}
+	return &GetConversationResult{
+		Conversation: conv,
+		UnreadCount:  unreadCount,
+		Questions:    questions,
+	}, nil
 }
 
 // DeleteConversation soft-deletes the conversation identified by convID and

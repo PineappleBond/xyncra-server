@@ -1200,3 +1200,142 @@ func TestCLIUpdateHandler_OnAgentTimeout(t *testing.T) {
 	assert.Contains(t, output, "conv=conv-123")
 	assert.Contains(t, output, "LLM timeout after 120s")
 }
+
+// ---------------------------------------------------------------------------
+// Restore conversation fallback tests (D-015)
+// ---------------------------------------------------------------------------
+
+// setupTestIPCWithMock creates a mock WebSocket server with custom response
+// handlers and returns the IPC socket path, ClientDB, and cleanup function.
+// The responseHandler allows tests to control mock server responses per method.
+func setupTestIPCWithMock(t *testing.T, responseHandler func(req protocol.PackageDataRequest) json.RawMessage) (sockPath string, db *store.ClientDB, cleanup func()) {
+	t.Helper()
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			var pkg protocol.Package
+			if err := conn.ReadJSON(&pkg); err != nil {
+				return
+			}
+			var req protocol.PackageDataRequest
+			_ = json.Unmarshal(pkg.Data, &req)
+
+			var respData []byte
+			if responseHandler != nil {
+				data := responseHandler(req)
+				respData, _ = json.Marshal(protocol.PackageDataResponse{ID: req.ID, Code: protocol.ResponseCodeOK, Data: data})
+			} else {
+				respData, _ = json.Marshal(protocol.PackageDataResponse{ID: req.ID, Code: protocol.ResponseCodeOK, Data: json.RawMessage(`{}`)})
+			}
+
+			respPkg := protocol.Package{Version: 1, Type: protocol.PackageTypeResponse, Data: json.RawMessage(respData)}
+			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			_ = conn.WriteJSON(respPkg)
+		}
+	}))
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
+	tmpDir, err := os.MkdirTemp("/tmp", "xyncra-ipc-fallback-*")
+	if err != nil {
+		ts.Close()
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+
+	db, err = store.New(tmpDir + "/test.db")
+	if err != nil {
+		ts.Close()
+		t.Fatalf("open db: %v", err)
+	}
+
+	xc, err := client.New(
+		client.WithServerURL(wsURL),
+		client.WithUserID("testuser"),
+		client.WithDB(db),
+	)
+	if err != nil {
+		_ = db.Close()
+		ts.Close()
+		t.Fatalf("create client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = xc.Start(ctx) }()
+	time.Sleep(500 * time.Millisecond)
+
+	// Set up IPC server.
+	sockPath = tmpDir + "/xyncra.sock"
+	ipcServer := NewIPCServer(sockPath)
+	registerIPCHandlers(ipcServer, xc, db, "testuser")
+	go func() { _ = ipcServer.Start(context.Background()) }()
+	time.Sleep(200 * time.Millisecond)
+
+	cleanup = func() {
+		cancel()
+		xc.Stop()
+		_ = ipcServer.Stop()
+		_ = db.Close()
+		ts.Close()
+		_ = os.RemoveAll(tmpDir)
+	}
+
+	return sockPath, db, cleanup
+}
+
+// TestRestoreConversation_FallbackToRPC verifies that when the local DB returns
+// ErrNotFound during restore_conversation, the IPC handler falls back to fetching
+// the conversation from the server via RPC and upserts it to the local DB.
+func TestRestoreConversation_FallbackToRPC(t *testing.T) {
+	// Custom mock server: restore_conversation returns empty (OK),
+	// get_conversation returns a conversation fetched from "server".
+	responseHandler := func(req protocol.PackageDataRequest) json.RawMessage {
+		switch req.Method {
+		case "restore_conversation":
+			data, _ := json.Marshal(client.RestoreConversationResult{
+				Conversation:         &model.Conversation{ID: "conv-fallback", UserID1: "other", UserID2: "testuser", Type: "1-on-1", Title: "Fallback Conv"},
+				RestoredMessageCount: 3,
+			})
+			return data
+		case "get_conversation":
+			data, _ := json.Marshal(client.GetConversationResult{
+				Conversation: &model.Conversation{ID: "conv-fallback", UserID1: "other", UserID2: "testuser", Type: "1-on-1", Title: "Fallback Conv"},
+				UnreadCount:  2,
+			})
+			return data
+		default:
+			return json.RawMessage(`{}`)
+		}
+	}
+
+	sockPath, db, cleanup := setupTestIPCWithMock(t, responseHandler)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Do NOT seed the conversation in local DB — this triggers the ErrNotFound path.
+	// Verify the conversation does not exist.
+	_, err := db.Conversations.Get(ctx, "conv-fallback")
+	require.ErrorIs(t, err, store.ErrNotFound, "conversation should not exist before test")
+
+	// Call restore_conversation via IPC.
+	ipcClient := NewIPCClient(sockPath, 5*time.Second)
+	resp, err := ipcClient.Call(context.Background(), "restore_conversation", map[string]any{
+		"conversation_id": "conv-fallback",
+	})
+	require.NoError(t, err)
+	require.Nil(t, resp.Error)
+
+	// After fallback, the conversation should be upserted into local DB.
+	gotConv, err := db.Conversations.Get(ctx, "conv-fallback")
+	require.NoError(t, err, "conversation should exist in local DB after fallback upsert")
+	assert.Equal(t, "Fallback Conv", gotConv.Title)
+	assert.Equal(t, "other", gotConv.UserID1)
+	assert.Equal(t, "testuser", gotConv.UserID2)
+}

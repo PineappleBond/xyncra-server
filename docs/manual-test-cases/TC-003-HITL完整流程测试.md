@@ -2,7 +2,7 @@
 
 > **测试编号**: TC-003
 > **测试类型**: 端到端集成测试 + 韧性测试
-> **覆盖范围**: HITL 完整流程、Question 持久化 (D-116)、多设备竞态、并行多 Question、服务器重启恢复 (Scenario 1-7)、HITL 超时自动清理 (D-123)、Conversation updated_at 同步优化 (D-124)
+> **覆盖范围**: HITL 完整流程、Question 持久化 (D-116)、多设备竞态、并行多 Question、服务器重启恢复 (Scenario 1-7)、HITL 超时自动清理 (D-123)、Conversation updated_at 同步优化 (D-124)、HITL 事件流简化 (D-125)
 > **环境**: Docker E2E (D-043)
 > **最后更新**: 2026-07-16
 
@@ -18,7 +18,7 @@
 **测试目标**：验证 HITL 流程的完整性和韧性，包括 checkpoint 创建、Question 持久化、resume 机制、并发锁协调、以及各种故障场景下的恢复能力。
 
 **覆盖的关键决策**：
-- 基础流程：D-083 (CheckpointStore)、D-084 (并发锁)、D-085 (agent_resume RPC)、D-087 (Ephemeral Update)、D-092 (ReverseRPC)
+- 基础流程：D-083 (CheckpointStore)、D-084 (并发锁)、D-085 (agent_resume RPC)、D-087 (agent_timeout 通知; agent_question/agent_checkpoint_created 已由 D-125 移除)、D-092 (ReverseRPC)
 - 韧性设计：D-116 (Question 持久化表)、D-112 (Checkpoint 清理)、D-071 (幂等性)、D-114 (agent-resume IPC-only)
 - 自动清理：D-123 (HITL 超时自动清理)、D-124 (Conversation updated_at 同步优化)
 
@@ -1414,7 +1414,7 @@ cp .env.test.example .env.test
 | 阶段 | 结果 | 备注 |
 |------|------|------|
 | 阶段 1: Daemon 启动 | ✅ / ❌ | |
-| 阶段 2: HITL 触发 + Question 持久化 | ✅ / ❌ | D-083, D-087, D-116 |
+| 阶段 2: HITL 触发 + Question 持久化 | ✅ / ❌ | D-083, D-125, D-116 |
 | 阶段 3: Resume | ✅ / ❌ | D-085 |
 | 阶段 4: 并发锁 | ✅ / ❌ | D-084 |
 | 阶段 5: 超时处理 | ✅ / ❌ | |

@@ -248,6 +248,7 @@ func TestNewRootCommand(t *testing.T) {
 		"logs",
 		"kill",
 		"agent-resume",
+		"reload-agents",
 	}
 	for _, name := range expectedCmds {
 		if !names[name] {
@@ -258,12 +259,12 @@ func TestNewRootCommand(t *testing.T) {
 
 func TestNewRootCommand_TotalSubcommandCount(t *testing.T) {
 	cmd := NewRootCommand()
-	// 18 subcommands: listen, send, create-conversation, delete-conversation,
+	// 19 subcommands: listen, send, create-conversation, delete-conversation,
 	// restore-conversation, list-conversations, get-conversation, delete-message,
 	// mark-as-read, get-messages, search-messages, draft, sync-updates,
-	// set-typing, stream-text, logs, kill, agent-resume.
-	if got := len(cmd.Commands()); got != 18 {
-		t.Errorf("expected 18 subcommands, got %d", got)
+	// set-typing, stream-text, logs, kill, agent-resume, reload-agents.
+	if got := len(cmd.Commands()); got != 19 {
+		t.Errorf("expected 19 subcommands, got %d", got)
 	}
 }
 
