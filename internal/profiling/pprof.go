@@ -41,6 +41,14 @@ func DefaultPprofConfig() PprofConfig {
 //
 // When cfg.Enabled is false, StartPprof returns nil immediately.
 //
+// NOTE: The /debug/pprof/profile endpoint is intentionally NOT registered.
+// When Pyroscope is enabled (XYNCRA_PROFILING_ENABLED=true), it performs
+// continuous CPU profiling. Go runtime only allows one CPU profiler at a time,
+// so registering pprof.Profile would conflict with Pyroscope and return
+// "cpu profiling already in use" errors. Other pprof endpoints (goroutine,
+// heap, allocs, block, mutex, threadcreate, trace, cmdline, symbol) remain
+// available for debugging.
+//
 // This follows D-003 (internal deployment model) and D-063 (optional module
 // pattern): the pprof server is only started when explicitly enabled.
 func StartPprof(ctx context.Context, cfg PprofConfig) error {
@@ -54,7 +62,8 @@ func StartPprof(ctx context.Context, cfg PprofConfig) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	// NOTE: /debug/pprof/profile is intentionally omitted to avoid conflict
+	// with Pyroscope's continuous CPU profiling (see function doc above).
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
