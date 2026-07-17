@@ -9,10 +9,6 @@ linters:
     - govet
     - staticcheck
     - unused
-  settings:
-    errcheck:
-      ignore: fmt:.*,io:Read|Write|ReadFrom|WriteTo
-      check-blank: false
   exclusions:
     rules:
       - path: _test\.go
