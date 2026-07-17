@@ -1,108 +1,119 @@
+---
+last_updated: 2026-07-17
+---
+
 # 分布式追踪
 
 ## 概述
 
-Xyncra Server 当前未实现正式的分布式追踪。本文档描述建议的追踪设计方案，覆盖关键操作链路的 Trace Context 传播、Span 定义以及集成方案。
+Xyncra Server 已实现基于 OpenTelemetry 的分布式链路追踪，覆盖从 WebSocket 连接到 Agent LLM 调用的完整请求链路。追踪数据通过 OTLP/gRPC 协议导出到 Jaeger（或其他兼容后端），支持在 Jaeger UI 中进行端到端的链路可视化。
 
-## 当前追踪状态
+**状态**：已实现
 
-### 已有追踪基础
+## 追踪架构
 
-项目目前通过以下方式提供有限的可观测性：
+### 技术栈
 
-1. **日志上下文**：关键操作通过日志记录开始和结束时间
-2. **LLM 调用事件**：`LLMCallEvent` 记录了 Agent 执行的耗时
-3. **健康检查**：内置 `/health` 端点监控服务可用性
+| 组件 | 选择 | 说明 |
+|------|------|------|
+| 追踪 SDK | OpenTelemetry | 行业标准 |
+| Exporter | OTLP/gRPC | 标准协议，对接 Jaeger/Tempo |
+| 采样策略 | 可配置比例 + DebugSampler | 支持 debug user/device 强制采样 |
+| 默认后端 | Jaeger All-in-One | 开发/测试环境开箱即用 |
+| 存储 | Badger（嵌入式） | 无需外部数据库 |
 
-### 缺失的追踪能力
-
-- 跨 goroutine 的 Trace Context 传播
-- 端到端的请求延迟分析
-- 跨 Redis/MQ/LLM API 调用的链路追踪
-- 依赖 OpenTelemetry 或类似标准
-
-## 推荐追踪架构
-
-### 整体架构
+### Span 层级树
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│ WebSocket    │────▶│ Message      │────▶│ Store/DB     │
-│ Client       │     │ Handler      │     │              │
-└──────────────┘     ├──────────────┤     ├──────────────┤
-                     │ Span:        │     │ Span:        │
-                     │ handle-msg   │     │ db-write     │
-                     └──────────────┘     └──────────────┘
-                            │
-                            ▼
-                     ┌──────────────┐     ┌──────────────┐
-                     │ Broker/MQ    │────▶│ Agent        │
-                     │ (Asynq)      │     │ Executor     │
-                     ├──────────────┤     ├──────────────┤
-                     │ Span:        │     │ Span:        │
-                     │ enqueue-task │     │ agent-exec   │
-                     └──────────────┘     └──────┬───────┘
-                                                  │
-                                                  ▼
-                                          ┌──────────────┐
-                                          │ LLM API      │
-                                          │ Call         │
-                                          ├──────────────┤
-                                          │ Span:        │
-                                          │ llm-call     │
-                                          └──────────────┘
+ws.connection (root span, 每个 WebSocket 连接生命周期)
+├── ws.message.receive
+│   └── handler.invoke (方法分发)
+│       ├── handler.broker.enqueue (MQ 入队)
+│       │   └── mq.process (worker 侧，同一 trace)
+│       │       └── agent.execute
+│       │           ├── agent.build
+│       │           └── agent.run
+│       │               ├── agent.llm.call (迭代 1)
+│       │               ├── agent.tool.call (工具调用)
+│       │               ├── agent.llm.call (迭代 2)
+│       │               ├── agent.checkpoint.save
+│       │               └── agent.stream (流式输出)
+│       └── handler.broadcast (跨节点 Pub/Sub)
+└── ws.message.send
 ```
 
-### 关键 Span 定义
+### No-op 保证
 
-#### WebSocket 连接生命周期
+当 `XYNCRA_TRACING_ENABLED=false`（默认值）时，安装 no-op TracerProvider。所有 `tracer.Start()` 调用返回零分配的 noop span，`TracingMiddleware` 也不会被添加到 Agent 中间件链中，确保零开销。
 
-| Span 名称 | 父 Span | 说明 | 属性 |
-|-----------|---------|------|------|
-| `ws.connect` | - | WebSocket 连接升级 | `user_id`, `device_id`, `ip` |
-| `ws.disconnect` | - | WebSocket 断开 | `user_id`, `device_id`, `duration` |
-| `ws.message.receive` | `ws.connect` | 接收客户端消息 | `message_type`, `size` |
-| `ws.message.send` | `ws.connect` | 发送消息给客户端 | `target_user`, `message_type` |
+**静默降级**：所有追踪操作不阻塞业务路径，错误仅记录日志不返回给调用方。
 
-#### 消息处理链路
+## Span 定义
 
-| Span 名称 | 父 Span | 说明 | 属性 |
-|-----------|---------|------|------|
-| `handler.invoke` | `ws.message.receive` | 方法分发 | `method` |
-| `handler.store.write` | `handler.invoke` | 数据库写入 | `store`, `table` |
-| `handler.broker.enqueue` | `handler.invoke` | 消息队列入队 | `queue`, `task_type` |
-| `handler.broadcast` | `handler.invoke` | 跨节点广播 | `targets` |
+### WebSocket 层
 
-#### Agent 执行链路
+| Span 名称 | 常量 | 父 Span | 说明 | 属性 |
+|-----------|------|---------|------|------|
+| `ws.connection` | `SpanWSConnection` | - | WebSocket 连接生命周期 | `xyncra.user.id`, `xyncra.device.id`, `xyncra.connection.id` |
+| `ws.message.receive` | `SpanWSMessageReceive` | `ws.connection` | 接收客户端消息 | `xyncra.method`, `xyncra.size_bytes` |
+| `ws.message.send` | `SpanWSMessageSend` | `ws.connection` | 发送消息给客户端 | `xyncra.target_type` |
 
-| Span 名称 | 父 Span | 说明 | 属性 |
-|-----------|---------|------|------|
-| `agent.execute` | `handler.invoke` | Agent 执行入口 | `agent_id`, `conversation_id` |
-| `agent.llm.call` | `agent.execute` | LLM 模型调用 | `model`, `input_tokens`, `max_tokens` |
-| `agent.tool.call` | `agent.execute` | 工具调用 | `tool_name` |
-| `agent.checkpoint.save` | `agent.execute` | 检查点保存 | `checkpoint_id` |
-| `agent.stream` | `agent.execute` | 流式输出 | `chunk_size` |
+### Handler 层
 
-#### 消息队列链路
+| Span 名称 | 常量 | 父 Span | 说明 | 属性 |
+|-----------|------|---------|------|------|
+| `handler.invoke` | `SpanHandlerInvoke` | `ws.message.receive` | 方法分发 | `xyncra.method` |
+| `handler.broker.enqueue` | `SpanBrokerEnqueue` | `handler.invoke` | 消息队列入队 | `xyncra.task.type` |
+| `handler.broadcast` | `SpanHandlerBroadcast` | `handler.invoke` | 跨节点广播 | `xyncra.target_user_id` |
 
-| Span 名称 | 父 Span | 说明 | 属性 |
-|-----------|---------|------|------|
-| `mq.enqueue` | 调用方 | 任务入队 | `task_type`, `queue` |
-| `mq.process` | `mq.enqueue` | 任务处理 | `task_id`, `retry_count` |
-| `mq.retry` | `mq.process` | 任务重试 | `attempt`, `max_retries` |
+### Agent 执行层
+
+| Span 名称 | 常量 | 父 Span | 说明 | 属性 |
+|-----------|------|---------|------|------|
+| `agent.execute` | `SpanAgentExecute` | `mq.process` | Agent 执行入口 | `xyncra.agent.id`, `xyncra.conversation.id` |
+| `agent.build` | `SpanAgentBuild` | `agent.execute` | Agent 构建 | - |
+| `agent.run` | `SpanAgentRun` | `agent.execute` | Agent 运行 | - |
+| `agent.llm.call` | `SpanAgentLLMCall` | `agent.run` | LLM 模型调用 | `xyncra.llm.model`, `xyncra.iteration`, `xyncra.llm.input_tokens`, `xyncra.llm.output_tokens`, `xyncra.llm.total_tokens`, `xyncra.duration_ms` |
+| `agent.tool.call` | `SpanAgentToolCall` | `agent.run` | 工具调用 | `xyncra.tool.name`, `xyncra.duration_ms` |
+| `agent.checkpoint.save` | `SpanAgentCheckpointSave` | `agent.run` | 检查点保存 | `xyncra.checkpoint.id` |
+| `agent.stream` | `SpanAgentStream` | `agent.run` | 流式输出 | `xyncra.chunk_count`, `xyncra.total_chars` |
+
+### 消息队列层
+
+| Span 名称 | 常量 | 父 Span | 说明 | 属性 |
+|-----------|------|---------|------|------|
+| `mq.process` | `SpanBrokerProcess` | `handler.broker.enqueue` | 任务处理 | `xyncra.task.type`, `xyncra.task.id` |
+
+## TracingMiddleware
+
+`TracingMiddleware` 是 Agent 执行层的 OpenTelemetry 中间件，记录 LLM 调用和工具调用的详细信息。
+
+### 工作原理
+
+- **BeforeModelRewriteState**：在每次 LLM 调用前创建 `agent.llm.call` span，记录模型名和迭代次数
+- **AfterModelRewriteState**：LLM 调用完成后关闭 span，写入 token 消耗（input/output/total）和耗时
+- **WrapInvokableToolCall**：包裹工具调用，创建 `agent.tool.call` span，记录工具名、耗时和错误状态
+
+### 条件加载
+
+`TracingMiddleware` 仅在 tracing 启用时被添加到 Agent 中间件链（通过 `AgentBuilder.SetTracingEnabled`）。Tracing 关闭时完全不加载，零开销。
+
+### 线程安全
+
+`TracingMiddleware` 非线程安全，依赖 Eino ADK 对每个 runner 的串行调用保证。
 
 ## Trace Context 传播
 
-### Context 传递模式
+### Context 传递
 
-Go 中的 Trace Context 通过 `context.Context` 传递：
+Go 中通过 `context.Context` 传递 Trace Context：
 
 ```go
 // 创建 Span
 ctx, span := tracer.Start(ctx, "agent.execute",
     trace.WithAttributes(
-        attribute.String("agent_id", agentID),
-        attribute.String("conversation_id", convID),
+        attribute.String("xyncra.agent.id", agentID),
+        attribute.String("xyncra.conversation.id", convID),
     ),
 )
 defer span.End()
@@ -114,7 +125,6 @@ result, err := s.Store().SendMessage(ctx, msg, members) // context 携带 trace
 ### 跨 goroutine 传播
 
 ```go
-// 启动 goroutine 时传递 context
 go func(ctx context.Context) {
     _, span := tracer.Start(ctx, "async.task")
     defer span.End()
@@ -122,128 +132,127 @@ go func(ctx context.Context) {
 }(ctx)
 ```
 
-### 跨进程传播（建议方案）
+### 跨 MQ 传播
 
-当前没有跨进程调用。如果未来引入：
+通过 `mq_propagation.go` 中的 `InjectTraceContext` 和 `ExtractTraceContext` 实现 W3C Trace Context 在消息队列中的传播：
 
-```http
-# HTTP 头传播（连接第三方 API 时）
-traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
-tracestate: vendorname1=opaqueValue1
+- **入队侧**：`InjectTraceContext(ctx)` 将当前 trace context 序列化为 `map[string]string`，注入到 MQ 任务元数据中
+- **出队侧**：`ExtractTraceContext(metadata)` 从 MQ 任务元数据中恢复 trace context，使 worker 侧的 span 与入队侧处于同一 trace
+
+这确保了从 WebSocket 接收到 Agent 执行的完整链路在同一个 trace 中可见。
+
+### Debug 采样
+
+`DebugSampler` 支持对特定用户或设备强制全量采样：
+
+- 通过 `XYNCRA_TRACING_DEBUG_USERS` 和 `XYNCRA_TRACING_DEBUG_DEVICES` 配置
+- 在 WebSocket handler 层通过 `WithDebug(ctx, userID, deviceID)` 标记 context
+- 匹配 debug 列表的请求强制 `RecordAndSample`，不受采样率限制
+- 非 debug 请求回退到 `TraceIDRatioBased` 采样
+
+## 配置
+
+所有配置通过 `XYNCRA_TRACING_*` 环境变量控制，详见 [配置参考](../onboarding/configuration.md)。
+
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `XYNCRA_TRACING_ENABLED` | `false` | 是否启用追踪 |
+| `XYNCRA_TRACING_OTLP_ENDPOINT` | `localhost:4317` | OTLP/gRPC collector 地址 |
+| `XYNCRA_TRACING_OTLP_INSECURE` | `true` | 是否禁用 TLS |
+| `XYNCRA_TRACING_SAMPLING_RATE` | `1.0` | 采样率（0.0-1.0） |
+| `XYNCRA_TRACING_SERVICE_NAME` | `xyncra-server` | 服务名称 |
+| `XYNCRA_TRACING_DEBUG_USERS` | 空 | 强制采样的用户 ID（逗号分隔） |
+| `XYNCRA_TRACING_DEBUG_DEVICES` | 空 | 强制采样的设备 ID（逗号分隔） |
+
+## Jaeger 集成
+
+### Docker Compose 部署
+
+所有 docker-compose 文件都包含 Jaeger 服务定义，使用 Badger 嵌入式存储：
+
+```yaml
+jaeger:
+  image: jaegertracing/all-in-one:latest
+  ports:
+    - "4317:4317"    # OTLP gRPC
+    - "4318:4318"    # OTLP HTTP
+    - "16686:16686"  # Jaeger UI
+  environment:
+    - SPAN_STORAGE_TYPE=badger
+    - BADGER_EPHEMERAL=false
+    - BADGER_DIRECTORY_KEY=/badger/data_keys
+    - BADGER_DIRECTORY_VALUE=/badger/data
+  volumes:
+    - jaeger-badger:/badger
+  healthcheck:
+    test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:16686"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
 ```
 
-对于 Redis/Asynq 消息队列，Trace Context 可以编码在任务元数据中：
+### 各环境端口分配
 
-```go
-type TaskMetadata struct {
-    TraceID  string `json:"trace_id"`
-    SpanID   string `json:"span_id"`
-    // ... 业务字段
-}
+| 环境 | OTLP gRPC | OTLP HTTP | Jaeger UI |
+|------|-----------|-----------|-----------|
+| docker-compose.yml | 4317 | 4318 | 16686 |
+| docker-compose.e2e.yml | 14317 | 14318 | 16687 |
+| docker-compose.multi-node.yml | 24317 | 24318 | 26686 |
+
+### 快速启动
+
+```bash
+# 1. 启动 Jaeger
+docker compose up -d jaeger
+
+# 2. 启动 server（启用 tracing）
+XYNCRA_TRACING_ENABLED=true ./bin/xyncra-server
+
+# 3. 打开 Jaeger UI 查看链路
+open http://localhost:16686
 ```
 
-## 集成方案
+## 属性参考
 
-### 推荐：OpenTelemetry
+所有 span attribute key 统一定义在 `internal/tracing/attributes.go`：
 
-```go
-import (
-    "go.opentelemetry.io/otel"
-    "go.opentelemetry.io/otel/attribute"
-    "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-    "go.opentelemetry.io/otel/sdk/resource"
-    "go.opentelemetry.io/otel/sdk/trace"
-    semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
-)
+| 常量 | Key | 说明 |
+|------|-----|------|
+| `AttrUserID` | `xyncra.user.id` | 用户标识 |
+| `AttrDeviceID` | `xyncra.device.id` | 设备标识 |
+| `AttrConnID` | `xyncra.connection.id` | 连接标识 |
+| `AttrMethod` | `xyncra.method` | RPC 方法名 |
+| `AttrAgentID` | `xyncra.agent.id` | Agent 标识 |
+| `AttrConversationID` | `xyncra.conversation.id` | 会话标识 |
+| `AttrTaskType` | `xyncra.task.type` | 任务类型 |
+| `AttrTaskID` | `xyncra.task.id` | 任务标识 |
+| `AttrIteration` | `xyncra.iteration` | LLM 迭代次数 |
+| `AttrToolName` | `xyncra.tool.name` | 工具名称 |
+| `AttrModel` | `xyncra.llm.model` | LLM 模型名 |
+| `AttrInputTokens` | `xyncra.llm.input_tokens` | 输入 token 数 |
+| `AttrOutputTokens` | `xyncra.llm.output_tokens` | 输出 token 数 |
+| `AttrTotalTokens` | `xyncra.llm.total_tokens` | 总 token 数 |
+| `AttrDurationMs` | `xyncra.duration_ms` | 耗时（毫秒） |
+| `AttrCheckpointID` | `xyncra.checkpoint.id` | 检查点标识 |
+| `AttrChunkCount` | `xyncra.chunk_count` | 流式块数 |
+| `AttrTotalChars` | `xyncra.total_chars` | 总字符数 |
+| `AttrDebug` | `xyncra.debug` | 调试标记 |
+| `AttrSizeBytes` | `xyncra.size_bytes` | 消息大小（字节） |
+| `AttrTargetUserID` | `xyncra.target_user_id` | 目标用户 |
+| `AttrTargetType` | `xyncra.target_type` | 目标类型 |
 
-// 初始化 Provider
-func initTracer() (*trace.TracerProvider, error) {
-    exporter, err := otlptracegrpc.New(ctx,
-        otlptracegrpc.WithEndpoint("otel-collector:4317"),
-    )
-    if err != nil {
-        return nil, err
-    }
+## 代码组织
 
-    tp := trace.NewTracerProvider(
-        trace.WithBatcher(exporter),
-        trace.WithResource(resource.NewWithAttributes(
-            semconv.SchemaURL,
-            semconv.ServiceNameKey.String("xyncra-server"),
-            semconv.ServiceVersionKey.String(version),
-        )),
-    )
-    otel.SetTracerProvider(tp)
-    return tp, nil
-}
-```
+追踪相关代码分布在以下包中：
 
-### 导出后端
-
-| 后端 | 部署方式 | 适用场景 |
-|------|----------|----------|
-| Jaeger | All-in-one 或 Production | 小型团队，快速搭建 |
-| Tempo | 集群部署 | 大型部署，与 Grafana 集成 |
-| Zipkin | 单节点 | 兼容 OpenZipkin 生态 |
-| 云厂商 | 托管服务 | 阿里云链路追踪、AWS X-Ray |
-
-### Grafana Tempo + Loki 关联
-
-```yAML
-# 通过 trace_id 关联日志和追踪
-loki:
-  config:
-    derived_fields:
-      - name: trace_id
-        url: 'http://tempo:3200/trace/$${trace_id}'
-        mat regex: 'trace_id=(\w+)'
-```
-
-## 手动追踪（过渡方案）
-
-在集成 OpenTelemetry 之前，可以通过日志模拟基本追踪：
-
-```go
-// 为每个请求生成 TraceID
-type TraceContext struct {
-    TraceID string
-    SpanID  string
-    ParentSpanID string
-}
-
-func StartTrace(ctx context.Context, name string) (*TraceContext, context.Context) {
-    traceID := uuid.New().String()
-    spanID := uuid.New().String()[:8]
-    
-    // 将 TraceID 注入日志
-    ctx = context.WithValue(ctx, traceKey, &TraceContext{
-        TraceID: traceID,
-        SpanID:  spanID,
-    })
-    
-    logger.Info("trace: started",
-        "trace_id", traceID,
-        "span", name,
-    )
-    
-    return &TraceContext{TraceID: traceID, SpanID: spanID}, ctx
-}
-
-func EndTrace(tc *TraceContext, name string) {
-    logger.Info("trace: ended",
-        "trace_id", tc.TraceID,
-        "span", name,
-    )
-}
-```
-
-## 实施优先级
-
-| 优先级 | 追踪能力 | 预估工作量 | 说明 |
-|--------|----------|------------|------|
-| P0 | LLM 调用追踪 | 低 | 已有 LLMCallEvent 数据 |
-| P0 | WebSocket 连接追踪 | 低 | 已有连接生命周期事件 |
-| P1 | Agent 执行全链路 | 中 | 从消息入队到 Agent 响应 |
-| P1 | 消息投递延迟追踪 | 中 | 端到端消息延迟分析 |
-| P2 | 跨节点追踪 | 高 | 多节点部署时启用 |
-| P3 | 集成 OpenTelemetry | 高 | 标准化追踪体系 |
+| 包 | 文件 | 说明 |
+|------|------|------|
+| `internal/tracing` | `tracing.go` | InitTracer、Tracer 全局初始化 |
+| `internal/tracing` | `config.go` | TracingConfig 配置读取 |
+| `internal/tracing` | `middleware.go` | DebugSampler 采样策略 |
+| `internal/tracing` | `mq_propagation.go` | W3C Trace Context MQ 传播 |
+| `internal/tracing` | `attributes.go` | Span 名称和属性常量 |
+| `internal/tracing` | `doc.go` | 包文档 |
+| `internal/server` | `tracing_helpers.go` | WebSocket/Handler 层 span 辅助函数 |
+| `internal/handler` | `tracing_helpers.go` | Broker enqueue span |
+| `internal/agent` | `tracing_middleware.go` | TracingMiddleware（LLM/Tool span） |

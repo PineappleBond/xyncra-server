@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -218,6 +219,9 @@ type RedisConnectionStoreConfig struct {
 	// PoolTimeout is the maximum time to wait for a pool connection.
 	// A value of 0 uses the go-redis default (5 seconds).
 	PoolTimeout time.Duration
+
+	// TracingEnabled enables OpenTelemetry instrumentation for Redis operations.
+	TracingEnabled bool
 }
 
 // resolveDefaultTTL returns the configured default TTL or the package-level
@@ -281,6 +285,14 @@ func NewRedisConnectionStore(cfg RedisConnectionStoreConfig) (*RedisConnectionSt
 	}
 
 	client := redis.NewClient(cfg.toRedisOptions())
+
+	// Add OpenTelemetry instrumentation hook for Redis operations.
+	if cfg.TracingEnabled {
+		if err := redisotel.InstrumentTracing(client); err != nil {
+			_ = client.Close()
+			return nil, fmt.Errorf("server: failed to instrument redis tracing: %w", err)
+		}
+	}
 
 	// Verify connectivity unless lazy connect is enabled.
 	if !cfg.LazyConnect {

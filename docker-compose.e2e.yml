@@ -2,6 +2,9 @@
 # 端口选择避免与本地开发环境冲突（D-043）：
 #   Redis  16379 -> 6379
 #   Server 18080 -> 8080
+#   Jaeger OTLP gRPC 14317 -> 4317
+#   Jaeger OTLP HTTP 14318 -> 4318
+#   Jaeger UI        16687 -> 16686
 
 services:
   redis-e2e:
@@ -31,11 +34,17 @@ services:
       - XYNCRA_DB_DRIVER=sqlite
       - XYNCRA_DB_DSN=/app/xyncra-e2e.db
       - XYNCRA_LLM_LOG_DIR=/app/llm-logs
+      - XYNCRA_TRACING_ENABLED=true
+      - XYNCRA_TRACING_OTLP_ENDPOINT=jaeger-e2e:4317
+      - XYNCRA_TRACING_OTLP_INSECURE=true
+      - XYNCRA_TRACING_SAMPLING_RATE=1.0
     volumes:
       - ./llm-logs-e2e:/app/llm-logs
     user: "root"
     depends_on:
       redis-e2e:
+        condition: service_healthy
+      jaeger-e2e:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
@@ -43,3 +52,25 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
+
+  jaeger-e2e:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "14317:4317"    # OTLP gRPC
+      - "14318:4318"    # OTLP HTTP
+      - "16687:16686"   # Jaeger UI
+    environment:
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_KEY=/badger/data_keys
+      - BADGER_DIRECTORY_VALUE=/badger/data
+    volumes:
+      - jaeger-badger-e2e:/badger
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:16686"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  jaeger-badger-e2e:

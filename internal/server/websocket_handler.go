@@ -150,6 +150,10 @@ func (h *DefaultMessageHandler) handleRequest(ctx context.Context, client *Clien
 		return
 	}
 
+	// Start handler.invoke span after we know the method name.
+	invokeCtx, invokeFinish := startHandlerInvokeSpan(ctx, req.Method)
+	defer invokeFinish(nil)
+
 	h.mu.RLock()
 	methodHandler, ok := h.methods[req.Method]
 	if !ok {
@@ -164,7 +168,7 @@ func (h *DefaultMessageHandler) handleRequest(ctx context.Context, client *Clien
 		return
 	}
 
-	result, err := methodHandler.HandleRequest(ctx, client, &req)
+	result, err := methodHandler.HandleRequest(invokeCtx, client, &req)
 	if err != nil {
 		log.Printf("websocket: handler error [connID=%s, method=%s]: %v",
 			client.ConnID(), req.Method, err)

@@ -1,5 +1,7 @@
 # 错误码体系
 
+> last_updated: 2026-07-17
+
 ## 概述
 
 Xyncra Server 定义了层次化的错误码体系，涵盖协议层、服务器内部和客户端错误，确保错误信息的结构化和可操作性。
@@ -18,7 +20,7 @@ Xyncra Server 定义了层次化的错误码体系，涵盖协议层、服务器
 
 ### 协议层错误码（pkg/protocol）
 
-定义在 `pkg/protocol/protocol.go`：
+定义在 `pkg/protocol/errors.go`：
 
 | 错误码 | 常量名 | HTTP 类比 | 说明 |
 |--------|--------|-----------|------|
@@ -34,7 +36,7 @@ Xyncra Server 定义了层次化的错误码体系，涵盖协议层、服务器
 
 ### 服务器内部错误码（internal/server）
 
-定义在 `internal/server/server.go`：
+定义在 `internal/server/websocket_server.go`：
 
 | 错误 | Go 类型 | 说明 |
 |------|---------|------|

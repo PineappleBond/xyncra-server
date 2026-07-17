@@ -1,3 +1,7 @@
+---
+last_updated: 2026-07-17
+---
+
 # 配置参考
 
 > Xyncra 遵循"零配置"设计哲学——开箱即用，所有选项都有合理的默认值。
@@ -134,6 +138,28 @@ LLM 日志文件路径：`{XYNCRA_LLM_LOG_DIR}/llm-calls.log`
   "token_usage": {"prompt": 100, "completion": 50, "total": 150}
 }
 ```
+
+### 分布式追踪
+
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `XYNCRA_TRACING_ENABLED` | `false` | 是否启用 OpenTelemetry 链路追踪 |
+| `XYNCRA_TRACING_OTLP_ENDPOINT` | `localhost:4317` | OTLP/gRPC collector 地址 |
+| `XYNCRA_TRACING_OTLP_INSECURE` | `true` | 是否禁用 OTLP Exporter TLS |
+| `XYNCRA_TRACING_SAMPLING_RATE` | `1.0` | 采样率（0.0-1.0），1.0 表示全量采样 |
+| `XYNCRA_TRACING_SERVICE_NAME` | `xyncra-server` | 服务名称（Jaeger 中显示） |
+| `XYNCRA_TRACING_DEBUG_USERS` | 空 | 强制采样的用户 ID，逗号分隔 |
+| `XYNCRA_TRACING_DEBUG_DEVICES` | 空 | 强制采样的设备 ID，逗号分隔 |
+
+命令行标志（覆盖环境变量）：
+
+| 标志 | 说明 |
+|------|------|
+| `-tracing-enabled` | 启用追踪 |
+| `-tracing-endpoint` | OTLP endpoint |
+| `-tracing-sampling-rate` | 采样率 |
+
+启用后，追踪数据通过 OTLP/gRPC 导出到配置的 collector（如 Jaeger）。详见 [分布式追踪](../observability/distributed-tracing.md)。
 
 ### E2E 测试端口约定
 
@@ -358,6 +384,7 @@ XYNCRA_LLM_LOG_DIR=/var/log/xyncra/llm
 - 设置 `XYNCRA_MAX_CONNS_PER_USER` 防止连接滥用
 - 将 Agent 配置文件目录放在版本控制之外
 - 启用 LLM 日志用于审计和调试
+- 启用分布式追踪（`XYNCRA_TRACING_ENABLED=true`）并部署 Jaeger 用于链路排查
 - 在反向代理层处理 TLS（Xyncra 不处理 TLS）
 
 ---
@@ -387,6 +414,10 @@ XYNCRA_MAX_CONNS_PER_USER=0
 
 # LLM Provider
 # DASHSCOPE_API_KEY=your_api_key_here
+
+# Distributed Tracing
+XYNCRA_TRACING_ENABLED=false
+# XYNCRA_TRACING_OTLP_ENDPOINT=jaeger:4317
 ```
 
 ### 完整的 `.env` 模板
@@ -415,6 +446,15 @@ XYNCRA_AGENTS_DIR=agents
 
 # --- LLM Logging ---
 # XYNCRA_LLM_LOG_DIR=/var/log/xyncra/llm
+
+# --- Distributed Tracing ---
+XYNCRA_TRACING_ENABLED=false
+XYNCRA_TRACING_OTLP_ENDPOINT=localhost:4317
+XYNCRA_TRACING_OTLP_INSECURE=true
+XYNCRA_TRACING_SAMPLING_RATE=1.0
+XYNCRA_TRACING_SERVICE_NAME=xyncra-server
+# XYNCRA_TRACING_DEBUG_USERS=alice,bob
+# XYNCRA_TRACING_DEBUG_DEVICES=dev1,dev2
 
 # --- Client ---
 XYNCRA_USER_ID=

@@ -104,6 +104,12 @@ func NewAgentResumeHandler(
 			}
 		}
 
+		// Create agent.execute span for the resume path.
+		// HITL resume creates an independent trace (no link to the original
+		// process trace). Cross-trace linking may be added later.
+		ctx, executeFinish := startAgentExecuteSpan(ctx, payload.AgentID, payload.ConversationID, payload.SenderID)
+		defer executeFinish(nil)
+
 		// 3. Acquire per-conversation lock (D-084).
 		// For HITL, the initial execution's lock is NOT released. The resume
 		// task reuses the same lock. If the lock is still held (expected for

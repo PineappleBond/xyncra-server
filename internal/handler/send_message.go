@@ -104,9 +104,9 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 	if params.ClientMessageID == "" {
 		return nil, protocol.NewValidationError("missing required field: client_message_id")
 	}
-	if params.Content == "" {
-		return nil, protocol.NewValidationError("missing required field: content")
-	}
+	// D-091: empty content is allowed; the Agent handles it by returning a
+	// user-friendly error message. The CLI layer (send.go) already ensures
+	// that --content was explicitly provided (even if the value is empty).
 
 	// Apply default message type.
 	if params.Type == "" {
@@ -191,9 +191,11 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 			Type:    mq.TypeSendMessage,
 			Payload: payloadBytes,
 		}
-		if _, err := h.broker.Enqueue(ctx, task); err != nil {
+		enqueueCtx, enqueueFinish := startBrokerEnqueueSpan(ctx, mq.TypeSendMessage)
+		if _, err := h.broker.Enqueue(enqueueCtx, task); err != nil {
 			log.Printf("send_message: MQ enqueue failed (fire-and-forget): %v", err)
 		}
+		enqueueFinish(nil)
 	}
 
 	// 5b. If the sender is human and the peer is a registered agent, enqueue
@@ -216,9 +218,11 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 						Type:    mq.TypeAgentProcess,
 						Payload: payloadBytes,
 					}
-					if _, err := h.broker.Enqueue(ctx, agentTask, mq.WithMaxRetry(20)); err != nil {
+					enqueueCtx, enqueueFinish := startBrokerEnqueueSpan(ctx, mq.TypeAgentProcess)
+					if _, err := h.broker.Enqueue(enqueueCtx, agentTask, mq.WithMaxRetry(20)); err != nil {
 						log.Printf("send_message: agent MQ enqueue failed (fire-and-forget): %v", err)
 					}
+					enqueueFinish(nil)
 				}
 			}
 		}

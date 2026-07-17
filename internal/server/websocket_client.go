@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"sync"
@@ -139,6 +140,16 @@ func WithSendBufSize(n int) ClientOption {
 // WithMessageHandler sets the handler for incoming messages.
 func WithMessageHandler(h MessageHandler) ClientOption {
 	return func(c *Client) { c.handler = h }
+}
+
+// WithContext sets the base context for the client.
+// This allows the client to inherit span context from the connection span,
+// ensuring that all child spans (message receive, handler invoke) are linked
+// to the connection's trace.
+func WithContext(ctx context.Context) ClientOption {
+	return func(c *Client) {
+		c.ctx, c.cancel = context.WithCancel(ctx)
+	}
 }
 
 // NewClient creates a Client wrapping the given WebSocket connection. The
@@ -300,9 +311,25 @@ func (c *Client) readPump() {
 			continue
 		}
 
-		if c.handler != nil {
-			c.handler.HandleMessage(c.ctx, c, pkg)
+		// Extract method name from the package data (best-effort, for span attribute).
+		method := ""
+		if pkg.Data != nil {
+			var req struct {
+				Method string `json:"method"`
+			}
+			_ = json.Unmarshal(pkg.Data, &req)
+			method = req.Method
 		}
+
+		// Create ws.message.receive span; pass recvCtx to the handler so
+		// downstream spans (handler.invoke) are children of this span.
+		recvCtx, recvFinish := startMessageReceiveSpan(c.ctx, method, len(message))
+
+		if c.handler != nil {
+			c.handler.HandleMessage(recvCtx, c, pkg)
+		}
+
+		recvFinish(nil)
 	}
 }
 

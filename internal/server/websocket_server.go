@@ -611,7 +611,17 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 
 	connID := uuid.New().String()
 
-	client := NewClient(conn, userID, deviceID, connID, s.clientOptions...)
+	// Create ws.connection span covering the entire connection lifecycle.
+	// The span uses r.Context() as parent so it inherits HTTP transport context
+	// (trace IDs propagated from reverse proxy).
+	connCtx, connFinish := startConnectionSpan(r.Context(), userID, deviceID, connID)
+
+	client := NewClient(conn, userID, deviceID, connID, append(s.clientOptions, WithContext(connCtx))...)
+
+	// End the connection span when handleWebSocket returns. Placed immediately
+	// after NewClient so that ALL exit paths (including ConnectionStore.Add
+	// failure) properly close the span.
+	defer connFinish(nil)
 
 	// Atomically register the new connection and remove old connections from
 	// the device index. The new connID is different from all old connIDs, so
@@ -848,11 +858,17 @@ func (s *WebSocketServer) BroadcastUpdates(userID string, updates *protocol.Pack
 		return fmt.Errorf("websocket: updates is nil")
 	}
 
+	// Create handler.broadcast span (fire-and-forget: tracing errors must not
+	// block business logic). Uses context.Background() as parent because
+	// BroadcastUpdates has no caller context.
+	bcastCtx, bcastFinish := startBroadcastSpan(context.Background(), userID)
+	defer bcastFinish(nil)
+
 	// 1. Local broadcast (existing logic).
-	s.broadcastLocal(userID, updates)
+	s.broadcastLocal(bcastCtx, userID, updates)
 
 	// 2. Cross-node publish via Pub/Sub.
-	if err := s.nodeBroadcaster.Publish(s.Context(), userID, updates, s.nodeID); err != nil {
+	if err := s.nodeBroadcaster.Publish(bcastCtx, userID, updates, s.nodeID); err != nil {
 		s.logger.Error("cross-node broadcast failed", "userID", userID, "error", err)
 		// Fire-and-forget: data is persisted, delivery via sync_updates (D-007).
 	}
@@ -863,7 +879,7 @@ func (s *WebSocketServer) BroadcastUpdates(userID string, updates *protocol.Pack
 // broadcastLocal sends a PackageDataUpdates package to all local connections
 // of the given user. It uses the per-user index for O(k) lookup where k is
 // the number of connections for that user.
-func (s *WebSocketServer) broadcastLocal(userID string, updates *protocol.PackageDataUpdates) {
+func (s *WebSocketServer) broadcastLocal(ctx context.Context, userID string, updates *protocol.PackageDataUpdates) {
 	data, err := jsonMarshal(updates)
 	if err != nil {
 		s.logger.Error("websocket: marshal updates for local broadcast: %v", err)
@@ -975,7 +991,7 @@ func (s *WebSocketServer) handleRemoteBroadcast(userID string, updates *protocol
 	if sourceNodeID == s.nodeID {
 		return
 	}
-	s.broadcastLocal(userID, updates)
+	s.broadcastLocal(context.Background(), userID, updates)
 }
 
 // ClientCount returns the number of active client connections.

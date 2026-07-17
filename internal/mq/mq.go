@@ -200,6 +200,10 @@ type Task struct {
 	// ProcessIn delays task processing by the given duration after enqueue.
 	// A value of 0 means immediate processing.
 	ProcessIn time.Duration
+
+	// Metadata carries key-value pairs for trace context propagation.
+	// Populated by the tracing layer; business code should not read/write this field.
+	Metadata map[string]string
 }
 
 // Broker is the core message queue interface. Implementations manage the

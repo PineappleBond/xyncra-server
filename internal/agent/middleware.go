@@ -91,5 +91,11 @@ func (b *AgentBuilder) buildMiddleware(
 		mws = append(mws, NewLoggingMiddleware(b.llmLogger, config.ID, config.Model))
 	}
 
+	// N+1. Tracing middleware (only when tracing is enabled).
+	// Uses the global tracer provider; no-op when tracing is disabled (zero overhead).
+	if b.tracingEnabled {
+		mws = append(mws, NewTracingMiddleware(config.ID, config.Model))
+	}
+
 	return mws
 }

@@ -1,4 +1,10 @@
+---
+last_updated: 2026-07-17
+---
+
 # Metrics 埋点
+
+> last_updated: 2026-07-17
 
 ## 概述
 

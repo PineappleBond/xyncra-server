@@ -293,6 +293,7 @@ type AgentBuilder struct {
 	clientFunctionProvider ClientFunctionProvider  // Phase 6 (D-101)
 	clientCaller           ClientCaller            // Phase 6 (D-101)
 	llmLogger              *LLMLogger              // optional: dedicated LLM call logger
+	tracingEnabled         bool                    // when true, TracingMiddleware is appended to the middleware chain
 }
 
 // NewAgentBuilder creates an AgentBuilder backed by the given LLM factory.
@@ -351,6 +352,14 @@ func (b *AgentBuilder) SetLLMLogger(logger *LLMLogger) {
 	b.llmLogger = logger
 }
 
+// SetTracingEnabled controls whether a TracingMiddleware is appended to the
+// middleware chain during Build(). When enabled, each LLM call and tool call
+// produces an OpenTelemetry span. When disabled (the default), no tracing
+// middleware is added and there is zero overhead.
+func (b *AgentBuilder) SetTracingEnabled(enabled bool) {
+	b.tracingEnabled = enabled
+}
+
 // BuiltAgent wraps an Eino Runner together with the config it was built from.
 // The Agent field holds the underlying agent for sub-agent wrapping (D-081).
 type BuiltAgent struct {
@@ -368,7 +377,11 @@ type BuiltAgent struct {
 //  4. Builds the middleware chain (D-079).
 //  5. Wraps everything in a ChatModelAgent with the agent's system prompt as instruction.
 //  6. Creates a Runner with streaming enabled and optional CheckPointStore (D-083).
-func (b *AgentBuilder) Build(ctx context.Context, config *AgentConfig) (*BuiltAgent, error) {
+func (b *AgentBuilder) Build(ctx context.Context, config *AgentConfig) (built *BuiltAgent, err error) {
+	// Create agent.build span for distributed tracing.
+	ctx, buildFinish := startAgentBuildSpan(ctx, config.ID)
+	defer func() { buildFinish(err) }()
+
 	chatModel, err := b.llmFactory.Create(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrAgentBuild, err)

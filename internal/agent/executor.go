@@ -12,9 +12,12 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/compose"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/internal/tracing"
 )
 
 // Logger is a structured logger interface compatible with server.Logger.
@@ -195,8 +198,12 @@ func NewAgentExecutor(
 //  9. Broadcast streaming chunks to the human user.
 //  10. Send is_done=true broadcast (D-052 step 1).
 //  11. Persist the final message (D-052 step 2).
-func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) error {
+func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (err error) {
 	startTime := time.Now()
+
+	// Create agent.execute span for distributed tracing.
+	ctx, executeFinish := startAgentExecuteSpan(ctx, payload.AgentID, payload.ConversationID, payload.SenderID)
+	defer func() { executeFinish(err) }()
 
 	// Inject caller device into context for DynamicToolProvider (D-102).
 	if payload.DeviceID != "" {
@@ -293,6 +300,9 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 	checkpointID := uuid.New().String()
 
 	// 10. Run agent with checkpoint ID for HITL support (D-083/D-084).
+	ctx, runFinish := startAgentRunSpan(ctx, payload.AgentID)
+	defer runFinish(nil)
+
 	iter := builtAgent.Runner.Run(ctx, schemaMessages, adk.WithCheckPointID(checkpointID))
 
 	// 11. Bridge stream with interrupt detection (Phase 8B).
@@ -301,6 +311,11 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 	go e.streamBridge.BridgeWithInterrupt(ctx, iter, chunkCh, interruptCh)
 
 	// 12. Consume chunks and broadcast to the human user.
+	// Start agent.stream span for distributed tracing.
+	streamCtx, streamFinish := startAgentStreamSpan(ctx)
+	var chunkCount int
+	var totalChars int
+
 	var fullResponse strings.Builder
 	firstToken := true
 
@@ -335,10 +350,21 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 				// HTTP 5xx errors from the LLM provider are transient.
 				streamErr = fmt.Errorf("%w: %v", ErrLLMTimeout, streamErr)
 			}
+			// Finalize stream span with error before returning.
+			if span := trace.SpanFromContext(streamCtx); span != nil {
+				span.SetAttributes(
+					attribute.Int(tracing.AttrChunkCount, chunkCount),
+					attribute.Int(tracing.AttrTotalChars, totalChars),
+				)
+			}
+			streamFinish(streamErr)
 			return fmt.Errorf("execute agent: stream: %w", streamErr)
 		}
 
 		if chunk.Content != "" {
+			chunkCount++
+			totalChars += len(chunk.Content)
+
 			// On first token, clear typing indicator (D-065).
 			if firstToken {
 				clearTyping()
@@ -358,11 +384,24 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) err
 		}
 	}
 
+	// Finalize agent.stream span with final counts.
+	if span := trace.SpanFromContext(streamCtx); span != nil {
+		span.SetAttributes(
+			attribute.Int(tracing.AttrChunkCount, chunkCount),
+			attribute.Int(tracing.AttrTotalChars, totalChars),
+		)
+	}
+	streamFinish(nil)
+
 	// 12b. Check for HITL interrupt (Phase 8B).
 	// BridgeWithInterrupt closes both channels when done. The interruptCh
 	// receives at most one value. A non-blocking select detects whether the
 	// agent paused for user input.
 	if info, ok := <-interruptCh; ok && info != nil {
+		// Create agent.checkpoint.save span for HITL checkpoint persistence.
+		_, checkpointFinish := startAgentCheckpointSaveSpan(ctx, checkpointID)
+		defer checkpointFinish(nil)
+
 		e.logger.Info("agent executor: HITL interrupt",
 			"agent_id", payload.AgentID,
 			"conversation_id", payload.ConversationID,

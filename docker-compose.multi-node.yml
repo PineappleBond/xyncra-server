@@ -1,0 +1,213 @@
+# Multi-Node 分布式测试 docker-compose
+# 3 个 server 节点 + 共享 MySQL 8.0 + 共享 Redis 7 + chaos-agent
+#
+# 端口选择避免与现有 E2E 环境冲突：
+#   Node-A  18080 -> 8080
+#   Node-B  18081 -> 8080
+#   Node-C  18082 -> 8080
+#   Redis   16380 -> 6379
+#   MySQL   13306 -> 3306
+#   Jaeger OTLP gRPC 24317 -> 4317
+#   Jaeger OTLP HTTP 24318 -> 4318
+#   Jaeger UI        26686 -> 16686
+
+services:
+  # ==========================================================================
+  # Infrastructure
+  # ==========================================================================
+
+  mysql-mn:
+    container_name: mysql-mn
+    image: mysql:8.0
+    ports:
+      - "13306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=xyncra_mn
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  redis-mn:
+    container_name: redis-mn
+    image: redis:7-alpine
+    ports:
+      - "16380:6379"
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  jaeger-mn:
+    container_name: jaeger-mn
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "24317:4317"    # OTLP gRPC
+      - "24318:4318"    # OTLP HTTP
+      - "26686:16686"   # Jaeger UI
+    environment:
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_KEY=/badger/data_keys
+      - BADGER_DIRECTORY_VALUE=/badger/data
+    volumes:
+      - jaeger-badger-mn:/badger
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:16686"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ==========================================================================
+  # Server Nodes (3 instances sharing MySQL + Redis)
+  # ==========================================================================
+
+  xyncra-node-a:
+    container_name: xyncra-node-a
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.agent
+      - .env.test
+    ports:
+      - "18080:8080"
+    environment:
+      - XYNCRA_ADDR=:8080
+      - XYNCRA_REDIS_ADDR=redis-mn:6379
+      - XYNCRA_REDIS_DB=15
+      - XYNCRA_DB_DRIVER=mysql
+      - XYNCRA_DB_DSN=root:root@tcp(mysql-mn:3306)/xyncra_mn?parseTime=true&loc=Local
+      - XYNCRA_LLM_LOG_DIR=/app/llm-logs
+      - XYNCRA_TRACING_ENABLED=true
+      - XYNCRA_TRACING_OTLP_ENDPOINT=jaeger-mn:4317
+      - XYNCRA_TRACING_OTLP_INSECURE=true
+      - XYNCRA_TRACING_SAMPLING_RATE=1.0
+    volumes:
+      - ./llm-logs-mn:/app/llm-logs
+    user: "root"
+    depends_on:
+      mysql-mn:
+        condition: service_healthy
+      redis-mn:
+        condition: service_healthy
+      jaeger-mn:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  xyncra-node-b:
+    container_name: xyncra-node-b
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.agent
+      - .env.test
+    ports:
+      - "18081:8080"
+    environment:
+      - XYNCRA_ADDR=:8080
+      - XYNCRA_REDIS_ADDR=redis-mn:6379
+      - XYNCRA_REDIS_DB=15
+      - XYNCRA_DB_DRIVER=mysql
+      - XYNCRA_DB_DSN=root:root@tcp(mysql-mn:3306)/xyncra_mn?parseTime=true&loc=Local
+      - XYNCRA_LLM_LOG_DIR=/app/llm-logs
+      - XYNCRA_TRACING_ENABLED=true
+      - XYNCRA_TRACING_OTLP_ENDPOINT=jaeger-mn:4317
+      - XYNCRA_TRACING_OTLP_INSECURE=true
+      - XYNCRA_TRACING_SAMPLING_RATE=1.0
+    volumes:
+      - ./llm-logs-mn:/app/llm-logs
+    user: "root"
+    depends_on:
+      mysql-mn:
+        condition: service_healthy
+      redis-mn:
+        condition: service_healthy
+      jaeger-mn:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  xyncra-node-c:
+    container_name: xyncra-node-c
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.agent
+      - .env.test
+    ports:
+      - "18082:8080"
+    environment:
+      - XYNCRA_ADDR=:8080
+      - XYNCRA_REDIS_ADDR=redis-mn:6379
+      - XYNCRA_REDIS_DB=15
+      - XYNCRA_DB_DRIVER=mysql
+      - XYNCRA_DB_DSN=root:root@tcp(mysql-mn:3306)/xyncra_mn?parseTime=true&loc=Local
+      - XYNCRA_LLM_LOG_DIR=/app/llm-logs
+      - XYNCRA_TRACING_ENABLED=true
+      - XYNCRA_TRACING_OTLP_ENDPOINT=jaeger-mn:4317
+      - XYNCRA_TRACING_OTLP_INSECURE=true
+      - XYNCRA_TRACING_SAMPLING_RATE=1.0
+    volumes:
+      - ./llm-logs-mn:/app/llm-logs
+    user: "root"
+    depends_on:
+      mysql-mn:
+        condition: service_healthy
+      redis-mn:
+        condition: service_healthy
+      jaeger-mn:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  # ==========================================================================
+  # Chaos Agent (sidecar for rolling restarts)
+  # ==========================================================================
+
+  chaos-agent:
+    container_name: chaos-agent
+    image: docker:cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./scripts/chaos-agent:/scripts
+    environment:
+      - PROJECT_NAME=xyncra-server
+      - MIN_INTERVAL=10
+      - MAX_INTERVAL=40
+      - NODE_A=xyncra-node-a
+      - NODE_B=xyncra-node-b
+      - NODE_C=xyncra-node-c
+    entrypoint: ["/bin/sh", "/scripts/chaos-loop.sh"]
+    # chaos-agent 保持运行，等待 start-chaos 触发
+    # 控制命令:
+    #   docker exec <chaos-container> start-chaos
+    #   docker exec <chaos-container> stop-chaos
+    #   docker exec <chaos-container> chaos-status
+
+volumes:
+  jaeger-badger-mn:

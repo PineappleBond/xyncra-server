@@ -1,4 +1,10 @@
+---
+last_updated: 2026-07-17
+---
+
 # 结构化日志规范
+
+> last_updated: 2026-07-17
 
 ## 概述
 
@@ -149,7 +155,7 @@ logger.Error("health check: connection store ping failed: %v", err)
 
 ## LLM 专用日志格式
 
-LLM 调用日志使用独立的 JSONL 格式（每行一个 JSON 对象），通过 `XYNCRA_LLM_LOG_DIR` 环境变量启用。
+LLM 调用日志使用独立的 JSONL 格式（每行一个 JSON 对象），通过 `XYNCRA_LLM_LOG_DIR` 环境变量启用（实现见 `main.go:237`，文件名固定为 `llm-calls.log`）。
 
 ```json
 {"level":"info","msg":"llm call completed","agent_id":"weather-bot","model":"qwen3.7-plus","duration_ms":1234,"input_tokens":500,"output_tokens":200,"time":"2024-01-01T00:00:00Z"}
@@ -208,6 +214,41 @@ cat /app/llm-logs/llm-calls.log | \
   jq 'select(.msg == "llm call completed") | .duration_ms' | \
   awk '{if($1<1000) count[1]++; else if($1<5000) count[2]++; else count[3]++}
        END{print "<1s:", count[1]+0, "1-5s:", count[2]+0, ">5s:", count[3]+0}'
+```
+
+## Tracing 与 Logging 的关系
+
+Xyncra Server 同时运行两套并行的可观测性体系，各司其职：
+
+| 维度 | 结构化日志（LLMLogger） | 分布式追踪（OpenTelemetry） |
+|------|------------------------|---------------------------|
+| 目的 | 持久化审计记录、离线分析 | 实时链路排查、性能瓶颈定位 |
+| 格式 | JSONL 文件（`llm-calls.log`） | OTLP/gRPC → Jaeger/Tempo |
+| 触发 | `XYNCRA_LLM_LOG_DIR` 环境变量 | `XYNCRA_TRACING_ENABLED` 环境变量 |
+| 数据保留 | 文件持久保留，手动清理 | 后端存储策略决定（Jaeger 默认 72h） |
+| 查询方式 | `jq` / `grep` 命令行分析 | Jaeger UI 可视化检索 |
+| 性能影响 | 极低（异步写文件） | 极低（no-op 当关闭时） |
+
+### 两者并行运行，互不干扰
+
+- **LLMLogger** 保留作为 LLM 调用的持久化日志，记录完整的请求/响应内容、token 消耗和耗时
+- **Tracing** 用于实时链路排查，记录从 WebSocket 接收到 Agent 响应的完整调用链
+- 两者可同时启用，也可独立启用，互不依赖
+- `TracingMiddleware` 仅在 tracing 启用时被添加到 Agent 中间件链；`LoggingMiddleware` 独立运行
+- 在 LLM 调用场景中，LLMLogger 记录完整请求/响应，Tracing 记录 token 摘要和耗时——两者互补
+
+### 协同使用场景
+
+```bash
+# 场景：排查某个 Agent 的慢 LLM 调用
+
+# 1. 先在 Jaeger UI 中找到慢 trace
+#    → 看到 agent.llm.call span 耗时 30s
+
+# 2. 用 agent_id 和时间范围在 LLM 日志中定位完整请求
+grep '"agent_id":"weather-bot"' /app/llm-logs/llm-calls.log | jq 'select(.duration_ms > 10000)'
+
+# 3. 对照 trace 中的 token 消耗和日志中的完整请求内容，定位问题
 ```
 
 ## 日志安全

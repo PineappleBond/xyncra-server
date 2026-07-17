@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	"github.com/hibiken/asynq"
+
+	"github.com/PineappleBond/xyncra-server/internal/tracing"
 )
 
 // Compile-time check: AsynqBroker must implement the Broker interface.
@@ -75,8 +77,9 @@ func (c AsynqConfig) serverConfig() asynq.Config {
 // payload bytes. It carries our domain Task metadata alongside the raw
 // application payload.
 type asynqTaskPayload struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload,omitempty"`
+	Type     string            `json:"type"`
+	Payload  json.RawMessage   `json:"payload,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // TaskIDFromContext returns the broker-assigned task ID from the handler
@@ -186,9 +189,17 @@ func (b *AsynqBroker) Enqueue(ctx context.Context, task *Task, opts ...EnqueueOp
 	// NOTE: We wrap the payload in an envelope to carry metadata (type) alongside
 	// the raw application payload. A future optimization could use Asynq's task type
 	// directly to avoid the extra serialization layer.
+
+	// Inject trace context into metadata for MQ propagation.
+	metadata := tracing.InjectTraceContext(ctx)
+	if len(metadata) == 0 {
+		metadata = nil // omit empty metadata from JSON
+	}
+
 	env, err := json.Marshal(asynqTaskPayload{
-		Type:    task.Type,
-		Payload: task.Payload,
+		Type:     task.Type,
+		Payload:  task.Payload,
+		Metadata: metadata,
 	})
 	if err != nil {
 		return "", fmt.Errorf("mq: marshal task payload: %w", err)
@@ -332,6 +343,15 @@ func (b *AsynqBroker) Start(ctx context.Context, handler Handler) error {
 			return fmt.Errorf("mq: decode task: %w", err)
 		}
 
+		// Restore trace context from task metadata for distributed tracing.
+		if task.Metadata != nil {
+			ctx = tracing.ExtractTraceContext(task.Metadata)
+		}
+
+		// Create mq.process span for worker-side tracing.
+		ctx, processFinish := startMQProcessSpan(ctx, task.Type)
+		defer processFinish(nil)
+
 		// Asynq injects the task ID into the context automatically.
 		// Handlers can retrieve it via TaskIDFromContext.
 		return handler.ProcessTask(ctx, task)
@@ -433,8 +453,9 @@ func decodeAsynqTask(aTask *asynq.Task) (*Task, error) {
 	}
 
 	return &Task{
-		Type:    env.Type,
-		Payload: env.Payload,
+		Type:     env.Type,
+		Payload:  env.Payload,
+		Metadata: env.Metadata,
 	}, nil
 }
 

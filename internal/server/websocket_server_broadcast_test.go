@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -245,7 +246,7 @@ func TestBroadcastLocal_ToleratesSendFailure(t *testing.T) {
 
 	// broadcastLocal should not panic even with a closed client.
 	assert.NotPanics(t, func() {
-		srv.broadcastLocal("user-1", updates)
+		srv.broadcastLocal(context.Background(), "user-1", updates)
 	})
 
 	// The two healthy clients should have received the broadcast.
@@ -288,7 +289,7 @@ func TestBroadcastLocal_AllFailed_NoPanic(t *testing.T) {
 
 	// broadcastLocal should not panic even when all sends fail.
 	assert.NotPanics(t, func() {
-		srv.broadcastLocal("user-1", updates)
+		srv.broadcastLocal(context.Background(), "user-1", updates)
 	})
 
 	// No messages should be in any send channel.
@@ -325,7 +326,7 @@ func TestBroadcastLocal_Success_AllClientsReceive(t *testing.T) {
 		},
 	}
 
-	srv.broadcastLocal("user-1", updates)
+	srv.broadcastLocal(context.Background(), "user-1", updates)
 
 	// All three clients should have received the broadcast.
 	for _, c := range []*Client{c1, c2, c3} {

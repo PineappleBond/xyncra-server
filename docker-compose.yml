@@ -8,10 +8,16 @@ services:
       - XYNCRA_REDIS_ADDR=redis:6379
       - XYNCRA_DB_DRIVER=sqlite
       - XYNCRA_DB_DSN=/data/xyncra.db
+      - XYNCRA_TRACING_ENABLED=true
+      - XYNCRA_TRACING_OTLP_ENDPOINT=jaeger:4317
+      - XYNCRA_TRACING_OTLP_INSECURE=true
+      - XYNCRA_TRACING_SAMPLING_RATE=1.0
     volumes:
       - xyncra-data:/data
     depends_on:
       redis:
+        condition: service_healthy
+      jaeger:
         condition: service_healthy
     restart: unless-stopped
 
@@ -26,6 +32,27 @@ services:
       retries: 3
     restart: unless-stopped
 
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+      - "16686:16686"  # Jaeger UI
+    environment:
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_KEY=/badger/data_keys
+      - BADGER_DIRECTORY_VALUE=/badger/data
+    volumes:
+      - jaeger-badger:/badger
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:16686"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
 volumes:
   xyncra-data:
   redis-data:
+  jaeger-badger:

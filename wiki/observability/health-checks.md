@@ -1,5 +1,7 @@
 # 健康检查
 
+> last_updated: 2026-07-17
+
 ## 概述
 
 Xyncra Server 提供内置的健康检查端点，用于监控服务运行状态和依赖可用性。健康检查结果用于负载均衡、容器编排和监控告警。
@@ -35,7 +37,7 @@ Xyncra Server 提供内置的健康检查端点，用于监控服务运行状态
 
 ### 实现细节
 
-定义在 `internal/server/websocket_server.go:1005-1023`：
+定义在 `internal/server/websocket_server.go:1008-1023`：
 
 ```go
 func (s *WebSocketServer) handleHealth(w http.ResponseWriter, r *http.Request) {

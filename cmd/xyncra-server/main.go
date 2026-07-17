@@ -19,12 +19,17 @@
 //	-max-conns     Max connections per user, 0 = unlimited (default 0)
 //	-agents-dir    Path to agent config directory (default "agents")
 //	-max-functions-per-device  Max functions a device can register (default 200)
+//	-tracing-enabled  Enable OpenTelemetry distributed tracing (default false)
+//	-tracing-endpoint  OTLP gRPC endpoint for trace exporter (default "localhost:4317")
+//	-tracing-sampling-rate  Trace sampling rate 0.0-1.0 (default 1.0)
 //
 // Environment variables (used as fallback when flags are not set):
 //
 //	XYNCRA_ADDR, XYNCRA_REDIS_ADDR, XYNCRA_REDIS_PASSWORD, XYNCRA_REDIS_DB,
 //	XYNCRA_DB_DRIVER, XYNCRA_DB_DSN, XYNCRA_MAX_CONNS_PER_USER,
-//	XYNCRA_MAX_FUNCTIONS_PER_DEVICE
+//	XYNCRA_MAX_FUNCTIONS_PER_DEVICE, XYNCRA_TRACING_ENABLED,
+//	XYNCRA_TRACING_OTLP_ENDPOINT, XYNCRA_TRACING_SAMPLING_RATE,
+//	XYNCRA_TRACING_DEBUG_USERS, XYNCRA_TRACING_DEBUG_DEVICES
 package main
 
 import (
@@ -32,6 +37,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -46,7 +52,10 @@ import (
 	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
+	"github.com/PineappleBond/xyncra-server/internal/tracing"
+	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // Version information, injected at build time via -ldflags.
@@ -80,22 +89,71 @@ func main() {
 	maxFunctionsPerDevice := flag.Int("max-functions-per-device",
 		envOrDefaultInt("XYNCRA_MAX_FUNCTIONS_PER_DEVICE", 200),
 		"Max functions a device can register")
+	tracingEnabled := flag.Bool("tracing-enabled",
+		envOrDefault("XYNCRA_TRACING_ENABLED", "false") == "true",
+		"Enable OpenTelemetry distributed tracing")
+	tracingEndpoint := flag.String("tracing-endpoint",
+		envOrDefault("XYNCRA_TRACING_OTLP_ENDPOINT", "localhost:4317"),
+		"OTLP gRPC endpoint for trace exporter")
+	tracingSamplingRate := flag.Float64("tracing-sampling-rate",
+		envOrDefaultFloat("XYNCRA_TRACING_SAMPLING_RATE", 1.0),
+		"Trace sampling rate (0.0-1.0)")
 	flag.Parse()
 
 	log.Printf("starting xyncra-server %s (%s) built %s on %s", version, commit, buildTime, *addr)
+
+	// ---------------------------------------------------------------
+	// OpenTelemetry Tracing
+	// ---------------------------------------------------------------
+
+	tracerCfg := tracing.DefaultTracingConfig()
+
+	// Override with CLI flags if explicitly set
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "tracing-enabled":
+			tracerCfg.Enabled = *tracingEnabled
+		case "tracing-endpoint":
+			tracerCfg.Endpoint = *tracingEndpoint
+		case "tracing-sampling-rate":
+			tracerCfg.SampleRate = *tracingSamplingRate
+		}
+	})
+
+	tracerShutdown, err := tracing.InitTracer(tracerCfg)
+	if err != nil {
+		log.Printf("WARNING: failed to initialize tracer: %v (falling back to no-op)", err)
+		tracerShutdown, _ = tracing.InitTracer(tracing.TracingConfig{Enabled: false})
+	}
+
+	// Instrument the default HTTP transport for LLM API call tracing.
+	if *tracingEnabled {
+		http.DefaultTransport = otelhttp.NewTransport(http.DefaultTransport)
+	}
 
 	// ---------------------------------------------------------------
 	// Database / Store
 	// ---------------------------------------------------------------
 
 	db, err := store.NewDatabase(store.DatabaseConfig{
-		Driver: *dbDriver,
-		DSN:    *dbDSN,
+		Driver:        *dbDriver,
+		DSN:           *dbDSN,
+		EnableTracing: *tracingEnabled,
 	})
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
 	}
 	defer db.Close()
+
+	// Flush pending spans before closing the database (LIFO: deferred after
+	// db.Close so it runs first at shutdown).
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracerShutdown(ctx); err != nil {
+			log.Printf("tracer shutdown error: %v", err)
+		}
+	}()
 
 	dataStore := store.NewFromDatabase(db)
 
@@ -117,6 +175,7 @@ func main() {
 		Password:              *redisPassword,
 		DB:                    *redisDB,
 		MaxConnectionsPerUser: *maxConns,
+		TracingEnabled:        *tracingEnabled,
 	})
 	if err != nil {
 		log.Fatalf("failed to create connection store: %v", err)
@@ -148,6 +207,12 @@ func main() {
 		Password: *redisPassword,
 		DB:       *redisDB,
 	})
+	// Add OpenTelemetry instrumentation for Redis Pub/Sub operations.
+	if *tracingEnabled {
+		if err := redisotel.InstrumentTracing(nodeBroadcasterClient); err != nil {
+			log.Printf("WARNING: failed to instrument node broadcaster redis client: %v", err)
+		}
+	}
 	nodeBroadcaster := server.NewRedisNodeBroadcaster(nodeBroadcasterClient, "xyncra")
 	defer nodeBroadcasterClient.Close()
 
@@ -186,6 +251,12 @@ func main() {
 		Password: *redisPassword,
 		DB:       *redisDB,
 	})
+	// Add OpenTelemetry instrumentation for Redis idempotency operations.
+	if *tracingEnabled {
+		if err := redisotel.InstrumentTracing(redisIdempotencyClient); err != nil {
+			log.Printf("WARNING: failed to instrument idempotency redis client: %v", err)
+		}
+	}
 	defer redisIdempotencyClient.Close()
 
 	// PendingStore for reverse-RPC request persistence (Phase 4, D-103).
@@ -255,6 +326,10 @@ func main() {
 	if llmLogger != nil {
 		agentBuilder.SetLLMLogger(llmLogger)
 	}
+	// Enable tracing middleware when OpenTelemetry tracing is active.
+	// The global tracer provider was already initialized above; when disabled,
+	// a no-op provider is installed and no spans are emitted.
+	agentBuilder.SetTracingEnabled(*tracingEnabled)
 	// Wire the default tool registry (D-078). Built-in tools are registered
 	// via init() in the tools package; custom tools can be added here.
 	agentBuilder.SetToolRegistry(agenttools.DefaultRegistry)
@@ -422,4 +497,20 @@ func envOrDefaultInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// envOrDefaultFloat returns the float64 value of the environment variable
+// identified by key, or fallback if the variable is empty, unset, or cannot
+// be parsed as a float.
+func envOrDefaultFloat(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: invalid float %q for env %s, using default %g\n", v, key, fallback)
+		return fallback
+	}
+	return f
 }

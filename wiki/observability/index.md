@@ -1,16 +1,20 @@
+---
+last_updated: 2026-07-17
+---
+
 # 可观测性视角
 
 关注系统的日志、指标、追踪和健康检查，确保故障时可快速定位问题。
 
 ## 主题文档
 
-| 文档 | 说明 |
-|------|------|
-| [结构化日志规范](logging-standards.md) | 日志格式、级别、字段规范 |
-| [Metrics 埋点](metrics.md) | 业务和系统指标定义 |
-| [分布式追踪](distributed-tracing.md) | 链路追踪设计 |
-| [错误码体系](error-codes.md) | 错误码定义和分类 |
-| [健康检查](health-checks.md) | 健康检查端点设计 |
+| 文档 | 说明 | 状态 |
+|------|------|------|
+| [结构化日志规范](logging-standards.md) | 日志格式、级别、字段规范 | 已实现 |
+| [Metrics 埋点](metrics.md) | 业务和系统指标定义 | 规划中 |
+| [分布式追踪](distributed-tracing.md) | OpenTelemetry 全链路追踪实现 | 已实现 |
+| [错误码体系](error-codes.md) | 错误码定义和分类 | 已实现 |
+| [健康检查](health-checks.md) | 健康检查端点设计 | 已实现 |
 
 ## 核心原则
 
