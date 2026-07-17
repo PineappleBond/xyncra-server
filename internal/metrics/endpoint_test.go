@@ -20,8 +20,6 @@ import (
 //   - At least 10 unique metric families are present
 func TestMetricsEndpoint_PrometheusFormat(t *testing.T) {
 	// Touch a few Vec metrics so they appear in the Gather output.
-	MessagesSent.WithLabelValues("_endpoint_init").Add(0)
-	ConnectionsPerUser.WithLabelValues("_endpoint_init").Set(0)
 	AgentExecutions.WithLabelValues("_endpoint_init", "_endpoint_init").Add(0)
 	LLMCallsTotal.WithLabelValues("_endpoint_init", "_endpoint_init").Add(0)
 

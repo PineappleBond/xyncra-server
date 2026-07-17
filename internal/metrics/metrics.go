@@ -6,7 +6,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// System metrics (7)
+// System metrics (6)
 // ---------------------------------------------------------------------------
 
 var (
@@ -41,12 +41,6 @@ var (
 		Help: "Total GC cycles completed",
 	})
 
-	// CPUUsage is the CPU usage ratio of the process.
-	CPUUsage = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "xyncra_cpu_usage",
-		Help: "CPU usage ratio",
-	})
-
 	// OpenFDs is the number of open file descriptors.
 	OpenFDs = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "xyncra_open_fds",
@@ -55,7 +49,7 @@ var (
 )
 
 // ---------------------------------------------------------------------------
-// Connection metrics (5)
+// Connection metrics (3)
 // ---------------------------------------------------------------------------
 
 var (
@@ -71,18 +65,6 @@ var (
 		Help: "Total connections since start",
 	})
 
-	// ConnectionsPerUser tracks active connections per user ID.
-	ConnectionsPerUser = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "xyncra_connections_per_user",
-		Help: "Connections per user",
-	}, []string{"user_id"})
-
-	// ConnectionsPerDevice tracks active connections per (user, device) pair.
-	ConnectionsPerDevice = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "xyncra_connections_per_device",
-		Help: "Connections per device",
-	}, []string{"user_id", "device_id"})
-
 	// ConnectionsDuration tracks the distribution of connection lifetimes.
 	ConnectionsDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "xyncra_connections_duration_seconds",
@@ -92,26 +74,20 @@ var (
 )
 
 // ---------------------------------------------------------------------------
-// Message metrics (5)
+// Message metrics (4)
 // ---------------------------------------------------------------------------
 
 var (
-	// MessagesSent counts messages sent, labelled by conversation ID.
-	MessagesSent = promauto.NewCounterVec(prometheus.CounterOpts{
+	// MessagesSent counts total messages sent by the server.
+	MessagesSent = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "xyncra_messages_sent_total",
 		Help: "Total messages sent",
-	}, []string{"conversation_id"})
+	})
 
 	// MessagesReceived counts total messages received by the server.
 	MessagesReceived = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "xyncra_messages_received_total",
 		Help: "Total messages received",
-	})
-
-	// MessagesPerSecond is a gauge of the current message throughput.
-	MessagesPerSecond = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "xyncra_messages_per_second",
-		Help: "Messages per second",
 	})
 
 	// MessageSizeBytes tracks the distribution of message sizes.
@@ -140,7 +116,10 @@ var (
 		Help: "Total agent executions",
 	}, []string{"agent_id", "model"})
 
-	// AgentExecutionsFailed counts failed agent executions by agent ID and error.
+	// AgentExecutionsFailed counts failed agent executions by agent ID and
+	// classified error category. The "error" label must use a value from a
+	// fixed set (e.g. "timeout", "rate_limit", "context_length", "other")
+	// to prevent unbounded cardinality.
 	AgentExecutionsFailed = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "xyncra_agent_executions_failed_total",
 		Help: "Total failed agent executions",
@@ -183,7 +162,9 @@ var (
 		Help: "Total LLM calls",
 	}, []string{"agent_id", "model"})
 
-	// LLMCallsFailed counts failed LLM API calls.
+	// LLMCallsFailed counts failed LLM API calls. The "error" label must use
+	// a classified value (e.g. "timeout", "rate_limit", "context_length",
+	// "other") to prevent unbounded cardinality.
 	LLMCallsFailed = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "xyncra_llm_calls_failed_total",
 		Help: "Total failed LLM calls",
@@ -233,7 +214,7 @@ var (
 )
 
 // ---------------------------------------------------------------------------
-// Redis metrics (4) — total: 36 metrics
+// Redis metrics (4) — total: 32 metrics
 // ---------------------------------------------------------------------------
 
 var (

@@ -8,7 +8,7 @@ last_updated: 2026-07-17
 
 ## Overview
 
-Xyncra Server exposes 36 Prometheus metrics via the `/metrics` HTTP endpoint on the same port as the WebSocket server (default `:8080`). This is enabled by the `XYNCRA_METRICS_ENABLED=true` environment variable (opt-in, per D-063 optional module pattern).
+Xyncra Server exposes 32 Prometheus metrics via the `/metrics` HTTP endpoint on the same port as the WebSocket server (default `:8080`). This is enabled by the `XYNCRA_METRICS_ENABLED=true` environment variable (opt-in, per D-063 optional module pattern).
 
 The metrics endpoint is registered via `WSWithExtraRoutes` (D-128) on the same HTTP mux as `/health`, avoiding the need for a separate management port. The server package does not depend on Prometheus -- the `Route` abstraction decouples the two.
 
@@ -30,9 +30,9 @@ Returns Prometheus exposition format. Requires `XYNCRA_METRICS_ENABLED=true`.
 
 When disabled (default), no metrics collectors are created and the `/metrics` route is not registered. Zero overhead when unused.
 
-## Implemented Metrics (36 total)
+## Implemented Metrics (32 total)
 
-### System Metrics (7) -- Go Runtime & Service Health
+### System Metrics (6) -- Go Runtime & Service Health
 
 Collected every 10 seconds by the runtime collector in `internal/metrics/runtime.go`. These metrics monitor the Go runtime and process health. They are essential for capacity planning and detecting resource exhaustion.
 
@@ -43,32 +43,28 @@ Collected every 10 seconds by the runtime collector in `internal/metrics/runtime
 | `xyncra_memory_inuse_bytes` | Gauge | Heap memory in use in bytes | Memory footprint tracking |
 | `xyncra_gc_duration_seconds` | Summary | GC pause duration (p50/p90/p99) | GC overhead monitoring |
 | `xyncra_gc_count` | Gauge | Total GC cycles completed | GC frequency tracking |
-| `xyncra_cpu_usage` | Gauge | CPU usage ratio | CPU saturation alerting |
 | `xyncra_open_fds` | Gauge | Open file descriptors | FD exhaustion detection |
 
-### Connection Metrics (5) -- WebSocket Connection State
+### Connection Metrics (3) -- WebSocket Connection State
 
 Track connection lifecycle and capacity. Critical for detecting connection storms and leaks.
 
-| Metric | Type | Labels | Help | Ops Value |
-|--------|------|--------|------|-----------|
-| `xyncra_connections_active` | Gauge | -- | Current active WebSocket connections | Capacity planning, leak detection |
-| `xyncra_connections_total` | Counter | -- | Total connections since start | Connection rate tracking |
-| `xyncra_connections_per_user` | GaugeVec | `user_id` | Connections per user | Multi-device monitoring |
-| `xyncra_connections_per_device` | GaugeVec | `user_id`, `device_id` | Connections per device | Device-level tracking |
-| `xyncra_connections_duration_seconds` | Histogram | -- | Connection duration distribution (exponential buckets, 1s start, 2x factor, 15 buckets) | Connection stability analysis |
+| Metric | Type | Help | Ops Value |
+|--------|------|------|-----------|
+| `xyncra_connections_active` | Gauge | Current active WebSocket connections | Capacity planning, leak detection |
+| `xyncra_connections_total` | Counter | Total connections since start | Connection rate tracking |
+| `xyncra_connections_duration_seconds` | Histogram | Connection duration distribution (exponential buckets, 1s start, 2x factor, 15 buckets) | Connection stability analysis |
 
-### Message Metrics (5) -- Message Processing Throughput
+### Message Metrics (4) -- Message Processing Throughput
 
 Monitor message flow and delivery health. Key indicators of system throughput.
 
-| Metric | Type | Labels | Help | Ops Value |
-|--------|------|--------|------|-----------|
-| `xyncra_messages_sent_total` | CounterVec | `conversation_id` | Total messages sent | Throughput tracking |
-| `xyncra_messages_received_total` | Counter | -- | Total messages received | Inbound load monitoring |
-| `xyncra_messages_per_second` | Gauge | -- | Messages per second | Real-time throughput |
-| `xyncra_message_size_bytes` | Histogram | -- | Message size distribution (exponential buckets, 64B start, 2x factor, 12 buckets) | Payload size analysis |
-| `xyncra_message_latency_seconds` | Histogram | -- | Message delivery latency (default buckets) | Delivery SLA monitoring |
+| Metric | Type | Help | Ops Value |
+|--------|------|------|-----------|
+| `xyncra_messages_sent_total` | Counter | Total messages sent | Throughput tracking |
+| `xyncra_messages_received_total` | Counter | Total messages received | Inbound load monitoring |
+| `xyncra_message_size_bytes` | Histogram | Message size distribution (exponential buckets, 64B start, 2x factor, 12 buckets) | Payload size analysis |
+| `xyncra_message_latency_seconds` | Histogram | Message delivery latency (default buckets) | Delivery SLA monitoring |
 
 ### Agent Metrics (9) -- AI Agent Execution & LLM
 
@@ -85,6 +81,8 @@ Monitor agent runtime performance and LLM integration health. Essential for cost
 | `xyncra_llm_tokens_output_total` | CounterVec | `agent_id`, `model` | Total LLM output tokens | Cost tracking (output) |
 | `xyncra_llm_calls_total` | CounterVec | `agent_id`, `model` | Total LLM calls | LLM usage tracking |
 | `xyncra_llm_calls_failed_total` | CounterVec | `agent_id`, `model`, `error` | Total failed LLM calls | LLM error rate alerting |
+
+The `error` label on `xyncra_agent_executions_failed_total` and `xyncra_llm_calls_failed_total` uses classified values from a fixed set to prevent unbounded cardinality: `timeout`, `rate_limit`, `context_length`, `other`.
 
 ### Business Metrics (6) -- Application-Level Operations
 

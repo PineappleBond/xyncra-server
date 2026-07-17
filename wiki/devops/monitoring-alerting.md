@@ -61,7 +61,6 @@ type LLMCallEvent struct {
 | `xyncra_connections_active` | Gauge | 当前活跃 WebSocket 连接数 | `/health` 端点 |
 | `xyncra_connections_total` | Counter | 累计连接总数 | 日志聚合 |
 | `xyncra_messages_sent_total` | Counter | 累计消息发送数 | 日志聚合 |
-| `xyncra_messages_per_second` | Gauge | 每秒消息处理数 | 日志聚合 |
 | `xyncra_llm_calls_total` | Counter | LLM 调用总数 | LLM 日志 |
 | `xyncra_llm_calls_failed_total` | Counter | LLM 调用失败数 | LLM 日志 |
 | `xyncra_llm_duration_ms` | Histogram | LLM 调用耗时分布 | LLM 日志 |

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/PineappleBond/xyncra-server/internal/metrics"
@@ -78,9 +79,9 @@ func (m *PrometheusMetrics) Record(ctx context.Context, event LLMCallEvent) {
 	metrics.LLMCallsTotal.WithLabelValues(agentID, model).Inc()
 
 	if event.Error != nil {
-		errMsg := event.Error.Error()
-		metrics.AgentExecutionsFailed.WithLabelValues(agentID, errMsg).Inc()
-		metrics.LLMCallsFailed.WithLabelValues(agentID, model, errMsg).Inc()
+		errCategory := classifyMetricError(event.Error)
+		metrics.AgentExecutionsFailed.WithLabelValues(agentID, errCategory).Inc()
+		metrics.LLMCallsFailed.WithLabelValues(agentID, model, errCategory).Inc()
 		return
 	}
 
@@ -88,6 +89,26 @@ func (m *PrometheusMetrics) Record(ctx context.Context, event LLMCallEvent) {
 	metrics.AgentDuration.WithLabelValues(agentID, model).Observe(event.Duration.Seconds())
 	metrics.LLMTokensInput.WithLabelValues(agentID, model).Add(float64(event.InputTokens))
 	metrics.LLMTokensOutput.WithLabelValues(agentID, model).Add(float64(event.OutputTokens))
+}
+
+// classifyMetricError categorizes errors into a fixed set of labels for
+// Prometheus metrics. This prevents unbounded cardinality from arbitrary
+// error messages.
+func classifyMetricError(err error) string {
+	if err == nil {
+		return "other"
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "timeout"):
+		return "timeout"
+	case strings.Contains(msg, "rate limit"), strings.Contains(msg, "rate_limit"):
+		return "rate_limit"
+	case strings.Contains(msg, "context length"), strings.Contains(msg, "token"):
+		return "context_length"
+	default:
+		return "other"
+	}
 }
 
 // MultiMetrics fans out Record calls to multiple LLMMetrics implementations.

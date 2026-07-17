@@ -12,9 +12,6 @@ func TestAllMetricsRegistered(t *testing.T) {
 	// Touch each Vec metric with a label so it appears in Gather output.
 	// Prometheus only exposes Vec metrics after they have at least one
 	// label combination.
-	MessagesSent.WithLabelValues("_init").Add(0)
-	ConnectionsPerUser.WithLabelValues("_init").Set(0)
-	ConnectionsPerDevice.WithLabelValues("_init", "_init").Set(0)
 	AgentExecutions.WithLabelValues("_init", "_init").Add(0)
 	AgentExecutionsFailed.WithLabelValues("_init", "_init").Add(0)
 	AgentDuration.WithLabelValues("_init", "_init").Observe(0)
@@ -36,26 +33,22 @@ func TestAllMetricsRegistered(t *testing.T) {
 		registered[mf.GetName()] = true
 	}
 
-	// All 36 expected metric names.
+	// All 32 expected metric names.
 	expected := []string{
-		// System (7)
+		// System (6)
 		"xyncra_goroutines",
 		"xyncra_memory_alloc_bytes",
 		"xyncra_memory_inuse_bytes",
 		"xyncra_gc_duration_seconds",
 		"xyncra_gc_count",
-		"xyncra_cpu_usage",
 		"xyncra_open_fds",
-		// Connection (5)
+		// Connection (3)
 		"xyncra_connections_active",
 		"xyncra_connections_total",
-		"xyncra_connections_per_user",
-		"xyncra_connections_per_device",
 		"xyncra_connections_duration_seconds",
-		// Message (5)
+		// Message (4)
 		"xyncra_messages_sent_total",
 		"xyncra_messages_received_total",
-		"xyncra_messages_per_second",
 		"xyncra_message_size_bytes",
 		"xyncra_message_latency_seconds",
 		// Agent (9)
@@ -100,10 +93,8 @@ func TestMetricsCanBeSet(t *testing.T) {
 	MemoryAlloc.Set(1024)
 	MemoryInuse.Set(2048)
 	GCCount.Set(5)
-	CPUUsage.Set(0.5)
 	OpenFDs.Set(100)
 	ConnectionsActive.Set(10)
-	MessagesPerSecond.Set(50)
 	AgentActive.Set(3)
 	AgentQueueDepth.Set(7)
 	ConversationsActive.Set(15)
@@ -119,12 +110,11 @@ func TestMetricsCanBeSet(t *testing.T) {
 	ReverseRPCFailed.Inc()
 
 	// Vecs
-	MessagesSent.WithLabelValues("conv-1").Inc()
+	MessagesSent.Inc()
 	AgentExecutions.WithLabelValues("agent-1", "gpt-4").Inc()
 	LLMCallsTotal.WithLabelValues("agent-1", "gpt-4").Inc()
 	LLMTokensInput.WithLabelValues("agent-1", "gpt-4").Add(100)
 	LLMTokensOutput.WithLabelValues("agent-1", "gpt-4").Add(50)
-	ConnectionsPerUser.WithLabelValues("user-1").Set(2)
 	FunctionsRegistered.WithLabelValues("dev-1").Set(5)
 	AsynqQueueSize.WithLabelValues("default").Set(3)
 

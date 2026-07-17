@@ -447,8 +447,8 @@ func TestPrometheusMetrics_Record_Error(t *testing.T) {
 
 	pm.Record(ctx, event)
 
-	// Verify AgentExecutionsFailed incremented.
-	failCounter, err := metrics.AgentExecutionsFailed.GetMetricWithLabelValues("error-agent-prom", "rate limited")
+	// Verify AgentExecutionsFailed incremented with classified error label.
+	failCounter, err := metrics.AgentExecutionsFailed.GetMetricWithLabelValues("error-agent-prom", "rate_limit")
 	if err != nil {
 		t.Fatalf("get counter: %v", err)
 	}
@@ -456,8 +456,8 @@ func TestPrometheusMetrics_Record_Error(t *testing.T) {
 		t.Errorf("agent executions failed >= 1, got %f", got)
 	}
 
-	// Verify LLMCallsFailed incremented.
-	llmFail, err := metrics.LLMCallsFailed.GetMetricWithLabelValues("error-agent-prom", "gpt-3.5", "rate limited")
+	// Verify LLMCallsFailed incremented with classified error label.
+	llmFail, err := metrics.LLMCallsFailed.GetMetricWithLabelValues("error-agent-prom", "gpt-3.5", "rate_limit")
 	if err != nil {
 		t.Fatalf("get counter: %v", err)
 	}
@@ -553,5 +553,36 @@ func TestMultiMetrics_Record_FansOut(t *testing.T) {
 	}
 	if r2.count() != 1 {
 		t.Errorf("impl 2: expected 1 event, got %d", r2.count())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// classifyError tests
+// ---------------------------------------------------------------------------
+
+func TestClassifyMetricError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected string
+	}{
+		{"nil error", nil, "other"},
+		{"timeout", errors.New("request timeout exceeded"), "timeout"},
+		{"Timeout uppercase", errors.New("Request Timeout"), "timeout"},
+		{"rate limit space", errors.New("rate limit exceeded"), "rate_limit"},
+		{"rate limit underscore", errors.New("rate_limit exceeded"), "rate_limit"},
+		{"context length", errors.New("context length exceeded"), "context_length"},
+		{"token limit", errors.New("max token limit reached"), "context_length"},
+		{"generic error", errors.New("something went wrong"), "other"},
+		{"empty error", errors.New(""), "other"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyMetricError(tt.err)
+			if got != tt.expected {
+				t.Errorf("classifyMetricError(%v) = %q, want %q", tt.err, got, tt.expected)
+			}
+		})
 	}
 }
