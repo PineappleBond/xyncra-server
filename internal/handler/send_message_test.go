@@ -282,14 +282,9 @@ func TestSendMessage_InvalidParams(t *testing.T) {
 			},
 			errSubstr: "client_message_id",
 		},
-		{
-			name: "missing content",
-			params: map[string]interface{}{
-				"conversation_id":   "conv-1",
-				"client_message_id": uuid.New().String(),
-			},
-			errSubstr: "content",
-		},
+		// D-091: empty/missing content is intentionally allowed at the handler
+		// level; the CLI layer enforces --content presence, and the Agent
+		// returns a user-friendly error for empty content.
 	}
 
 	for _, tt := range tests {
