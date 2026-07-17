@@ -9,6 +9,7 @@
 ## 1. Overview
 
 Single-file GitHub Actions workflow (`.github/workflows/ci.yml`) that:
+
 - Runs lint, unit tests, and Docker build verification on every PR and push to main
 - Runs full E2E test suite only on push to main
 - Publishes Docker image to GitHub Container Registry (GHCR) only after all checks pass on main
@@ -51,13 +52,15 @@ permissions:
 ```yaml
 env:
   GO_VERSION: '1.26'
+  GOLANGCI_LINT_VERSION: 'v2.1'
 ```
 
-Single Go version (matches `go.mod` and `Dockerfile`). No version matrix — xyncra-server is an application, not a library.
+- **Go**: single version (matches `go.mod` and `Dockerfile`). No version matrix — xyncra-server is an application, not a library.
+- **golangci-lint**: pinned to `v2.1`. Pre-push hook checks and reports the installed version vs required version.
 
 ## 6. Job Topology
 
-```
+```text
 ┌─────────────┐  ┌──────────────┐  ┌───────────────┐
 │   lint      │  │  unit-test   │  │  docker-build │
 │  (PR+main)  │  │  (PR+main)   │  │  (PR+main)    │
