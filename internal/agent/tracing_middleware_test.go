@@ -175,3 +175,182 @@ func TestTracingMiddleware_IterationIncrement(t *testing.T) {
 	// iteration should be 3 after three model calls.
 	assert.Equal(t, int32(3), m.iteration)
 }
+
+func TestTracingMiddleware_DebugFilter_UserMatch(t *testing.T) {
+	startIdx := len(recorder.Ended())
+	m := NewTracingMiddleware("agent-debug-1", "gpt-4")
+	m.SetDebugFilter([]string{"user-A"}, nil)
+
+	state := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			schema.UserMessage("hello"),
+		},
+	}
+
+	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "user-A", DeviceID: "device-1"})
+	outCtx, _, err := m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+
+	// Simulate response
+	respState := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			schema.UserMessage("hello"),
+			{
+				Role:    schema.Assistant,
+				Content: "hi there",
+				ResponseMeta: &schema.ResponseMeta{
+					Usage: &schema.TokenUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+				},
+			},
+		},
+	}
+
+	_, _, err = m.AfterModelRewriteState(outCtx, respState, nil)
+	require.NoError(t, err)
+
+	spans := spansSince(startIdx)
+	require.Len(t, spans, 1)
+
+	events := spans[0].Events()
+	var hasRequest, hasResponse bool
+	for _, e := range events {
+		if e.Name == "llm.debug.request" {
+			hasRequest = true
+		}
+		if e.Name == "llm.debug.response" {
+			hasResponse = true
+		}
+	}
+	assert.True(t, hasRequest, "expected llm.debug.request event for matching user")
+	assert.True(t, hasResponse, "expected llm.debug.response event for matching user")
+}
+
+func TestTracingMiddleware_DebugFilter_DeviceMatch(t *testing.T) {
+	startIdx := len(recorder.Ended())
+	m := NewTracingMiddleware("agent-debug-2", "gpt-4")
+	m.SetDebugFilter(nil, []string{"device-X"})
+
+	state := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			schema.UserMessage("test"),
+		},
+	}
+
+	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "user-B", DeviceID: "device-X"})
+	outCtx, _, err := m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+
+	respState := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			schema.UserMessage("test"),
+			{Role: schema.Assistant, Content: "reply"},
+		},
+	}
+
+	_, _, err = m.AfterModelRewriteState(outCtx, respState, nil)
+	require.NoError(t, err)
+
+	spans := spansSince(startIdx)
+	require.Len(t, spans, 1)
+
+	events := spans[0].Events()
+	var hasRequest, hasResponse bool
+	for _, e := range events {
+		if e.Name == "llm.debug.request" {
+			hasRequest = true
+		}
+		if e.Name == "llm.debug.response" {
+			hasResponse = true
+		}
+	}
+	assert.True(t, hasRequest, "expected llm.debug.request event for matching device")
+	assert.True(t, hasResponse, "expected llm.debug.response event for matching device")
+}
+
+func TestTracingMiddleware_DebugFilter_NoMatch(t *testing.T) {
+	startIdx := len(recorder.Ended())
+	m := NewTracingMiddleware("agent-debug-3", "gpt-4")
+	m.SetDebugFilter([]string{"user-A"}, []string{"device-A"})
+
+	state := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			schema.UserMessage("test"),
+		},
+	}
+
+	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "user-B", DeviceID: "device-B"})
+	outCtx, _, err := m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+
+	respState := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			schema.UserMessage("test"),
+			{Role: schema.Assistant, Content: "reply"},
+		},
+	}
+
+	_, _, err = m.AfterModelRewriteState(outCtx, respState, nil)
+	require.NoError(t, err)
+
+	spans := spansSince(startIdx)
+	require.Len(t, spans, 1)
+
+	for _, e := range spans[0].Events() {
+		assert.NotEqual(t, "llm.debug.request", e.Name)
+		assert.NotEqual(t, "llm.debug.response", e.Name)
+	}
+}
+
+func TestTracingMiddleware_DebugFilter_NoFilter(t *testing.T) {
+	startIdx := len(recorder.Ended())
+	m := NewTracingMiddleware("agent-debug-4", "gpt-4")
+	// No SetDebugFilter called
+
+	state := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			schema.UserMessage("test"),
+		},
+	}
+
+	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "user-A", DeviceID: "device-A"})
+	outCtx, outState, err := m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+
+	_, _, err = m.AfterModelRewriteState(outCtx, outState, nil)
+	require.NoError(t, err)
+
+	spans := spansSince(startIdx)
+	require.Len(t, spans, 1)
+
+	for _, e := range spans[0].Events() {
+		assert.NotEqual(t, "llm.debug.request", e.Name)
+		assert.NotEqual(t, "llm.debug.response", e.Name)
+	}
+}
+
+func TestTracingMiddleware_DebugFilter_NoCallerDevice(t *testing.T) {
+	startIdx := len(recorder.Ended())
+	m := NewTracingMiddleware("agent-debug-5", "gpt-4")
+	m.SetDebugFilter([]string{"user-A"}, nil)
+
+	state := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			schema.UserMessage("test"),
+		},
+	}
+
+	// No CallerDevice in context
+	outCtx, outState, err := m.BeforeModelRewriteState(context.Background(), state, nil)
+	require.NoError(t, err)
+
+	_, _, err = m.AfterModelRewriteState(outCtx, outState, nil)
+	require.NoError(t, err)
+
+	spans := spansSince(startIdx)
+	require.Len(t, spans, 1)
+
+	for _, e := range spans[0].Events() {
+		assert.NotEqual(t, "llm.debug.request", e.Name)
+		assert.NotEqual(t, "llm.debug.response", e.Name)
+	}
+}

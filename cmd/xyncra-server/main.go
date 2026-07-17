@@ -300,15 +300,6 @@ func main() {
 		}
 	}
 
-	if llmLogger != nil {
-		debugUsers := envCSV("XYNCRA_LLM_DEBUG_USERS")
-		debugDevices := envCSV("XYNCRA_LLM_DEBUG_DEVICES")
-		if len(debugUsers) > 0 || len(debugDevices) > 0 {
-			llmLogger.SetDebugFilter(debugUsers, debugDevices)
-			log.Printf("[INFO] LLM debug log filter: users=%v devices=%v", debugUsers, debugDevices)
-		}
-	}
-
 	llmFactory := agent.NewLLMClientFactory()
 	agentBuilder := agent.NewAgentBuilder(llmFactory)
 	if llmLogger != nil {
@@ -318,6 +309,15 @@ func main() {
 	// The global tracer provider was already initialized above; when disabled,
 	// a no-op provider is installed and no spans are emitted.
 	agentBuilder.SetTracingEnabled(*tracingEnabled)
+	// Configure debug LLM content capture in tracing spans.
+	if *tracingEnabled {
+		debugUsers := envCSV("XYNCRA_TRACING_DEBUG_USERS")
+		debugDevices := envCSV("XYNCRA_TRACING_DEBUG_DEVICES")
+		if len(debugUsers) > 0 || len(debugDevices) > 0 {
+			agentBuilder.SetTracingDebugFilter(debugUsers, debugDevices)
+			log.Printf("[INFO] Tracing debug LLM capture: users=%v devices=%v", debugUsers, debugDevices)
+		}
+	}
 	// Wire the default tool registry (D-078). Built-in tools are registered
 	// via init() in the tools package; custom tools can be added here.
 	agentBuilder.SetToolRegistry(agenttools.DefaultRegistry)
@@ -487,23 +487,7 @@ func envOrDefaultInt(key string, fallback int) int {
 	return n
 }
 
-// envOrDefaultFloat returns the float64 value of the environment variable
-// identified by key, or fallback if the variable is empty, unset, or cannot
-// be parsed as a float.
-func envOrDefaultFloat(key string, fallback float64) float64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: invalid float %q for env %s, using default %g\n", v, key, fallback)
-		return fallback
-	}
-	return f
-}
-
-// envCSV reads an environment variable as a comma-separated list.
+// envCSV splits a comma-separated environment variable into a trimmed slice.
 // Returns nil if the variable is empty or unset.
 func envCSV(key string) []string {
 	v := os.Getenv(key)
@@ -518,8 +502,21 @@ func envCSV(key string) []string {
 			result = append(result, trimmed)
 		}
 	}
-	if len(result) == 0 {
-		return nil
-	}
 	return result
+}
+
+// envOrDefaultFloat returns the float64 value of the environment variable
+// identified by key, or fallback if the variable is empty, unset, or cannot
+// be parsed as a float.
+func envOrDefaultFloat(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: invalid float %q for env %s, using default %g\n", v, key, fallback)
+		return fallback
+	}
+	return f
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"sync/atomic"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 
 	"github.com/PineappleBond/xyncra-server/internal/tracing"
 )
@@ -43,6 +45,13 @@ type TracingMiddleware struct {
 
 	// llmSpan holds the active agent.llm.call span for the current iteration.
 	llmSpan trace.Span
+
+	// debugUsers/debugDevices: when non-empty, full LLM content is recorded
+	// as span events for matching callers (OR logic).
+	debugUsers   map[string]bool
+	debugDevices map[string]bool
+	hasDebug     bool
+	debugMatched bool // set per-iteration in BeforeModelRewriteState
 }
 
 // NewTracingMiddleware creates a TracingMiddleware for the given agent.
@@ -54,6 +63,15 @@ func NewTracingMiddleware(agentID, model string) *TracingMiddleware {
 		agentID:                      agentID,
 		model:                        model,
 	}
+}
+
+// SetDebugFilter configures per-user/device debug content capture.
+// When the caller matches (OR logic), full request/response content is
+// recorded as span events on the agent.llm.call span.
+func (m *TracingMiddleware) SetDebugFilter(users, devices []string) {
+	m.debugUsers = toSet(users)
+	m.debugDevices = toSet(devices)
+	m.hasDebug = len(m.debugUsers) > 0 || len(m.debugDevices) > 0
 }
 
 // BeforeModelRewriteState starts an "agent.llm.call" span before each model
@@ -71,6 +89,15 @@ func (m *TracingMiddleware) BeforeModelRewriteState(ctx context.Context, state *
 		),
 	)
 	m.llmSpan = span
+
+	// Debug: record full request content as span event
+	m.debugMatched = m.isDebugCaller(ctx)
+	if m.debugMatched && len(state.Messages) > 0 {
+		reqPayload := m.serializeMessages(state.Messages)
+		span.AddEvent("llm.debug.request", trace.WithAttributes(
+			attribute.String("llm.request.messages", reqPayload),
+		))
+	}
 
 	return ctx, state, nil
 }
@@ -106,6 +133,16 @@ func (m *TracingMiddleware) AfterModelRewriteState(ctx context.Context, state *a
 		attribute.Int(tracing.AttrTotalTokens, totalTokens),
 		attribute.Int64(tracing.AttrDurationMs, durationMs),
 	)
+
+	// Debug: record full response content as span event
+	if m.debugMatched && len(state.Messages) > 0 {
+		last := state.Messages[len(state.Messages)-1]
+		respPayload := m.serializeMessage(last)
+		m.llmSpan.AddEvent("llm.debug.response", trace.WithAttributes(
+			attribute.String("llm.response.message", respPayload),
+		))
+	}
+
 	m.llmSpan.End()
 	m.llmSpan = nil
 
@@ -139,4 +176,59 @@ func (m *TracingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 
 		return result, err
 	}, nil
+}
+
+// isDebugCaller checks if the context's CallerDevice matches the debug filter.
+func (m *TracingMiddleware) isDebugCaller(ctx context.Context) bool {
+	if !m.hasDebug {
+		return false
+	}
+	d, ok := CallerDeviceFromContext(ctx)
+	if !ok {
+		return false
+	}
+	return m.debugUsers[d.UserID] || m.debugDevices[d.DeviceID]
+}
+
+// serializeMessages converts messages to a JSON string for debug span events.
+func (m *TracingMiddleware) serializeMessages(msgs []*schema.Message) string {
+	type msgJSON struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	out := make([]msgJSON, 0, len(msgs))
+	for _, msg := range msgs {
+		out = append(out, msgJSON{
+			Role:    string(msg.Role),
+			Content: msg.Content,
+		})
+	}
+	data, _ := json.Marshal(out)
+	return string(data)
+}
+
+// serializeMessage converts a single message to a JSON string.
+func (m *TracingMiddleware) serializeMessage(msg *schema.Message) string {
+	type msgJSON struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	out := msgJSON{
+		Role:    string(msg.Role),
+		Content: msg.Content,
+	}
+	data, _ := json.Marshal(out)
+	return string(data)
+}
+
+// toSet converts a string slice to a lookup map.
+func toSet(items []string) map[string]bool {
+	if len(items) == 0 {
+		return nil
+	}
+	s := make(map[string]bool, len(items))
+	for _, item := range items {
+		s[item] = true
+	}
+	return s
 }

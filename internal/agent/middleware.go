@@ -94,7 +94,9 @@ func (b *AgentBuilder) buildMiddleware(
 	// N+1. Tracing middleware (only when tracing is enabled).
 	// Uses the global tracer provider; no-op when tracing is disabled (zero overhead).
 	if b.tracingEnabled {
-		mws = append(mws, NewTracingMiddleware(config.ID, config.Model))
+		tmw := NewTracingMiddleware(config.ID, config.Model)
+		tmw.SetDebugFilter(b.tracingDebugUsers, b.tracingDebugDevices)
+		mws = append(mws, tmw)
 	}
 
 	return mws

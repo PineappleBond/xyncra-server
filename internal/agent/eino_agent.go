@@ -294,6 +294,8 @@ type AgentBuilder struct {
 	clientCaller           ClientCaller            // Phase 6 (D-101)
 	llmLogger              *LLMLogger              // optional: dedicated LLM call logger
 	tracingEnabled         bool                    // when true, TracingMiddleware is appended to the middleware chain
+	tracingDebugUsers      []string                // debug user IDs for LLM content capture
+	tracingDebugDevices    []string                // debug device IDs for LLM content capture
 }
 
 // NewAgentBuilder creates an AgentBuilder backed by the given LLM factory.
@@ -358,6 +360,14 @@ func (b *AgentBuilder) SetLLMLogger(logger *LLMLogger) {
 // middleware is added and there is zero overhead.
 func (b *AgentBuilder) SetTracingEnabled(enabled bool) {
 	b.tracingEnabled = enabled
+}
+
+// SetTracingDebugFilter configures which users/devices get full LLM content
+// recorded in tracing spans. When non-empty, matching callers (OR logic)
+// have their request/response content added as span events on agent.llm.call.
+func (b *AgentBuilder) SetTracingDebugFilter(users, devices []string) {
+	b.tracingDebugUsers = users
+	b.tracingDebugDevices = devices
 }
 
 // BuiltAgent wraps an Eino Runner together with the config it was built from.

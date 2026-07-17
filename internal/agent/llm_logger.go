@@ -21,13 +21,10 @@ import (
 // format (one JSON object per line). It is safe for concurrent use; all
 // writes are serialized through an internal mutex.
 type LLMLogger struct {
-	mu           sync.Mutex
-	w            io.Writer
-	enc          *json.Encoder
-	indent       bool
-	debugUsers   map[string]bool // OR filter: match any user
-	debugDevices map[string]bool // OR filter: match any device
-	hasFilter    bool            // true when debug lists are non-empty
+	mu     sync.Mutex
+	w      io.Writer
+	enc    *json.Encoder
+	indent bool
 }
 
 // NewLLMLogger creates an LLMLogger that writes to w. When indent is true
@@ -41,58 +38,8 @@ func NewLLMLogger(w io.Writer, indent bool) *LLMLogger {
 	return &LLMLogger{w: w, enc: enc, indent: indent}
 }
 
-// SetDebugFilter configures per-user/device filtering for LLM log output.
-// When non-empty, only requests from matching users OR devices are logged.
-// When empty (default), all requests are logged.
-func (l *LLMLogger) SetDebugFilter(users, devices []string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.debugUsers = toSet(users)
-	l.debugDevices = toSet(devices)
-	l.hasFilter = len(l.debugUsers) > 0 || len(l.debugDevices) > 0
-}
-
-// toSet converts a string slice to a lookup map.
-func toSet(items []string) map[string]bool {
-	if len(items) == 0 {
-		return nil
-	}
-	s := make(map[string]bool, len(items))
-	for _, item := range items {
-		s[item] = true
-	}
-	return s
-}
-
-// HasFilter reports whether a debug filter is active.
-func (l *LLMLogger) HasFilter() bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.hasFilter
-}
-
-// shouldLog returns true if the logger should write a record for the given
-// context. When no debug filter is set, all contexts are logged. When a
-// filter is active, only contexts carrying a CallerDevice whose UserID or
-// DeviceID appears in the debug lists are logged.
-func (l *LLMLogger) shouldLog(ctx context.Context) bool {
-	if !l.hasFilter {
-		return true
-	}
-	d, ok := CallerDeviceFromContext(ctx)
-	if !ok {
-		return false
-	}
-	return l.debugUsers[d.UserID] || l.debugDevices[d.DeviceID]
-}
-
-// write serializes a LogRecord as a single JSON line, subject to the debug
-// filter. When the filter is active and the context does not match, the
-// record is silently dropped.
-func (l *LLMLogger) write(ctx context.Context, rec LogRecord) {
-	if !l.shouldLog(ctx) {
-		return
-	}
+// write serializes a LogRecord as a single JSON line.
+func (l *LLMLogger) write(rec LogRecord) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	_ = l.enc.Encode(rec)
@@ -150,28 +97,20 @@ type TokenSnapshot struct {
 // Helper functions
 // ---------------------------------------------------------------------------
 
-// convertMessage converts a schema.Message to a MessageSnapshot.
-// When noTruncate is true, content is not truncated (used for debug logging).
-func convertMessage(msg *schema.Message, noTruncate bool) MessageSnapshot {
+// convertMessage converts a schema.Message to a MessageSnapshot, truncating
+// long content to keep log records manageable.
+func convertMessage(msg *schema.Message) MessageSnapshot {
 	if msg == nil {
 		return MessageSnapshot{}
 	}
-	content := msg.Content
-	if !noTruncate {
-		content = truncate(content, 4096)
-	}
 	snap := MessageSnapshot{
 		Role:    string(msg.Role),
-		Content: content,
+		Content: truncate(msg.Content, 4096),
 	}
 	for _, tc := range msg.ToolCalls {
-		args := tc.Function.Arguments
-		if !noTruncate {
-			args = truncate(args, 2048)
-		}
 		snap.ToolCalls = append(snap.ToolCalls, ToolCallSnapshot{
 			Name: tc.Function.Name,
-			Args: args,
+			Args: truncate(tc.Function.Arguments, 2048),
 		})
 	}
 	return snap
@@ -235,7 +174,7 @@ func NewLoggingMiddleware(logger *LLMLogger, agentID, model string) *LoggingMidd
 
 // BeforeAgent logs the "agent_start" phase.
 func (m *LoggingMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
-	m.logger.write(ctx, LogRecord{
+	m.logger.write(LogRecord{
 		Timestamp: time.Now(),
 		AgentID:   m.agentID,
 		Model:     m.model,
@@ -247,13 +186,12 @@ func (m *LoggingMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatMod
 
 // AfterAgent logs the "agent_end" phase with a summary of the final state.
 func (m *LoggingMiddleware) AfterAgent(ctx context.Context, state *adk.ChatModelAgentState) (context.Context, error) {
-	noTruncate := m.logger.HasFilter()
 	var lastMsg *MessageSnapshot
 	if n := len(state.Messages); n > 0 {
-		snap := convertMessage(state.Messages[n-1], noTruncate)
+		snap := convertMessage(state.Messages[n-1])
 		lastMsg = &snap
 	}
-	m.logger.write(ctx, LogRecord{
+	m.logger.write(LogRecord{
 		Timestamp: time.Now(),
 		AgentID:   m.agentID,
 		Model:     m.model,
@@ -269,11 +207,10 @@ func (m *LoggingMiddleware) AfterAgent(ctx context.Context, state *adk.ChatModel
 // will be sent to the model.
 func (m *LoggingMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
 	iter := int(atomic.AddInt32(&m.iteration, 1))
-	noTruncate := m.logger.HasFilter()
 
 	msgs := make([]MessageSnapshot, 0, len(state.Messages))
 	for _, msg := range state.Messages {
-		msgs = append(msgs, convertMessage(msg, noTruncate))
+		msgs = append(msgs, convertMessage(msg))
 	}
 	tools := make([]ToolSnapshot, 0, len(state.ToolInfos))
 	for _, ti := range state.ToolInfos {
@@ -282,7 +219,7 @@ func (m *LoggingMiddleware) BeforeModelRewriteState(ctx context.Context, state *
 
 	m.modelCallStart.Store(time.Now())
 
-	m.logger.write(ctx, LogRecord{
+	m.logger.write(LogRecord{
 		Timestamp: time.Now(),
 		AgentID:   m.agentID,
 		Model:     m.model,
@@ -308,7 +245,7 @@ func (m *LoggingMiddleware) AfterModelRewriteState(ctx context.Context, state *a
 
 	if n := len(state.Messages); n > 0 {
 		last := state.Messages[n-1]
-		snap := convertMessage(last, m.logger.HasFilter())
+		snap := convertMessage(last)
 		rec.Output = &snap
 
 		// Extract token usage from the model response metadata.
@@ -329,7 +266,7 @@ func (m *LoggingMiddleware) AfterModelRewriteState(ctx context.Context, state *a
 		}
 	}
 
-	m.logger.write(ctx, rec)
+	m.logger.write(rec)
 	return ctx, state, nil
 }
 
@@ -338,31 +275,20 @@ func (m *LoggingMiddleware) AfterModelRewriteState(ctx context.Context, state *a
 func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 		iter := int(atomic.LoadInt32(&m.iteration))
-		noTruncate := m.logger.HasFilter()
 
-		toolArgs := argumentsInJSON
-		if !noTruncate {
-			toolArgs = truncate(argumentsInJSON, 2048)
-		}
-
-		m.logger.write(ctx, LogRecord{
+		m.logger.write(LogRecord{
 			Timestamp: time.Now(),
 			AgentID:   m.agentID,
 			Model:     m.model,
 			Iteration: iter,
 			Phase:     "tool_call",
 			ToolName:  tCtx.Name,
-			ToolArgs:  toolArgs,
+			ToolArgs:  truncate(argumentsInJSON, 2048),
 		})
 
 		start := time.Now()
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		dur := time.Since(start).Milliseconds()
-
-		toolResult := result
-		if !noTruncate {
-			toolResult = truncate(result, 4096)
-		}
 
 		resultRec := LogRecord{
 			Timestamp:  time.Now(),
@@ -371,13 +297,13 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 			Iteration:  iter,
 			Phase:      "tool_result",
 			ToolName:   tCtx.Name,
-			ToolResult: toolResult,
+			ToolResult: truncate(result, 4096),
 			DurationMs: dur,
 		}
 		if err != nil {
 			resultRec.Error = err.Error()
 		}
-		m.logger.write(ctx, resultRec)
+		m.logger.write(resultRec)
 
 		return result, err
 	}, nil
