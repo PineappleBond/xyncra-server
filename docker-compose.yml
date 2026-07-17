@@ -104,11 +104,8 @@ services:
     volumes:
       - ./loki/loki-config.yml:/etc/loki/local-config.yaml
       - loki-data:/loki
-    healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+    # NOTE: grafana/loki:latest 是 distroless 镜像，无 /bin/sh 也无 wget/curl，
+    # 无法在容器内执行健康检查。服务本身稳定，启动失败会在日志中立即报错。
     restart: unless-stopped
 
   promtail:
@@ -127,11 +124,7 @@ services:
       - "4040:4040"
     volumes:
       - pyroscope-data:/var/lib/pyroscope
-    healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:4040/ready || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+    # NOTE: grafana/pyroscope:latest 是 distroless 镜像，无 /bin/sh，无法执行容器内健康检查
     restart: unless-stopped
 
   grafana:
@@ -142,8 +135,10 @@ services:
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_INSTALL_PLUGINS=grafana-pyroscope-datasource
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/xyncra-system-overview.json
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
       - grafana-data:/var/lib/grafana
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
@@ -154,7 +149,7 @@ services:
       prometheus:
         condition: service_healthy
       loki:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
 
 volumes:
