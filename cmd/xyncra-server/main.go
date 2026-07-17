@@ -41,6 +41,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -299,6 +300,15 @@ func main() {
 		}
 	}
 
+	if llmLogger != nil {
+		debugUsers := envCSV("XYNCRA_LLM_DEBUG_USERS")
+		debugDevices := envCSV("XYNCRA_LLM_DEBUG_DEVICES")
+		if len(debugUsers) > 0 || len(debugDevices) > 0 {
+			llmLogger.SetDebugFilter(debugUsers, debugDevices)
+			log.Printf("[INFO] LLM debug log filter: users=%v devices=%v", debugUsers, debugDevices)
+		}
+	}
+
 	llmFactory := agent.NewLLMClientFactory()
 	agentBuilder := agent.NewAgentBuilder(llmFactory)
 	if llmLogger != nil {
@@ -491,4 +501,25 @@ func envOrDefaultFloat(key string, fallback float64) float64 {
 		return fallback
 	}
 	return f
+}
+
+// envCSV reads an environment variable as a comma-separated list.
+// Returns nil if the variable is empty or unset.
+func envCSV(key string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
