@@ -18,7 +18,7 @@ import (
 
 func TestDeleteConversation_HappyPath(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteConversationHandler(s, nil)
+	handler := NewDeleteConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-delete-happy-1"
@@ -64,7 +64,7 @@ func TestDeleteConversation_HappyPath(t *testing.T) {
 
 func TestDeleteConversation_MissingConversationID(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteConversationHandler(s, nil)
+	handler := NewDeleteConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -88,7 +88,7 @@ func TestDeleteConversation_MissingConversationID(t *testing.T) {
 
 func TestDeleteConversation_NotFound(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteConversationHandler(s, nil)
+	handler := NewDeleteConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -112,7 +112,7 @@ func TestDeleteConversation_NotFound(t *testing.T) {
 
 func TestDeleteConversation_NotMember(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteConversationHandler(s, nil)
+	handler := NewDeleteConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-delete-notmember-1"
@@ -139,7 +139,7 @@ func TestDeleteConversation_NotMember(t *testing.T) {
 
 func TestDeleteConversation_CascadeDelete(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteConversationHandler(s, nil)
+	handler := NewDeleteConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-delete-cascade-1"
@@ -172,7 +172,7 @@ func TestDeleteConversation_CascadeDelete(t *testing.T) {
 
 func TestDeleteConversation_DoubleDelete(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteConversationHandler(s, nil)
+	handler := NewDeleteConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-delete-double-1"

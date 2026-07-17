@@ -1,3 +1,7 @@
+---
+last_updated: 2026-07-17
+---
+
 # CI/CD
 
 ## 概述
@@ -24,6 +28,7 @@ Xyncra 目前没有 GitHub Actions 工作流文件，所有的构建和测试通
 | 单元测试 | `make test` | 无 | 使用 `-short` 标记，不依赖外部服务 |
 | 构建服务器 | `make build-server` | 无 | 编译 `cmd/xyncra-server/` |
 | 构建客户端 | `make build-client` | 无 | 编译 `cmd/xyncra-client/` |
+| 构建全部 | `make build` | 无 | 同时编译 server 和 client |
 | E2E 测试 | `make test-e2e` | Redis（16379） | 需要 Docker E2E 环境 |
 | CLI E2E | `make test-cli-e2e` | Redis + Server | 需要完整 E2E 环境 |
 | 全部测试 | `make test-all` | 全部 | 运行所有测试 |

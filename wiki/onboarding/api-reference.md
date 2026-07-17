@@ -1,3 +1,7 @@
+---
+last_updated: 2026-07-17
+---
+
 # WebSocket API 参考
 
 > Xyncra 使用基于 JSON 的 3 层信封协议（Frame → Package → Message），

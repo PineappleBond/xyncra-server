@@ -75,7 +75,7 @@ func parseSetTypingResponse(t *testing.T, data json.RawMessage) map[string]strin
 func TestSetTyping_BasicFlow(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewSetTypingHandler(s, rb.broadcast)
+	h := NewSetTypingHandler(s, rb.broadcast, nil)
 
 	convID := "conv-typing-1"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -122,7 +122,7 @@ func TestSetTyping_BasicFlow(t *testing.T) {
 func TestSetTyping_IsTypingFalse(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewSetTypingHandler(s, rb.broadcast)
+	h := NewSetTypingHandler(s, rb.broadcast, nil)
 
 	convID := "conv-typing-2"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -156,7 +156,7 @@ func TestSetTyping_IsTypingFalse(t *testing.T) {
 func TestSetTyping_MissingConversationID(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewSetTypingHandler(s, rb.broadcast)
+	h := NewSetTypingHandler(s, rb.broadcast, nil)
 
 	params := map[string]interface{}{
 		"is_typing": true,
@@ -180,7 +180,7 @@ func TestSetTyping_MissingConversationID(t *testing.T) {
 func TestSetTyping_ConversationNotFound(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewSetTypingHandler(s, rb.broadcast)
+	h := NewSetTypingHandler(s, rb.broadcast, nil)
 
 	params := map[string]interface{}{
 		"conversation_id": "nonexistent-conv",
@@ -205,7 +205,7 @@ func TestSetTyping_ConversationNotFound(t *testing.T) {
 func TestSetTyping_CallerNotMember(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewSetTypingHandler(s, rb.broadcast)
+	h := NewSetTypingHandler(s, rb.broadcast, nil)
 
 	convID := "conv-typing-5"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -233,7 +233,7 @@ func TestSetTyping_CallerNotMember(t *testing.T) {
 func TestSetTyping_SenderAlsoReceivesBroadcast(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewSetTypingHandler(s, rb.broadcast)
+	h := NewSetTypingHandler(s, rb.broadcast, nil)
 
 	convID := "conv-typing-6"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -262,7 +262,7 @@ func TestSetTyping_SenderAlsoReceivesBroadcast(t *testing.T) {
 func TestSetTyping_NoUserUpdatesCreated(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewSetTypingHandler(s, rb.broadcast)
+	h := NewSetTypingHandler(s, rb.broadcast, nil)
 
 	convID := "conv-typing-7"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -302,7 +302,7 @@ func TestSetTyping_NoUserUpdatesCreated(t *testing.T) {
 func TestSetTyping_BroadcastError_Tolerated(t *testing.T) {
 	s := setupTestSQLite(t)
 	fb := &failingBroadcaster{}
-	h := NewSetTypingHandler(s, fb.broadcast)
+	h := NewSetTypingHandler(s, fb.broadcast, nil)
 
 	convID := "conv-typing-8"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -328,7 +328,7 @@ func TestSetTyping_BroadcastError_Tolerated(t *testing.T) {
 func TestSetTyping_DeletedConversation(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewSetTypingHandler(s, rb.broadcast)
+	h := NewSetTypingHandler(s, rb.broadcast, nil)
 
 	convID := "conv-typing-9"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -364,7 +364,7 @@ func TestSetTyping_DeletedConversation(t *testing.T) {
 func TestSetTyping_RateLimit(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewSetTypingHandler(s, rb.broadcast)
+	h := NewSetTypingHandler(s, rb.broadcast, nil)
 
 	convID := "conv-typing-10"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -417,7 +417,7 @@ func TestSetTyping_RateLimit(t *testing.T) {
 func TestSetTyping_InvalidJSONParams(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewSetTypingHandler(s, rb.broadcast)
+	h := NewSetTypingHandler(s, rb.broadcast, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -441,7 +441,7 @@ func TestSetTyping_InvalidJSONParams(t *testing.T) {
 func TestSetTyping_IsTypingOmitted_DefaultsFalse(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewSetTypingHandler(s, rb.broadcast)
+	h := NewSetTypingHandler(s, rb.broadcast, nil)
 	ctx := context.Background()
 
 	convID := "conv-typing-default"
@@ -477,7 +477,7 @@ func TestSetTyping_IsTypingOmitted_DefaultsFalse(t *testing.T) {
 func TestSetTyping_ConcurrentCalls(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewSetTypingHandler(s, rb.broadcast)
+	h := NewSetTypingHandler(s, rb.broadcast, nil)
 	ctx := context.Background()
 
 	convID := "conv-typing-concurrent"

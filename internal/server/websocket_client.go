@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -298,16 +298,16 @@ func (c *Client) readPump() {
 				websocket.CloseGoingAway,
 				websocket.CloseNormalClosure,
 			) {
-				log.Printf("websocket: read error [connID=%s]: %v", c.connID, err)
+				slog.Error("websocket: read error", "connID", c.connID, "error", err)
 			} else {
-				log.Printf("websocket: client disconnected [connID=%s]: %v", c.connID, err)
+				slog.Debug("websocket: client disconnected", "connID", c.connID, "error", err)
 			}
 			return
 		}
 
 		pkg, err := unmarshalPackage(message)
 		if err != nil {
-			log.Printf("websocket: decode message [connID=%s]: %v", c.connID, err)
+			slog.Error("websocket: decode message", "connID", c.connID, "error", err)
 			continue
 		}
 

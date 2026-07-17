@@ -7,6 +7,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/PineappleBond/xyncra-server/internal/metrics"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // captureLogger records Info/Error calls for assertion in tests.
@@ -358,5 +361,197 @@ func TestLogMetrics_ErrorArgsContainExpectedKeys(t *testing.T) {
 		if !found {
 			t.Errorf("error log missing expected key %q, got keys: %s", expected, strings.Join(keys, ", "))
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PrometheusMetrics tests
+// ---------------------------------------------------------------------------
+
+// readCounterValue reads the current value of a prometheus Counter.
+func readCounterValue(t *testing.T, c interface{ Write(*dto.Metric) error }) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	if err := c.Write(m); err != nil {
+		t.Fatalf("failed to read counter: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
+
+func TestPrometheusMetrics_Record_Success(t *testing.T) {
+	pm := NewPrometheusMetrics()
+	ctx := context.Background()
+
+	event := LLMCallEvent{
+		AgentID:      "test-agent-prom",
+		Model:        "gpt-4",
+		Duration:     2 * time.Second,
+		InputTokens:  100,
+		OutputTokens: 50,
+	}
+
+	pm.Record(ctx, event)
+
+	// Verify AgentExecutions incremented.
+	counter, err := metrics.AgentExecutions.GetMetricWithLabelValues("test-agent-prom", "gpt-4")
+	if err != nil {
+		t.Fatalf("get counter: %v", err)
+	}
+	if got := readCounterValue(t, counter); got < 1 {
+		t.Errorf("agent executions >= 1, got %f", got)
+	}
+
+	// Verify LLMCallsTotal incremented.
+	llmCounter, err := metrics.LLMCallsTotal.GetMetricWithLabelValues("test-agent-prom", "gpt-4")
+	if err != nil {
+		t.Fatalf("get counter: %v", err)
+	}
+	if got := readCounterValue(t, llmCounter); got < 1 {
+		t.Errorf("llm calls total >= 1, got %f", got)
+	}
+
+	// Verify LLMTokensInput.
+	inputCounter, err := metrics.LLMTokensInput.GetMetricWithLabelValues("test-agent-prom", "gpt-4")
+	if err != nil {
+		t.Fatalf("get counter: %v", err)
+	}
+	if got := readCounterValue(t, inputCounter); got < 100 {
+		t.Errorf("input tokens >= 100, got %f", got)
+	}
+
+	// Verify LLMTokensOutput.
+	outputCounter, err := metrics.LLMTokensOutput.GetMetricWithLabelValues("test-agent-prom", "gpt-4")
+	if err != nil {
+		t.Fatalf("get counter: %v", err)
+	}
+	if got := readCounterValue(t, outputCounter); got < 50 {
+		t.Errorf("output tokens >= 50, got %f", got)
+	}
+
+	// Verify AgentDuration histogram was called (no panic means it worked).
+	// Reading histogram values from Observer requires testutil; we verify
+	// the counter metrics above are sufficient for validation.
+}
+
+func TestPrometheusMetrics_Record_Error(t *testing.T) {
+	pm := NewPrometheusMetrics()
+	ctx := context.Background()
+
+	testErr := errors.New("rate limited")
+	event := LLMCallEvent{
+		AgentID:  "error-agent-prom",
+		Model:    "gpt-3.5",
+		Duration: time.Second,
+		Error:    testErr,
+	}
+
+	pm.Record(ctx, event)
+
+	// Verify AgentExecutionsFailed incremented.
+	failCounter, err := metrics.AgentExecutionsFailed.GetMetricWithLabelValues("error-agent-prom", "rate limited")
+	if err != nil {
+		t.Fatalf("get counter: %v", err)
+	}
+	if got := readCounterValue(t, failCounter); got < 1 {
+		t.Errorf("agent executions failed >= 1, got %f", got)
+	}
+
+	// Verify LLMCallsFailed incremented.
+	llmFail, err := metrics.LLMCallsFailed.GetMetricWithLabelValues("error-agent-prom", "gpt-3.5", "rate limited")
+	if err != nil {
+		t.Fatalf("get counter: %v", err)
+	}
+	if got := readCounterValue(t, llmFail); got < 1 {
+		t.Errorf("llm calls failed >= 1, got %f", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MultiMetrics tests
+// ---------------------------------------------------------------------------
+
+// recordingMetrics tracks Record calls for testing MultiMetrics fan-out.
+type recordingMetrics struct {
+	mu     sync.Mutex
+	events []LLMCallEvent
+}
+
+func (r *recordingMetrics) Record(_ context.Context, event LLMCallEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
+}
+
+func (r *recordingMetrics) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.events)
+}
+
+func TestMultiMetrics_FanOut(t *testing.T) {
+	r1 := &recordingMetrics{}
+	r2 := &recordingMetrics{}
+	mm := NewMultiMetrics(r1, r2)
+
+	ctx := context.Background()
+	event := LLMCallEvent{
+		AgentID:      "multi-agent",
+		Model:        "claude-3",
+		Duration:     time.Second,
+		InputTokens:  200,
+		OutputTokens: 100,
+	}
+
+	mm.Record(ctx, event)
+
+	if r1.count() != 1 {
+		t.Errorf("expected r1 to have 1 event, got %d", r1.count())
+	}
+	if r2.count() != 1 {
+		t.Errorf("expected r2 to have 1 event, got %d", r2.count())
+	}
+
+	// Call again.
+	mm.Record(ctx, event)
+	if r1.count() != 2 {
+		t.Errorf("expected r1 to have 2 events, got %d", r1.count())
+	}
+	if r2.count() != 2 {
+		t.Errorf("expected r2 to have 2 events, got %d", r2.count())
+	}
+}
+
+func TestMultiMetrics_Empty(t *testing.T) {
+	mm := NewMultiMetrics()
+	// Should not panic.
+	mm.Record(context.Background(), LLMCallEvent{AgentID: "test", Model: "test"})
+}
+
+// TestMultiMetrics_Record_FansOut is an alias test matching the acceptance
+// criteria name. It verifies that with 2 mock implementations, both receive
+// the event.
+//
+// Acceptance criteria:
+//   - 2 mock LLMMetrics implementations
+//   - Both receive the event
+func TestMultiMetrics_Record_FansOut(t *testing.T) {
+	r1 := &recordingMetrics{}
+	r2 := &recordingMetrics{}
+	mm := NewMultiMetrics(r1, r2)
+
+	event := LLMCallEvent{
+		AgentID:      "fans-out-agent",
+		Model:        "gpt-4",
+		Duration:     time.Second,
+		InputTokens:  10,
+		OutputTokens: 20,
+	}
+	mm.Record(context.Background(), event)
+
+	if r1.count() != 1 {
+		t.Errorf("impl 1: expected 1 event, got %d", r1.count())
+	}
+	if r2.count() != 1 {
+		t.Errorf("impl 2: expected 1 event, got %d", r2.count())
 	}
 }

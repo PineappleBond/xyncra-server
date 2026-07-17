@@ -1,5 +1,7 @@
 # Skill 清单
 
+> last_updated: 2026-07-17
+
 ## 项目已有的 Claude Code Skills
 
 所有 Skill 文件位于 `.claude/skills/` 目录下。每个 Skill 是一个独立的 Markdown 文件，大多包含 `name` 和 `description` 元数据用于自动触发（`xyncra-client-usage` 除外，其未使用 YAML frontmatter）。

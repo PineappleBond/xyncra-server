@@ -3,7 +3,7 @@ package tracing
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -15,8 +15,6 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // InitTracer initializes the OpenTelemetry tracing subsystem.
@@ -46,7 +44,7 @@ func InitTracer(cfg TracingConfig) (shutdown func(context.Context) error, err er
 		otlptracegrpc.WithEndpoint(cfg.Endpoint),
 	}
 	if cfg.Insecure {
-		opts = append(opts, otlptracegrpc.WithDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())))
+		opts = append(opts, otlptracegrpc.WithInsecure())
 	}
 
 	exporter, err := otlptracegrpc.New(ctx, opts...)
@@ -98,7 +96,7 @@ func version() string {
 func hostname() string {
 	h, err := os.Hostname()
 	if err != nil {
-		log.Printf("tracing: failed to get hostname: %v", err)
+		slog.Error("tracing: failed to get hostname", "error", err)
 		return "unknown"
 	}
 	return h

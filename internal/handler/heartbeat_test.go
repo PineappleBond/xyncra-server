@@ -66,7 +66,7 @@ func newHeartbeatRequest(id string, params interface{}) *protocol.PackageDataReq
 
 func TestHeartbeat_HappyPath(t *testing.T) {
 	store := server.NewMemoryConnectionStore(0)
-	handler := NewHeartbeatHandler(store)
+	handler := NewHeartbeatHandler(store, nil)
 	ctx := context.Background()
 
 	connID := "conn-hb-01"
@@ -116,7 +116,7 @@ func TestHeartbeat_HappyPath(t *testing.T) {
 
 func TestHeartbeat_ConnectionExpired(t *testing.T) {
 	store := server.NewMemoryConnectionStore(0)
-	handler := NewHeartbeatHandler(store)
+	handler := NewHeartbeatHandler(store, nil)
 	ctx := context.Background()
 
 	// Use a connID that does NOT exist in the store.
@@ -142,7 +142,7 @@ func TestHeartbeat_RefreshFailed(t *testing.T) {
 		MemoryConnectionStore: memStore,
 		refreshErr:            fmt.Errorf("simulated redis timeout"),
 	}
-	handler := NewHeartbeatHandler(failingStore)
+	handler := NewHeartbeatHandler(failingStore, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClientWithConnID("alice", "conn-hb-03")
@@ -163,7 +163,7 @@ func TestHeartbeat_RefreshFailed(t *testing.T) {
 
 func TestHeartbeat_WithDeviceInfo(t *testing.T) {
 	store := server.NewMemoryConnectionStore(0)
-	handler := NewHeartbeatHandler(store)
+	handler := NewHeartbeatHandler(store, nil)
 	ctx := context.Background()
 
 	connID := "conn-hb-04"
@@ -201,7 +201,7 @@ func TestHeartbeat_WithDeviceInfo(t *testing.T) {
 
 func TestHeartbeat_EmptyParams(t *testing.T) {
 	store := server.NewMemoryConnectionStore(0)
-	handler := NewHeartbeatHandler(store)
+	handler := NewHeartbeatHandler(store, nil)
 	ctx := context.Background()
 
 	connID := "conn-hb-05"

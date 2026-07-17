@@ -1,3 +1,7 @@
+---
+last_updated: 2026-07-17
+---
+
 # Vibe Coding 指南
 
 ## 什么是 Vibe Coding

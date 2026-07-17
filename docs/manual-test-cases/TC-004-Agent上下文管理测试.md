@@ -252,7 +252,7 @@ CONV_ID=conv-xxxxx-xxxxx
 **验证**：
 ```bash
 # 数据库验证
-docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db \
+docker cp xyncra-server-xyncra-server-e2e-1:/app/xyncra-e2e.db /tmp/xyncra-e2e.db && sqlite3 /tmp/xyncra-e2e.db \
   "SELECT id, user_id1, user_id2 FROM conversations WHERE id='$CONV_ID';"
 # 预期: conv-xxxxx|alice|agent/context-test-bot
 ```
@@ -274,12 +274,12 @@ done
 **验证**：
 ```bash
 # 数据库验证消息数
-docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db \
+docker cp xyncra-server-xyncra-server-e2e-1:/app/xyncra-e2e.db /tmp/xyncra-e2e.db && sqlite3 /tmp/xyncra-e2e.db \
   "SELECT COUNT(*) FROM messages WHERE conversation_id='$CONV_ID' AND sender_id='alice';"
 # 预期: 20
 
 # 计算总 token 数（启发式：字符数/4）
-docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db \
+docker cp xyncra-server-xyncra-server-e2e-1:/app/xyncra-e2e.db /tmp/xyncra-e2e.db && sqlite3 /tmp/xyncra-e2e.db \
   "SELECT SUM(LENGTH(content))/4 FROM messages WHERE conversation_id='$CONV_ID' AND sender_id='alice';"
 # 预期: 约 6000 tokens（超过 MaxTokens=4000）
 ```
@@ -562,19 +562,19 @@ if records:
 
 ```bash
 # 查看会话
-docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db \
+docker cp xyncra-server-xyncra-server-e2e-1:/app/xyncra-e2e.db /tmp/xyncra-e2e.db && sqlite3 /tmp/xyncra-e2e.db \
   "SELECT id, user_id1, user_id2, title FROM conversations WHERE id='$CONV_ID';"
 
 # 统计消息数
-docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db \
+docker cp xyncra-server-xyncra-server-e2e-1:/app/xyncra-e2e.db /tmp/xyncra-e2e.db && sqlite3 /tmp/xyncra-e2e.db \
   "SELECT COUNT(*), sender_id FROM messages WHERE conversation_id='$CONV_ID' GROUP BY sender_id;"
 
 # 估算总 token 数
-docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db \
+docker cp xyncra-server-xyncra-server-e2e-1:/app/xyncra-e2e.db /tmp/xyncra-e2e.db && sqlite3 /tmp/xyncra-e2e.db \
   "SELECT SUM(LENGTH(content))/4 as estimated_tokens FROM messages WHERE conversation_id='$CONV_ID';"
 
 # 查看最新消息
-docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db \
+docker cp xyncra-server-xyncra-server-e2e-1:/app/xyncra-e2e.db /tmp/xyncra-e2e.db && sqlite3 /tmp/xyncra-e2e.db \
   "SELECT message_id, sender_id, SUBSTR(content, 1, 50) FROM messages WHERE conversation_id='$CONV_ID' ORDER BY message_id DESC LIMIT 5;"
 ```
 

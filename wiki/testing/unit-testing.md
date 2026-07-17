@@ -1,12 +1,16 @@
+---
+last_updated: 2026-07-17
+---
+
 # 单元测试
 
 ## 概述
 
 Xyncra 的单元测试分布在三个主要包中，每个包都有独立的 `TESTING_USAGE.md` 文档：
 
-- `internal/server/TESTING_USAGE.md` — 226+ 测试，覆盖 WebSocket 服务器、连接存储、消息处理
-- `internal/mq/TESTING_USAGE.md` — 20+ 测试，覆盖 Asynq 消息队列、任务路由
-- `internal/store/TESTING_USAGE.md` — 11 个测试函数 x 3 数据库，覆盖 SQLite/PostgreSQL/MySQL
+- `internal/server/TESTING_USAGE.md` — 325 个测试函数，覆盖 WebSocket 服务器、连接存储、消息处理
+- `internal/mq/TESTING_USAGE.md` — 68 个测试函数，覆盖 Asynq 消息队列、任务路由
+- `internal/store/TESTING_USAGE.md` — 130 个测试函数，覆盖 SQLite/PostgreSQL/MySQL
 
 ## 单元测试规范
 

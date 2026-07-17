@@ -76,7 +76,7 @@ func parseSendMessageResponse(t *testing.T, data json.RawMessage) (*model.Messag
 func TestSendMessage_HappyPath(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-happy-1"
@@ -136,7 +136,7 @@ func TestSendMessage_HappyPath(t *testing.T) {
 func TestSendMessage_IdempotentDuplicate(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-idempotent-1"
@@ -199,7 +199,7 @@ func TestSendMessage_IdempotentDuplicate(t *testing.T) {
 func TestSendMessage_ConversationNotFound(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -226,7 +226,7 @@ func TestSendMessage_ConversationNotFound(t *testing.T) {
 func TestSendMessage_SenderNotMember(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-member-1"
@@ -256,7 +256,7 @@ func TestSendMessage_SenderNotMember(t *testing.T) {
 func TestSendMessage_InvalidParams(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -312,7 +312,7 @@ func TestSendMessage_InvalidParams(t *testing.T) {
 func TestSendMessage_MessageIDIncrement(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-msgid-1"
@@ -357,7 +357,7 @@ func TestSendMessage_MessageIDIncrement(t *testing.T) {
 func TestSendMessage_UserUpdateSeqIncrement(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-seq-1"
@@ -421,7 +421,7 @@ func TestSendMessage_UserUpdateSeqIncrement(t *testing.T) {
 func TestSendMessage_EnqueueError(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &failingBroker{} // always fails
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-enqueue-err-1"
@@ -458,7 +458,7 @@ func TestSendMessage_EnqueueError(t *testing.T) {
 func TestSendMessage_WithReplyTo(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-reply-1"
@@ -501,7 +501,7 @@ func TestSendMessage_WithReplyTo(t *testing.T) {
 func TestSendMessage_MultipleMessages(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-multi-1"
@@ -571,7 +571,7 @@ func TestSendMessage_MultipleMessages(t *testing.T) {
 func TestSendMessage_ConcurrentIdempotency(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-concurrent-1"
@@ -639,7 +639,7 @@ func TestSendMessage_ConcurrentIdempotency(t *testing.T) {
 func TestSendMessage_EnqueueError_DuplicateNotAffected(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &failingBroker{} // always fails
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-dup-fail-1"
@@ -731,7 +731,7 @@ func (b *nthFailBroker) Enqueue(ctx context.Context, task *mq.Task, opts ...mq.E
 func TestSendMessage_AgentDetection_NonAgentUnchanged(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &recordingBroker{}
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-nonagent-1"
@@ -766,7 +766,7 @@ func TestSendMessage_AgentDetection_EnqueuesAgentTask(t *testing.T) {
 	broker := &recordingBroker{}
 	registry := agent.NewRegistry()
 	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
-	handler := NewSendMessageHandler(s, broker, registry)
+	handler := NewSendMessageHandler(s, broker, registry, nil)
 	ctx := context.Background()
 
 	convID := "conv-agent-1"
@@ -802,7 +802,7 @@ func TestSendMessage_AgentDetection_PayloadCorrectness(t *testing.T) {
 	broker := &recordingBroker{}
 	registry := agent.NewRegistry()
 	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
-	handler := NewSendMessageHandler(s, broker, registry)
+	handler := NewSendMessageHandler(s, broker, registry, nil)
 	ctx := context.Background()
 
 	convID := "conv-agent-payload-1"
@@ -852,7 +852,7 @@ func TestSendMessage_AgentDetection_NilRegistry(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &recordingBroker{}
 	// Pass nil registry: agent detection disabled (D-063).
-	handler := NewSendMessageHandler(s, broker, nil)
+	handler := NewSendMessageHandler(s, broker, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-nilreg-1"
@@ -887,7 +887,7 @@ func TestSendMessage_AgentDetection_EmptyAgentID(t *testing.T) {
 	broker := &recordingBroker{}
 	registry := agent.NewRegistry()
 	// Do NOT register any agent with empty ID.
-	handler := NewSendMessageHandler(s, broker, registry)
+	handler := NewSendMessageHandler(s, broker, registry, nil)
 	ctx := context.Background()
 
 	convID := "conv-emptyid-1"
@@ -922,7 +922,7 @@ func TestSendMessage_AgentDetection_UnregisteredAgent(t *testing.T) {
 	broker := &recordingBroker{}
 	registry := agent.NewRegistry()
 	// Registry exists but "nonexistent" is NOT registered.
-	handler := NewSendMessageHandler(s, broker, registry)
+	handler := NewSendMessageHandler(s, broker, registry, nil)
 	ctx := context.Background()
 
 	convID := "conv-unreg-1"
@@ -956,7 +956,7 @@ func TestSendMessage_AgentDetection_AgentSenderNoRecursion(t *testing.T) {
 	broker := &recordingBroker{}
 	registry := agent.NewRegistry()
 	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
-	handler := NewSendMessageHandler(s, broker, registry)
+	handler := NewSendMessageHandler(s, broker, registry, nil)
 	ctx := context.Background()
 
 	convID := "conv-recursion-1"
@@ -993,7 +993,7 @@ func TestSendMessage_AgentDetection_EnqueueAgentFails(t *testing.T) {
 	broker := &nthFailBroker{failOnCall: 2}
 	registry := agent.NewRegistry()
 	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
-	handler := NewSendMessageHandler(s, broker, registry)
+	handler := NewSendMessageHandler(s, broker, registry, nil)
 	ctx := context.Background()
 
 	convID := "conv-enqfail-1"
@@ -1036,7 +1036,7 @@ func TestSendMessage_AgentDetection_PersistFailsNoEnqueue(t *testing.T) {
 	broker := &recordingBroker{}
 	registry := agent.NewRegistry()
 	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
-	handler := NewSendMessageHandler(s, broker, registry)
+	handler := NewSendMessageHandler(s, broker, registry, nil)
 	ctx := context.Background()
 
 	convID := "conv-persistfail-1"

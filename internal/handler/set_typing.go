@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -76,6 +75,7 @@ func (rl *typingRateLimiter) allow() bool {
 type setTypingHandler struct {
 	store       store.StoreAPI
 	broadcastFn func(userID string, updates *protocol.PackageDataUpdates) error
+	logger      server.Logger
 	limiters    sync.Map // key: "userID:convID" -> *typingRateLimiter
 }
 
@@ -84,10 +84,15 @@ type setTypingHandler struct {
 func NewSetTypingHandler(
 	store store.StoreAPI,
 	broadcastFn func(userID string, updates *protocol.PackageDataUpdates) error,
+	logger server.Logger,
 ) *setTypingHandler {
+	if logger == nil {
+		logger = defaultLogger{}
+	}
 	h := &setTypingHandler{
 		store:       store,
 		broadcastFn: broadcastFn,
+		logger:      logger,
 	}
 	go h.cleanupLoop()
 	return h
@@ -186,7 +191,7 @@ func (h *setTypingHandler) HandleRequest(ctx context.Context, client *server.Cli
 	// 6. Broadcast to ALL members (including the caller, D-050).
 	for _, memberID := range members {
 		if err := h.broadcastFn(memberID, updates); err != nil {
-			log.Printf("set_typing: broadcast to user %s failed (fire-and-forget): %v", memberID, err)
+			h.logger.Info("set_typing: broadcast failed (fire-and-forget)", "userID", memberID, "error", err)
 		}
 	}
 

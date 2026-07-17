@@ -1,3 +1,7 @@
+---
+last_updated: 2026-07-17
+---
+
 # 备份恢复
 
 ## 概述
@@ -115,9 +119,10 @@ find $BACKUP_DIR -name "dump_*.rdb.gz" -mtime +$RETENTION_DAYS -delete
 ### 配置文件备份
 
 ```bash
-# Agent 配置和 .env 文件通过版本控制管理
-git add agents/*.md .env.*
-git commit -m "backup: agent config and env files"
+# Agent 配置和 .env 模板通过版本控制管理
+# ⚠️ 不要提交真实 .env 文件（可能包含 API Key），仅提交 .env.*.example 模板
+git add agents/*.md .env.*.example
+git commit -m "backup: agent config and env templates"
 ```
 
 ## 备份频率与保留

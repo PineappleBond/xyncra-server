@@ -1,4 +1,10 @@
+---
+last_updated: 2026-07-17
+---
+
 # 开发环境搭建
+
+> last_updated: 2026-07-17
 
 ## 前置条件
 
@@ -64,12 +70,16 @@ redis-cli ping  # 应返回 PONG
     -addr :9090 \
     -redis-addr localhost:6379 \
     -db-driver sqlite \
-    -db-dsn ./data/xyncra.db
+    -db-dsn ./data/xyncra.db \
+    -agents-dir ./agents
 
 # 使用环境变量
 export XYNCRA_ADDR=:8080
 export XYNCRA_REDIS_ADDR=localhost:6379
 export XYNCRA_DB_DRIVER=sqlite
+export XYNCRA_AGENTS_DIR=./agents
+export XYNCRA_MAX_FUNCTIONS_PER_DEVICE=50
+export XYNCRA_LLM_LOG_DIR=./llm-logs
 ./bin/xyncra-server
 ```
 

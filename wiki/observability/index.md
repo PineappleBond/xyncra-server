@@ -11,7 +11,7 @@ last_updated: 2026-07-17
 | 文档 | 说明 | 状态 |
 |------|------|------|
 | [结构化日志规范](logging-standards.md) | 日志格式、级别、字段规范 | 已实现 |
-| [Metrics 埋点](metrics.md) | 业务和系统指标定义 | 规划中 |
+| [Metrics 埋点](metrics.md) | 36 个 Prometheus 指标定义和配置 | 已实现 |
 | [分布式追踪](distributed-tracing.md) | OpenTelemetry 全链路追踪实现 | 已实现 |
 | [错误码体系](error-codes.md) | 错误码定义和分类 | 已实现 |
 | [健康检查](health-checks.md) | 健康检查端点设计 | 已实现 |

@@ -1,3 +1,7 @@
+---
+last_updated: 2026-07-17
+---
+
 # 手动测试
 
 ## 何时使用手动测试
@@ -288,7 +292,9 @@ sequenceDiagram
    ```
    docs/testing/manual/tc-{NNN}_{short_description}.md
    ```
-   > 注意：如果 `docs/testing/manual/` 目录不存在，需先执行 `mkdir -p docs/testing/manual` 创建。
+    > 注意：手动测试用例存储在 `docs/testing/manual/` 目录下，命名格式为 `tc-{NNN}_{short_description}.md`。该目录当前仅包含 `.gitkeep`，尚未填充正式的测试用例文件。
+    >
+    > 当前 `docs/testing/manual/` 目录仅包含 `.gitkeep` 占位文件，尚未填充实际的手动测试文档。新增用例时请按命名规范添加到此目录。
 
 5. **执行与记录**：
    - 执行测试，记录结果
@@ -299,7 +305,7 @@ sequenceDiagram
 
 ```bash
 # 创建新用例
-mkdir -p docs/testing/manual && cat > docs/testing/manual/tc-008_my_new_scenario.md << 'TEMPLATE'
+cat > docs/testing/manual/tc-008_my_new_scenario.md << 'TEMPLATE'
 # TC-008: 新场景名称
 
 ## 测试信息

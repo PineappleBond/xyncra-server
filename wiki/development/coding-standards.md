@@ -1,4 +1,10 @@
+---
+last_updated: 2026-07-17
+---
+
 # 编码规范
+
+> last_updated: 2026-07-17
 
 ## 概述
 
@@ -297,6 +303,92 @@ var _ StoreAPI = (*Store)(nil)
 var _ Server = (*WebSocketServer)(nil)
 var _ NodeBroadcaster = (*NoopBroadcaster)(nil)
 ```
+
+## Go 版本特性
+
+### `range over int`
+
+Go 1.22+ 支持直接遍历整数区间：
+
+```go
+for i := range 5 {
+    // i = 0, 1, 2, 3, 4
+}
+```
+
+适用于固定次数的循环，语义比 `for i := 0; i < n; i++` 更简洁。
+
+### `range over func`（迭代器）
+
+Go 1.23+ 支持函数迭代器，标准库 `maps`、`slices` 包提供配套工具：
+
+```go
+for k, v := range maps.All(m) {
+    // 遍历 map 的键值对
+}
+
+for _, item := range slices.Backward(s) {
+    // 反向遍历切片
+}
+```
+
+### 泛型使用
+
+项目使用 Go 1.26 工具链，支持完整的泛型特性：
+
+```go
+// 类型参数推导 — 调用时通常无需显式指定类型
+func NewStore[T model.Modeler](db *gorm.DB) *Store[T] {
+    return &Store[T]{db: db}
+}
+
+// 泛型约束使用 interface 中的类型元素
+type Numeric interface {
+    ~int | ~int64 | ~float64
+}
+```
+
+### 适用原则
+
+1. **新代码优先使用新语法**：`range over int` 替代计数循环，迭代器替代手写回调
+2. **泛型适度**：仅在消除 boilerplate 或保证类型安全时有收益的场景使用
+3. **不主动重构**：不为了使用新特性而修改已验证的旧代码
+4. **编译兼容**：确保代码通过 `go vet ./...` 且无弃用警告
+
+## Go 1.26 新特性编码指导
+
+### 迭代器（range over func）
+
+Go 1.26 支持自定义迭代器，如标准库 `slices.Backward`、`slices.Chunk`、`maps.Keys` 等。Xyncra 项目在以下场景中使用：
+
+```go
+// 反向遍历切片
+for i, msg := range slices.Backward(messages) {
+    // ...
+}
+
+// 按块遍历
+for chunk := range slices.Chunk(allItems, 100) {
+    // 批量处理
+}
+```
+
+### 增强的 slices / maps 标准库
+
+优先使用标准库函数，避免手动循环：
+
+```go
+// 使用 slices 取代手动 append
+collected := slices.Collect(iter)
+
+// 使用 maps 操作
+keys := maps.Keys(m)
+maps.DeleteFunc(m, func(k string, v int) bool { return v == 0 })
+```
+
+### 零值问题修复
+
+Go 1.26 改进了 `sync.Map` 的 `Range` 行为，修复了 range 中修改 map 可能导致的问题。新代码应使用 `maps` 包中的函数替代手动 range+delete。
 
 ## 测试规范
 

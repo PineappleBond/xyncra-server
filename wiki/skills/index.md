@@ -1,3 +1,7 @@
+---
+last_updated: 2026-07-17
+---
+
 # Skill 视角
 
 关注 AI 辅助开发（Vibe Coding）的实践，包括 Claude Code Skills、Commands 和 Agent 开发指南。

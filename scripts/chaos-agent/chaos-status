@@ -1,0 +1,21 @@
+#!/bin/sh
+# chaos-status — Show current chaos-agent status.
+# Usage: docker exec <chaos-container> chaos-status
+
+FLAG_FILE="/tmp/chaos-active"
+COUNTER_FILE="/tmp/chaos-counter"
+LOG_FILE="/tmp/chaos.log"
+
+round=$(cat "$COUNTER_FILE" 2>/dev/null || echo "0")
+
+if [ -f "$FLAG_FILE" ]; then
+  status="running"
+else
+  status="stopped"
+fi
+
+echo "Status:     $status"
+echo "Rounds:     $round"
+echo ""
+echo "Recent log:"
+tail -10 "$LOG_FILE" 2>/dev/null || echo "(no log entries)"

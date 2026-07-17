@@ -433,7 +433,7 @@ ls -la llm-logs-e2e/
 
 ```bash
 ./bin/xyncra-client listen \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   > "$E2E_HOME/alice-daemon.log" 2>&1 &
 ALICE_PID=$!
@@ -451,7 +451,7 @@ ps -p $ALICE_PID
 
 ```bash
 PARENT_CONV_ID=$(./bin/xyncra-client create-conversation \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --peer-id "agent/parent-bot" | grep "ID:" | awk '{print $2}')
 echo "PARENT_CONV_ID=$PARENT_CONV_ID"
@@ -469,7 +469,7 @@ docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
 
 ```bash
 ./bin/xyncra-client send \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --conversation-id "$PARENT_CONV_ID" \
   --content "请研究一下 Go 语言的 goroutine 调度机制，分析其优缺点。"
@@ -555,10 +555,10 @@ docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
 #### 步骤 2.8: 客户端命令验证
 
 ```bash
-./bin/xyncra-client sync-updates --user-id alice
+./bin/xyncra-client sync-updates --user-id alice --device-id test-device-alice
 
 ./bin/xyncra-client get-messages \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --conversation-id "$PARENT_CONV_ID" \
   --limit 5
 ```
@@ -573,7 +573,7 @@ docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
 
 ```bash
 TOP_CONV_ID=$(./bin/xyncra-client create-conversation \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --peer-id "agent/top-bot" | grep "ID:" | awk '{print $2}')
 echo "TOP_CONV_ID=$TOP_CONV_ID"
@@ -583,7 +583,7 @@ echo "TOP_CONV_ID=$TOP_CONV_ID"
 
 ```bash
 ./bin/xyncra-client send \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --conversation-id "$TOP_CONV_ID" \
   --content "请帮我分析一下这件事。"
@@ -651,7 +651,7 @@ else:
 
 ```bash
 ORPHAN_CONV_ID=$(./bin/xyncra-client create-conversation \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --peer-id "agent/orphan-bot" | grep "ID:" | awk '{print $2}')
 echo "ORPHAN_CONV_ID=$ORPHAN_CONV_ID"
@@ -675,7 +675,7 @@ docker compose -f docker-compose.e2e.yml logs xyncra-server-e2e 2>&1 | \
 
 ```bash
 ./bin/xyncra-client send \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --conversation-id "$ORPHAN_CONV_ID" \
   --content "你好，请介绍一下你自己。"
@@ -686,10 +686,10 @@ sleep 15  # 等待处理
 #### 步骤 4.4: 验证 orphan-bot 正常响应
 
 ```bash
-./bin/xyncra-client sync-updates --user-id alice
+./bin/xyncra-client sync-updates --user-id alice --device-id test-device-alice
 
 ./bin/xyncra-client get-messages \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --conversation-id "$ORPHAN_CONV_ID" \
   --limit 3
 ```
@@ -772,7 +772,7 @@ asyncio.run(call_rpc())
 
 ```bash
 ./bin/xyncra-client send \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --conversation-id "$PARENT_CONV_ID" \
   --content "请研究一下 Rust 的所有权机制。"
@@ -847,7 +847,7 @@ websocat -n1 ws://localhost:18080/ws?user_id=e2e-admin \
 ### 7.1 Server DB 验证命令速查
 
 ```bash
-DB_EXEC="docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e sqlite3 /app/xyncra-e2e.db"
+DB_EXEC="sqlite3 /tmp/xyncra-e2e.db"
 
 # 查看所有 Agent 相关会话
 $DB_EXEC "SELECT id, user_id1, user_id2, type FROM conversations WHERE user_id2 LIKE 'agent/%';"
@@ -1023,8 +1023,8 @@ docker cp agents/child-bot.md xyncra-server-xyncra-server-e2e-1:/app/agents/chil
 
 ```bash
 # 停止 daemon
-./bin/xyncra-client kill --user-id alice
-./bin/xyncra-client kill --user-id alice --force 2>/dev/null
+./bin/xyncra-client kill --user-id alice --device-id test-device-alice
+./bin/xyncra-client kill --user-id alice --device-id test-device-alice --force 2>/dev/null
 
 # 恢复 Agent 配置
 rm -f agents/parent-bot.md agents/child-bot.md agents/orphan-bot.md

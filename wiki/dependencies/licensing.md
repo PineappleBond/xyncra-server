@@ -1,3 +1,7 @@
+---
+last_updated: 2026-07-17
+---
+
 # Licensing
 
 ## 项目 License

@@ -3,7 +3,7 @@ package mq
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 )
 
@@ -34,7 +34,7 @@ func (th *TaskHandler) Register(taskType string, fn func(ctx context.Context, ta
 	defer th.mu.Unlock()
 	_, exists := th.handlers[taskType]
 	if exists {
-		log.Printf("[WARN] mq: overwriting existing handler for task type %q", taskType)
+		slog.Warn("mq: overwriting existing handler", "task_type", taskType)
 	}
 	th.handlers[taskType] = fn
 	return !exists // true if this was a new registration, false if overwritten

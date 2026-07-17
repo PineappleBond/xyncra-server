@@ -170,7 +170,7 @@ flowchart TD
 
 ```bash
 ./bin/xyncra-client listen \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   > "$E2E_HOME/alice-daemon.log" 2>&1 &
 ALICE_PID=$!
@@ -204,7 +204,7 @@ cat "$E2E_HOME/server.log" | grep "system.register_functions" | tail -3
 
 ```bash
 CONV_ID=$(./bin/xyncra-client create-conversation \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --peer-id "agent/weather-bot" | grep "ID:" | awk '{print $2}')
 echo "CONV_ID=$CONV_ID"
@@ -214,7 +214,7 @@ echo "CONV_ID=$CONV_ID"
 
 ```bash
 ./bin/xyncra-client send \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --server ws://localhost:18080/ws \
   --conversation-id "$CONV_ID" \
   --content "What's the weather? Call a client tool."
@@ -291,7 +291,7 @@ redis-cli -p 16379 -n 15 GET "$PENDING_KEY"
 ```bash
 # 使用相同的 device_id 启动新连接
 ./bin/xyncra-client listen \
-  --user-id alice \
+  --user-id alice --device-id test-device-alice \
   --device-id "$DEVICE_ID" \
   --server ws://localhost:18080/ws \
   > "$E2E_HOME/alice-daemon-2.log" 2>&1 &
@@ -369,8 +369,8 @@ $R FLUSHDB
 ## 10. 环境清理
 
 ```bash
-./bin/xyncra-client kill --user-id alice
-./bin/xyncra-client kill --user-id alice --force 2>/dev/null
+./bin/xyncra-client kill --user-id alice --device-id test-device-alice
+./bin/xyncra-client kill --user-id alice --device-id test-device-alice --force 2>/dev/null
 
 docker compose -f docker-compose.e2e.yml down
 

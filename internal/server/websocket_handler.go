@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
@@ -125,17 +125,17 @@ func (h *DefaultMessageHandler) HandleMessage(ctx context.Context, client *Clien
 		if rpc != nil {
 			var resp protocol.PackageDataResponse
 			if err := jsonUnmarshal(pkg.Data, &resp); err != nil {
-				log.Printf("websocket: decode response [connID=%s]: %v", client.ConnID(), err)
+				slog.Error("websocket: decode response", "connID", client.ConnID(), "error", err)
 				return
 			}
 			rpc.DispatchResponse(&resp)
 		} else {
-			log.Printf("websocket: received response from client [connID=%s] (ignored, no reverse RPC)", client.ConnID())
+			slog.Debug("websocket: received response from client (ignored, no reverse RPC)", "connID", client.ConnID())
 		}
 	case protocol.PackageTypeUpdates:
-		log.Printf("websocket: received updates package from client [connID=%s] (ignored)", client.ConnID())
+		slog.Debug("websocket: received updates package from client (ignored)", "connID", client.ConnID())
 	default:
-		log.Printf("websocket: unknown package type %d from client [connID=%s]", pkg.Type, client.ConnID())
+		slog.Warn("websocket: unknown package type", "type", pkg.Type, "connID", client.ConnID())
 	}
 }
 
@@ -145,7 +145,7 @@ func (h *DefaultMessageHandler) HandleMessage(ctx context.Context, client *Clien
 func (h *DefaultMessageHandler) handleRequest(ctx context.Context, client *Client, pkg *protocol.Package) {
 	var req protocol.PackageDataRequest
 	if err := jsonUnmarshal(pkg.Data, &req); err != nil {
-		log.Printf("websocket: decode request [connID=%s]: %v", client.ConnID(), err)
+		slog.Error("websocket: decode request", "connID", client.ConnID(), "error", err)
 		_ = sendErrorResponse(client, "", protocol.ResponseCodeError, "invalid request data")
 		return
 	}
@@ -162,7 +162,7 @@ func (h *DefaultMessageHandler) handleRequest(ctx context.Context, client *Clien
 	h.mu.RUnlock()
 
 	if methodHandler == nil {
-		log.Printf("websocket: unknown method %q [connID=%s]", req.Method, client.ConnID())
+		slog.Warn("websocket: unknown method", "method", req.Method, "connID", client.ConnID())
 		_ = sendErrorResponse(client, req.ID, protocol.ResponseCodeError,
 			fmt.Sprintf("unknown method: %s", req.Method))
 		return
@@ -170,8 +170,7 @@ func (h *DefaultMessageHandler) handleRequest(ctx context.Context, client *Clien
 
 	result, err := methodHandler.HandleRequest(invokeCtx, client, &req)
 	if err != nil {
-		log.Printf("websocket: handler error [connID=%s, method=%s]: %v",
-			client.ConnID(), req.Method, err)
+		slog.Error("websocket: handler error", "connID", client.ConnID(), "method", req.Method, "error", err)
 		var handlerErr *protocol.HandlerError
 		if errors.As(err, &handlerErr) {
 			_ = sendErrorResponse(client, req.ID, handlerErr.Code, handlerErr.Message)

@@ -18,7 +18,7 @@ import (
 
 func TestRestoreConversation_HappyPath(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewRestoreConversationHandler(s, nil)
+	handler := NewRestoreConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-restore-happy-1"
@@ -27,7 +27,7 @@ func TestRestoreConversation_HappyPath(t *testing.T) {
 
 	// Delete the conversation first (cascade delete) via handler to ensure
 	// unified timestamp for conversation and messages (matches production behavior).
-	deleteHandler := NewDeleteConversationHandler(s, nil)
+	deleteHandler := NewDeleteConversationHandler(s, nil, nil)
 	deleteClient := server.NewTestClient("alice")
 	deleteReq := newTestRequest("req-del", "delete_conversation", map[string]interface{}{
 		"conversation_id": convID,
@@ -80,7 +80,7 @@ func TestRestoreConversation_HappyPath(t *testing.T) {
 
 func TestRestoreConversation_Idempotent(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewRestoreConversationHandler(s, nil)
+	handler := NewRestoreConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-restore-idempotent-1"
@@ -118,7 +118,7 @@ func TestRestoreConversation_Idempotent(t *testing.T) {
 
 func TestRestoreConversation_MissingConversationID(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewRestoreConversationHandler(s, nil)
+	handler := NewRestoreConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -141,7 +141,7 @@ func TestRestoreConversation_MissingConversationID(t *testing.T) {
 
 func TestRestoreConversation_NotFound(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewRestoreConversationHandler(s, nil)
+	handler := NewRestoreConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -164,7 +164,7 @@ func TestRestoreConversation_NotFound(t *testing.T) {
 
 func TestRestoreConversation_NotMember(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewRestoreConversationHandler(s, nil)
+	handler := NewRestoreConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-restore-notmember-1"
@@ -200,7 +200,7 @@ func TestRestoreConversation_MessagesVisibleAfterRestore(t *testing.T) {
 	seedTestMessages(t, s, convID, "alice", 5, 1)
 
 	// Delete cascade via handler to ensure unified timestamp.
-	deleteHandler := NewDeleteConversationHandler(s, nil)
+	deleteHandler := NewDeleteConversationHandler(s, nil, nil)
 	deleteClient := server.NewTestClient("alice")
 	deleteReq := newTestRequest("req-del", "delete_conversation", map[string]interface{}{
 		"conversation_id": convID,
@@ -214,7 +214,7 @@ func TestRestoreConversation_MessagesVisibleAfterRestore(t *testing.T) {
 	assert.Empty(t, msgs, "messages should be hidden after delete")
 
 	// Restore via handler.
-	handler := NewRestoreConversationHandler(s, nil)
+	handler := NewRestoreConversationHandler(s, nil, nil)
 	params := map[string]interface{}{
 		"conversation_id": convID,
 	}

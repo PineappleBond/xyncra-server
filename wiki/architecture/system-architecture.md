@@ -1,4 +1,10 @@
+---
+last_updated: 2026-07-17
+---
+
 # 系统架构概览
+
+> last_updated: 2026-07-17
 
 ## 概述
 
@@ -138,11 +144,15 @@ Xyncra 是一个基于 Go 语言的实时消息 + AI Agent 服务器。系统以
 
 ### 4. MQ 层 (`internal/mq`)
 
-基于 Asynq（Redis）的异步任务队列。`internal/mq/handler.go` 中注册 MQ 任务处理器。
+基于 Asynq（Redis）的异步任务队列。`internal/mq/mq.go:64-87` 定义了 7 种任务类型，当前在 `internal/mq/handler.go` 中注册了 3 种处理器：
 
 | 任务类型 | 处理器 | 说明 |
 |---------|--------|------|
 | `mq:send_message` | NewSendMessageTaskHandler | 广播实时消息给接收方 |
+| `mq:sync_updates` | — | 更新 fan-out（预留） |
+| `mq:push_notification` | — | 推送通知（预留） |
+| `mq:presence_broadcast` | — | 在线状态广播（预留） |
+| `mq:conversation_sync` | — | 会话同步（预留） |
 | `mq:agent_process` | AgentTaskHandler | Agent AI 处理 |
 | `mq:agent_resume` | NewAgentResumeHandler | HITL 恢复后继续 Agent |
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
@@ -44,12 +43,16 @@ type heartbeatResponse struct {
 // store's metadata fields.
 type heartbeatHandler struct {
 	connStore server.ConnectionStore
+	logger    server.Logger
 }
 
 // NewHeartbeatHandler creates a heartbeatHandler backed by the given
 // ConnectionStore.
-func NewHeartbeatHandler(connStore server.ConnectionStore) *heartbeatHandler {
-	return &heartbeatHandler{connStore: connStore}
+func NewHeartbeatHandler(connStore server.ConnectionStore, logger server.Logger) *heartbeatHandler {
+	if logger == nil {
+		logger = defaultLogger{}
+	}
+	return &heartbeatHandler{connStore: connStore, logger: logger}
 }
 
 // HandleRequest implements MethodHandler. It processes a "heartbeat" RPC
@@ -73,8 +76,8 @@ func (h *heartbeatHandler) HandleRequest(ctx context.Context, client *server.Cli
 
 	// 2. Log device info if provided (observability only, not persisted).
 	if len(params.DeviceInfo) > 0 {
-		log.Printf("heartbeat: device_info from [connID=%s, userID=%s]: %v",
-			client.ConnID(), client.UserID(), params.DeviceInfo)
+		h.logger.Debug("heartbeat: device_info received",
+			"connID", client.ConnID(), "userID", client.UserID(), "device_info", params.DeviceInfo)
 	}
 
 	// 3. Refresh the connection TTL (D-010 passive renewal).

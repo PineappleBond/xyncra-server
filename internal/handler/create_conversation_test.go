@@ -33,7 +33,7 @@ func parseCreateConversationResponse(t *testing.T, data json.RawMessage) (*model
 func TestCreateConversation_HappyPath(t *testing.T) {
 	// D-011: find-or-create idempotency model for create_conversation.
 	s := setupTestSQLite(t)
-	handler := NewCreateConversationHandler(s, nil)
+	handler := NewCreateConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -71,7 +71,7 @@ func TestCreateConversation_HappyPath(t *testing.T) {
 func TestCreateConversation_WithTitle(t *testing.T) {
 	// D-011: optional title should be persisted.
 	s := setupTestSQLite(t)
-	handler := NewCreateConversationHandler(s, nil)
+	handler := NewCreateConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -102,7 +102,7 @@ func TestCreateConversation_IdempotentDuplicate(t *testing.T) {
 	// D-011: repeated call by the same user returns the existing conversation
 	// with duplicate=true and the same conversation ID.
 	s := setupTestSQLite(t)
-	handler := NewCreateConversationHandler(s, nil)
+	handler := NewCreateConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -138,7 +138,7 @@ func TestCreateConversation_ReverseIdempotent(t *testing.T) {
 	// so a call in the reverse direction should still find the existing
 	// conversation and return duplicate=true.
 	s := setupTestSQLite(t)
-	handler := NewCreateConversationHandler(s, nil)
+	handler := NewCreateConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	// Alice creates conversation with Bob.
@@ -173,7 +173,7 @@ func TestCreateConversation_ReverseIdempotent(t *testing.T) {
 
 func TestCreateConversation_MissingUserID(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewCreateConversationHandler(s, nil)
+	handler := NewCreateConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -214,7 +214,7 @@ func TestCreateConversation_MissingUserID(t *testing.T) {
 
 func TestCreateConversation_CannotCreateWithSelf(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewCreateConversationHandler(s, nil)
+	handler := NewCreateConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -241,7 +241,7 @@ func TestCreateConversation_DBConsistency(t *testing.T) {
 	// the database should contain exactly one conversation between the pair,
 	// and any messages sent in that conversation should be unaffected.
 	s := setupTestSQLite(t)
-	handler := NewCreateConversationHandler(s, nil)
+	handler := NewCreateConversationHandler(s, nil, nil)
 	ctx := context.Background()
 
 	aliceClient := server.NewTestClient("alice")
@@ -277,7 +277,7 @@ func TestCreateConversation_DBConsistency(t *testing.T) {
 
 	// Seed a message into the conversation and verify count remains 1 after
 	// another idempotent create call.
-	sendHandler := NewSendMessageHandler(s, &mockBroker{}, nil)
+	sendHandler := NewSendMessageHandler(s, &mockBroker{}, nil, nil)
 	msgParams := map[string]interface{}{
 		"conversation_id":   conv1.ID,
 		"client_message_id": "client-msg-db-check-1",
@@ -332,7 +332,7 @@ func (b *countingBroker) count() int {
 func TestCreateConversation_UserUpdateCreated(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &mockBroker{}
-	handler := NewCreateConversationHandler(s, broker)
+	handler := NewCreateConversationHandler(s, broker, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -365,7 +365,7 @@ func TestCreateConversation_UserUpdateCreated(t *testing.T) {
 func TestCreateConversation_MQEnqueue(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &countingBroker{}
-	handler := NewCreateConversationHandler(s, broker)
+	handler := NewCreateConversationHandler(s, broker, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -386,7 +386,7 @@ func TestCreateConversation_MQEnqueue(t *testing.T) {
 func TestCreateConversation_BrokerFailureStillSucceeds(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &failingBroker{} // always fails
-	handler := NewCreateConversationHandler(s, broker)
+	handler := NewCreateConversationHandler(s, broker, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -415,7 +415,7 @@ func TestCreateConversation_BrokerFailureStillSucceeds(t *testing.T) {
 func TestCreateConversation_DuplicateDoesNotTriggerMQ(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &countingBroker{}
-	handler := NewCreateConversationHandler(s, broker)
+	handler := NewCreateConversationHandler(s, broker, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -455,7 +455,7 @@ func TestCreateConversation_DuplicateDoesNotTriggerMQ(t *testing.T) {
 // panic (fire-and-forget with nil is safe).
 func TestCreateConversation_NilBroker(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewCreateConversationHandler(s, nil) // nil broker
+	handler := NewCreateConversationHandler(s, nil, nil) // nil broker
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")

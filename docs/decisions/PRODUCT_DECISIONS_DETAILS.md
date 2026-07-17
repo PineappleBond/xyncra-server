@@ -372,10 +372,28 @@
 
 ---
 
+## D-128: /metrics 端点在同一 HTTP 端口暴露
+
+**决策**：通过 `WSWithExtraRoutes` 功能选项将 `/metrics` 注册到现有 HTTP mux（端口 8080），而非独立管理端口。
+
+**理由：**
+
+- 符合 D-003 内网部署模型（反向代理已控制访问）
+- 简化部署（少一个端口配置）
+- server 包不依赖 Prometheus（通过 Route 抽象解耦）
+- 与 `/health` 端点模式一致
+
+**备选方案（已拒绝）：** 独立管理端口（如 `:9090`）— 增加配置复杂度，内网模型下无安全收益。
+
+**实现：** 在 `internal/server/websocket_server.go` 中新增 `WSWithExtraRoutes` 选项，允许从外部注册额外的 HTTP 路由到服务器的 HTTP mux。`Route` 结构体定义在 server 包中，仅包含 `Pattern string` 和 `Handler http.Handler`，不引入 Prometheus 依赖。
+
+---
+
 ## 版本历史
 
 | 日期       | 版本  | 变更                                                                                           |
 | ---------- | ----- | ---------------------------------------------------------------------------------------------- |
+| 2026-07-17 | v3.26 | D-128（/metrics 端点在同一 HTTP 端口暴露，WSWithExtraRoutes）                                   |
 | 2026-07-17 | v3.25 | D-127（手动业务级追踪，移除自动埋点库）                                                         |
 | 2026-07-16 | v3.23 | D-121（两阶段幂等性）、D-036（新增 reload-agents IPC-only）、D-126（FetchMoreMessages）         |
 | 2026-07-16 | v3.21 | 新增 D-123（HITL 超时自动清理）、D-124（Conversation 同步优化 - updated_at 广播）               |

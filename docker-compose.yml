@@ -3,6 +3,7 @@ services:
     build: .
     ports:
       - "8080:8080"
+      - "6060:6060"       # pprof (dev only)
     environment:
       - XYNCRA_ADDR=:8080
       - XYNCRA_REDIS_ADDR=redis:6379
@@ -12,8 +13,16 @@ services:
       - XYNCRA_TRACING_OTLP_ENDPOINT=jaeger:4317
       - XYNCRA_TRACING_OTLP_INSECURE=true
       - XYNCRA_TRACING_SAMPLING_RATE=1.0
+      - XYNCRA_LOG_LEVEL=info
+      - XYNCRA_LOG_DIR=/var/log/xyncra
+      - XYNCRA_LOG_FORMAT=json
+      - XYNCRA_METRICS_ENABLED=true
+      - XYNCRA_PPROF_ENABLED=true
+      - XYNCRA_PROFILING_ENABLED=true
+      - XYNCRA_PROFILING_SERVER=http://pyroscope:4040
     volumes:
       - xyncra-data:/data
+      - xyncra-logs:/var/log/xyncra
     depends_on:
       redis:
         condition: service_healthy
@@ -52,7 +61,108 @@ services:
       retries: 3
     restart: unless-stopped
 
+  # --- Observability stack (enabled via --profile observability) ---
+
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["observability"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.enable-lifecycle'
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    profiles: ["observability"]
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9093/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    profiles: ["observability"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/local-config.yaml
+      - loki-data:/loki
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:latest
+    profiles: ["observability"]
+    volumes:
+      - ./promtail/promtail-config.yml:/etc/promtail/config.yml
+      - xyncra-logs:/var/log/xyncra:ro
+    command: -config.file=/etc/promtail/config.yml
+    restart: unless-stopped
+
+  pyroscope:
+    image: grafana/pyroscope:latest
+    profiles: ["observability"]
+    ports:
+      - "4040:4040"
+    volumes:
+      - pyroscope-data:/var/lib/pyroscope
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:4040/api/v1/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["observability"]
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=grafana-pyroscope-datasource
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   xyncra-data:
   redis-data:
   jaeger-badger:
+  xyncra-logs:
+  prometheus-data:
+  loki-data:
+  pyroscope-data:
+  grafana-data:

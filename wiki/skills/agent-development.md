@@ -1,10 +1,18 @@
+---
+last_updated: 2026-07-17
+---
+
 # Agent 开发指南
+
+> last_updated: 2026-07-17
 
 ## 概述
 
 Xyncra 使用 Eino 框架（`github.com/cloudwego/eino`）的 Agent Development Kit（ADK）构建 AI Agent。Agent 定义存储在 `agents/` 目录下的 Markdown 文件中，包含 YAML frontmatter 元数据和 system prompt。
 
-## Agent 配置文件格式
+## Agent 配置文件格式（Markdown + YAML Frontmatter）
+
+Agent 配置使用 Markdown 文件作为载体，文件头部以 `---` 分隔的 YAML frontmatter 定义元数据，正文部分为 system prompt。
 
 ### 基本结构
 

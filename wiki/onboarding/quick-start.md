@@ -1,5 +1,11 @@
+---
+last_updated: 2026-07-17
+---
+
 # 快速开始
 
+> last_updated: 2026-07-17
+>
 > 在 5 分钟内跑通 Xyncra 从启动到发送第一条消息的完整链路。
 
 ---
@@ -356,6 +362,7 @@ Agent 的回复会通过 streaming 推送实时显示：
 | `failed to create connection store` | Redis 未运行或地址错误，检查 `XYNCRA_REDIS_ADDR` |
 | `address already in use` | 端口 `:8080` 被占用，使用 `-addr :8081` 或 `XYNCRA_ADDR=:8081` 更改 |
 | `failed to auto-migrate database` | 数据库文件权限问题，检查 DSN 路径是否可写 |
+| 配置未生效（如端口、Redis 地址与预期不符） | 环境变量优先级：CLI 参数 > 环境变量 > 默认值。检查 `.env` 文件是否存在，或变量是否正确 `export`；使用 `echo $VAR` 验证当前值 |
 
 ### 客户端无法连接
 

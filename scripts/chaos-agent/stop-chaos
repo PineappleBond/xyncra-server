@@ -1,0 +1,15 @@
+#!/bin/sh
+# stop-chaos — Stop chaos-agent rolling restarts.
+# The current restart cycle will complete, but no new round will begin.
+# Usage: docker exec <chaos-container> stop-chaos
+
+FLAG_FILE="/tmp/chaos-active"
+COUNTER_FILE="/tmp/chaos-counter"
+
+if [ -f "$FLAG_FILE" ]; then
+  rm -f "$FLAG_FILE"
+  round=$(cat "$COUNTER_FILE" 2>/dev/null || echo "0")
+  echo "Chaos stopped. (completed rounds: $round)"
+else
+  echo "Chaos was not active."
+fi

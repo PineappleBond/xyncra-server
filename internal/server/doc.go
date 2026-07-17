@@ -32,7 +32,7 @@
 //	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 //	defer stopCancel()
 //	if err := srv.GracefulStop(stopCtx); err != nil {
-//	    log.Printf("graceful stop error: %v", err)
+//	    slog.Error("graceful stop error", "error", err)
 //	}
 //
 // # ConnectionStore

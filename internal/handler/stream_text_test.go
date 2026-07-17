@@ -50,7 +50,7 @@ func parseStreamTextResponse(t *testing.T, data json.RawMessage) map[string]stri
 func TestStreamText_BasicFlow(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 
 	convID := "conv-stream-1"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -99,7 +99,7 @@ func TestStreamText_BasicFlow(t *testing.T) {
 func TestStreamText_MiddleFrames(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 
 	convID := "conv-stream-2"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -143,7 +143,7 @@ func TestStreamText_MiddleFrames(t *testing.T) {
 func TestStreamText_IsDoneFrame(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 
 	convID := "conv-stream-3"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -176,7 +176,7 @@ func TestStreamText_IsDoneFrame(t *testing.T) {
 func TestStreamText_MissingConversationID(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 
 	params := map[string]interface{}{
 		"stream_id": "stream-4",
@@ -199,7 +199,7 @@ func TestStreamText_MissingConversationID(t *testing.T) {
 func TestStreamText_MissingStreamID(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 
 	params := map[string]interface{}{
 		"conversation_id": "conv-stream-5",
@@ -222,7 +222,7 @@ func TestStreamText_MissingStreamID(t *testing.T) {
 func TestStreamText_ConversationNotFound(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 
 	params := map[string]interface{}{
 		"conversation_id": "nonexistent-conv",
@@ -246,7 +246,7 @@ func TestStreamText_ConversationNotFound(t *testing.T) {
 func TestStreamText_CallerNotMember(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 
 	convID := "conv-stream-7"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -273,7 +273,7 @@ func TestStreamText_CallerNotMember(t *testing.T) {
 func TestStreamText_SenderAlsoReceivesBroadcast(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 
 	convID := "conv-stream-8"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -304,7 +304,7 @@ func TestStreamText_SenderAlsoReceivesBroadcast(t *testing.T) {
 func TestStreamText_RateLimit(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 
 	convID := "conv-stream-9"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -355,7 +355,7 @@ func TestStreamText_RateLimit(t *testing.T) {
 func TestStreamText_NoUserUpdatesCreated(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 
 	convID := "conv-stream-10"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -397,7 +397,7 @@ func TestStreamText_NoUserUpdatesCreated(t *testing.T) {
 func TestStreamText_BroadcastError_Tolerated(t *testing.T) {
 	s := setupTestSQLite(t)
 	fb := &failingBroadcaster{}
-	h := NewStreamTextHandler(s, fb.broadcast)
+	h := NewStreamTextHandler(s, fb.broadcast, nil)
 
 	convID := "conv-stream-11"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -425,7 +425,7 @@ func TestStreamText_BroadcastError_Tolerated(t *testing.T) {
 func TestStreamText_InvalidJSONParams(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 	ctx := context.Background()
 
 	client := server.NewTestClient("alice")
@@ -449,7 +449,7 @@ func TestStreamText_InvalidJSONParams(t *testing.T) {
 func TestStreamText_EmptyText(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 
 	convID := "conv-stream-13"
 	createTestConversation(t, s, convID, "alice", "bob")
@@ -483,7 +483,7 @@ func TestStreamText_EmptyText(t *testing.T) {
 func TestStreamText_ConcurrentCalls(t *testing.T) {
 	s := setupTestSQLite(t)
 	rb := &recordingBroadcaster{}
-	h := NewStreamTextHandler(s, rb.broadcast)
+	h := NewStreamTextHandler(s, rb.broadcast, nil)
 	ctx := context.Background()
 
 	convID := "conv-stream-concurrent"

@@ -1,4 +1,10 @@
+---
+last_updated: 2026-07-17
+---
+
 # 项目结构
+
+> last_updated: 2026-07-17
 
 ## 目录总览
 
@@ -66,7 +72,7 @@ xyncra-client kill                # 终止守护进程
 
 ## `internal/` — 私有实现
 
-核心业务逻辑，总共 8 个包：
+核心业务逻辑，总共 8 个包（server, handler, agent, mq, store, cli, cleanup, e2e）：
 
 ### `internal/server/` — WebSocket 服务器与连接管理
 
@@ -180,7 +186,7 @@ Asynq (Redis-backed) 消息队列抽象层：
 | `handler.go` | `TaskHandler`：任务路由注册表 |
 | `options.go` | `EnqueueOption` 函数式选项 |
 
-预定义任务类型：
+预定义任务类型（共 7 种）：
 
 | 类型 | 用途 |
 |------|------|

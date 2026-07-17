@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -76,6 +75,7 @@ func (rl *streamingRateLimiter) allow() bool {
 type streamTextHandler struct {
 	store       store.StoreAPI
 	broadcastFn func(userID string, updates *protocol.PackageDataUpdates) error
+	logger      server.Logger
 	limiters    sync.Map // key: "userID:convID" -> *streamingRateLimiter
 }
 
@@ -84,10 +84,15 @@ type streamTextHandler struct {
 func NewStreamTextHandler(
 	store store.StoreAPI,
 	broadcastFn func(userID string, updates *protocol.PackageDataUpdates) error,
+	logger server.Logger,
 ) *streamTextHandler {
+	if logger == nil {
+		logger = defaultLogger{}
+	}
 	h := &streamTextHandler{
 		store:       store,
 		broadcastFn: broadcastFn,
+		logger:      logger,
 	}
 	go h.cleanupLoop()
 	return h
@@ -191,7 +196,7 @@ func (h *streamTextHandler) HandleRequest(ctx context.Context, client *server.Cl
 	// 6. Broadcast to ALL members (including the caller, D-050).
 	for _, memberID := range members {
 		if err := h.broadcastFn(memberID, updates); err != nil {
-			log.Printf("stream_text: broadcast to user %s failed (fire-and-forget): %v", memberID, err)
+			h.logger.Info("stream_text: broadcast failed (fire-and-forget)", "userID", memberID, "error", err)
 		}
 	}
 

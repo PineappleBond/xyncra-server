@@ -1,0 +1,10 @@
+#!/bin/sh
+# start-chaos — Trigger chaos-agent to begin rolling restarts.
+# Usage: docker exec <chaos-container> start-chaos
+
+FLAG_FILE="/tmp/chaos-active"
+COUNTER_FILE="/tmp/chaos-counter"
+
+touch "$FLAG_FILE"
+round=$(cat "$COUNTER_FILE" 2>/dev/null || echo "0")
+echo "Chaos started. Rolling restarts active. (completed rounds: $round)"

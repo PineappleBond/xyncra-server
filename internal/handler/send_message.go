@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -73,14 +72,19 @@ type sendMessageHandler struct {
 	store         store.StoreAPI
 	broker        mq.Broker
 	agentRegistry *agent.AgentRegistry // nil = agent detection disabled (D-063)
+	logger        server.Logger
 }
 
 // NewSendMessageHandler creates a sendMessageHandler.
-func NewSendMessageHandler(store store.StoreAPI, broker mq.Broker, agentRegistry *agent.AgentRegistry) *sendMessageHandler {
+func NewSendMessageHandler(store store.StoreAPI, broker mq.Broker, agentRegistry *agent.AgentRegistry, logger server.Logger) *sendMessageHandler {
+	if logger == nil {
+		logger = defaultLogger{}
+	}
 	return &sendMessageHandler{
 		store:         store,
 		broker:        broker,
 		agentRegistry: agentRegistry,
+		logger:        logger,
 	}
 }
 
@@ -185,7 +189,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 	taskPayload := sendMessageTaskPayload{Recipients: recipients}
 	payloadBytes, err := json.Marshal(taskPayload)
 	if err != nil {
-		log.Printf("send_message: failed to marshal MQ payload: %v", err)
+		h.logger.Error("send_message: failed to marshal MQ payload", "error", err)
 	} else {
 		task := &mq.Task{
 			Type:    mq.TypeSendMessage,
@@ -193,7 +197,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 		}
 		enqueueCtx, enqueueFinish := startBrokerEnqueueSpan(ctx, mq.TypeSendMessage)
 		if _, err := h.broker.Enqueue(enqueueCtx, task); err != nil {
-			log.Printf("send_message: MQ enqueue failed (fire-and-forget): %v", err)
+			h.logger.Info("send_message: MQ enqueue failed (fire-and-forget)", "error", err)
 		}
 		enqueueFinish(nil)
 	}
@@ -212,7 +216,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 					DeviceID:       client.DeviceID(), // Phase 6 (D-102)
 				}
 				if payloadBytes, err := json.Marshal(agentPayload); err != nil {
-					log.Printf("send_message: failed to marshal agent MQ payload: %v", err)
+					h.logger.Error("send_message: failed to marshal agent MQ payload", "error", err)
 				} else {
 					agentTask := &mq.Task{
 						Type:    mq.TypeAgentProcess,
@@ -220,7 +224,7 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 					}
 					enqueueCtx, enqueueFinish := startBrokerEnqueueSpan(ctx, mq.TypeAgentProcess)
 					if _, err := h.broker.Enqueue(enqueueCtx, agentTask, mq.WithMaxRetry(20)); err != nil {
-						log.Printf("send_message: agent MQ enqueue failed (fire-and-forget): %v", err)
+						h.logger.Info("send_message: agent MQ enqueue failed (fire-and-forget)", "error", err)
 					}
 					enqueueFinish(nil)
 				}

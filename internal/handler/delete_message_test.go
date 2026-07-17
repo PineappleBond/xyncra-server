@@ -22,7 +22,7 @@ import (
 
 func TestDeleteMessage_HappyPath(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteMessageHandler(s, nil)
+	handler := NewDeleteMessageHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-del-msg-happy-1"
@@ -79,7 +79,7 @@ func TestDeleteMessage_HappyPath(t *testing.T) {
 
 func TestDeleteMessage_MissingMessageID(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteMessageHandler(s, nil)
+	handler := NewDeleteMessageHandler(s, nil, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -103,7 +103,7 @@ func TestDeleteMessage_MissingMessageID(t *testing.T) {
 
 func TestDeleteMessage_NotFound(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteMessageHandler(s, nil)
+	handler := NewDeleteMessageHandler(s, nil, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -127,7 +127,7 @@ func TestDeleteMessage_NotFound(t *testing.T) {
 
 func TestDeleteMessage_NotMember(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteMessageHandler(s, nil)
+	handler := NewDeleteMessageHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-del-msg-notmember-1"
@@ -166,7 +166,7 @@ func TestDeleteMessage_NotMember(t *testing.T) {
 
 func TestDeleteMessage_NotSender(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteMessageHandler(s, nil)
+	handler := NewDeleteMessageHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-del-msg-notsender-1"
@@ -206,7 +206,7 @@ func TestDeleteMessage_NotSender(t *testing.T) {
 
 func TestDeleteMessage_DeletedNotVisible(t *testing.T) {
 	s := setupTestSQLite(t)
-	handler := NewDeleteMessageHandler(s, nil)
+	handler := NewDeleteMessageHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-del-msg-notvisible-1"

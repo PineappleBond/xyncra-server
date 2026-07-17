@@ -1,4 +1,10 @@
+---
+last_updated: 2026-07-17
+---
+
 # WebSocket 协议设计
+
+> last_updated: 2026-07-17
 
 ## 概述
 
@@ -323,6 +329,191 @@ const (
         "created_at": "2026-07-16T10:00:00Z"
       }
     ]
+  }
+}
+```
+
+### 完整请求/响应交互示例
+
+以下展示一次完整的消息发送流程，包含 3 层信封结构：
+
+**客户端请求**（Layer 1 `Package` → Layer 2 `PackageDataRequest` → Layer 3 `params`）：
+
+```json
+{
+  "version": 1,
+  "type": 0,
+  "data": {
+    "id": "req-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "method": "send_message",
+    "params": {
+      "conversation_id": "conv-xyz-987",
+      "client_message_id": "cmt-001",
+      "content": "Hello!",
+      "type": "text"
+    }
+  }
+}
+```
+
+**服务端成功响应**（Layer 1 → Layer 2 `PackageDataResponse` → Layer 3 `data.message`）：
+
+```json
+{
+  "version": 1,
+  "type": 1,
+  "data": {
+    "id": "req-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "code": 0,
+    "msg": "ok",
+    "data": {
+      "message": {
+        "id": "msg-uuid-001",
+        "message_id": 100,
+        "conversation_id": "conv-xyz-987",
+        "sender_id": "alice",
+        "content": "Hello!",
+        "type": "text",
+        "status": "sent",
+        "created_at": "2026-07-17T08:00:00Z"
+      },
+      "duplicate": false
+    }
+  }
+}
+```
+
+**服务端推送给其他设备**（Layer 1 → Layer 2 `PackageDataUpdates` → Layer 3 `updates[].payload`）：
+
+```json
+{
+  "version": 1,
+  "type": 2,
+  "data": {
+    "updates": [
+      {
+        "seq": 2048,
+        "type": "message",
+        "payload": {
+          "id": "msg-uuid-001",
+          "message_id": 100,
+          "conversation_id": "conv-xyz-987",
+          "sender_id": "alice",
+          "content": "Hello!",
+          "type": "text",
+          "created_at": "2026-07-17T08:00:00Z"
+        },
+        "created_at": "2026-07-17T08:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+### 创建会话请求
+
+```json
+{
+  "version": 1,
+  "type": 0,
+  "data": {
+    "id": "req-1111-2222-3333-4444",
+    "method": "create_conversation",
+    "params": {
+      "user_id": "bob",
+      "title": "工作讨论"
+    }
+  }
+}
+```
+
+**响应**：
+```json
+{
+  "version": 1,
+  "type": 1,
+  "data": {
+    "id": "req-1111-2222-3333-4444",
+    "code": 0,
+    "msg": "ok",
+    "data": {
+      "conversation": {
+        "id": "conv-xyz-987",
+        "user_id1": "alice",
+        "user_id2": "bob",
+        "type": "1on1",
+        "created_at": "2026-07-17T08:00:00Z"
+      },
+      "duplicate": false
+    }
+  }
+}
+```
+
+### 增量同步请求
+
+```json
+{
+  "version": 1,
+  "type": 0,
+  "data": {
+    "id": "req-sync-001",
+    "method": "sync_updates",
+    "params": {
+      "after_seq": 2048,
+      "limit": 50
+    }
+  }
+}
+```
+
+**响应**（含多个更新）：
+```json
+{
+  "version": 1,
+  "type": 1,
+  "data": {
+    "id": "req-sync-001",
+    "code": 0,
+    "msg": "ok",
+    "data": {
+      "updates": [
+        {"seq": 2049, "type": "message", "payload": {...}},
+        {"seq": 2050, "type": "mark_read", "payload": {...}}
+      ],
+      "has_more": false
+    }
+  }
+}
+```
+
+### Agent 恢复请求（HITL）
+
+```json
+{
+  "version": 1,
+  "type": 0,
+  "data": {
+    "id": "req-resume-001",
+    "method": "agent_resume",
+    "params": {
+      "conversation_id": "conv-xyz-987"
+    }
+  }
+}
+```
+
+### 服务端错误响应
+
+```json
+{
+  "version": 1,
+  "type": 1,
+  "data": {
+    "id": "req-a1b2c3d4-...",
+    "code": -100,
+    "msg": "validation error: missing required field: conversation_id",
+    "data": null
   }
 }
 ```

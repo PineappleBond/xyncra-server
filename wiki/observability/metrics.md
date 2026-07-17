@@ -2,265 +2,166 @@
 last_updated: 2026-07-17
 ---
 
-# Metrics 埋点
+# Prometheus Metrics
 
 > last_updated: 2026-07-17
 
-## 概述
+## Overview
 
-Xyncra Server 目前通过日志方式暴露指标，尚未集成 Prometheus 客户端。本文档定义建议采集的指标体系和实施方案。
+Xyncra Server exposes 36 Prometheus metrics via the `/metrics` HTTP endpoint on the same port as the WebSocket server (default `:8080`). This is enabled by the `XYNCRA_METRICS_ENABLED=true` environment variable (opt-in, per D-063 optional module pattern).
 
-## 当前指标能力
+The metrics endpoint is registered via `WSWithExtraRoutes` (D-128) on the same HTTP mux as `/health`, avoiding the need for a separate management port. The server package does not depend on Prometheus -- the `Route` abstraction decouples the two.
 
-### LLMMetrics 接口
+All debug/metrics endpoints are only accessible within the internal network (D-003 deployment model).
 
-通过 `internal/agent/monitoring.go` 定义的指标接口：
+## Endpoint
 
-```go
-type LLMMetrics interface {
-    Record(ctx context.Context, event LLMCallEvent)
-}
-
-type LLMCallEvent struct {
-    AgentID      string
-    Model        string
-    Duration     time.Duration
-    InputTokens  int
-    OutputTokens int
-    Error        error
-}
+```text
+GET /metrics
 ```
 
-当前通过 `LogMetrics` 实现将 LLM 调用事件记录到日志。
+Returns Prometheus exposition format. Requires `XYNCRA_METRICS_ENABLED=true`.
 
-### 健康检查端点
+## Configuration
 
-`GET /health` 返回：
-- 连接数
-- 健康状态（ok/degraded）
+| Environment Variable | Default | Description |
+|----------------------|---------|-------------|
+| `XYNCRA_METRICS_ENABLED` | `false` | Enable Prometheus metrics collection and `/metrics` endpoint |
 
-## 建议的指标分类
+When disabled (default), no metrics collectors are created and the `/metrics` route is not registered. Zero overhead when unused.
 
-### 系统指标
+## Implemented Metrics (36 total)
 
-用于监控 Go 运行时和服务健康状况：
+### System Metrics (7) -- Go Runtime & Service Health
 
-| 指标名称 | 类型 | 说明 | 建议标签 |
-|----------|------|------|----------|
-| `xyncra_goroutines` | Gauge | 当前 goroutine 数量 | - |
-| `xyncra_memory_alloc_bytes` | Gauge | 已分配堆内存 | - |
-| `xyncra_memory_inuse_bytes` | Gauge | 使用中的堆内存 | - |
-| `xyncra_gc_duration_seconds` | Histogram | GC 暂停时间 | - |
-| `xyncra_gc_count` | Counter | GC 次数累计 | - |
-| `xyncra_cpu_usage` | Gauge | CPU 使用率 | - |
-| `xyncra_open_fds` | Gauge | 打开文件描述符数 | - |
+Collected every 10 seconds by the runtime collector in `internal/metrics/runtime.go`. These metrics monitor the Go runtime and process health. They are essential for capacity planning and detecting resource exhaustion.
 
-### 连接指标
+| Metric | Type | Help | Ops Value |
+|--------|------|------|-----------|
+| `xyncra_goroutines` | Gauge | Current goroutine count | Goroutine leak detection |
+| `xyncra_memory_alloc_bytes` | Gauge | Allocated heap memory in bytes | Memory pressure alerting |
+| `xyncra_memory_inuse_bytes` | Gauge | Heap memory in use in bytes | Memory footprint tracking |
+| `xyncra_gc_duration_seconds` | Summary | GC pause duration (p50/p90/p99) | GC overhead monitoring |
+| `xyncra_gc_count` | Gauge | Total GC cycles completed | GC frequency tracking |
+| `xyncra_cpu_usage` | Gauge | CPU usage ratio | CPU saturation alerting |
+| `xyncra_open_fds` | Gauge | Open file descriptors | FD exhaustion detection |
 
-用于监控 WebSocket 连接状态：
+### Connection Metrics (5) -- WebSocket Connection State
 
-| 指标名称 | 类型 | 说明 | 建议标签 |
-|----------|------|------|----------|
-| `xyncra_connections_active` | Gauge | 当前活跃连接数 | `user_id` |
-| `xyncra_connections_total` | Counter | 累计连接总数 | - |
-| `xyncra_connections_per_user` | Gauge | 每用户连接数 | `user_id` |
-| `xyncra_connections_per_device` | Gauge | 每设备连接数 | `user_id`, `device_id` |
-| `xyncra_connections_duration_seconds` | Histogram | 连接时长分布 | - |
+Track connection lifecycle and capacity. Critical for detecting connection storms and leaks.
 
-### 消息指标
+| Metric | Type | Labels | Help | Ops Value |
+|--------|------|--------|------|-----------|
+| `xyncra_connections_active` | Gauge | -- | Current active WebSocket connections | Capacity planning, leak detection |
+| `xyncra_connections_total` | Counter | -- | Total connections since start | Connection rate tracking |
+| `xyncra_connections_per_user` | GaugeVec | `user_id` | Connections per user | Multi-device monitoring |
+| `xyncra_connections_per_device` | GaugeVec | `user_id`, `device_id` | Connections per device | Device-level tracking |
+| `xyncra_connections_duration_seconds` | Histogram | -- | Connection duration distribution (exponential buckets, 1s start, 2x factor, 15 buckets) | Connection stability analysis |
 
-用于监控消息处理吞吐量：
+### Message Metrics (5) -- Message Processing Throughput
 
-| 指标名称 | 类型 | 说明 | 建议标签 |
-|----------|------|------|----------|
-| `xyncra_messages_sent_total` | Counter | 消息发送总数 | `conversation_id` |
-| `xyncra_messages_received_total` | Counter | 消息接收总数 | - |
-| `xyncra_messages_per_second` | Gauge | 每秒消息处理数 | - |
-| `xyncra_message_size_bytes` | Histogram | 消息大小分布 | - |
-| `xyncra_message_latency_seconds` | Histogram | 消息投递延迟 | - |
+Monitor message flow and delivery health. Key indicators of system throughput.
 
-### Agent 指标
+| Metric | Type | Labels | Help | Ops Value |
+|--------|------|--------|------|-----------|
+| `xyncra_messages_sent_total` | CounterVec | `conversation_id` | Total messages sent | Throughput tracking |
+| `xyncra_messages_received_total` | Counter | -- | Total messages received | Inbound load monitoring |
+| `xyncra_messages_per_second` | Gauge | -- | Messages per second | Real-time throughput |
+| `xyncra_message_size_bytes` | Histogram | -- | Message size distribution (exponential buckets, 64B start, 2x factor, 12 buckets) | Payload size analysis |
+| `xyncra_message_latency_seconds` | Histogram | -- | Message delivery latency (default buckets) | Delivery SLA monitoring |
 
-用于监控 AI Agent 执行情况：
+### Agent Metrics (9) -- AI Agent Execution & LLM
 
-| 指标名称 | 类型 | 说明 | 建议标签 |
-|----------|------|------|----------|
-| `xyncra_agent_executions_total` | Counter | Agent 执行总数 | `agent_id`, `model` |
-| `xyncra_agent_executions_failed_total` | Counter | Agent 执行失败数 | `agent_id`, `error` |
-| `xyncra_agent_duration_seconds` | Histogram | Agent 执行耗时 | `agent_id`, `model` |
-| `xyncra_agent_active` | Gauge | 当前活跃 Agent 数 | - |
-| `xyncra_agent_queue_depth` | Gauge | Agent 任务队列深度 | - |
-| `xyncra_llm_tokens_input_total` | Counter | LLM 输入 Token 总数 | `agent_id`, `model` |
-| `xyncra_llm_tokens_output_total` | Counter | LLM 输出 Token 总数 | `agent_id`, `model` |
-| `xyncra_llm_calls_total` | Counter | LLM 调用总数 | `agent_id`, `model` |
-| `xyncra_llm_calls_failed_total` | Counter | LLM 调用失败数 | `agent_id`, `model`, `error` |
+Monitor agent runtime performance and LLM integration health. Essential for cost control and SLA monitoring.
 
-### 业务指标
+| Metric | Type | Labels | Help | Ops Value |
+|--------|------|--------|------|-----------|
+| `xyncra_agent_executions_total` | CounterVec | `agent_id`, `model` | Total agent executions | Execution rate tracking |
+| `xyncra_agent_executions_failed_total` | CounterVec | `agent_id`, `error` | Total failed agent executions | Error rate alerting |
+| `xyncra_agent_duration_seconds` | HistogramVec | `agent_id`, `model` | Agent execution duration (default buckets) | Latency SLA monitoring |
+| `xyncra_agent_active` | Gauge | -- | Currently active agent executions | Concurrency monitoring |
+| `xyncra_agent_queue_depth` | Gauge | -- | Agent task queue depth | Queue backlog alerting |
+| `xyncra_llm_tokens_input_total` | CounterVec | `agent_id`, `model` | Total LLM input tokens | Cost tracking (input) |
+| `xyncra_llm_tokens_output_total` | CounterVec | `agent_id`, `model` | Total LLM output tokens | Cost tracking (output) |
+| `xyncra_llm_calls_total` | CounterVec | `agent_id`, `model` | Total LLM calls | LLM usage tracking |
+| `xyncra_llm_calls_failed_total` | CounterVec | `agent_id`, `model`, `error` | Total failed LLM calls | LLM error rate alerting |
 
-用于监控业务层面的运行情况：
+### Business Metrics (6) -- Application-Level Operations
 
-| 指标名称 | 类型 | 说明 | 建议标签 |
-|----------|------|------|----------|
-| `xyncra_conversations_active` | Gauge | 活跃会话数 | - |
-| `xyncra_conversations_created_total` | Counter | 会话创建总数 | - |
-| `xyncra_devices_connected` | Gauge | 已连接设备数 | - |
-| `xyncra_functions_registered` | Gauge | 注册的函数数 | `device_id` |
-| `xyncra_reverse_rpc_requests_total` | Counter | 反向 RPC 请求数 | - |
-| `xyncra_reverse_rpc_failed_total` | Counter | 反向 RPC 失败数 | - |
+Track business-layer operations. Provide visibility into feature usage and system correctness.
 
-### Redis 指标
+| Metric | Type | Labels | Help | Ops Value |
+|--------|------|--------|------|-----------|
+| `xyncra_conversations_active` | Gauge | -- | Active conversations | Load indicator |
+| `xyncra_conversations_created_total` | Counter | -- | Total conversations created | Growth tracking |
+| `xyncra_devices_connected` | Gauge | -- | Connected devices | Device fleet size |
+| `xyncra_functions_registered` | GaugeVec | `device_id` | Registered functions per device | Tool capability tracking |
+| `xyncra_reverse_rpc_requests_total` | Counter | -- | Total reverse RPC requests | Bidirectional RPC usage |
+| `xyncra_reverse_rpc_failed_total` | Counter | -- | Total failed reverse RPC requests | RPC failure alerting |
 
-用于监控 Redis 依赖状态：
+### Redis Metrics (4) -- Infrastructure Dependency Health
 
-| 指标名称 | 类型 | 说明 | 建议标签 |
-|----------|------|------|----------|
-| `xyncra_redis_connected` | Gauge | Redis 连接状态（1/0） | - |
-| `xyncra_redis_ping_duration_seconds` | Histogram | Redis Ping 延迟 | - |
-| `xyncra_redis_pool_size` | Gauge | 连接池大小 | - |
-| `xyncra_asynq_queue_size` | Gauge | 消息队列深度 | `queue` |
+Monitor Redis connectivity and async task queue health. Redis is a critical dependency -- these metrics enable early detection of infrastructure issues.
 
-## 指标导出格式
+| Metric | Type | Labels | Help | Ops Value |
+|--------|------|--------|------|-----------|
+| `xyncra_redis_connected` | Gauge | -- | Redis connection status (1=connected, 0=disconnected) | Infrastructure health |
+| `xyncra_redis_ping_duration_seconds` | Histogram | -- | Redis ping latency (default buckets) | Redis latency degradation |
+| `xyncra_redis_pool_size` | Gauge | -- | Redis connection pool size | Connection pool saturation |
+| `xyncra_asynq_queue_size` | GaugeVec | `queue` | Asynq queue depth | Task backlog alerting |
 
-### 建议：Prometheus 格式
+## Prometheus Configuration
 
-通过 `/metrics` HTTP 端点暴露指标：
+Add to `prometheus.yml`:
 
-```
-# HELP xyncra_connections_active Current active WebSocket connections
-# TYPE xyncra_connections_active gauge
-xyncra_connections_active 42
-
-# HELP xyncra_llm_calls_total Total LLM calls
-# TYPE xyncra_llm_calls_total counter
-xyncra_llm_calls_total{agent_id="weather-bot",model="qwen3.7-plus"} 150
-xyncra_llm_calls_total{agent_id="mcp-bot",model="gpt-4"} 75
-
-# HELP xyncra_agent_duration_seconds Agent execution duration
-# TYPE xyncra_agent_duration_seconds histogram
-xyncra_agent_duration_seconds_bucket{agent_id="weather-bot",le="1"} 50
-xyncra_agent_duration_seconds_bucket{agent_id="weather-bot",le="5"} 120
-xyncra_agent_duration_seconds_bucket{agent_id="weather-bot",le="+Inf"} 150
-xyncra_agent_duration_seconds_sum{agent_id="weather-bot"} 450
-xyncra_agent_duration_seconds_count{agent_id="weather-bot"} 150
-```
-
-### 实现思路
-
-使用 `prometheus/client_golang`：
-
-```go
-import (
-    "github.com/prometheus/client_golang/prometheus"
-    "github.com/prometheus/client_golang/prometheus/promhttp"
-)
-
-var (
-    activeConnections = prometheus.NewGauge(prometheus.GaugeOpts{
-        Name: "xyncra_connections_active",
-        Help: "Current active WebSocket connections",
-    })
-
-    llmCallsTotal = prometheus.NewCounterVec(
-        prometheus.CounterOpts{
-            Name: "xyncra_llm_calls_total",
-            Help: "Total LLM calls",
-        },
-        []string{"agent_id", "model"},
-    )
-
-    agentDuration = prometheus.NewHistogramVec(
-        prometheus.HistogramOpts{
-            Name:    "xyncra_agent_duration_seconds",
-            Help:    "Agent execution duration",
-            Buckets: prometheus.DefBuckets,
-        },
-        []string{"agent_id"},
-    )
-)
-
-func init() {
-    prometheus.MustRegister(activeConnections)
-    prometheus.MustRegister(llmCallsTotal)
-    prometheus.MustRegister(agentDuration)
-}
-
-// 在 /metrics 端点注册
-mux.Handle("/metrics", promhttp.Handler())
-```
-
-## 当前实现建议
-
-### 从日志导出指标（替代方案）
-
-在集成 Prometheus 客户端之前，可以通过日志解析器导出指标：
-
-```bash
-# 从 LLM 日志提取 Prometheus 格式指标
-cat /app/llm-logs/llm-calls.log | \
-  jq -r 'select(.msg == "llm call completed") | 
-    "xyncra_llm_calls_total{agent_id=\"\(.agent_id)\",model=\"\(.model)\"} 1"' | \
-  sort | uniq -c | \
-  awk '{print $2, $1}'
-```
-
-### LLM 调用日志结构化指标
-
-当前 `LogMetrics.Record` 输出已是结构化的键值对格式，可直接被日志采集系统解析：
-
-```go
-func (m *LogMetrics) Record(ctx context.Context, event LLMCallEvent) {
-    if event.Error != nil {
-        m.logger.Error("llm call failed",
-            "agent_id", event.AgentID,
-            "model", event.Model,
-            "duration_ms", event.Duration.Milliseconds(),
-            "error", event.Error,
-        )
-        return
-    }
-    m.logger.Info("llm call completed",
-        "agent_id", event.AgentID,
-        "model", event.Model,
-        "duration_ms", event.Duration.Milliseconds(),
-        "input_tokens", event.InputTokens,
-        "output_tokens", event.OutputTokens,
-    )
-}
-```
-
-## 弃用指标
-
-当某个指标不再需要时：
-1. 记录弃用原因
-2. 标记为 `DEPRECATED` 并说明替代指标
-3. 至少保留一个发布周期再移除
-4. 在 CHANGELOG 中说明
-
-## 集成建议
-
-### 监控堆栈推荐
-
-```
-Xyncra Server → Prometheus → Grafana Dashboard
-                 ↓
-           AlertManager → 通知渠道
-```
-
-### 快速开始
-
-```bash
-# 1. 添加依赖
-go get github.com/prometheus/client_golang
-
-# 2. 注册 /metrics 端点
-mux.Handle("/metrics", promhttp.Handler())
-
-# 3. 配置 Prometheus
-# prometheus.yml
+```yaml
 scrape_configs:
   - job_name: 'xyncra'
+    scrape_interval: 15s
     static_configs:
-      - targets: ['localhost:8080']
-
-# 4. 导入 Grafana Dashboard
+      - targets: ['xyncra-server:8080']
+    metrics_path: /metrics
 ```
+
+## Example Queries
+
+```promql
+# Active connections
+xyncra_connections_active
+
+# Message rate (per second)
+rate(xyncra_messages_sent_total[5m])
+
+# Agent error rate
+rate(xyncra_agent_executions_failed_total[5m])
+  / rate(xyncra_agent_executions_total[5m])
+
+# LLM P95 latency per agent
+histogram_quantile(0.95,
+  rate(xyncra_agent_duration_seconds_bucket{agent_id="weather-bot"}[5m]))
+
+# Redis pool utilization
+xyncra_redis_pool_size
+
+# Asynq queue backlog
+xyncra_asynq_queue_size
+
+# Goroutine trend
+deriv(xyncra_goroutines[10m])
+```
+
+## Deprecation Policy
+
+When a metric is no longer needed:
+
+1. Mark as `DEPRECATED` in code comments with the replacement metric
+2. Keep the metric for at least one release cycle
+3. Document the migration in CHANGELOG
+4. Remove in the following release
+
+## Related
+
+- [Distributed Tracing](distributed-tracing.md) -- OpenTelemetry tracing
+- [Logging](../devops/logging.md) -- Structured logging configuration
+- [Profiling](../devops/profiling.md) -- pprof and Pyroscope
+- [Alerting](../devops/alerting.md) -- Alert rules based on these metrics

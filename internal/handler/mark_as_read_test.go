@@ -51,7 +51,7 @@ func seedMessages(t *testing.T, s *testSQLiteStore, convID string, count int) {
 
 func TestMarkAsRead_HappyPath(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s, nil)
+	h := NewMarkAsReadHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-happy"
@@ -103,7 +103,7 @@ func TestMarkAsRead_HappyPath(t *testing.T) {
 
 func TestMarkAsRead_OmitMessageID(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s, nil)
+	h := NewMarkAsReadHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-omit"
@@ -137,7 +137,7 @@ func TestMarkAsRead_OmitMessageID(t *testing.T) {
 
 func TestMarkAsRead_MAXSemantics(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s, nil)
+	h := NewMarkAsReadHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-max"
@@ -185,7 +185,7 @@ func TestMarkAsRead_MAXSemantics(t *testing.T) {
 
 func TestMarkAsRead_MissingConversationID(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s, nil)
+	h := NewMarkAsReadHandler(s, nil, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -208,7 +208,7 @@ func TestMarkAsRead_MissingConversationID(t *testing.T) {
 
 func TestMarkAsRead_NotFound(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s, nil)
+	h := NewMarkAsReadHandler(s, nil, nil)
 	ctx := context.Background()
 
 	params := map[string]interface{}{
@@ -232,7 +232,7 @@ func TestMarkAsRead_NotFound(t *testing.T) {
 
 func TestMarkAsRead_NotMember(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s, nil)
+	h := NewMarkAsReadHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-notmember"
@@ -260,7 +260,7 @@ func TestMarkAsRead_NotMember(t *testing.T) {
 
 func TestMarkAsRead_UserID1AndUserID2Separate(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s, nil)
+	h := NewMarkAsReadHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-separate"
@@ -300,7 +300,7 @@ func TestMarkAsRead_UserID1AndUserID2Separate(t *testing.T) {
 
 func TestMarkAsRead_UnreadCountCorrect(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s, nil)
+	h := NewMarkAsReadHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-unread"
@@ -342,7 +342,7 @@ func TestMarkAsRead_UnreadCountCorrect(t *testing.T) {
 
 func TestMarkAsRead_UserUpdateCreation(t *testing.T) {
 	s := setupTestSQLite(t)
-	h := NewMarkAsReadHandler(s, nil)
+	h := NewMarkAsReadHandler(s, nil, nil)
 	ctx := context.Background()
 
 	convID := "conv-mark-uu-create"

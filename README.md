@@ -86,6 +86,16 @@ Most messaging systems force you to choose between **real-time infrastructure** 
 - **Fail-open design** — MQ enqueue failures don't block message persistence; Redis outages don't crash agents
 - **Ephemeral events** — Typing indicators, streaming text, agent status — never persisted, never replayed, always real-time
 
+### 🔭 Observability
+
+All features are opt-in via environment variables (zero overhead when disabled):
+
+- **Structured logging** — `slog`-based structured logging with JSON/text format and automatic log rotation (lumberjack)
+- **Prometheus metrics** — 36 metrics covering system, connections, messages, agents, business operations, and Redis health
+- **Performance profiling** — pprof HTTP server (localhost-only) and Pyroscope continuous profiling integration
+- **Docker Compose stack** — Complete observability profile with Prometheus, AlertManager, Loki, Promtail, Pyroscope, and Grafana
+- **Alert rules** — 11 pre-defined alerts for goroutine leaks, connection storms, LLM errors, Redis failures, and queue backlogs
+
 ---
 
 ## Quick Start
@@ -439,7 +449,7 @@ make vet
 | Document                                                   | Description                                           |
 | ---------------------------------------------------------- | ----------------------------------------------------- |
 | [API Reference](docs/API.md)                               | Complete WebSocket protocol specification             |
-| [Product Decisions](docs/decisions/PRODUCT_DECISIONS.md)   | Architecture decisions (D-001 to D-124, 111 defined) |
+| [Product Decisions](docs/decisions/PRODUCT_DECISIONS.md)   | Architecture decisions (D-001 to D-128)              |
 | [Product Decisions Details](docs/decisions/PRODUCT_DECISIONS_DETAILS.md) | Detailed decision specifications                  |
 | [Developer Guide](docs/guides/DEVELOPER_GUIDE.md)          | Project structure, coding conventions, how-to guides  |
 | [Developer Reference](docs/guides/DEVELOPER_REFERENCE.md)  | Developer reference documentation                     |

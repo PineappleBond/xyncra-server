@@ -3,7 +3,7 @@ package client
 import (
 	"bytes"
 	"errors"
-	"log"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -313,12 +313,13 @@ func TestWithLogger(t *testing.T) {
 
 func TestStdLogger(t *testing.T) {
 	var buf bytes.Buffer
-	l := &stdLogger{logger: log.New(&buf, "", 0)}
+	slogger := slog.New(slog.NewTextHandler(&buf, nil))
+	l := &stdLogger{logger: slogger}
 
 	l.Info("hello", "key", "value")
 	output := buf.String()
-	if !strings.Contains(output, "[INFO] hello") {
-		t.Errorf("Info output = %q, want to contain [INFO] hello", output)
+	if !strings.Contains(output, "hello") {
+		t.Errorf("Info output = %q, want to contain hello", output)
 	}
 	if !strings.Contains(output, "key=value") {
 		t.Errorf("Info output = %q, want to contain key=value", output)
@@ -327,15 +328,15 @@ func TestStdLogger(t *testing.T) {
 	buf.Reset()
 	l.Error("oops", "code", 500)
 	output = buf.String()
-	if !strings.Contains(output, "[ERROR] oops") {
-		t.Errorf("Error output = %q, want to contain [ERROR] oops", output)
+	if !strings.Contains(output, "oops") {
+		t.Errorf("Error output = %q, want to contain oops", output)
 	}
 
 	buf.Reset()
 	l.Debug("trace")
 	output = buf.String()
-	if !strings.Contains(output, "[DEBUG] trace") {
-		t.Errorf("Debug output = %q, want to contain [DEBUG] trace", output)
+	if !strings.Contains(output, "trace") {
+		t.Errorf("Debug output = %q, want to contain trace", output)
 	}
 }
 

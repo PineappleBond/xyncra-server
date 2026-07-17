@@ -3,7 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -95,29 +95,29 @@ type Logger interface {
 	Debug(msg string, args ...any)
 }
 
-// stdLogger is the default Logger implementation backed by the standard log package.
+// stdLogger is the default Logger implementation backed by slog.
 type stdLogger struct {
-	logger *log.Logger
+	logger *slog.Logger
 }
 
 // newStdLogger creates a stdLogger that writes to stderr.
 func newStdLogger() *stdLogger {
-	return &stdLogger{logger: log.New(os.Stderr, "", log.LstdFlags)}
+	return &stdLogger{logger: slog.New(slog.NewTextHandler(os.Stderr, nil))}
 }
 
 // Info logs an informational message.
 func (l *stdLogger) Info(msg string, args ...any) {
-	l.logger.Printf("[INFO] %s%s", msg, formatArgs(args))
+	l.logger.Info(msg, args...)
 }
 
 // Error logs an error message.
 func (l *stdLogger) Error(msg string, args ...any) {
-	l.logger.Printf("[ERROR] %s%s", msg, formatArgs(args))
+	l.logger.Error(msg, args...)
 }
 
 // Debug logs a debug-level message.
 func (l *stdLogger) Debug(msg string, args ...any) {
-	l.logger.Printf("[DEBUG] %s%s", msg, formatArgs(args))
+	l.logger.Debug(msg, args...)
 }
 
 // formatArgs converts a variadic key-value slice into a " key=value ..." string.

@@ -22,6 +22,7 @@
 //	-tracing-enabled  Enable OpenTelemetry distributed tracing (default false)
 //	-tracing-endpoint  OTLP gRPC endpoint for trace exporter (default "localhost:4317")
 //	-tracing-sampling-rate  Trace sampling rate 0.0-1.0 (default 1.0)
+//	-metrics-enabled     Enable Prometheus /metrics endpoint (default false)
 //
 // Environment variables (used as fallback when flags are not set):
 //
@@ -29,14 +30,15 @@
 //	XYNCRA_DB_DRIVER, XYNCRA_DB_DSN, XYNCRA_MAX_CONNS_PER_USER,
 //	XYNCRA_MAX_FUNCTIONS_PER_DEVICE, XYNCRA_TRACING_ENABLED,
 //	XYNCRA_TRACING_OTLP_ENDPOINT, XYNCRA_TRACING_SAMPLING_RATE,
-//	XYNCRA_TRACING_DEBUG_USERS, XYNCRA_TRACING_DEBUG_DEVICES
+//	XYNCRA_TRACING_DEBUG_USERS, XYNCRA_TRACING_DEBUG_DEVICES,
+//	XYNCRA_METRICS_ENABLED
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -49,10 +51,14 @@ import (
 	agenttools "github.com/PineappleBond/xyncra-server/internal/agent/tools"
 	"github.com/PineappleBond/xyncra-server/internal/cleanup"
 	"github.com/PineappleBond/xyncra-server/internal/handler"
+	"github.com/PineappleBond/xyncra-server/internal/logger"
+	"github.com/PineappleBond/xyncra-server/internal/metrics"
 	"github.com/PineappleBond/xyncra-server/internal/mq"
+	"github.com/PineappleBond/xyncra-server/internal/profiling"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/internal/tracing"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -96,9 +102,21 @@ func main() {
 	tracingSamplingRate := flag.Float64("tracing-sampling-rate",
 		envOrDefaultFloat("XYNCRA_TRACING_SAMPLING_RATE", 1.0),
 		"Trace sampling rate (0.0-1.0)")
+	metricsEnabled := flag.Bool("metrics-enabled",
+		envOrDefault("XYNCRA_METRICS_ENABLED", "false") == "true",
+		"Enable Prometheus /metrics endpoint and runtime collector")
 	flag.Parse()
 
-	log.Printf("starting xyncra-server %s (%s) built %s on %s", version, commit, buildTime, *addr)
+	// Initialize structured logger.
+	logCfg := logger.DefaultConfig()
+	logCleanup, err := logger.Init(logCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to init logger: %v\n", err)
+		os.Exit(1)
+	}
+	defer logCleanup()
+
+	slog.Info("starting xyncra-server", "version", version, "commit", commit, "build_time", buildTime, "addr", *addr)
 
 	// ---------------------------------------------------------------
 	// OpenTelemetry Tracing
@@ -120,7 +138,7 @@ func main() {
 
 	tracerShutdown, err := tracing.InitTracer(tracerCfg)
 	if err != nil {
-		log.Printf("WARNING: failed to initialize tracer: %v (falling back to no-op)", err)
+		slog.Warn("failed to initialize tracer (falling back to no-op)", "error", err)
 		tracerShutdown, _ = tracing.InitTracer(tracing.TracingConfig{Enabled: false})
 	}
 
@@ -133,7 +151,8 @@ func main() {
 		DSN:    *dbDSN,
 	})
 	if err != nil {
-		log.Fatalf("failed to open database: %v", err)
+		slog.Error("failed to open database", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
@@ -143,7 +162,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := tracerShutdown(ctx); err != nil {
-			log.Printf("tracer shutdown error: %v", err)
+			slog.Error("tracer shutdown error", "error", err)
 		}
 	}()
 
@@ -153,10 +172,11 @@ func main() {
 	migrateCtx, migrateCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := dataStore.AutoMigrate(migrateCtx); err != nil {
 		migrateCancel()
-		log.Fatalf("failed to auto-migrate database: %v", err)
+		slog.Error("failed to auto-migrate database", "error", err)
+		os.Exit(1)
 	}
 	migrateCancel()
-	log.Println("database migrated successfully")
+	slog.Info("database migrated successfully")
 
 	// ---------------------------------------------------------------
 	// Redis ConnectionStore
@@ -169,7 +189,8 @@ func main() {
 		MaxConnectionsPerUser: *maxConns,
 	})
 	if err != nil {
-		log.Fatalf("failed to create connection store: %v", err)
+		slog.Error("failed to create connection store", "error", err)
+		os.Exit(1)
 	}
 	defer connStore.Close()
 
@@ -183,7 +204,8 @@ func main() {
 		RedisDB:       *redisDB,
 	})
 	if err != nil {
-		log.Fatalf("failed to create broker: %v", err)
+		slog.Error("failed to create broker", "error", err)
+		os.Exit(1)
 	}
 	defer broker.Close()
 
@@ -213,9 +235,9 @@ func main() {
 
 	agentRegistry := agent.NewRegistry()
 	if err := agentRegistry.Load(*agentsDir); err != nil {
-		log.Printf("warning: failed to load agents from %s: %v", *agentsDir, err)
+		slog.Warn("failed to load agents", "agents_dir", *agentsDir, "error", err)
 	}
-	log.Printf("loaded %d agent configuration(s)", agentRegistry.Count())
+	slog.Info("loaded agent configurations", "count", agentRegistry.Count())
 
 	// ---------------------------------------------------------------
 	// Function Registry (D-099)
@@ -246,6 +268,17 @@ func main() {
 	// WebSocket Server
 	// ---------------------------------------------------------------
 
+	slogAdapter := logger.NewSlogLogger(logger.WithComponent("server"))
+
+	// Build extra HTTP routes (e.g. /metrics) when metrics are enabled (D-003).
+	var extraRoutes []server.Route
+	if *metricsEnabled {
+		extraRoutes = append(extraRoutes, server.Route{
+			Pattern: "/metrics",
+			Handler: promhttp.Handler(),
+		})
+	}
+
 	srv, err := server.NewWebSocketServer(
 		server.WSWithAddr(*addr),
 		server.WSWithConnectionStore(connStore),
@@ -255,9 +288,12 @@ func main() {
 		server.WSWithNodeBroadcaster(nodeBroadcaster),
 		server.WSWithFunctionRegistry(funcRegistry),
 		server.WSWithPendingStore(pendingStore), // Phase 4 (D-103)
+		server.WSWithLogger(slogAdapter),
+		server.WSWithExtraRoutes(extraRoutes...),
 	)
 	if err != nil {
-		log.Fatalf("failed to create websocket server: %v", err)
+		slog.Error("failed to create websocket server", "error", err)
+		os.Exit(1)
 	}
 
 	// Wire structured logger into agent registry (Phase 7 review).
@@ -289,14 +325,14 @@ func main() {
 			logPath := filepath.Join(llmLogDir, "llm-calls.log")
 			f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
-				log.Printf("[WARN] failed to open LLM log file %s: %v", logPath, err)
+				slog.Warn("failed to open LLM log file", "path", logPath, "error", err)
 			} else {
 				llmLogger = agent.NewLLMLogger(f, false)
 				defer f.Close()
-				log.Printf("[INFO] LLM call logging enabled: %s", logPath)
+				slog.Info("LLM call logging enabled", "path", logPath)
 			}
 		} else {
-			log.Printf("[WARN] failed to create LLM log dir %s: %v", llmLogDir, err)
+			slog.Warn("failed to create LLM log dir", "dir", llmLogDir, "error", err)
 		}
 	}
 
@@ -315,7 +351,7 @@ func main() {
 		debugDevices := envCSV("XYNCRA_TRACING_DEBUG_DEVICES")
 		if len(debugUsers) > 0 || len(debugDevices) > 0 {
 			agentBuilder.SetTracingDebugFilter(debugUsers, debugDevices)
-			log.Printf("[INFO] Tracing debug LLM capture: users=%v devices=%v", debugUsers, debugDevices)
+			slog.Info("tracing debug LLM capture enabled", "users", debugUsers, "devices", debugDevices)
 		}
 	}
 	// Wire the default tool registry (D-078). Built-in tools are registered
@@ -327,7 +363,9 @@ func main() {
 	broadcastHelper := agent.NewBroadcastHelper(srv, srv.Logger())
 	contextManager := agent.NewDBContextManager(dataStore.MessageStore())
 
-	llmMetrics := agent.NewLogMetrics(srv.Logger())
+	logMetrics := agent.NewLogMetrics(srv.Logger())
+	promMetrics := agent.NewPrometheusMetrics()
+	llmMetrics := agent.NewMultiMetrics(logMetrics, promMetrics)
 
 	// Checkpoint store for HITL support (D-083).
 	// Reuses the same dedicated redis.Client as idempotency.
@@ -363,7 +401,7 @@ func main() {
 	// MCP Bridge for external tool servers (D-086).
 	// Connections are established lazily during Agent Build; CloseAll during
 	// shutdown releases all MCP client resources.
-	mcpBridge := agenttools.NewMCPBridge(nil) // nil → uses log.Default()
+	mcpBridge := agenttools.NewMCPBridge(nil) // nil → uses slog.Default()
 	agentBuilder.SetMCPBridge(mcpBridge)
 
 	// Wire client function provider and caller for DynamicToolProvider (Phase 6 / D-101).
@@ -379,11 +417,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Start Prometheus runtime collector when metrics are enabled (D-063).
+	if *metricsEnabled {
+		metrics.StartRuntimeCollector(ctx)
+		slog.Info("Prometheus metrics enabled", "endpoint", "/metrics")
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		log.Printf("received signal %v, shutting down...", sig)
+		slog.Info("received signal, shutting down", "signal", sig)
 		cancel()
 	}()
 
@@ -404,7 +448,7 @@ func main() {
 
 	go func() {
 		if err := broker.Start(ctx, taskHandler); err != nil {
-			log.Printf("broker error: %v", err)
+			slog.Error("broker error", "error", err)
 		}
 	}()
 
@@ -439,11 +483,39 @@ func main() {
 	go hitlCleanup.Run(ctx)
 
 	// ---------------------------------------------------------------
+	// Profiling (pprof + Pyroscope)
+	// ---------------------------------------------------------------
+
+	// Start pprof HTTP server on a dedicated port (D-003: localhost only).
+	pprofCfg := profiling.DefaultPprofConfig()
+	if pprofCfg.Enabled {
+		go func() {
+			if err := profiling.StartPprof(ctx, pprofCfg); err != nil {
+				slog.Error("pprof server error", "error", err)
+			}
+		}()
+		slog.Info("pprof server enabled", "addr", pprofCfg.Addr)
+	}
+
+	// Start Pyroscope continuous profiling agent (D-072: fail-open).
+	pyroscopeCfg := profiling.DefaultPyroscopeConfig()
+	if pyroscopeCfg.Enabled {
+		pyroCleanup, err := profiling.StartPyroscope(pyroscopeCfg)
+		if err != nil {
+			slog.Warn("pyroscope init failed (continuing without profiling)", "error", err)
+		} else if pyroCleanup != nil {
+			defer pyroCleanup()
+			slog.Info("pyroscope profiling enabled", "server", pyroscopeCfg.Server, "app", pyroscopeCfg.AppName)
+		}
+	}
+
+	// ---------------------------------------------------------------
 	// Run
 	// ---------------------------------------------------------------
 
 	if err := srv.Start(ctx); err != nil {
-		log.Fatalf("server error: %v", err)
+		slog.Error("server error", "error", err)
+		os.Exit(1)
 	}
 
 	// ---------------------------------------------------------------
@@ -453,13 +525,13 @@ func main() {
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer stopCancel()
 	if err := srv.GracefulStop(stopCtx); err != nil {
-		log.Printf("graceful stop error: %v", err)
+		slog.Error("graceful stop error", "error", err)
 	}
 
 	// Close all MCP server connections after in-flight requests finish (D-086).
 	mcpBridge.CloseAll()
 
-	log.Println("server stopped")
+	slog.Info("server stopped")
 }
 
 // envOrDefault returns the value of the environment variable identified by

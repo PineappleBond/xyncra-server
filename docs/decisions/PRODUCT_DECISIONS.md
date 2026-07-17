@@ -57,6 +57,7 @@
 | D-124 | Conversation 同步优化（updated_at 广播） | 减少不必要的 get_conversation RPC |
 | D-126 | 消息按需拉取（FetchMoreMessages） | 本地消息不足时从服务器拉取 |
 | D-127 | 手动业务级追踪，而非自动基础设施追踪 | Jaeger Operation 列表保持高信噪比 |
+| D-128 | /metrics 端点通过 WSWithExtraRoutes 暴露在同一 HTTP 端口 | 简化部署，内网模型无需独立管理端口 |
 
 ---
 

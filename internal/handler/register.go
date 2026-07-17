@@ -1,12 +1,22 @@
 package handler
 
 import (
+	"log/slog"
+
 	"github.com/PineappleBond/xyncra-server/internal/agent"
 	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
+
+// defaultLogger wraps slog.Default() to satisfy the server.Logger interface.
+// It is used when handlers are constructed without an explicit logger (e.g. in tests).
+type defaultLogger struct{}
+
+func (defaultLogger) Info(msg string, args ...any)  { slog.Default().Info(msg, args...) }
+func (defaultLogger) Error(msg string, args ...any) { slog.Default().Error(msg, args...) }
+func (defaultLogger) Debug(msg string, args ...any) { slog.Default().Debug(msg, args...) }
 
 // Dependencies holds all dependencies required by handlers.
 type Dependencies struct {
@@ -52,20 +62,20 @@ type Dependencies struct {
 // Note: mq_send_message is a task handler (processed by the MQ worker), not a
 // method handler (invoked by client RPC), and is therefore not registered here.
 func RegisterAll(h *server.DefaultMessageHandler, deps Dependencies) {
-	h.RegisterMethod("heartbeat", NewHeartbeatHandler(deps.ConnStore))
-	h.RegisterMethod("send_message", NewSendMessageHandler(deps.Store, deps.Broker, deps.AgentRegistry))
+	h.RegisterMethod("heartbeat", NewHeartbeatHandler(deps.ConnStore, deps.Logger))
+	h.RegisterMethod("send_message", NewSendMessageHandler(deps.Store, deps.Broker, deps.AgentRegistry, deps.Logger))
 	h.RegisterMethod("sync_updates", NewSyncUpdatesHandler(deps.Store))
-	h.RegisterMethod("create_conversation", NewCreateConversationHandler(deps.Store, deps.Broker))
+	h.RegisterMethod("create_conversation", NewCreateConversationHandler(deps.Store, deps.Broker, deps.Logger))
 	h.RegisterMethod("list_conversations", NewListConversationsHandler(deps.Store))
 	h.RegisterMethod("get_messages", NewGetMessagesHandler(deps.Store))
 	h.RegisterMethod("search_messages", NewSearchMessagesHandler(deps.Store))
 	h.RegisterMethod("get_conversation", NewGetConversationHandler(deps.Store))
-	h.RegisterMethod("delete_conversation", NewDeleteConversationHandler(deps.Store, deps.Broker))
-	h.RegisterMethod("restore_conversation", NewRestoreConversationHandler(deps.Store, deps.Broker))
-	h.RegisterMethod("delete_message", NewDeleteMessageHandler(deps.Store, deps.Broker))
-	h.RegisterMethod("mark_as_read", NewMarkAsReadHandler(deps.Store, deps.Broker))
-	h.RegisterMethod("set_typing", NewSetTypingHandler(deps.Store, deps.BroadcastFn))
-	h.RegisterMethod("stream_text", NewStreamTextHandler(deps.Store, deps.BroadcastFn))
+	h.RegisterMethod("delete_conversation", NewDeleteConversationHandler(deps.Store, deps.Broker, deps.Logger))
+	h.RegisterMethod("restore_conversation", NewRestoreConversationHandler(deps.Store, deps.Broker, deps.Logger))
+	h.RegisterMethod("delete_message", NewDeleteMessageHandler(deps.Store, deps.Broker, deps.Logger))
+	h.RegisterMethod("mark_as_read", NewMarkAsReadHandler(deps.Store, deps.Broker, deps.Logger))
+	h.RegisterMethod("set_typing", NewSetTypingHandler(deps.Store, deps.BroadcastFn, deps.Logger))
+	h.RegisterMethod("stream_text", NewStreamTextHandler(deps.Store, deps.BroadcastFn, deps.Logger))
 	h.RegisterMethod("reload_agents", NewReloadAgentsHandler(deps.AgentRegistry))
 	h.RegisterMethod("agent_resume", NewAgentResumeHandler(deps.Store, deps.Broker))
 	// Phase 2: register function registry handler (nil-safe per D-063).

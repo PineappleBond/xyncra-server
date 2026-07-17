@@ -1,9 +1,12 @@
 package mq
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -505,6 +508,76 @@ func TestDecodeAsynqTask_EmptyPayload(t *testing.T) {
 	require.Error(t, err, "expected error for empty type")
 	assert.ErrorIs(t, err, ErrInvalidTask, "expected ErrInvalidTask")
 	assert.Nil(t, task, "expected nil task on error")
+}
+
+// ---------------------------------------------------------------------------
+// slogAsynqLogger tests
+// ---------------------------------------------------------------------------
+
+// TestAsynqLogger_UsesSlog verifies that the asynq internal logger delegates
+// to slog, producing structured slog output rather than raw fmt output.
+//
+// Acceptance criteria:
+//   - Each log method (Debug, Info, Warn, Error, Fatal) produces output
+//   - Output is valid slog format (contains slog-standard keys)
+//   - The logger includes the "component":"asynq" field
+func TestAsynqLogger_UsesSlog(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// Install a JSON slog handler writing to buf.
+	h := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	slog.SetDefault(slog.New(h))
+
+	// Create a fresh asynq logger that picks up the new slog.Default().
+	l := newAsynqLogger()
+
+	// Exercise all log methods.
+	l.Debug("debug-msg")
+	l.Info("info-msg")
+	l.Warn("warn-msg")
+	l.Error("error-msg")
+	l.Fatal("fatal-msg")
+
+	output := buf.String()
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("expected 5 log lines, got %d: %q", len(lines), output)
+	}
+
+	// Verify each line is valid JSON.
+	for i, line := range lines {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("line %d not valid JSON: %v\nline: %q", i, err, line)
+		}
+		// Each line should contain a "msg" field.
+		if _, ok := rec["msg"]; !ok {
+			t.Errorf("line %d missing 'msg' field: %v", i, rec)
+		}
+		// Each line should contain a "level" field.
+		if _, ok := rec["level"]; !ok {
+			t.Errorf("line %d missing 'level' field: %v", i, rec)
+		}
+	}
+
+	// Verify the component field is set to "asynq".
+	var firstLine map[string]any
+	_ = json.Unmarshal([]byte(lines[0]), &firstLine)
+	if comp, ok := firstLine["component"]; !ok || comp != "asynq" {
+		t.Errorf("expected component=asynq, got %v", firstLine["component"])
+	}
+
+	// Verify the expected log messages appear in the output.
+	expectedMsgs := []string{"debug-msg", "info-msg", "warn-msg", "error-msg", "fatal-msg"}
+	for i, expected := range expectedMsgs {
+		var rec map[string]any
+		_ = json.Unmarshal([]byte(lines[i]), &rec)
+		if msg, ok := rec["msg"].(string); !ok || msg != expected {
+			t.Errorf("line %d: expected msg=%q, got %v", i, expected, rec["msg"])
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

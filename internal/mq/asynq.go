@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/hibiken/asynq"
@@ -460,45 +460,44 @@ func decodeAsynqTask(aTask *asynq.Task) (*Task, error) {
 }
 
 // --------------------------------------------------------------------------
-// asynqLogger adapts the standard log package to asynq's Logger interface.
-// Each level is prefixed with a tag so the output can be filtered.
+// slogAsynqLogger adapts slog to asynq's Logger interface.
 // --------------------------------------------------------------------------
 
-// asynqLogger wraps the standard logger to satisfy asynq.Logger.
-type asynqLogger struct {
-	logger *log.Logger
+// slogAsynqLogger wraps *slog.Logger to satisfy asynq.Logger.
+type slogAsynqLogger struct {
+	inner *slog.Logger
 }
 
 // newAsynqLogger returns a logger suitable for Asynq's internal logging.
-func newAsynqLogger() *asynqLogger {
-	return &asynqLogger{
-		logger: log.Default(),
+func newAsynqLogger() *slogAsynqLogger {
+	return &slogAsynqLogger{
+		inner: slog.Default().With("component", "asynq"),
 	}
 }
 
 // Debug logs a message at debug level.
-func (l *asynqLogger) Debug(args ...interface{}) {
-	l.logger.Print("[DEBUG] ", fmt.Sprint(args...))
+func (l *slogAsynqLogger) Debug(args ...interface{}) {
+	l.inner.Debug(fmt.Sprint(args...))
 }
 
 // Info logs a message at info level.
-func (l *asynqLogger) Info(args ...interface{}) {
-	l.logger.Print("[INFO] ", fmt.Sprint(args...))
+func (l *slogAsynqLogger) Info(args ...interface{}) {
+	l.inner.Info(fmt.Sprint(args...))
 }
 
 // Warn logs a message at warning level.
-func (l *asynqLogger) Warn(args ...interface{}) {
-	l.logger.Print("[WARN] ", fmt.Sprint(args...))
+func (l *slogAsynqLogger) Warn(args ...interface{}) {
+	l.inner.Warn(fmt.Sprint(args...))
 }
 
 // Error logs a message at error level.
-func (l *asynqLogger) Error(args ...interface{}) {
-	l.logger.Print("[ERROR] ", fmt.Sprint(args...))
+func (l *slogAsynqLogger) Error(args ...interface{}) {
+	l.inner.Error(fmt.Sprint(args...))
 }
 
-// Fatal logs a message at fatal level without exiting the process.
+// Fatal logs a message at error level without exiting the process.
 // Unlike log.Fatal, this method does NOT call os.Exit(1); it simply
 // records the message so that the caller can handle the failure.
-func (l *asynqLogger) Fatal(args ...interface{}) {
-	l.logger.Print("[FATAL] ", fmt.Sprint(args...))
+func (l *slogAsynqLogger) Fatal(args ...interface{}) {
+	l.inner.Error(fmt.Sprint(args...))
 }

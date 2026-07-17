@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -53,13 +53,13 @@ type Logger interface {
 	Debug(msg string, args ...any)
 }
 
-// stdLogger wraps the standard library log package to satisfy the Logger
-// interface. It prefixes messages with a level tag for basic structured output.
-type stdLogger struct{}
+// slogDefaultLogger wraps slog.Default() to satisfy the Logger interface.
+// It is used as the fallback when no Logger option is provided.
+type slogDefaultLogger struct{}
 
-func (stdLogger) Info(msg string, args ...any)  { log.Printf("[INFO]  "+msg, args...) }
-func (stdLogger) Error(msg string, args ...any) { log.Printf("[ERROR] "+msg, args...) }
-func (stdLogger) Debug(msg string, args ...any) { log.Printf("[DEBUG] "+msg, args...) }
+func (slogDefaultLogger) Info(msg string, args ...any)  { slog.Default().Info(msg, args...) }
+func (slogDefaultLogger) Error(msg string, args ...any) { slog.Default().Error(msg, args...) }
+func (slogDefaultLogger) Debug(msg string, args ...any) { slog.Default().Debug(msg, args...) }
 
 // --------------------------------------------------------------------------
 // WebSocketServerConfig
@@ -113,6 +113,12 @@ type WebSocketServerConfig struct {
 // WebSocketServerOption configures a WebSocketServer during construction.
 type WebSocketServerOption func(*webSocketServerOptions)
 
+// Route represents an additional HTTP route to register on the server's mux.
+type Route struct {
+	Pattern string
+	Handler http.Handler
+}
+
 type webSocketServerOptions struct {
 	// Base server options (embedded).
 	addr            string
@@ -136,6 +142,7 @@ type webSocketServerOptions struct {
 	nodeBroadcaster        NodeBroadcaster
 	functionRegistry       FunctionRegistry
 	pendingStore           PendingStore // Phase 4: reverse-RPC request persistence (D-103)
+	extraRoutes            []Route      // Additional HTTP routes to register on the mux
 }
 
 // WSWithAddr sets the listen address.
@@ -225,7 +232,7 @@ func WSWithMessageHandler(h MessageHandler) WebSocketServerOption {
 }
 
 // WSWithLogger sets a custom Logger for the server. If not set, a default
-// logger that wraps the standard library log package is used.
+// logger backed by slog.Default() is used.
 func WSWithLogger(l Logger) WebSocketServerOption {
 	return func(o *webSocketServerOptions) {
 		if l != nil {
@@ -265,6 +272,15 @@ func WSWithFunctionRegistry(fr FunctionRegistry) WebSocketServerOption {
 func WSWithPendingStore(ps PendingStore) WebSocketServerOption {
 	return func(o *webSocketServerOptions) {
 		o.pendingStore = ps
+	}
+}
+
+// WSWithExtraRoutes registers additional HTTP routes on the server's HTTP mux.
+// This allows exposing endpoints like /metrics without the server package
+// knowing about Prometheus (D-003).
+func WSWithExtraRoutes(routes ...Route) WebSocketServerOption {
+	return func(o *webSocketServerOptions) {
+		o.extraRoutes = append(o.extraRoutes, routes...)
 	}
 }
 
@@ -343,6 +359,9 @@ type WebSocketServer struct {
 	// functionRegistry manages client-declared function capabilities.
 	// When nil, function registry features are disabled (nil-safe per D-063).
 	functionRegistry FunctionRegistry
+
+	// extraRoutes are additional HTTP routes registered on the server's mux.
+	extraRoutes []Route
 }
 
 // Ensure WebSocketServer implements Server at compile time.
@@ -417,7 +436,7 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 
 	logger := o.logger
 	if logger == nil {
-		logger = stdLogger{}
+		logger = slogDefaultLogger{}
 	}
 
 	nodeBroadcaster := o.nodeBroadcaster
@@ -439,6 +458,7 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 		connectionInfoEnricher: o.connectionInfoEnricher,
 		nodeBroadcaster:        nodeBroadcaster,
 		functionRegistry:       o.functionRegistry,
+		extraRoutes:            o.extraRoutes,
 		nodeID:                 uuid.New().String(),
 		wsConfig: WebSocketServerConfig{
 			Path:              o.path,
@@ -482,6 +502,9 @@ func (s *WebSocketServer) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(s.path, s.handleWebSocket)
 	mux.HandleFunc("/health", s.handleHealth)
+	for _, r := range s.extraRoutes {
+		mux.Handle(r.Pattern, r.Handler)
+	}
 
 	ln, err := net.Listen("tcp", s.Addr())
 	if err != nil {
@@ -515,7 +538,7 @@ func (s *WebSocketServer) Start(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if shutdownErr := s.httpServer.Shutdown(shutdownCtx); shutdownErr != nil {
-		log.Printf("websocket: http server shutdown: %v", shutdownErr)
+		s.logger.Error("websocket: http server shutdown", "error", shutdownErr)
 	}
 
 	// Close all active clients.
@@ -561,7 +584,7 @@ func (s *WebSocketServer) Addr() string {
 func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	userID, err := s.authenticate(r)
 	if err != nil {
-		s.logger.Error("websocket: authenticate: %v", err)
+		s.logger.Error("websocket: authenticate", "error", err)
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
 		return
 	}
@@ -605,7 +628,7 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 	// Upgrade first — zero blocking from device replacement.
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		s.logger.Error("websocket: upgrade: %v", err)
+		s.logger.Error("websocket: upgrade", "error", err)
 		return
 	}
 
@@ -668,7 +691,7 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 		s.connectionInfoEnricher(connInfo, r)
 	}
 	if addErr := s.ConnectionStore().Add(s.Context(), connInfo); addErr != nil {
-		s.logger.Error("websocket: register connection [connID=%s]: %v", connID, addErr)
+		s.logger.Error("websocket: register connection", "connID", connID, "error", addErr)
 		client.Close()
 		s.removeClient(connID, userID, deviceID)
 		return
@@ -683,7 +706,7 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cleanupCancel()
 	if removeErr := s.ConnectionStore().Remove(cleanupCtx, connID); removeErr != nil {
-		s.logger.Error("websocket: remove connection [connID=%s]: %v", connID, removeErr)
+		s.logger.Error("websocket: remove connection", "connID", connID, "error", removeErr)
 	}
 	s.removeClient(connID, userID, deviceID)
 
@@ -699,11 +722,9 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 
 		if !hasActiveConn {
 			if removed, regErr := s.functionRegistry.OnDeviceDisconnect(cleanupCtx, userID, deviceID); regErr != nil {
-				s.logger.Error("websocket: clean function registry [userID=%s, deviceID=%s]: %v",
-					userID, deviceID, regErr)
+				s.logger.Error("websocket: clean function registry", "userID", userID, "deviceID", deviceID, "error", regErr)
 			} else if removed != nil {
-				s.logger.Info("websocket: cleaned %d function(s) from registry [userID=%s, deviceID=%s]",
-					len(removed.Functions), userID, deviceID)
+				s.logger.Info("websocket: cleaned functions from registry", "count", len(removed.Functions), "userID", userID, "deviceID", deviceID)
 			}
 		}
 	}
@@ -722,7 +743,7 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	s.logger.Info("websocket: client disconnected [connID=%s, userID=%s, deviceID=%s]", connID, userID, deviceID)
+	s.logger.Info("websocket: client disconnected", "connID", connID, "userID", userID, "deviceID", deviceID)
 }
 
 // --------------------------------------------------------------------------
@@ -762,14 +783,12 @@ func (s *WebSocketServer) performDeviceReplacement(
 	userID, deviceID string,
 ) {
 	for connID, oldClient := range oldClients {
-		s.logger.Info("websocket: device replacement detected [userID=%s, deviceID=%s, oldConnID=%s]",
-			userID, deviceID, connID)
+		s.logger.Info("websocket: device replacement detected", "userID", userID, "deviceID", deviceID, "oldConnID", connID)
 
 		// 1. Send 4001 close frame to the old connection.
 		closeMsg := websocket.FormatCloseMessage(4001, "replaced by new connection from same device")
 		if writeErr := oldClient.conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(5*time.Second)); writeErr != nil {
-			s.logger.Error("websocket: failed to send 4001 close frame [oldConnID=%s]: %v",
-				connID, writeErr)
+			s.logger.Error("websocket: failed to send 4001 close frame", "oldConnID", connID, "error", writeErr)
 		}
 
 		// 2. Brief pause for TCP send buffer flush. WriteControl writes the
@@ -882,7 +901,7 @@ func (s *WebSocketServer) BroadcastUpdates(userID string, updates *protocol.Pack
 func (s *WebSocketServer) broadcastLocal(ctx context.Context, userID string, updates *protocol.PackageDataUpdates) {
 	data, err := jsonMarshal(updates)
 	if err != nil {
-		s.logger.Error("websocket: marshal updates for local broadcast: %v", err)
+		s.logger.Error("websocket: marshal updates for local broadcast", "error", err)
 		return
 	}
 	pkg := &protocol.Package{
@@ -900,7 +919,7 @@ func (s *WebSocketServer) broadcastLocal(ctx context.Context, userID string, upd
 
 	for _, client := range clients {
 		if sendErr := client.SendPackage(pkg); sendErr != nil {
-			s.logger.Error("websocket: broadcast to [connID=%s]: %v", client.ConnID(), sendErr)
+			s.logger.Error("websocket: broadcast failed", "connID", client.ConnID(), "error", sendErr)
 		}
 	}
 }
@@ -930,7 +949,7 @@ func (s *WebSocketServer) sendToUser(userID string, pkg *protocol.Package) error
 	for _, client := range clients {
 		if err := client.Send(data); err != nil {
 			lastErr = err
-			s.logger.Error("websocket: send to user [connID=%s]: %v", client.ConnID(), err)
+			s.logger.Error("websocket: send to user failed", "connID", client.ConnID(), "error", err)
 		} else {
 			anySuccess = true
 		}
@@ -1030,7 +1049,7 @@ func (s *WebSocketServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if err := s.ConnectionStore().Ping(ctx); err != nil {
 		status = "degraded"
 		httpStatus = http.StatusServiceUnavailable
-		s.logger.Error("websocket: health check: connection store ping failed: %v", err)
+		s.logger.Error("websocket: health check: connection store ping failed", "error", err)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

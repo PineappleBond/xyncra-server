@@ -65,7 +65,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	// to verify they were registered with correct dependencies.
 
 	// 1. Heartbeat handler
-	heartbeatHandler := NewHeartbeatHandler(deps.ConnStore)
+	heartbeatHandler := NewHeartbeatHandler(deps.ConnStore, nil)
 	heartbeatReq := &protocol.PackageDataRequest{
 		ID:     "req-heartbeat",
 		Method: "heartbeat",
@@ -99,7 +99,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	assert.NotNil(t, syncResult.Updates)
 
 	// 3. SendMessage handler
-	sendHandler := NewSendMessageHandler(deps.Store, deps.Broker, nil)
+	sendHandler := NewSendMessageHandler(deps.Store, deps.Broker, nil, nil)
 	sendReq := &protocol.PackageDataRequest{
 		ID:     "req-send",
 		Method: "send_message",
@@ -121,7 +121,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	assert.False(t, sendResult.Duplicate)
 
 	// 4. CreateConversation handler (find-or-create, D-011).
-	createHandler := NewCreateConversationHandler(deps.Store, deps.Broker)
+	createHandler := NewCreateConversationHandler(deps.Store, deps.Broker, nil)
 	createReq := &protocol.PackageDataRequest{
 		ID:     "req-create",
 		Method: "create_conversation",
@@ -216,7 +216,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	assert.NotNil(t, getConvResult.Conversation)
 
 	// 9. DeleteConversation handler (create a temp conv to delete)
-	deleteConvHandler := NewDeleteConversationHandler(deps.Store, deps.Broker)
+	deleteConvHandler := NewDeleteConversationHandler(deps.Store, deps.Broker, nil)
 	tempConvID := "conv-delete-reg"
 	createTestConversation(t, s, tempConvID, userID, "dave")
 	deleteReq := &protocol.PackageDataRequest{
@@ -235,7 +235,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	assert.Equal(t, "ok", deleteResult.Status)
 
 	// 10. RestoreConversation handler
-	restoreConvHandler := NewRestoreConversationHandler(deps.Store, deps.Broker)
+	restoreConvHandler := NewRestoreConversationHandler(deps.Store, deps.Broker, nil)
 	restoreReq := &protocol.PackageDataRequest{
 		ID:     "req-restore-conv",
 		Method: "restore_conversation",
@@ -252,7 +252,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	assert.NotNil(t, restoreResult.Conversation)
 
 	// 11. DeleteMessage handler -- need a message to delete
-	sendHandler2 := NewSendMessageHandler(deps.Store, deps.Broker, nil)
+	sendHandler2 := NewSendMessageHandler(deps.Store, deps.Broker, nil, nil)
 	sendReq2 := &protocol.PackageDataRequest{
 		ID:     "req-send-for-delete",
 		Method: "send_message",
@@ -271,7 +271,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 		} `json:"message"`
 	}
 	require.NoError(t, json.Unmarshal(sendResp2, &sendResult2))
-	deleteMsgHandler := NewDeleteMessageHandler(deps.Store, deps.Broker)
+	deleteMsgHandler := NewDeleteMessageHandler(deps.Store, deps.Broker, nil)
 	deleteMsgReq := &protocol.PackageDataRequest{
 		ID:     "req-delete-msg",
 		Method: "delete_message",
@@ -288,7 +288,7 @@ func TestRegisterAll_RegistersAllHandlers(t *testing.T) {
 	assert.Equal(t, "ok", deleteMsgResult.Status)
 
 	// 12. MarkAsRead handler
-	markReadHandler := NewMarkAsReadHandler(deps.Store, deps.Broker)
+	markReadHandler := NewMarkAsReadHandler(deps.Store, deps.Broker, nil)
 	markReadReq := &protocol.PackageDataRequest{
 		ID:     "req-mark-read",
 		Method: "mark_as_read",
@@ -342,7 +342,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	// This verifies that Dependencies struct contains correct values.
 
 	// Heartbeat uses ConnStore.
-	hbHandler := NewHeartbeatHandler(deps.ConnStore)
+	hbHandler := NewHeartbeatHandler(deps.ConnStore, nil)
 	hbReq := &protocol.PackageDataRequest{
 		ID:     "req-hb-dep",
 		Method: "heartbeat",
@@ -364,7 +364,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	require.NoError(t, err, "Store dependency should be correctly injected")
 
 	// SendMessage uses Store and Broker.
-	sendHandler := NewSendMessageHandler(deps.Store, deps.Broker, nil)
+	sendHandler := NewSendMessageHandler(deps.Store, deps.Broker, nil, nil)
 	sendReq := &protocol.PackageDataRequest{
 		ID:     "req-send-dep",
 		Method: "send_message",
@@ -379,7 +379,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	require.NoError(t, err, "Store and Broker dependencies should be correctly injected")
 
 	// CreateConversation uses Store.
-	createHandler := NewCreateConversationHandler(deps.Store, deps.Broker)
+	createHandler := NewCreateConversationHandler(deps.Store, deps.Broker, nil)
 	createReq := &protocol.PackageDataRequest{
 		ID:     "req-create-dep",
 		Method: "create_conversation",
@@ -442,7 +442,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	require.NoError(t, err, "GetConversation Store dependency should be correctly injected")
 
 	// DeleteConversation uses Store.
-	deleteConvHandler := NewDeleteConversationHandler(deps.Store, deps.Broker)
+	deleteConvHandler := NewDeleteConversationHandler(deps.Store, deps.Broker, nil)
 	tempConvID := "conv-delete-dep"
 	createTestConversation(t, s, tempConvID, userID, "dave")
 	deleteReq := &protocol.PackageDataRequest{
@@ -456,7 +456,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	require.NoError(t, err, "DeleteConversation Store dependency should be correctly injected")
 
 	// RestoreConversation uses Store.
-	restoreConvHandler := NewRestoreConversationHandler(deps.Store, deps.Broker)
+	restoreConvHandler := NewRestoreConversationHandler(deps.Store, deps.Broker, nil)
 	restoreReq := &protocol.PackageDataRequest{
 		ID:     "req-restore-conv-dep",
 		Method: "restore_conversation",
@@ -469,7 +469,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 
 	// DeleteMessage uses Store.
 	// First send a message to delete.
-	sendHandler2 := NewSendMessageHandler(deps.Store, deps.Broker, nil)
+	sendHandler2 := NewSendMessageHandler(deps.Store, deps.Broker, nil, nil)
 	sendReq2 := &protocol.PackageDataRequest{
 		ID:     "req-send-for-delete-dep",
 		Method: "send_message",
@@ -488,7 +488,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 		} `json:"message"`
 	}
 	require.NoError(t, json.Unmarshal(sendResp2, &sendResult2))
-	deleteMsgHandler := NewDeleteMessageHandler(deps.Store, deps.Broker)
+	deleteMsgHandler := NewDeleteMessageHandler(deps.Store, deps.Broker, nil)
 	deleteMsgReq := &protocol.PackageDataRequest{
 		ID:     "req-delete-msg-dep",
 		Method: "delete_message",
@@ -500,7 +500,7 @@ func TestRegisterAll_DependencyInjection(t *testing.T) {
 	require.NoError(t, err, "DeleteMessage Store dependency should be correctly injected")
 
 	// MarkAsRead uses Store.
-	markReadHandler := NewMarkAsReadHandler(deps.Store, deps.Broker)
+	markReadHandler := NewMarkAsReadHandler(deps.Store, deps.Broker, nil)
 	markReadReq := &protocol.PackageDataRequest{
 		ID:     "req-mark-read-dep",
 		Method: "mark_as_read",
@@ -652,13 +652,13 @@ func TestRegisterAll_HandlersInvokable(t *testing.T) {
 		var handler server.MethodHandler
 		switch tc.name {
 		case "heartbeat":
-			handler = NewHeartbeatHandler(deps.ConnStore)
+			handler = NewHeartbeatHandler(deps.ConnStore, nil)
 		case "sync_updates":
 			handler = NewSyncUpdatesHandler(deps.Store)
 		case "send_message":
-			handler = NewSendMessageHandler(deps.Store, deps.Broker, nil)
+			handler = NewSendMessageHandler(deps.Store, deps.Broker, nil, nil)
 		case "create_conversation":
-			handler = NewCreateConversationHandler(deps.Store, deps.Broker)
+			handler = NewCreateConversationHandler(deps.Store, deps.Broker, nil)
 		case "list_conversations":
 			handler = NewListConversationsHandler(deps.Store)
 		case "get_messages":
@@ -668,14 +668,14 @@ func TestRegisterAll_HandlersInvokable(t *testing.T) {
 		case "get_conversation":
 			handler = NewGetConversationHandler(deps.Store)
 		case "delete_conversation":
-			handler = NewDeleteConversationHandler(deps.Store, deps.Broker)
+			handler = NewDeleteConversationHandler(deps.Store, deps.Broker, nil)
 		case "restore_conversation":
-			handler = NewRestoreConversationHandler(deps.Store, deps.Broker)
+			handler = NewRestoreConversationHandler(deps.Store, deps.Broker, nil)
 		case "send_message_for_delete":
-			handler = NewSendMessageHandler(deps.Store, deps.Broker, nil)
+			handler = NewSendMessageHandler(deps.Store, deps.Broker, nil, nil)
 		case "delete_message":
 			// Send a real message to get its ID, then delete it
-			tmpSendHandler := NewSendMessageHandler(deps.Store, deps.Broker, nil)
+			tmpSendHandler := NewSendMessageHandler(deps.Store, deps.Broker, nil, nil)
 			tmpReq := &protocol.PackageDataRequest{
 				ID:     "req-invoke-send-del",
 				Method: "send_message",
@@ -694,12 +694,12 @@ func TestRegisterAll_HandlersInvokable(t *testing.T) {
 				} `json:"message"`
 			}
 			require.NoError(t, json.Unmarshal(tmpResp, &tmpResult))
-			handler = NewDeleteMessageHandler(deps.Store, deps.Broker)
+			handler = NewDeleteMessageHandler(deps.Store, deps.Broker, nil)
 			req.Params = mustMarshal(t, map[string]interface{}{
 				"message_id": tmpResult.Message.ID,
 			})
 		case "mark_as_read":
-			handler = NewMarkAsReadHandler(deps.Store, deps.Broker)
+			handler = NewMarkAsReadHandler(deps.Store, deps.Broker, nil)
 		}
 
 		resp, err := handler.HandleRequest(ctx, client, req)
@@ -744,7 +744,7 @@ func TestRegisterAll_MultipleCalls(t *testing.T) {
 	client := server.NewTestClientWithConnID(userID, connID)
 
 	// Verify handlers still work after multiple registrations.
-	handler := NewHeartbeatHandler(deps.ConnStore)
+	handler := NewHeartbeatHandler(deps.ConnStore, nil)
 	req := &protocol.PackageDataRequest{
 		ID:     "req-multi",
 		Method: "heartbeat",

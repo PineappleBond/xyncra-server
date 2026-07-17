@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,13 +54,17 @@ type deleteConversationUpdatePayload struct {
 type deleteConversationHandler struct {
 	store  store.StoreAPI
 	broker mq.Broker
+	logger server.Logger
 }
 
 // NewDeleteConversationHandler creates a deleteConversationHandler backed by the given Store
 // and Broker. The broker is used to enqueue a fire-and-forget MQ task that
 // pushes the delete_conversation update to all conversation members' online devices.
-func NewDeleteConversationHandler(store store.StoreAPI, broker mq.Broker) *deleteConversationHandler {
-	return &deleteConversationHandler{store: store, broker: broker}
+func NewDeleteConversationHandler(store store.StoreAPI, broker mq.Broker, logger server.Logger) *deleteConversationHandler {
+	if logger == nil {
+		logger = defaultLogger{}
+	}
+	return &deleteConversationHandler{store: store, broker: broker, logger: logger}
 }
 
 // HandleRequest implements MethodHandler. It processes a "delete_conversation" RPC
@@ -153,7 +157,7 @@ func (h *deleteConversationHandler) HandleRequest(ctx context.Context, client *s
 	for _, memberID := range members {
 		latestSeq, err := h.store.UserUpdateStore().GetLatestSeq(ctx, memberID)
 		if err != nil {
-			log.Printf("delete_conversation: failed to get latest seq for user %s (skipping UserUpdate): %v", memberID, err)
+			h.logger.Error("delete_conversation: failed to get latest seq (skipping UserUpdate)", "userID", memberID, "error", err)
 			continue
 		}
 		newSeq := latestSeq + 1
@@ -183,11 +187,11 @@ func (h *deleteConversationHandler) HandleRequest(ctx context.Context, client *s
 	if err := h.store.UserUpdateStore().Create(ctx, updates); err != nil {
 		// UserUpdate creation failure does not affect the main flow (D-007
 		// fire-and-forget spirit). The conversation was already soft-deleted.
-		log.Printf("delete_conversation: failed to create UserUpdates: %v", err)
+		h.logger.Error("delete_conversation: failed to create UserUpdates", "error", err)
 	}
 
 	// 7. MQ broadcast to all members' online devices (fire-and-forget, D-007).
-	broadcastDeleteConversationUpdates(h.broker, recipients)
+	broadcastDeleteConversationUpdates(h.broker, h.logger, recipients)
 
 	// 8. Return response.
 	return marshalResponse(deleteConversationResponse{
@@ -204,16 +208,19 @@ func (h *deleteConversationHandler) HandleRequest(ctx context.Context, client *s
 // Errors are logged but never returned (D-007: MQ failures do not affect data
 // integrity — the update was already persisted and will be delivered via
 // sync_updates on the next pull).
-func broadcastDeleteConversationUpdates(broker mq.Broker, recipients []sendMessageRecipient) {
+func broadcastDeleteConversationUpdates(broker mq.Broker, logger server.Logger, recipients []sendMessageRecipient) {
 	if broker == nil {
 		return
+	}
+	if logger == nil {
+		logger = slog.Default()
 	}
 
 	taskPayload := sendMessageTaskPayload{Recipients: recipients}
 
 	payloadBytes, err := json.Marshal(taskPayload)
 	if err != nil {
-		log.Printf("delete_conversation: failed to marshal MQ payload: %v", err)
+		logger.Error("delete_conversation: failed to marshal MQ payload", "error", err)
 		return
 	}
 
@@ -222,6 +229,6 @@ func broadcastDeleteConversationUpdates(broker mq.Broker, recipients []sendMessa
 		Payload: payloadBytes,
 	}
 	if _, err := broker.Enqueue(context.Background(), task); err != nil {
-		log.Printf("delete_conversation: MQ enqueue failed (fire-and-forget): %v", err)
+		logger.Info("delete_conversation: MQ enqueue failed (fire-and-forget)", "error", err)
 	}
 }

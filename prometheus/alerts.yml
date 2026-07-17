@@ -1,0 +1,100 @@
+groups:
+  - name: xyncra-system
+    rules:
+      - alert: HighGoroutineCount
+        expr: xyncra_goroutines > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Goroutine count exceeds 10000"
+
+      - alert: HighMemoryUsage
+        expr: xyncra_memory_alloc_bytes > 1e9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory usage exceeds 1GB"
+
+  - name: xyncra-connections
+    rules:
+      - alert: HighConnectionCount
+        expr: xyncra_connections_active > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Active connections exceed 1000"
+
+      - alert: ConnectionSpike
+        expr: rate(xyncra_connections_total[1m]) > 100
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Connection rate exceeds 100/s"
+
+  - name: xyncra-agent
+    rules:
+      - alert: HighLLMErrorRate
+        expr: |
+          rate(xyncra_llm_calls_failed_total[5m])
+          / rate(xyncra_llm_calls_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LLM error rate exceeds 10%"
+
+      - alert: SlowLLMResponse
+        expr: histogram_quantile(0.95, rate(xyncra_agent_duration_seconds_bucket[5m])) > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM P95 latency exceeds 30s"
+
+      - alert: AgentExecutionFailure
+        expr: increase(xyncra_agent_executions_failed_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent execution failures detected"
+
+  - name: xyncra-redis
+    rules:
+      - alert: RedisDown
+        expr: xyncra_redis_connected == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis connection lost"
+
+      - alert: HighRedisLatency
+        expr: histogram_quantile(0.95, rate(xyncra_redis_ping_duration_seconds_bucket[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis P95 latency exceeds 100ms"
+
+  - name: xyncra-messages
+    rules:
+      - alert: MessageLatencyHigh
+        expr: histogram_quantile(0.95, rate(xyncra_message_latency_seconds_bucket[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Message P95 latency exceeds 5s"
+
+      - alert: MessageQueueBacklog
+        expr: xyncra_asynq_queue_size > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Message queue backlog exceeds 1000"

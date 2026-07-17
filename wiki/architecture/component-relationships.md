@@ -1,4 +1,10 @@
+---
+last_updated: 2026-07-17
+---
+
 # 组件关系
+
+> last_updated: 2026-07-17
 
 ## 概览
 
@@ -140,11 +146,15 @@ Handler 作为 MQ 的生产者：
 | 消息删除 | `mq:send_message` | `deleteMessageHandler` | 广播删除 |
 | 读指针更新 | `mq:send_message` | `markAsReadHandler` | 广播读指针 |
 
-Handler 作为 MQ 的消费者（`internal/mq/handler.go`）：
+Handler 作为 MQ 的消费者（`internal/mq/mq.go:64-87` 定义了 7 种任务类型）：
 
 | 任务类型 | 消费者 | 说明 |
 |----------|--------|------|
 | `mq:send_message` | `NewSendMessageTaskHandler` | 调用 `BroadcastUpdates` 推送 |
+| `mq:sync_updates` | — | 更新 fan-out（预留） |
+| `mq:push_notification` | — | 推送通知（预留） |
+| `mq:presence_broadcast` | — | 在线状态广播（预留） |
+| `mq:conversation_sync` | — | 会话同步（预留） |
 | `mq:agent_process` | `AgentTaskHandler` | 执行 Agent 处理管道 |
 | `mq:agent_resume` | `NewAgentResumeHandler` | 恢复 HITL 中断的 Agent |
 

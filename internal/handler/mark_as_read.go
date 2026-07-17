@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -57,13 +57,17 @@ type markReadUpdatePayload struct {
 type markAsReadHandler struct {
 	store  store.StoreAPI
 	broker mq.Broker
+	logger server.Logger
 }
 
 // NewMarkAsReadHandler creates a markAsReadHandler backed by the given Store
 // and Broker. The broker is used to enqueue a fire-and-forget MQ task that
 // pushes the mark_read update to the caller's other online devices.
-func NewMarkAsReadHandler(store store.StoreAPI, broker mq.Broker) *markAsReadHandler {
-	return &markAsReadHandler{store: store, broker: broker}
+func NewMarkAsReadHandler(store store.StoreAPI, broker mq.Broker, logger server.Logger) *markAsReadHandler {
+	if logger == nil {
+		logger = defaultLogger{}
+	}
+	return &markAsReadHandler{store: store, broker: broker, logger: logger}
 }
 
 // HandleRequest implements MethodHandler. It processes a "mark_as_read" RPC
@@ -151,7 +155,7 @@ func (h *markAsReadHandler) HandleRequest(ctx context.Context, client *server.Cl
 
 	latestSeq, err := h.store.UserUpdateStore().GetLatestSeq(ctx, userID)
 	if err != nil {
-		log.Printf("mark_as_read: failed to get latest seq for user %s (skipping UserUpdate): %v", userID, err)
+		h.logger.Error("mark_as_read: failed to get latest seq (skipping UserUpdate)", "userID", userID, "error", err)
 	} else {
 		newSeq := latestSeq + 1
 		now := time.Now()
@@ -166,13 +170,13 @@ func (h *markAsReadHandler) HandleRequest(ctx context.Context, client *server.Cl
 		if err := h.store.UserUpdateStore().Create(ctx, []model.UserUpdate{update}); err != nil {
 			// UserUpdate creation failure does not affect the main flow (D-007
 			// fire-and-forget spirit). The read cursor was already persisted.
-			log.Printf("mark_as_read: failed to create UserUpdate for user %s: %v", userID, err)
+			h.logger.Error("mark_as_read: failed to create UserUpdate", "userID", userID, "error", err)
 		}
 
 		// 9. MQ broadcast to the operating user's other devices (fire-and-forget,
 		// D-007). Reuses the sendMessageRecipient / sendMessageTaskPayload types
 		// and TypeSendMessage task type since they are sufficiently generic.
-		broadcastMarkReadUpdate(h.broker, userID, newSeq, updatePayload, now)
+		broadcastMarkReadUpdate(h.broker, h.logger, userID, newSeq, updatePayload, now)
 	}
 
 	// 10. Return success. Use actualCursor (not the requested messageID) so
@@ -195,6 +199,7 @@ func (h *markAsReadHandler) HandleRequest(ctx context.Context, client *server.Cl
 // sync_updates on the next pull).
 func broadcastMarkReadUpdate(
 	broker mq.Broker,
+	logger server.Logger,
 	userID string,
 	seq uint32,
 	payload json.RawMessage,
@@ -202,6 +207,9 @@ func broadcastMarkReadUpdate(
 ) {
 	if broker == nil {
 		return
+	}
+	if logger == nil {
+		logger = slog.Default()
 	}
 
 	recipient := sendMessageRecipient{
@@ -219,7 +227,7 @@ func broadcastMarkReadUpdate(
 
 	payloadBytes, err := json.Marshal(taskPayload)
 	if err != nil {
-		log.Printf("mark_as_read: failed to marshal MQ payload: %v", err)
+		logger.Error("mark_as_read: failed to marshal MQ payload", "error", err)
 		return
 	}
 
@@ -228,6 +236,6 @@ func broadcastMarkReadUpdate(
 		Payload: payloadBytes,
 	}
 	if _, err := broker.Enqueue(context.Background(), task); err != nil {
-		log.Printf("mark_as_read: MQ enqueue failed (fire-and-forget): %v", err)
+		logger.Info("mark_as_read: MQ enqueue failed (fire-and-forget)", "error", err)
 	}
 }
