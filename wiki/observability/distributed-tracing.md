@@ -24,23 +24,41 @@ Xyncra Server 已实现基于 OpenTelemetry 的分布式链路追踪，覆盖从
 
 ### Span 层级树
 
+追踪采用两层结构：**触发层**（Trigger Layer）显示在 Jaeger Operation 列表中，**业务层**（Business Layer）以子 span 形式呈现，不出现在 Operation 列表中。
+
 ```
 ws.connection (root span, 每个 WebSocket 连接生命周期)
 ├── ws.message.receive
 │   └── handler.invoke (方法分发)
+│       ├── db.conversation.get          ← 业务层（不出现在 Operation 列表）
+│       ├── db.message.create
+│       ├── redis.connection.add
+│       ├── redis.pending.save
 │       ├── handler.broker.enqueue (MQ 入队)
 │       │   └── mq.process (worker 侧，同一 trace)
 │       │       └── agent.execute
 │       │           ├── agent.build
+│       │           │   └── db.agent.get
 │       │           └── agent.run
+│       │               ├── db.conversation.get
 │       │               ├── agent.llm.call (迭代 1)
 │       │               ├── agent.tool.call (工具调用)
+│       │               │   └── db.tool_result.create
 │       │               ├── agent.llm.call (迭代 2)
+│       │               ├── db.message.create
 │       │               ├── agent.checkpoint.save
+│       │               │   └── redis.checkpoint.save
 │       │               └── agent.stream (流式输出)
 │       └── handler.broadcast (跨节点 Pub/Sub)
+│           └── redis.broadcast.publish
 └── ws.message.send
 ```
+
+**说明**：
+
+- 触发层 span（`ws.*`、`mq.*`、`agent.*`、`handler.*`）出现在 Jaeger Operation 列表中
+- 业务层 span（`db.*`、`redis.*`）作为子 span 存在，提供详细的数据库和缓存操作信息
+- 这种设计确保 Jaeger Operation 列表保持高信噪比（见 D-127）
 
 ### No-op 保证
 
@@ -83,6 +101,36 @@ ws.connection (root span, 每个 WebSocket 连接生命周期)
 | Span 名称 | 常量 | 父 Span | 说明 | 属性 |
 |-----------|------|---------|------|------|
 | `mq.process` | `SpanBrokerProcess` | `handler.broker.enqueue` | 任务处理 | `xyncra.task.type`, `xyncra.task.id` |
+
+### 业务层（Business Layer）
+
+业务层 span 以子 span 形式存在于触发层 span 之下，**不出现在 Jaeger Operation 列表中**（见 D-127）。这些 span 提供详细的数据库和缓存操作信息。
+
+#### 数据库操作 Span
+
+| Span 名称 | 常量 | 父 Span | 说明 |
+| --------- | ---- | ------- | ---- |
+| `db.conversation.get` | `SpanDBConversationGet` | `handler.invoke` / `agent.execute` | 获取会话 |
+| `db.conversation.create` | `SpanDBConversationCreate` | `handler.invoke` | 创建会话 |
+| `db.message.create` | `SpanDBMessageCreate` | `handler.invoke` | 创建消息 |
+| `db.message.list` | `SpanDBMessageList` | `handler.invoke` | 查询消息列表 |
+| `db.agent.get` | `SpanDBAgentGet` | `agent.execute` | 获取 Agent 配置 |
+| `db.tool_result.create` | `SpanDBToolResultCreate` | `agent.tool.call` | 保存工具调用结果 |
+
+#### Redis 操作 Span
+
+| Span 名称 | 常量 | 父 Span | 说明 |
+| --------- | ---- | ------- | ---- |
+| `redis.connection.add` | `SpanRedisConnectionAdd` | `handler.invoke` | 注册连接 |
+| `redis.connection.remove` | `SpanRedisConnectionRemove` | `ws.connection` | 移除连接 |
+| `redis.pending.save` | `SpanRedisPendingSave` | `handler.invoke` | 保存 ReverseRPC pending 请求 |
+| `redis.checkpoint.save` | `SpanRedisCheckpointSave` | `agent.checkpoint.save` | 保存 HITL 检查点 |
+| `redis.broadcast.publish` | `SpanRedisBroadcastPublish` | `handler.broadcast` | 跨节点广播 |
+
+**命名规范**：
+
+- `db.<entity>.<operation>` — 数据库操作（如 `db.conversation.get`）
+- `redis.<store>.<operation>` — Redis 操作（如 `redis.connection.add`）
 
 ## TracingMiddleware
 

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"gorm.io/gorm"
 
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/internal/tracing"
 )
 
 // MessageStore provides data access operations for the Message model.
@@ -22,8 +24,11 @@ func NewMessageStore(db *gorm.DB) *MessageStore {
 }
 
 // Create inserts a new message record into the database.
-func (ms *MessageStore) Create(ctx context.Context, msg *model.Message) error {
-	if err := ms.db.WithContext(ctx).Create(msg).Error; err != nil {
+func (ms *MessageStore) Create(ctx context.Context, msg *model.Message) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBMessageCreate)
+	defer func() { finish(err) }()
+
+	if err = ms.db.WithContext(ctx).Create(msg).Error; err != nil {
 		return classifyError(err)
 	}
 	return nil
@@ -31,9 +36,12 @@ func (ms *MessageStore) Create(ctx context.Context, msg *model.Message) error {
 
 // Get retrieves a message by its primary key. Returns ErrNotFound if no record
 // exists.
-func (ms *MessageStore) Get(ctx context.Context, id string) (*model.Message, error) {
+func (ms *MessageStore) Get(ctx context.Context, id string) (result *model.Message, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBMessageGet)
+	defer func() { finish(err) }()
+
 	var msg model.Message
-	err := ms.db.WithContext(ctx).
+	err = ms.db.WithContext(ctx).
 		Where("id = ?", id).
 		First(&msg).Error
 	if err != nil {
@@ -48,13 +56,17 @@ func (ms *MessageStore) Get(ctx context.Context, id string) (*model.Message, err
 // ListByConversation returns messages for the given conversation with
 // MessageID greater than afterMessageID, ordered by MessageID ascending,
 // limited to at most limit rows. This supports incremental message fetching.
-func (ms *MessageStore) ListByConversation(ctx context.Context, convID string, afterMessageID uint32, limit int) ([]*model.Message, error) {
+func (ms *MessageStore) ListByConversation(ctx context.Context, convID string, afterMessageID uint32, limit int) (result []*model.Message, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBMessageListByConversation,
+		attribute.String(tracing.AttrConversationID, convID))
+	defer func() { finish(err) }()
+
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 
 	var msgs []*model.Message
-	err := ms.db.WithContext(ctx).
+	err = ms.db.WithContext(ctx).
 		Where("conversation_id = ? AND message_id > ?", convID, afterMessageID).
 		Order("message_id ASC").
 		Limit(limit).
@@ -66,7 +78,10 @@ func (ms *MessageStore) ListByConversation(ctx context.Context, convID string, a
 }
 
 // Delete performs a soft delete on the message identified by id.
-func (ms *MessageStore) Delete(ctx context.Context, id string) error {
+func (ms *MessageStore) Delete(ctx context.Context, id string) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBMessageDelete)
+	defer func() { finish(err) }()
+
 	result := ms.db.WithContext(ctx).Delete(&model.Message{}, "id = ?", id)
 	if result.Error != nil {
 		return classifyError(fmt.Errorf("store: delete message: %w", result.Error))
@@ -80,9 +95,12 @@ func (ms *MessageStore) Delete(ctx context.Context, id string) error {
 // GetByClientMessageID retrieves a message by its client-generated unique ID
 // and sender ID (composite uniqueness). This is useful for idempotency checks
 // on the send-message path. Returns ErrNotFound if no matching record exists.
-func (ms *MessageStore) GetByClientMessageID(ctx context.Context, clientMessageID, senderID string) (*model.Message, error) {
+func (ms *MessageStore) GetByClientMessageID(ctx context.Context, clientMessageID, senderID string) (result *model.Message, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBMessageGetByClientMessageID)
+	defer func() { finish(err) }()
+
 	var msg model.Message
-	err := ms.db.WithContext(ctx).
+	err = ms.db.WithContext(ctx).
 		Where("client_message_id = ? AND sender_id = ?", clientMessageID, senderID).
 		First(&msg).Error
 	if err != nil {
@@ -99,7 +117,11 @@ func (ms *MessageStore) GetByClientMessageID(ctx context.Context, clientMessageI
 // MessageID descending (newest first), limited to at most limit rows.
 // If afterMessageID is non-zero, only messages with MessageID < afterMessageID
 // are returned, enabling cursor-based pagination through search results.
-func (ms *MessageStore) SearchByConversation(ctx context.Context, convID, content string, afterMessageID uint32, limit int) ([]*model.Message, error) {
+func (ms *MessageStore) SearchByConversation(ctx context.Context, convID, content string, afterMessageID uint32, limit int) (result []*model.Message, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBMessageSearchByConversation,
+		attribute.String(tracing.AttrConversationID, convID))
+	defer func() { finish(err) }()
+
 	if limit <= 0 || limit > 201 {
 		limit = 50
 	}
@@ -118,7 +140,7 @@ func (ms *MessageStore) SearchByConversation(ctx context.Context, convID, conten
 	}
 
 	var msgs []*model.Message
-	err := query.
+	err = query.
 		Order("message_id DESC").
 		Limit(limit).
 		Find(&msgs).Error
@@ -131,13 +153,17 @@ func (ms *MessageStore) SearchByConversation(ctx context.Context, convID, conten
 // ListByTimeRange returns messages for the given conversation within the
 // specified time range (inclusive), ordered by MessageID ascending, limited
 // to at most limit rows.
-func (ms *MessageStore) ListByTimeRange(ctx context.Context, convID string, startTime, endTime time.Time, limit int) ([]*model.Message, error) {
+func (ms *MessageStore) ListByTimeRange(ctx context.Context, convID string, startTime, endTime time.Time, limit int) (result []*model.Message, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBMessageListByTimeRange,
+		attribute.String(tracing.AttrConversationID, convID))
+	defer func() { finish(err) }()
+
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 
 	var msgs []*model.Message
-	err := ms.db.WithContext(ctx).
+	err = ms.db.WithContext(ctx).
 		Where("conversation_id = ? AND created_at >= ? AND created_at <= ?", convID, startTime, endTime).
 		Order("message_id ASC").
 		Limit(limit).
@@ -149,7 +175,10 @@ func (ms *MessageStore) ListByTimeRange(ctx context.Context, convID string, star
 }
 
 // Restore undeletes a soft-deleted message identified by id.
-func (ms *MessageStore) Restore(ctx context.Context, id string) error {
+func (ms *MessageStore) Restore(ctx context.Context, id string) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBMessageRestore)
+	defer func() { finish(err) }()
+
 	result := ms.db.WithContext(ctx).
 		Unscoped().
 		Model(&model.Message{}).
@@ -166,7 +195,11 @@ func (ms *MessageStore) Restore(ctx context.Context, id string) error {
 
 // DeleteByConversation performs a soft delete on all messages belonging to the
 // given conversation.
-func (ms *MessageStore) DeleteByConversation(ctx context.Context, convID string) error {
+func (ms *MessageStore) DeleteByConversation(ctx context.Context, convID string) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBMessageDeleteByConversation,
+		attribute.String(tracing.AttrConversationID, convID))
+	defer func() { finish(err) }()
+
 	result := ms.db.WithContext(ctx).
 		Where("conversation_id = ?", convID).
 		Delete(&model.Message{})
@@ -180,9 +213,12 @@ func (ms *MessageStore) DeleteByConversation(ctx context.Context, convID string)
 // MessageID greater than afterMessageID. Soft-deleted messages are excluded
 // automatically by GORM's soft-delete plugin. This supports unread message
 // counting.
-func (ms *MessageStore) CountUnread(ctx context.Context, convID string, afterMessageID uint32) (int64, error) {
-	var count int64
-	err := ms.db.WithContext(ctx).
+func (ms *MessageStore) CountUnread(ctx context.Context, convID string, afterMessageID uint32) (count int64, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBMessageCountUnread,
+		attribute.String(tracing.AttrConversationID, convID))
+	defer func() { finish(err) }()
+
+	err = ms.db.WithContext(ctx).
 		Model(&model.Message{}).
 		Where("conversation_id = ? AND message_id > ?", convID, afterMessageID).
 		Count(&count).Error
@@ -200,7 +236,11 @@ func (ms *MessageStore) CountUnread(ctx context.Context, convID string, afterMes
 
 // RestoreByConversation restores all soft-deleted messages belonging to the
 // given conversation. Returns the number of restored rows.
-func (ms *MessageStore) RestoreByConversation(ctx context.Context, convID string) (int64, error) {
+func (ms *MessageStore) RestoreByConversation(ctx context.Context, convID string) (count int64, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBMessageRestoreByConversation,
+		attribute.String(tracing.AttrConversationID, convID))
+	defer func() { finish(err) }()
+
 	result := ms.db.WithContext(ctx).
 		Unscoped().
 		Model(&model.Message{}).
@@ -216,13 +256,17 @@ func (ms *MessageStore) RestoreByConversation(ctx context.Context, convID string
 // ordered by MessageID descending (newest first), limited to at most limit rows.
 // Soft-deleted messages are excluded automatically by GORM's soft-delete plugin.
 // This is used by the Agent context manager to load conversation history.
-func (ms *MessageStore) ListRecentByConversation(ctx context.Context, convID string, limit int) ([]*model.Message, error) {
+func (ms *MessageStore) ListRecentByConversation(ctx context.Context, convID string, limit int) (result []*model.Message, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBMessageListRecentByConversation,
+		attribute.String(tracing.AttrConversationID, convID))
+	defer func() { finish(err) }()
+
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
 
 	var msgs []*model.Message
-	err := ms.db.WithContext(ctx).
+	err = ms.db.WithContext(ctx).
 		Where("conversation_id = ?", convID).
 		Order("message_id DESC").
 		Limit(limit).

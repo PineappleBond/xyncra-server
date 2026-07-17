@@ -1,5 +1,12 @@
 package store
 
+// Database access layer with manual OpenTelemetry tracing.
+//
+// Auto-instrumentation libraries (otelgorm) are intentionally NOT used (see
+// D-127). Instead, each public store method creates a manual span via
+// startSpan in tracing_helpers.go, keeping the Jaeger Operation list focused
+// on trigger-layer operations (ws.*, mq.*, agent.*) with DB work as child spans.
+
 import (
 	"fmt"
 	"log"
@@ -12,7 +19,6 @@ import (
 	"gorm.io/gorm/logger"
 
 	gsqlite "github.com/glebarez/sqlite"
-	"github.com/uptrace/opentelemetry-go-extra/otelgorm"
 )
 
 // DatabaseConfig holds the configuration for the database connection.
@@ -38,9 +44,6 @@ type DatabaseConfig struct {
 	// SlowQueryThreshold is the duration after which a query is logged as slow.
 	// A value of 0 disables slow query logging. Default: 200ms.
 	SlowQueryThreshold time.Duration
-
-	// EnableTracing enables OpenTelemetry instrumentation for GORM operations.
-	EnableTracing bool
 }
 
 // Database wraps a *gorm.DB connection and provides connection lifecycle management.
@@ -77,13 +80,6 @@ func NewDatabase(cfg DatabaseConfig) (*Database, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("store: failed to open database: %w", err)
-	}
-
-	// Register OpenTelemetry GORM plugin for automatic DB span instrumentation.
-	if cfg.EnableTracing {
-		if err := db.Use(otelgorm.NewPlugin()); err != nil {
-			return nil, fmt.Errorf("store: failed to register otelgorm plugin: %w", err)
-		}
 	}
 
 	sqlDB, err := db.DB()

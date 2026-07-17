@@ -136,21 +136,6 @@ func TestStartBroadcastSpan(t *testing.T) {
 	assert.Equal(t, "target-user-1", attrs["xyncra.target_user_id"])
 }
 
-func TestStartMessageSendSpan(t *testing.T) {
-	startIdx := len(recorder.Ended())
-
-	ctx, finish := startMessageSendSpan(context.Background(), "user")
-	require.NotNil(t, ctx)
-	finish(nil)
-
-	spans := spansSince(startIdx)
-	require.Len(t, spans, 1)
-	assert.Equal(t, tracing.SpanWSMessageSend, spans[0].Name())
-
-	attrs := roAttrMap(spans[0])
-	assert.Equal(t, "user", attrs["xyncra.target_type"])
-}
-
 func TestAllSpans_CreateAndEndCleanly(t *testing.T) {
 	startIdx := len(recorder.Ended())
 	ctx := context.Background()
@@ -161,11 +146,51 @@ func TestAllSpans_CreateAndEndCleanly(t *testing.T) {
 	f2(nil)
 	ctx3, f3 := startHandlerInvokeSpan(ctx2, "h")
 	f3(nil)
-	ctx4, f4 := startBroadcastSpan(ctx3, "u")
+	_, f4 := startBroadcastSpan(ctx3, "u")
 	f4(nil)
-	_, f5 := startMessageSendSpan(ctx4, "device")
-	f5(nil)
 
 	spans := spansSince(startIdx)
-	assert.Len(t, spans, 5)
+	assert.Len(t, spans, 4)
+}
+
+// ---------------------------------------------------------------------------
+// startRedisSpan tests
+// ---------------------------------------------------------------------------
+
+func TestStartRedisSpan_CreatesSpan(t *testing.T) {
+	startIdx := len(recorder.Ended())
+
+	ctx, finish := startRedisSpan(context.Background(), "redis.connection.add")
+	require.NotNil(t, ctx)
+	finish(nil)
+
+	spans := spansSince(startIdx)
+	require.Len(t, spans, 1)
+	assert.Equal(t, "redis.connection.add", spans[0].Name())
+}
+
+func TestStartRedisSpan_RecordsAttributes(t *testing.T) {
+	startIdx := len(recorder.Ended())
+
+	_, finish := startRedisSpan(context.Background(), "redis.connection.get",
+		attribute.String(tracing.AttrUserID, "user-1"),
+	)
+	finish(nil)
+
+	spans := spansSince(startIdx)
+	require.Len(t, spans, 1)
+	attrs := roAttrMap(spans[0])
+	assert.Equal(t, "user-1", attrs[tracing.AttrUserID])
+}
+
+func TestStartRedisSpan_WithError(t *testing.T) {
+	startIdx := len(recorder.Ended())
+
+	_, finish := startRedisSpan(context.Background(), "redis.pending.save")
+	finish(assert.AnError)
+
+	spans := spansSince(startIdx)
+	require.Len(t, spans, 1)
+	assert.Equal(t, "redis.pending.save", spans[0].Name())
+	assert.NotEmpty(t, spans[0].Status().Description)
 }

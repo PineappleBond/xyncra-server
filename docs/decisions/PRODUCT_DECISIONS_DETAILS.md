@@ -357,10 +357,26 @@
 
 ---
 
+## D-127: 手动业务级追踪，而非自动基础设施追踪
+
+**决策**：移除所有自动埋点库（otelgorm、redisotel、otelhttp），在 repository/store 方法层手动添加业务级 span。Jaeger Operation 列表只展示触发层操作（ws.*、mq.*、agent.*、system.*），DB/Redis 操作以子 span 形式呈现。
+
+**约束条件**：
+
+1. 所有新 public store/server 方法必须手动埋点
+2. Span 命名遵循 `domain.entity.operation` 模式（如 `db.conversation.get`、`redis.connection.add`）
+3. 禁止引入 otelgorm/redisotel/otelhttp 等自动埋点库
+4. 接受 otelhttp 移除后 outbound HTTP 可见性降低的 trade-off（`agent.llm.call` span 已覆盖业务层信息）
+
+**背景**：otelgorm/redisotel/otelhttp 产生大量低价值 span（`GORM query`、`get`、`ping`），严重污染 Jaeger Operation 列表，使开发者难以快速定位真正的业务操作。手动埋点虽然增加少量代码量，但保证 Operation 列表的信噪比。
+
+---
+
 ## 版本历史
 
 | 日期       | 版本  | 变更                                                                                           |
 | ---------- | ----- | ---------------------------------------------------------------------------------------------- |
+| 2026-07-17 | v3.25 | D-127（手动业务级追踪，移除自动埋点库）                                                         |
 | 2026-07-16 | v3.23 | D-121（两阶段幂等性）、D-036（新增 reload-agents IPC-only）、D-126（FetchMoreMessages）         |
 | 2026-07-16 | v3.21 | 新增 D-123（HITL 超时自动清理）、D-124（Conversation 同步优化 - updated_at 广播）               |
 | 2026-07-15 | v3.19 | 新增 D-116（Question 持久化表）、D-117（Conversation 状态机）、D-118（Pull-on-Notification 模式） |

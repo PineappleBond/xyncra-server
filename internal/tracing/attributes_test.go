@@ -9,11 +9,46 @@ import (
 
 func TestSpanNames_NotEmpty(t *testing.T) {
 	names := []string{
-		SpanWSConnection, SpanWSMessageReceive, SpanWSMessageSend,
+		// WS / handler spans
+		SpanWSConnection, SpanWSMessageReceive,
 		SpanHandlerInvoke, SpanBrokerEnqueue, SpanBrokerProcess,
 		SpanHandlerBroadcast, SpanAgentExecute, SpanAgentBuild,
 		SpanAgentRun, SpanAgentLLMCall, SpanAgentToolCall,
 		SpanAgentCheckpointSave, SpanAgentStream,
+		// DB layer spans
+		SpanDBConversationCreate, SpanDBConversationGet,
+		SpanDBConversationGetByUsers, SpanDBConversationGetByUser,
+		SpanDBConversationUpdate, SpanDBConversationDelete,
+		SpanDBConversationRestore, SpanDBConversationUpdateLastMessage,
+		SpanDBConversationSearchByTitle, SpanDBConversationGetUnscoped,
+		SpanDBConversationUpdateLastRead, SpanDBConversationUpdateAgentStatus,
+		SpanDBConversationClearAgentStatus, SpanDBConversationListStaleHITL,
+		SpanDBMessageCreate, SpanDBMessageGet,
+		SpanDBMessageListByConversation, SpanDBMessageDelete,
+		SpanDBMessageGetByClientMessageID, SpanDBMessageSearchByConversation,
+		SpanDBMessageListByTimeRange, SpanDBMessageRestore,
+		SpanDBMessageDeleteByConversation, SpanDBMessageCountUnread,
+		SpanDBMessageRestoreByConversation, SpanDBMessageListRecentByConversation,
+		SpanDBUserUpdateCreate, SpanDBUserUpdateListByUser,
+		SpanDBUserUpdateListByUserRange, SpanDBUserUpdateGetLatestSeq,
+		SpanDBUserUpdateCleanupExpiredBefore,
+		SpanDBQuestionCreate, SpanDBQuestionGetByConversation,
+		SpanDBQuestionGetPendingByCheckpoint, SpanDBQuestionGetByCheckpoint,
+		SpanDBQuestionUpdateAnswer, SpanDBQuestionDeleteByConversation,
+		SpanDBQuestionCountPendingByCheckpoint, SpanDBQuestionDeleteByCheckpoint,
+		SpanDBStoreSendMessage, SpanDBStoreTransaction, SpanDBStoreBeginTx,
+		SpanDBStoreAutoMigrate, SpanDBStorePing, SpanDBStoreHealthCheck,
+		// Redis layer spans
+		SpanRedisConnectionAdd, SpanRedisConnectionGet,
+		SpanRedisConnectionRemove, SpanRedisConnectionExists,
+		SpanRedisConnectionUpdate, SpanRedisConnectionPatch,
+		SpanRedisConnectionRefresh, SpanRedisConnectionListByUser,
+		SpanRedisConnectionCountByUser, SpanRedisConnectionCountAll,
+		SpanRedisConnectionRemoveByUser, SpanRedisConnectionPing,
+		SpanRedisPendingSave, SpanRedisPendingList,
+		SpanRedisPendingRemove, SpanRedisPendingUpdate,
+		SpanRedisPendingRemoveByDevice,
+		SpanRedisBroadcasterPublish, SpanRedisBroadcasterSubscribe,
 	}
 	for _, name := range names {
 		assert.NotEmpty(t, name, "span name constant must not be empty")
@@ -22,11 +57,46 @@ func TestSpanNames_NotEmpty(t *testing.T) {
 
 func TestSpanNames_Unique(t *testing.T) {
 	names := []string{
-		SpanWSConnection, SpanWSMessageReceive, SpanWSMessageSend,
+		// WS / handler spans
+		SpanWSConnection, SpanWSMessageReceive,
 		SpanHandlerInvoke, SpanBrokerEnqueue, SpanBrokerProcess,
 		SpanHandlerBroadcast, SpanAgentExecute, SpanAgentBuild,
 		SpanAgentRun, SpanAgentLLMCall, SpanAgentToolCall,
 		SpanAgentCheckpointSave, SpanAgentStream,
+		// DB layer spans
+		SpanDBConversationCreate, SpanDBConversationGet,
+		SpanDBConversationGetByUsers, SpanDBConversationGetByUser,
+		SpanDBConversationUpdate, SpanDBConversationDelete,
+		SpanDBConversationRestore, SpanDBConversationUpdateLastMessage,
+		SpanDBConversationSearchByTitle, SpanDBConversationGetUnscoped,
+		SpanDBConversationUpdateLastRead, SpanDBConversationUpdateAgentStatus,
+		SpanDBConversationClearAgentStatus, SpanDBConversationListStaleHITL,
+		SpanDBMessageCreate, SpanDBMessageGet,
+		SpanDBMessageListByConversation, SpanDBMessageDelete,
+		SpanDBMessageGetByClientMessageID, SpanDBMessageSearchByConversation,
+		SpanDBMessageListByTimeRange, SpanDBMessageRestore,
+		SpanDBMessageDeleteByConversation, SpanDBMessageCountUnread,
+		SpanDBMessageRestoreByConversation, SpanDBMessageListRecentByConversation,
+		SpanDBUserUpdateCreate, SpanDBUserUpdateListByUser,
+		SpanDBUserUpdateListByUserRange, SpanDBUserUpdateGetLatestSeq,
+		SpanDBUserUpdateCleanupExpiredBefore,
+		SpanDBQuestionCreate, SpanDBQuestionGetByConversation,
+		SpanDBQuestionGetPendingByCheckpoint, SpanDBQuestionGetByCheckpoint,
+		SpanDBQuestionUpdateAnswer, SpanDBQuestionDeleteByConversation,
+		SpanDBQuestionCountPendingByCheckpoint, SpanDBQuestionDeleteByCheckpoint,
+		SpanDBStoreSendMessage, SpanDBStoreTransaction, SpanDBStoreBeginTx,
+		SpanDBStoreAutoMigrate, SpanDBStorePing, SpanDBStoreHealthCheck,
+		// Redis layer spans
+		SpanRedisConnectionAdd, SpanRedisConnectionGet,
+		SpanRedisConnectionRemove, SpanRedisConnectionExists,
+		SpanRedisConnectionUpdate, SpanRedisConnectionPatch,
+		SpanRedisConnectionRefresh, SpanRedisConnectionListByUser,
+		SpanRedisConnectionCountByUser, SpanRedisConnectionCountAll,
+		SpanRedisConnectionRemoveByUser, SpanRedisConnectionPing,
+		SpanRedisPendingSave, SpanRedisPendingList,
+		SpanRedisPendingRemove, SpanRedisPendingUpdate,
+		SpanRedisPendingRemoveByDevice,
+		SpanRedisBroadcasterPublish, SpanRedisBroadcasterSubscribe,
 	}
 	seen := make(map[string]bool, len(names))
 	for _, name := range names {
@@ -43,6 +113,7 @@ func TestAttributeKeys_NotEmpty(t *testing.T) {
 		AttrModel, AttrInputTokens, AttrOutputTokens,
 		AttrTotalTokens, AttrDurationMs, AttrCheckpointID,
 		AttrChunkCount, AttrTotalChars, AttrDebug,
+		AttrSizeBytes, AttrTargetUserID, AttrTargetType,
 	}
 	for _, key := range keys {
 		assert.NotEmpty(t, key, "attribute key constant must not be empty")
@@ -57,6 +128,7 @@ func TestAttributeKeys_HaveXyncraPrefix(t *testing.T) {
 		AttrModel, AttrInputTokens, AttrOutputTokens,
 		AttrTotalTokens, AttrDurationMs, AttrCheckpointID,
 		AttrChunkCount, AttrTotalChars, AttrDebug,
+		AttrSizeBytes, AttrTargetUserID, AttrTargetType,
 	}
 	for _, key := range keys {
 		assert.True(t, strings.HasPrefix(key, "xyncra."),

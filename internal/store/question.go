@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"gorm.io/gorm"
 
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/internal/tracing"
 )
 
 // QuestionStore handles Question persistence operations
@@ -22,17 +24,24 @@ func NewQuestionStore(db *gorm.DB) *QuestionStore {
 }
 
 // Create persists a new Question.
-func (qs *QuestionStore) Create(ctx context.Context, q *model.Question) error {
-	if err := qs.db.WithContext(ctx).Create(q).Error; err != nil {
+func (qs *QuestionStore) Create(ctx context.Context, q *model.Question) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBQuestionCreate)
+	defer func() { finish(err) }()
+
+	if err = qs.db.WithContext(ctx).Create(q).Error; err != nil {
 		return classifyError(fmt.Errorf("store: create question: %w", err))
 	}
 	return nil
 }
 
 // GetByConversation returns all questions for a conversation.
-func (qs *QuestionStore) GetByConversation(ctx context.Context, conversationID string) ([]*model.Question, error) {
+func (qs *QuestionStore) GetByConversation(ctx context.Context, conversationID string) (result []*model.Question, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBQuestionGetByConversation,
+		attribute.String(tracing.AttrConversationID, conversationID))
+	defer func() { finish(err) }()
+
 	var questions []*model.Question
-	if err := qs.db.WithContext(ctx).
+	if err = qs.db.WithContext(ctx).
 		Where("conversation_id = ?", conversationID).
 		Order("created_at ASC").
 		Find(&questions).Error; err != nil {
@@ -42,9 +51,12 @@ func (qs *QuestionStore) GetByConversation(ctx context.Context, conversationID s
 }
 
 // GetPendingByCheckpoint returns pending questions for a checkpoint.
-func (qs *QuestionStore) GetPendingByCheckpoint(ctx context.Context, checkpointID string) ([]*model.Question, error) {
+func (qs *QuestionStore) GetPendingByCheckpoint(ctx context.Context, checkpointID string) (result []*model.Question, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBQuestionGetPendingByCheckpoint)
+	defer func() { finish(err) }()
+
 	var questions []*model.Question
-	if err := qs.db.WithContext(ctx).
+	if err = qs.db.WithContext(ctx).
 		Where("checkpoint_id = ? AND status = ?", checkpointID, model.QuestionStatusPending).
 		Order("created_at ASC").
 		Find(&questions).Error; err != nil {
@@ -54,9 +66,12 @@ func (qs *QuestionStore) GetPendingByCheckpoint(ctx context.Context, checkpointI
 }
 
 // GetByCheckpoint returns all questions for a checkpoint (both pending and answered).
-func (qs *QuestionStore) GetByCheckpoint(ctx context.Context, checkpointID string) ([]*model.Question, error) {
+func (qs *QuestionStore) GetByCheckpoint(ctx context.Context, checkpointID string) (result []*model.Question, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBQuestionGetByCheckpoint)
+	defer func() { finish(err) }()
+
 	var questions []*model.Question
-	if err := qs.db.WithContext(ctx).
+	if err = qs.db.WithContext(ctx).
 		Where("checkpoint_id = ?", checkpointID).
 		Order("created_at ASC").
 		Find(&questions).Error; err != nil {
@@ -68,7 +83,10 @@ func (qs *QuestionStore) GetByCheckpoint(ctx context.Context, checkpointID strin
 // UpdateAnswer updates a question's answer and status.
 // Returns ErrNotFound if question doesn't exist.
 // Returns ErrConflict if question is already answered (idempotency check).
-func (qs *QuestionStore) UpdateAnswer(ctx context.Context, questionID, answer, answeredBy, answeredDeviceID string) error {
+func (qs *QuestionStore) UpdateAnswer(ctx context.Context, questionID, answer, answeredBy, answeredDeviceID string) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBQuestionUpdateAnswer)
+	defer func() { finish(err) }()
+
 	now := time.Now()
 	result := qs.db.WithContext(ctx).
 		Model(&model.Question{}).
@@ -86,7 +104,7 @@ func (qs *QuestionStore) UpdateAnswer(ctx context.Context, questionID, answer, a
 	if result.RowsAffected == 0 {
 		// Either the question doesn't exist, or it's already answered.
 		var existing model.Question
-		if err := qs.db.WithContext(ctx).
+		if err = qs.db.WithContext(ctx).
 			Where("id = ?", questionID).
 			First(&existing).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -101,8 +119,12 @@ func (qs *QuestionStore) UpdateAnswer(ctx context.Context, questionID, answer, a
 }
 
 // DeleteByConversation deletes all questions for a conversation.
-func (qs *QuestionStore) DeleteByConversation(ctx context.Context, conversationID string) error {
-	if err := qs.db.WithContext(ctx).
+func (qs *QuestionStore) DeleteByConversation(ctx context.Context, conversationID string) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBQuestionDeleteByConversation,
+		attribute.String(tracing.AttrConversationID, conversationID))
+	defer func() { finish(err) }()
+
+	if err = qs.db.WithContext(ctx).
 		Where("conversation_id = ?", conversationID).
 		Delete(&model.Question{}).Error; err != nil {
 		return classifyError(fmt.Errorf("store: delete questions by conversation: %w", err))
@@ -111,9 +133,11 @@ func (qs *QuestionStore) DeleteByConversation(ctx context.Context, conversationI
 }
 
 // CountPendingByCheckpoint returns the count of pending questions for a checkpoint.
-func (qs *QuestionStore) CountPendingByCheckpoint(ctx context.Context, checkpointID string) (int64, error) {
-	var count int64
-	err := qs.db.WithContext(ctx).
+func (qs *QuestionStore) CountPendingByCheckpoint(ctx context.Context, checkpointID string) (count int64, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBQuestionCountPendingByCheckpoint)
+	defer func() { finish(err) }()
+
+	err = qs.db.WithContext(ctx).
 		Model(&model.Question{}).
 		Where("checkpoint_id = ? AND status = ?", checkpointID, model.QuestionStatusPending).
 		Count(&count).Error
@@ -124,7 +148,10 @@ func (qs *QuestionStore) CountPendingByCheckpoint(ctx context.Context, checkpoin
 }
 
 // DeleteByCheckpoint soft-deletes all questions for a checkpoint.
-func (qs *QuestionStore) DeleteByCheckpoint(ctx context.Context, checkpointID string) error {
+func (qs *QuestionStore) DeleteByCheckpoint(ctx context.Context, checkpointID string) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBQuestionDeleteByCheckpoint)
+	defer func() { finish(err) }()
+
 	result := qs.db.WithContext(ctx).
 		Where("checkpoint_id = ?", checkpointID).
 		Delete(&model.Question{})

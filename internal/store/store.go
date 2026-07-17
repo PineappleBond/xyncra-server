@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 	"gorm.io/gorm"
 
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/internal/tracing"
 )
 
 // maxSendMessageUpdates is the maximum number of user updates (conversation
@@ -108,8 +110,11 @@ func NewFromDatabase(database *Database) *Store {
 // updating tables and indexes as needed. It also performs manual index
 // migrations that GORM's AutoMigrate cannot handle (e.g. replacing a
 // single-column index with a composite one).
-func (s *Store) AutoMigrate(ctx context.Context) error {
-	if err := s.db.WithContext(ctx).AutoMigrate(
+func (s *Store) AutoMigrate(ctx context.Context) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBStoreAutoMigrate)
+	defer func() { finish(err) }()
+
+	if err = s.db.WithContext(ctx).AutoMigrate(
 		&model.Conversation{},
 		&model.Message{},
 		&model.UserUpdate{},
@@ -147,14 +152,18 @@ func (s *Store) SendMessage(
 	ctx context.Context,
 	msg *model.Message,
 	memberIDs []string,
-) (*SendMessageResult, error) {
+) (result *SendMessageResult, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBStoreSendMessage,
+		attribute.String(tracing.AttrConversationID, msg.ConversationID))
+	defer func() { finish(err) }()
+
 	if len(memberIDs) > maxSendMessageUpdates {
 		return nil, fmt.Errorf("store: too many members (%d), max is %d", len(memberIDs), maxSendMessageUpdates)
 	}
 
-	var result SendMessageResult
+	var sendResult SendMessageResult
 
-	err := s.Transaction(ctx, func(tx *gorm.DB) error {
+	err = s.Transaction(ctx, func(tx *gorm.DB) error {
 		// 1. Read conversation inside the transaction to get the current
 		//    LastProcessedMessageID. This is the critical section that prevents
 		//    concurrent senders from allocating the same MessageID (D-008).
@@ -226,22 +235,25 @@ func (s *Store) SendMessage(
 		}
 
 		// Capture results for the caller.
-		result.Message = msg
-		result.Updates = updates
+		sendResult.Message = msg
+		sendResult.Updates = updates
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return &result, nil
+	return &sendResult, nil
 }
 
 // Transaction executes fn inside a database transaction. If fn returns an error,
 // the transaction is rolled back; otherwise it is committed. Returns
 // ErrContextDeadlineExceeded if the context is already expired.
-func (s *Store) Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
-	if err := ctx.Err(); err != nil {
+func (s *Store) Transaction(ctx context.Context, fn func(tx *gorm.DB) error) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBStoreTransaction)
+	defer func() { finish(err) }()
+
+	if err = ctx.Err(); err != nil {
 		return fmt.Errorf("store: %w", err)
 	}
 	return s.db.WithContext(ctx).Transaction(fn)
@@ -249,8 +261,11 @@ func (s *Store) Transaction(ctx context.Context, fn func(tx *gorm.DB) error) err
 
 // BeginTx starts a new database transaction and returns a Tx handle.
 // The caller is responsible for calling Commit or Rollback on the returned Tx.
-func (s *Store) BeginTx(ctx context.Context) (*Tx, error) {
-	if err := ctx.Err(); err != nil {
+func (s *Store) BeginTx(ctx context.Context) (txResult *Tx, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBStoreBeginTx)
+	defer func() { finish(err) }()
+
+	if err = ctx.Err(); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	tx := s.db.WithContext(ctx).Begin()
@@ -264,17 +279,20 @@ func (s *Store) BeginTx(ctx context.Context) (*Tx, error) {
 // underlying driver and executing a lightweight SELECT 1 query. This catches
 // both connection-level failures and basic query-path problems (e.g. missing
 // or corrupt schema).
-func (s *Store) Ping(ctx context.Context) error {
-	sqlDB, err := s.db.DB()
-	if err != nil {
-		return fmt.Errorf("store: ping: %w", err)
+func (s *Store) Ping(ctx context.Context) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBStorePing)
+	defer func() { finish(err) }()
+
+	sqlDB, dbErr := s.db.DB()
+	if dbErr != nil {
+		return fmt.Errorf("store: ping: %w", dbErr)
 	}
-	if err := sqlDB.PingContext(ctx); err != nil {
+	if err = sqlDB.PingContext(ctx); err != nil {
 		return classifyError(fmt.Errorf("store: ping: %w", err))
 	}
 	// Verify the query path works by executing a trivial select.
 	var result int
-	if err := s.db.WithContext(ctx).Raw("SELECT 1").Scan(&result).Error; err != nil {
+	if err = s.db.WithContext(ctx).Raw("SELECT 1").Scan(&result).Error; err != nil {
 		return classifyError(fmt.Errorf("store: ping query: %w", err))
 	}
 	return nil
@@ -282,13 +300,16 @@ func (s *Store) Ping(ctx context.Context) error {
 
 // HealthCheck performs a comprehensive health check: it pings the database and
 // verifies basic connectivity by running a simple query.
-func (s *Store) HealthCheck(ctx context.Context) error {
-	if err := s.Ping(ctx); err != nil {
+func (s *Store) HealthCheck(ctx context.Context) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBStoreHealthCheck)
+	defer func() { finish(err) }()
+
+	if err = s.Ping(ctx); err != nil {
 		return err
 	}
 	// Verify we can run a query.
 	var result int
-	if err := s.db.WithContext(ctx).Raw("SELECT 1").Scan(&result).Error; err != nil {
+	if err = s.db.WithContext(ctx).Raw("SELECT 1").Scan(&result).Error; err != nil {
 		return fmt.Errorf("store: health check query failed: %w", err)
 	}
 	return nil

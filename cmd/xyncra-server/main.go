@@ -37,7 +37,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -53,9 +52,7 @@ import (
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/internal/tracing"
-	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // Version information, injected at build time via -ldflags.
@@ -126,19 +123,13 @@ func main() {
 		tracerShutdown, _ = tracing.InitTracer(tracing.TracingConfig{Enabled: false})
 	}
 
-	// Instrument the default HTTP transport for LLM API call tracing.
-	if *tracingEnabled {
-		http.DefaultTransport = otelhttp.NewTransport(http.DefaultTransport)
-	}
-
 	// ---------------------------------------------------------------
 	// Database / Store
 	// ---------------------------------------------------------------
 
 	db, err := store.NewDatabase(store.DatabaseConfig{
-		Driver:        *dbDriver,
-		DSN:           *dbDSN,
-		EnableTracing: *tracingEnabled,
+		Driver: *dbDriver,
+		DSN:    *dbDSN,
 	})
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
@@ -175,7 +166,6 @@ func main() {
 		Password:              *redisPassword,
 		DB:                    *redisDB,
 		MaxConnectionsPerUser: *maxConns,
-		TracingEnabled:        *tracingEnabled,
 	})
 	if err != nil {
 		log.Fatalf("failed to create connection store: %v", err)
@@ -207,12 +197,6 @@ func main() {
 		Password: *redisPassword,
 		DB:       *redisDB,
 	})
-	// Add OpenTelemetry instrumentation for Redis Pub/Sub operations.
-	if *tracingEnabled {
-		if err := redisotel.InstrumentTracing(nodeBroadcasterClient); err != nil {
-			log.Printf("WARNING: failed to instrument node broadcaster redis client: %v", err)
-		}
-	}
 	nodeBroadcaster := server.NewRedisNodeBroadcaster(nodeBroadcasterClient, "xyncra")
 	defer nodeBroadcasterClient.Close()
 
@@ -251,12 +235,6 @@ func main() {
 		Password: *redisPassword,
 		DB:       *redisDB,
 	})
-	// Add OpenTelemetry instrumentation for Redis idempotency operations.
-	if *tracingEnabled {
-		if err := redisotel.InstrumentTracing(redisIdempotencyClient); err != nil {
-			log.Printf("WARNING: failed to instrument idempotency redis client: %v", err)
-		}
-	}
 	defer redisIdempotencyClient.Close()
 
 	// PendingStore for reverse-RPC request persistence (Phase 4, D-103).

@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"gorm.io/gorm"
 
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/internal/tracing"
 )
 
 // UserUpdateStore provides data access operations for the UserUpdate model.
@@ -22,11 +24,14 @@ func NewUserUpdateStore(db *gorm.DB) *UserUpdateStore {
 
 // Create inserts a batch of user update records. GORM's CreateInBatches is used
 // to split large slices into manageable chunks (batch size 100).
-func (us *UserUpdateStore) Create(ctx context.Context, updates []model.UserUpdate) error {
+func (us *UserUpdateStore) Create(ctx context.Context, updates []model.UserUpdate) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBUserUpdateCreate)
+	defer func() { finish(err) }()
+
 	if len(updates) == 0 {
 		return nil
 	}
-	if err := us.db.WithContext(ctx).CreateInBatches(updates, 100).Error; err != nil {
+	if err = us.db.WithContext(ctx).CreateInBatches(updates, 100).Error; err != nil {
 		return classifyError(err)
 	}
 	return nil
@@ -35,13 +40,17 @@ func (us *UserUpdateStore) Create(ctx context.Context, updates []model.UserUpdat
 // ListByUser returns user updates for the given userID with Seq greater than
 // afterSeq, ordered by Seq ascending, limited to at most limit rows. This
 // supports incremental / long-polling sync of a user's event stream.
-func (us *UserUpdateStore) ListByUser(ctx context.Context, userID string, afterSeq uint32, limit int) ([]*model.UserUpdate, error) {
+func (us *UserUpdateStore) ListByUser(ctx context.Context, userID string, afterSeq uint32, limit int) (result []*model.UserUpdate, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBUserUpdateListByUser,
+		attribute.String(tracing.AttrUserID, userID))
+	defer func() { finish(err) }()
+
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
 
 	var updates []*model.UserUpdate
-	err := us.db.WithContext(ctx).
+	err = us.db.WithContext(ctx).
 		Where("user_id = ? AND seq > ?", userID, afterSeq).
 		Order("seq ASC").
 		Limit(limit).
@@ -55,12 +64,16 @@ func (us *UserUpdateStore) ListByUser(ctx context.Context, userID string, afterS
 // ListByUserRange returns user updates for the given userID with Seq in the
 // range (afterSeq, maxSeq] (exclusive start, inclusive end), ordered by Seq
 // ascending. This supports gap-filling in the handler layer.
-func (us *UserUpdateStore) ListByUserRange(ctx context.Context, userID string, afterSeq, maxSeq uint32) ([]*model.UserUpdate, error) {
+func (us *UserUpdateStore) ListByUserRange(ctx context.Context, userID string, afterSeq, maxSeq uint32) (result []*model.UserUpdate, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBUserUpdateListByUserRange,
+		attribute.String(tracing.AttrUserID, userID))
+	defer func() { finish(err) }()
+
 	if maxSeq <= afterSeq {
 		return nil, nil
 	}
 	var updates []*model.UserUpdate
-	err := us.db.WithContext(ctx).
+	err = us.db.WithContext(ctx).
 		Where("user_id = ? AND seq > ? AND seq <= ?", userID, afterSeq, maxSeq).
 		Order("seq ASC").
 		Find(&updates).Error
@@ -72,9 +85,12 @@ func (us *UserUpdateStore) ListByUserRange(ctx context.Context, userID string, a
 
 // GetLatestSeq returns the highest Seq value for the given user. Returns 0 and
 // nil if the user has no update records.
-func (us *UserUpdateStore) GetLatestSeq(ctx context.Context, userID string) (uint32, error) {
-	var seq uint32
-	err := us.db.WithContext(ctx).
+func (us *UserUpdateStore) GetLatestSeq(ctx context.Context, userID string) (seq uint32, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBUserUpdateGetLatestSeq,
+		attribute.String(tracing.AttrUserID, userID))
+	defer func() { finish(err) }()
+
+	err = us.db.WithContext(ctx).
 		Model(&model.UserUpdate{}).
 		Where("user_id = ?", userID).
 		Select("COALESCE(MAX(seq), 0)").
@@ -92,7 +108,10 @@ const DefaultCleanupRetention = 30 * 24 * time.Hour // 30 days
 // CleanupExpiredBefore deletes all user updates with CreatedAt strictly before
 // the given time. This is a hard delete (Unscoped) since expired updates should
 // be permanently removed. Returns the number of deleted rows.
-func (us *UserUpdateStore) CleanupExpiredBefore(ctx context.Context, before time.Time) (int64, error) {
+func (us *UserUpdateStore) CleanupExpiredBefore(ctx context.Context, before time.Time) (count int64, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBUserUpdateCleanupExpiredBefore)
+	defer func() { finish(err) }()
+
 	result := us.db.WithContext(ctx).
 		Unscoped().
 		Where("created_at < ?", before).

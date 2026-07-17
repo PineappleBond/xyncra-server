@@ -6,6 +6,9 @@ import (
 	"strings"
 	"sync"
 
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/PineappleBond/xyncra-server/internal/tracing"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 	"github.com/redis/go-redis/v9"
 )
@@ -65,7 +68,12 @@ func NewRedisNodeBroadcaster(client *redis.Client, keyPrefix string) *RedisNodeB
 // Publish sends a broadcast message for the given userID on the Redis
 // channel "{keyPrefix}:broadcast:{userID}". The payload includes the
 // sourceNodeID so that receiving nodes can skip messages they originated.
-func (b *RedisNodeBroadcaster) Publish(ctx context.Context, userID string, updates *protocol.PackageDataUpdates, sourceNodeID string) error {
+func (b *RedisNodeBroadcaster) Publish(ctx context.Context, userID string, updates *protocol.PackageDataUpdates, sourceNodeID string) (err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisBroadcasterPublish,
+		attribute.String(tracing.AttrUserID, userID),
+	)
+	defer func() { finish(err) }()
+
 	if userID == "" {
 		return fmt.Errorf("server: broadcast publish: user ID is required")
 	}
@@ -96,7 +104,10 @@ func (b *RedisNodeBroadcaster) Publish(ctx context.Context, userID string, updat
 //
 // Subscribe blocks until ctx is cancelled, then closes the Pub/Sub
 // subscription and returns ctx.Err().
-func (b *RedisNodeBroadcaster) Subscribe(ctx context.Context, callback func(userID string, updates *protocol.PackageDataUpdates, sourceNodeID string)) error {
+func (b *RedisNodeBroadcaster) Subscribe(ctx context.Context, callback func(userID string, updates *protocol.PackageDataUpdates, sourceNodeID string)) (err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisBroadcasterSubscribe)
+	defer func() { finish(err) }()
+
 	pattern := b.keyPrefix + redisBroadcastPrefix + "*"
 
 	ps := b.client.PSubscribe(ctx, pattern)

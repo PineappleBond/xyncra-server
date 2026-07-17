@@ -1,3 +1,7 @@
+---
+last_updated: 2026-07-17
+---
+
 # 开发视角
 
 关注开发者的日常开发规范、项目管理、代码质量和团队协作。
@@ -10,6 +14,7 @@
 | [项目结构](project-structure.md) | 目录结构说明、各包职责边界 |
 | [开发环境](development-setup.md) | 环境搭建、依赖安装、本地运行 |
 | [开发者指南](developer-guide.md) | 常见开发任务操作流程 |
+| [分布式追踪指南](tracing-guide.md) | 如何为新方法添加追踪 span |
 | [可替代性设计](replaceability.md) | 模块化设计、接口约定、开发者可替代性 |
 
 ## 核心原则

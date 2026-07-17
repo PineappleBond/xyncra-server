@@ -92,14 +92,10 @@ func startBroadcastSpan(ctx context.Context, targetUserID string) (context.Conte
 	}
 }
 
-// startMessageSendSpan creates a ws.message.send span for an outbound message.
-// It records the target type (user/device).
-func startMessageSendSpan(ctx context.Context, targetType string) (context.Context, func(error)) {
-	ctx, span := serverTracer.Start(ctx, tracing.SpanWSMessageSend,
-		trace.WithAttributes(
-			attribute.String(tracing.AttrTargetType, targetType),
-		),
-	)
+// startRedisSpan creates a named span for Redis operations with optional attributes.
+// Returns (ctx, finish) where finish sets error status and ends the span.
+func startRedisSpan(ctx context.Context, spanName string, attrs ...attribute.KeyValue) (context.Context, func(error)) {
+	ctx, span := serverTracer.Start(ctx, spanName, trace.WithAttributes(attrs...))
 	return ctx, func(err error) {
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())

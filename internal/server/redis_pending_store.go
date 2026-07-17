@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/PineappleBond/xyncra-server/internal/tracing"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -58,7 +61,13 @@ func (s *RedisPendingStore) deviceKey(userID, deviceID string) string {
 
 // Save persists a pending request by appending it to the device's list.
 // If the list exceeds MaxPendingPerDevice, the oldest entries are trimmed.
-func (s *RedisPendingStore) Save(ctx context.Context, req *PendingRequest) error {
+func (s *RedisPendingStore) Save(ctx context.Context, req *PendingRequest) (err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisPendingSave,
+		attribute.String(tracing.AttrUserID, req.UserID),
+		attribute.String(tracing.AttrDeviceID, req.DeviceID),
+	)
+	defer func() { finish(err) }()
+
 	data, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("pending store: marshal request: %w", err)
@@ -78,14 +87,20 @@ func (s *RedisPendingStore) Save(ctx context.Context, req *PendingRequest) error
 
 // List returns all pending requests for a device, ordered by Seq ascending
 // (insertion order). Returns an empty slice if there are no pending requests.
-func (s *RedisPendingStore) List(ctx context.Context, userID, deviceID string) ([]*PendingRequest, error) {
+func (s *RedisPendingStore) List(ctx context.Context, userID, deviceID string) (result []*PendingRequest, err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisPendingList,
+		attribute.String(tracing.AttrUserID, userID),
+		attribute.String(tracing.AttrDeviceID, deviceID),
+	)
+	defer func() { finish(err) }()
+
 	key := s.deviceKey(userID, deviceID)
 	strs, err := s.client.LRange(ctx, key, 0, -1).Result()
 	if err != nil {
 		return nil, fmt.Errorf("pending store: list: %w", err)
 	}
 
-	result := make([]*PendingRequest, 0, len(strs))
+	result = make([]*PendingRequest, 0, len(strs))
 	for _, raw := range strs {
 		var req PendingRequest
 		if err := json.Unmarshal([]byte(raw), &req); err != nil {
@@ -103,7 +118,13 @@ func (s *RedisPendingStore) List(ctx context.Context, userID, deviceID string) (
 // NOTE: Del+RPush in a pipeline is not a true transaction. If the process
 // crashes between the two commands, entries may be lost. This is acceptable
 // for a pending store (fail-open semantics, D-103).
-func (s *RedisPendingStore) Remove(ctx context.Context, userID, deviceID, requestID string) error {
+func (s *RedisPendingStore) Remove(ctx context.Context, userID, deviceID, requestID string) (err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisPendingRemove,
+		attribute.String(tracing.AttrUserID, userID),
+		attribute.String(tracing.AttrDeviceID, deviceID),
+	)
+	defer func() { finish(err) }()
+
 	key := s.deviceKey(userID, deviceID)
 
 	// Read all entries, filter out the target, and rewrite.
@@ -155,7 +176,13 @@ func (s *RedisPendingStore) Remove(ctx context.Context, userID, deviceID, reques
 // NOTE: Del+RPush in a pipeline is not a true transaction. If the process
 // crashes between the two commands, entries may be lost. This is acceptable
 // for a pending store (fail-open semantics, D-103).
-func (s *RedisPendingStore) Update(ctx context.Context, req *PendingRequest) error {
+func (s *RedisPendingStore) Update(ctx context.Context, req *PendingRequest) (err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisPendingUpdate,
+		attribute.String(tracing.AttrUserID, req.UserID),
+		attribute.String(tracing.AttrDeviceID, req.DeviceID),
+	)
+	defer func() { finish(err) }()
+
 	key := s.deviceKey(req.UserID, req.DeviceID)
 
 	newData, err := json.Marshal(req)
@@ -207,7 +234,13 @@ func (s *RedisPendingStore) Update(ctx context.Context, req *PendingRequest) err
 }
 
 // RemoveByDevice deletes all pending requests for a device.
-func (s *RedisPendingStore) RemoveByDevice(ctx context.Context, userID, deviceID string) error {
+func (s *RedisPendingStore) RemoveByDevice(ctx context.Context, userID, deviceID string) (err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisPendingRemoveByDevice,
+		attribute.String(tracing.AttrUserID, userID),
+		attribute.String(tracing.AttrDeviceID, deviceID),
+	)
+	defer func() { finish(err) }()
+
 	key := s.deviceKey(userID, deviceID)
 	if err := s.client.Del(ctx, key).Err(); err != nil {
 		return fmt.Errorf("pending store: remove by device: %w", err)

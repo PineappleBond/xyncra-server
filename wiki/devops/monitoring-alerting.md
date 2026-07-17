@@ -1,3 +1,7 @@
+---
+last_updated: 2026-07-17
+---
+
 # 监控告警
 
 ## 概述
@@ -180,7 +184,7 @@ type LLMCallEvent struct {
 1. **无原生 Prometheus 指标导出**：目前通过日志暴露指标，未集成 Prometheus client
 2. **无结构化指标收集**：当前指标分散在日志中，需要通过日志解析提取
 3. **无内置告警引擎**：告警需要通过外部系统（如 Prometheus + AlertManager）实现
-4. **无分布式追踪**：跨服务调用链路未追踪（见 [分布式追踪](../observability/distributed-tracing.md)）
+4. **追踪覆盖有限**：分布式追踪已实现（见 [分布式追踪](../observability/distributed-tracing.md)），但仅覆盖核心业务路径，非所有 HTTP/DB/Redis 操作均有 span
 
 ## 告警通知配置示例
 
@@ -285,4 +289,4 @@ curl -s -X POST $WEBHOOK_URL \
 2. 定义标准化的业务指标接口
 3. 提供 Grafana Dashboard JSON 模板
 4. 配置 AlertManager 告警规则
-5. 集成 OpenTelemetry 分布式追踪
+5. 扩展追踪覆盖范围至更多业务方法（当前已实现手动业务级追踪，见 D-127）

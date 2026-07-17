@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redis/go-redis/extra/redisotel/v9"
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/PineappleBond/xyncra-server/internal/tracing"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -219,9 +221,6 @@ type RedisConnectionStoreConfig struct {
 	// PoolTimeout is the maximum time to wait for a pool connection.
 	// A value of 0 uses the go-redis default (5 seconds).
 	PoolTimeout time.Duration
-
-	// TracingEnabled enables OpenTelemetry instrumentation for Redis operations.
-	TracingEnabled bool
 }
 
 // resolveDefaultTTL returns the configured default TTL or the package-level
@@ -285,14 +284,6 @@ func NewRedisConnectionStore(cfg RedisConnectionStoreConfig) (*RedisConnectionSt
 	}
 
 	client := redis.NewClient(cfg.toRedisOptions())
-
-	// Add OpenTelemetry instrumentation hook for Redis operations.
-	if cfg.TracingEnabled {
-		if err := redisotel.InstrumentTracing(client); err != nil {
-			_ = client.Close()
-			return nil, fmt.Errorf("server: failed to instrument redis tracing: %w", err)
-		}
-	}
 
 	// Verify connectivity unless lazy connect is enabled.
 	if !cfg.LazyConnect {
@@ -371,7 +362,19 @@ func NewRedisConnectionStoreFromClient(cfg RedisConnectionStoreFromClientConfig)
 // the initial Add. Overwriting a connection with a different UserID is
 // supported but the old user's set entry is removed; callers should avoid
 // relying on cross-user connection migration.
-func (s *RedisConnectionStore) Add(ctx context.Context, info *ConnectionInfo) error {
+func (s *RedisConnectionStore) Add(ctx context.Context, info *ConnectionInfo) (err error) {
+	// Safe attribute extraction (info may be nil).
+	var connID, userID string
+	if info != nil {
+		connID = info.ID
+		userID = info.UserID
+	}
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisConnectionAdd,
+		attribute.String(tracing.AttrConnID, connID),
+		attribute.String(tracing.AttrUserID, userID),
+	)
+	defer func() { finish(err) }()
+
 	if info == nil {
 		return fmt.Errorf("server: connection info is nil")
 	}
@@ -420,7 +423,12 @@ func (s *RedisConnectionStore) Add(ctx context.Context, info *ConnectionInfo) er
 
 // Get retrieves the connection info for the given connection ID. Returns
 // ErrConnectionNotFound if the key does not exist.
-func (s *RedisConnectionStore) Get(ctx context.Context, connID string) (*ConnectionInfo, error) {
+func (s *RedisConnectionStore) Get(ctx context.Context, connID string) (info *ConnectionInfo, err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisConnectionGet,
+		attribute.String(tracing.AttrConnID, connID),
+	)
+	defer func() { finish(err) }()
+
 	if connID == "" {
 		return nil, fmt.Errorf("server: connection ID is required")
 	}
@@ -433,12 +441,12 @@ func (s *RedisConnectionStore) Get(ctx context.Context, connID string) (*Connect
 		return nil, fmt.Errorf("server: get connection [connID=%s]: %w", connID, classifyRedisError(err))
 	}
 
-	var info ConnectionInfo
-	if err := json.Unmarshal([]byte(val), &info); err != nil {
+	var connInfo ConnectionInfo
+	if err := json.Unmarshal([]byte(val), &connInfo); err != nil {
 		return nil, fmt.Errorf("server: get connection [connID=%s]: unmarshal: %w", connID, err)
 	}
 
-	return &info, nil
+	return &connInfo, nil
 }
 
 // Remove deletes the connection identified by connID. It removes both the
@@ -450,7 +458,12 @@ func (s *RedisConnectionStore) Get(ctx context.Context, connID string) (*Connect
 // for set cleanup. If the info key expires between the read and the Lua
 // deletion, the SREM on the user set still executes (removing a potentially
 // stale entry). This is safe because the set entry would be orphaned anyway.
-func (s *RedisConnectionStore) Remove(ctx context.Context, connID string) error {
+func (s *RedisConnectionStore) Remove(ctx context.Context, connID string) (err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisConnectionRemove,
+		attribute.String(tracing.AttrConnID, connID),
+	)
+	defer func() { finish(err) }()
+
 	if connID == "" {
 		return fmt.Errorf("server: connection ID is required")
 	}
@@ -479,7 +492,12 @@ func (s *RedisConnectionStore) Remove(ctx context.Context, connID string) error 
 }
 
 // Exists reports whether a connection with the given ID is currently active.
-func (s *RedisConnectionStore) Exists(ctx context.Context, connID string) (bool, error) {
+func (s *RedisConnectionStore) Exists(ctx context.Context, connID string) (exists bool, err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisConnectionExists,
+		attribute.String(tracing.AttrConnID, connID),
+	)
+	defer func() { finish(err) }()
+
 	if connID == "" {
 		return false, fmt.Errorf("server: connection ID is required")
 	}
@@ -499,7 +517,12 @@ func (s *RedisConnectionStore) Exists(ctx context.Context, connID string) (bool,
 // script that only checks existence (not CAS). Concurrent Update calls may
 // silently overwrite each other's metadata changes. For atomic
 // read-modify-write semantics, use Patch instead.
-func (s *RedisConnectionStore) Update(ctx context.Context, connID string, metadata map[string]string) error {
+func (s *RedisConnectionStore) Update(ctx context.Context, connID string, metadata map[string]string) (err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisConnectionUpdate,
+		attribute.String(tracing.AttrConnID, connID),
+	)
+	defer func() { finish(err) }()
+
 	if connID == "" {
 		return fmt.Errorf("server: connection ID is required")
 	}
@@ -547,7 +570,12 @@ func (s *RedisConnectionStore) Update(ctx context.Context, connID string, metada
 // connection ID instead.
 //
 // Returns ErrConnectionNotFound if the connection does not exist.
-func (s *RedisConnectionStore) Patch(ctx context.Context, connID string, updater func(*ConnectionInfo)) error {
+func (s *RedisConnectionStore) Patch(ctx context.Context, connID string, updater func(*ConnectionInfo)) (err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisConnectionPatch,
+		attribute.String(tracing.AttrConnID, connID),
+	)
+	defer func() { finish(err) }()
+
 	if connID == "" {
 		return fmt.Errorf("server: connection ID is required")
 	}
@@ -599,7 +627,12 @@ func (s *RedisConnectionStore) Patch(ctx context.Context, connID string, updater
 // existence check and TTL reset are performed atomically in a single Lua
 // script to avoid the previous 3-call round-trip (P2-003/A2-005).
 // Returns ErrConnectionNotFound if the connection does not exist.
-func (s *RedisConnectionStore) Refresh(ctx context.Context, connID string) error {
+func (s *RedisConnectionStore) Refresh(ctx context.Context, connID string) (err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisConnectionRefresh,
+		attribute.String(tracing.AttrConnID, connID),
+	)
+	defer func() { finish(err) }()
+
 	if connID == "" {
 		return fmt.Errorf("server: connection ID is required")
 	}
@@ -640,7 +673,12 @@ func (s *RedisConnectionStore) Refresh(ctx context.Context, connID string) error
 // iterate over the per-user set incrementally, stopping once enough live
 // connections have been collected (P2-006). Expired or missing keys are
 // silently cleaned up from the set.
-func (s *RedisConnectionStore) ListByUser(ctx context.Context, userID string, limit int) ([]*ConnectionInfo, error) {
+func (s *RedisConnectionStore) ListByUser(ctx context.Context, userID string, limit int) (result []*ConnectionInfo, err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisConnectionListByUser,
+		attribute.String(tracing.AttrUserID, userID),
+	)
+	defer func() { finish(err) }()
+
 	if userID == "" {
 		return nil, fmt.Errorf("server: user ID is required")
 	}
@@ -661,7 +699,6 @@ func (s *RedisConnectionStore) ListByUser(ctx context.Context, userID string, li
 	// Use SScan to iterate the user set incrementally. We fetch in batches
 	// and stop once we have enough live connections or the cursor wraps.
 	var (
-		result     []*ConnectionInfo
 		staleIDs   []string
 		cursor     uint64
 		fetchLimit int64 = 100 // SScan COUNT hint
@@ -737,12 +774,17 @@ func (s *RedisConnectionStore) ListByUser(ctx context.Context, userID string, li
 // entries whose info keys have expired but have not yet been cleaned up.
 // For an exact count of live connections, use ListByUser and check the
 // length of the returned slice (P-006, A-011).
-func (s *RedisConnectionStore) CountByUser(ctx context.Context, userID string) (int64, error) {
+func (s *RedisConnectionStore) CountByUser(ctx context.Context, userID string) (n int64, err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisConnectionCountByUser,
+		attribute.String(tracing.AttrUserID, userID),
+	)
+	defer func() { finish(err) }()
+
 	if userID == "" {
 		return 0, fmt.Errorf("server: user ID is required")
 	}
 
-	n, err := s.client.SCard(ctx, s.userKey(userID)).Result()
+	n, err = s.client.SCard(ctx, s.userKey(userID)).Result()
 	if err != nil {
 		return 0, fmt.Errorf("server: count connections by user [userID=%s]: %w", userID, classifyRedisError(err))
 	}
@@ -753,13 +795,17 @@ func (s *RedisConnectionStore) CountByUser(ctx context.Context, userID string) (
 // It scans for info keys using the SCAN command (P-010).
 //
 // This is an approximate count suitable for monitoring and diagnostics.
-func (s *RedisConnectionStore) CountAll(ctx context.Context) (int64, error) {
+func (s *RedisConnectionStore) CountAll(ctx context.Context) (count int64, err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisConnectionCountAll)
+	defer func() { finish(err) }()
+
 	pattern := s.keyPrefix + redisKeyConnInfoPrefix + "*"
-	var count int64
 	var cursor uint64
 
 	for {
-		keys, nextCursor, err := s.client.Scan(ctx, cursor, pattern, 100).Result()
+		var keys []string
+		var nextCursor uint64
+		keys, nextCursor, err = s.client.Scan(ctx, cursor, pattern, 100).Result()
 		if err != nil {
 			return 0, fmt.Errorf("server: count all connections: %w", classifyRedisError(err))
 		}
@@ -781,7 +827,12 @@ func (s *RedisConnectionStore) CountAll(ctx context.Context) (int64, error) {
 //
 // Uses UNLINK instead of DEL (P-008) and processes keys in batches to avoid
 // blocking Redis with large deletions.
-func (s *RedisConnectionStore) RemoveByUser(ctx context.Context, userID string) (int64, error) {
+func (s *RedisConnectionStore) RemoveByUser(ctx context.Context, userID string) (removed int64, err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisConnectionRemoveByUser,
+		attribute.String(tracing.AttrUserID, userID),
+	)
+	defer func() { finish(err) }()
+
 	if userID == "" {
 		return 0, fmt.Errorf("server: user ID is required")
 	}
@@ -827,7 +878,10 @@ func (s *RedisConnectionStore) RemoveByUser(ctx context.Context, userID string) 
 }
 
 // Ping verifies that the Redis backend is reachable.
-func (s *RedisConnectionStore) Ping(ctx context.Context) error {
+func (s *RedisConnectionStore) Ping(ctx context.Context) (err error) {
+	ctx, finish := startRedisSpan(ctx, tracing.SpanRedisConnectionPing)
+	defer func() { finish(err) }()
+
 	if err := s.client.Ping(ctx).Err(); err != nil {
 		return fmt.Errorf("server: redis ping: %w", classifyRedisError(err))
 	}

@@ -1,3 +1,7 @@
+---
+last_updated: 2026-07-17
+---
+
 # 架构决策记录 (ADR)
 
 本文档以 ADR（Architecture Decision Record）格式记录 Xyncra 项目中的关键架构决策。每个决策包含**背景**、**方案对比**、**决策**和**后果**。
@@ -484,6 +488,56 @@ SET agent:idempotency:{msgID} "processed" EX 86400     // 第二阶段
 
 ---
 
+## ADR-013：手动业务级追踪，而非自动基础设施追踪
+
+### 背景
+
+分布式追踪需要决定在哪些操作中添加 span。两种方式：
+
+- **自动埋点**：使用 `otelgorm`、`redisotel`、`otelhttp` 等库，自动为每个 DB 查询、Redis 命令、HTTP 请求添加 span
+- **手动埋点**：在关键业务方法中手动添加 span
+
+### 方案对比
+
+| 方案 | Operation 列表信噪比 | 代码量 | 基础设施可见性 |
+| ---- | -------------------- | ------ | -------------- |
+| **自动埋点** | 低（大量 `GORM query`、`get`、`ping`） | 少（零配置） | 完整 |
+| **手动埋点** | 高（仅业务操作） | 多（每个方法需手动添加） | 部分（仅覆盖手动添加的方法） |
+| **混合模式** | 中 | 中 | 较完整 |
+
+### 决策
+
+选择 **手动业务级追踪**（D-127）。
+
+```
+追踪层级：
+    触发层（出现在 Jaeger Operation 列表）：
+        ├── ws.* — WebSocket 连接生命周期
+        ├── handler.* — RPC 方法分发
+        ├── mq.* — 消息队列任务
+        └── agent.* — Agent 执行
+    
+    业务层（子 span，不出现在 Operation 列表）：
+        ├── db.<entity>.<op> — 数据库操作（如 db.conversation.get）
+        └── redis.<store>.<op> — Redis 操作（如 redis.connection.add）
+```
+
+关键约束：
+
+1. 所有新 public store/server 方法必须手动埋点
+2. Span 命名遵循 `domain.entity.operation` 模式
+3. 禁止引入 `otelgorm`、`redisotel`、`otelhttp` 等自动埋点库
+4. 接受 outbound HTTP 可见性降低的 trade-off（`agent.llm.call` span 已覆盖业务层信息）
+
+### 后果
+
+- **正面**：Jaeger Operation 列表保持高信噪比，开发者可快速定位真正的业务操作；DB/Redis 操作以子 span 形式呈现，提供足够的调试信息
+- **负面**：每个新方法需要手动添加 span 代码（少量额外工作）；outbound HTTP 操作不再有 span（但 LLM 调用已通过 `agent.llm.call` 覆盖）
+
+**相关决策**：D-127（手动业务级追踪）
+
+---
+
 ## 决策索引
 
 | ADR | 决策 | 相关产品决策 |
@@ -500,3 +554,4 @@ SET agent:idempotency:{msgID} "processed" EX 86400     // 第二阶段
 | ADR-010 | 接口隔离与可选模块 | D-063 |
 | ADR-011 | 分层幂等性 | D-006, D-071, D-072, D-121 |
 | ADR-012 | 会话状态机 | D-117, D-124, D-125 |
+| ADR-013 | 手动业务级追踪 | D-127 |

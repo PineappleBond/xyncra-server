@@ -7,9 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"gorm.io/gorm"
 
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/internal/tracing"
 )
 
 // ConversationStore provides data access operations for the Conversation model.
@@ -23,8 +25,11 @@ func NewConversationStore(db *gorm.DB) *ConversationStore {
 }
 
 // Create inserts a new conversation record into the database.
-func (cs *ConversationStore) Create(ctx context.Context, conv *model.Conversation) error {
-	if err := cs.db.WithContext(ctx).Create(conv).Error; err != nil {
+func (cs *ConversationStore) Create(ctx context.Context, conv *model.Conversation) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationCreate)
+	defer func() { finish(err) }()
+
+	if err = cs.db.WithContext(ctx).Create(conv).Error; err != nil {
 		return classifyError(err)
 	}
 	return nil
@@ -32,9 +37,13 @@ func (cs *ConversationStore) Create(ctx context.Context, conv *model.Conversatio
 
 // Get retrieves a conversation by its primary key. Returns ErrNotFound if no
 // record exists.
-func (cs *ConversationStore) Get(ctx context.Context, id string) (*model.Conversation, error) {
+func (cs *ConversationStore) Get(ctx context.Context, id string) (result *model.Conversation, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationGet,
+		attribute.String(tracing.AttrConversationID, id))
+	defer func() { finish(err) }()
+
 	var conv model.Conversation
-	err := cs.db.WithContext(ctx).
+	err = cs.db.WithContext(ctx).
 		Where("id = ?", id).
 		First(&conv).Error
 	if err != nil {
@@ -49,9 +58,13 @@ func (cs *ConversationStore) Get(ctx context.Context, id string) (*model.Convers
 // GetByUsers returns the 1-on-1 conversation between user1 and user2.
 // It checks both (user1, user2) and (user2, user1) orderings.
 // Returns ErrNotFound if no matching conversation exists.
-func (cs *ConversationStore) GetByUsers(ctx context.Context, user1, user2 string) (*model.Conversation, error) {
+func (cs *ConversationStore) GetByUsers(ctx context.Context, user1, user2 string) (result *model.Conversation, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationGetByUsers,
+		attribute.String(tracing.AttrUserID, user1))
+	defer func() { finish(err) }()
+
 	var conv model.Conversation
-	err := cs.db.WithContext(ctx).
+	err = cs.db.WithContext(ctx).
 		Where("(user_id1 = ? AND user_id2 = ?) OR (user_id1 = ? AND user_id2 = ?)", user1, user2, user2, user1).
 		First(&conv).Error
 	if err != nil {
@@ -76,7 +89,11 @@ func (cs *ConversationStore) GetByUsers(ctx context.Context, user1, user2 string
 // contributes, some interleaved rows could be dropped after deduplication.
 // This is acceptable in practice because a single user typically has far fewer
 // than 1000 conversations.
-func (cs *ConversationStore) GetByUser(ctx context.Context, userID string, offset, limit int) ([]*model.Conversation, error) {
+func (cs *ConversationStore) GetByUser(ctx context.Context, userID string, offset, limit int) (result []*model.Conversation, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationGetByUser,
+		attribute.String(tracing.AttrUserID, userID))
+	defer func() { finish(err) }()
+
 	// Allow up to 101 so callers can use the limit+1 probe technique for
 	// has_more detection at the maximum page size (100).
 	if limit <= 0 || limit > 101 {
@@ -90,7 +107,7 @@ func (cs *ConversationStore) GetByUser(ctx context.Context, userID string, offse
 	fetchLimit := offset + limit
 
 	var asUser1 []*model.Conversation
-	if err := cs.db.WithContext(ctx).
+	if err = cs.db.WithContext(ctx).
 		Where("user_id1 = ?", userID).
 		Order("last_message_at DESC").
 		Limit(fetchLimit).
@@ -99,7 +116,7 @@ func (cs *ConversationStore) GetByUser(ctx context.Context, userID string, offse
 	}
 
 	var asUser2 []*model.Conversation
-	if err := cs.db.WithContext(ctx).
+	if err = cs.db.WithContext(ctx).
 		Where("user_id2 = ? AND user_id2 != ''", userID).
 		Order("last_message_at DESC").
 		Limit(fetchLimit).
@@ -148,15 +165,22 @@ func sortConversationsByLastMessageAt(convs []*model.Conversation) {
 }
 
 // Update saves all fields of the conversation back to the database.
-func (cs *ConversationStore) Update(ctx context.Context, conv *model.Conversation) error {
-	if err := cs.db.WithContext(ctx).Save(conv).Error; err != nil {
+func (cs *ConversationStore) Update(ctx context.Context, conv *model.Conversation) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationUpdate)
+	defer func() { finish(err) }()
+
+	if err = cs.db.WithContext(ctx).Save(conv).Error; err != nil {
 		return classifyError(err)
 	}
 	return nil
 }
 
 // Delete performs a soft delete on the conversation identified by id.
-func (cs *ConversationStore) Delete(ctx context.Context, id string) error {
+func (cs *ConversationStore) Delete(ctx context.Context, id string) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationDelete,
+		attribute.String(tracing.AttrConversationID, id))
+	defer func() { finish(err) }()
+
 	result := cs.db.WithContext(ctx).Delete(&model.Conversation{}, "id = ?", id)
 	if result.Error != nil {
 		return classifyError(fmt.Errorf("store: delete conversation: %w", result.Error))
@@ -168,7 +192,11 @@ func (cs *ConversationStore) Delete(ctx context.Context, id string) error {
 }
 
 // Restore undeletes a soft-deleted conversation identified by id.
-func (cs *ConversationStore) Restore(ctx context.Context, id string) error {
+func (cs *ConversationStore) Restore(ctx context.Context, id string) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationRestore,
+		attribute.String(tracing.AttrConversationID, id))
+	defer func() { finish(err) }()
+
 	result := cs.db.WithContext(ctx).
 		Unscoped().
 		Model(&model.Conversation{}).
@@ -185,7 +213,11 @@ func (cs *ConversationStore) Restore(ctx context.Context, id string) error {
 
 // UpdateLastMessage updates the LastMessageAt and LastProcessedMessageID fields
 // of the conversation identified by convID.
-func (cs *ConversationStore) UpdateLastMessage(ctx context.Context, convID string, lastMessageAt time.Time, lastProcessedMessageID uint32) error {
+func (cs *ConversationStore) UpdateLastMessage(ctx context.Context, convID string, lastMessageAt time.Time, lastProcessedMessageID uint32) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationUpdateLastMessage,
+		attribute.String(tracing.AttrConversationID, convID))
+	defer func() { finish(err) }()
+
 	result := cs.db.WithContext(ctx).
 		Model(&model.Conversation{}).
 		Where("id = ?", convID).
@@ -205,7 +237,11 @@ func (cs *ConversationStore) UpdateLastMessage(ctx context.Context, convID strin
 // SearchByTitle searches conversations for the given user that contain the
 // specified title substring (case-insensitive via LIKE), ordered by
 // LastMessageAt descending, limited to at most limit rows.
-func (cs *ConversationStore) SearchByTitle(ctx context.Context, userID, title string, limit int) ([]*model.Conversation, error) {
+func (cs *ConversationStore) SearchByTitle(ctx context.Context, userID, title string, limit int) (result []*model.Conversation, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationSearchByTitle,
+		attribute.String(tracing.AttrUserID, userID))
+	defer func() { finish(err) }()
+
 	// Allow up to 101 so callers can use the limit+1 probe technique.
 	if limit <= 0 || limit > 101 {
 		limit = 20
@@ -217,7 +253,7 @@ func (cs *ConversationStore) SearchByTitle(ctx context.Context, userID, title st
 	like := "%" + escapeLikePattern(title) + "%"
 
 	var convs []*model.Conversation
-	err := cs.db.WithContext(ctx).
+	err = cs.db.WithContext(ctx).
 		Where("(user_id1 = ? OR user_id2 = ?) AND title LIKE ? ESCAPE '|'", userID, userID, like).
 		Order("last_message_at DESC").
 		Limit(limit).
@@ -230,9 +266,13 @@ func (cs *ConversationStore) SearchByTitle(ctx context.Context, userID, title st
 
 // GetUnscoped retrieves a conversation including soft-deleted records.
 // Returns ErrNotFound if no record exists.
-func (cs *ConversationStore) GetUnscoped(ctx context.Context, id string) (*model.Conversation, error) {
+func (cs *ConversationStore) GetUnscoped(ctx context.Context, id string) (result *model.Conversation, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationGetUnscoped,
+		attribute.String(tracing.AttrConversationID, id))
+	defer func() { finish(err) }()
+
 	var conv model.Conversation
-	err := cs.db.WithContext(ctx).
+	err = cs.db.WithContext(ctx).
 		Unscoped().
 		Where("id = ?", id).
 		First(&conv).Error
@@ -247,7 +287,12 @@ func (cs *ConversationStore) GetUnscoped(ctx context.Context, id string) (*model
 
 // UpdateLastRead updates the last-read message ID for the specified user.
 // Uses MAX semantics: only advances forward, never backward (D-012).
-func (cs *ConversationStore) UpdateLastRead(ctx context.Context, convID, userID string, messageID uint32) error {
+func (cs *ConversationStore) UpdateLastRead(ctx context.Context, convID, userID string, messageID uint32) (err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationUpdateLastRead,
+		attribute.String(tracing.AttrConversationID, convID),
+		attribute.String(tracing.AttrUserID, userID))
+	defer func() { finish(err) }()
+
 	// 1. Get conversation to determine which field to update.
 	conv, err := cs.Get(ctx, convID)
 	if err != nil {
@@ -282,7 +327,11 @@ func (cs *ConversationStore) UpdateLastRead(ctx context.Context, convID, userID 
 // This is called when the agent transitions to a new status (e.g., idle → thinking → asking_user).
 // The agent_last_activity and updated_at fields are automatically set to the current time.
 // Returns the timestamp used for the update so callers can use it for broadcasts.
-func (cs *ConversationStore) UpdateAgentStatus(ctx context.Context, conversationID, agentStatus, agentID, checkpointID string) (time.Time, error) {
+func (cs *ConversationStore) UpdateAgentStatus(ctx context.Context, conversationID, agentStatus, agentID, checkpointID string) (ts time.Time, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationUpdateAgentStatus,
+		attribute.String(tracing.AttrConversationID, conversationID))
+	defer func() { finish(err) }()
+
 	now := time.Now()
 	result := cs.db.WithContext(ctx).Model(&model.Conversation{}).
 		Where("id = ?", conversationID).
@@ -306,7 +355,11 @@ func (cs *ConversationStore) UpdateAgentStatus(ctx context.Context, conversation
 // This is called when the agent completes execution or when HITL is resolved.
 // It clears agent_id, checkpoint_id and resets agent_status to "idle".
 // Returns the timestamp used for the update so callers can use it for broadcasts.
-func (cs *ConversationStore) ClearAgentStatus(ctx context.Context, conversationID string) (time.Time, error) {
+func (cs *ConversationStore) ClearAgentStatus(ctx context.Context, conversationID string) (ts time.Time, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationClearAgentStatus,
+		attribute.String(tracing.AttrConversationID, conversationID))
+	defer func() { finish(err) }()
+
 	now := time.Now()
 	result := cs.db.WithContext(ctx).Model(&model.Conversation{}).
 		Where("id = ?", conversationID).
@@ -329,10 +382,13 @@ func (cs *ConversationStore) ClearAgentStatus(ctx context.Context, conversationI
 // ListStaleHITLConversations returns conversations stuck in asking_user status
 // with updated_at older than maxAge. Results are limited to the given count.
 // Used by the HITL timeout cleanup task (D-123).
-func (cs *ConversationStore) ListStaleHITLConversations(ctx context.Context, maxAge time.Duration, limit int) ([]*model.Conversation, error) {
+func (cs *ConversationStore) ListStaleHITLConversations(ctx context.Context, maxAge time.Duration, limit int) (result []*model.Conversation, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBConversationListStaleHITL)
+	defer func() { finish(err) }()
+
 	cutoff := time.Now().Add(-maxAge)
 	var conversations []*model.Conversation
-	err := cs.db.WithContext(ctx).
+	err = cs.db.WithContext(ctx).
 		Where("agent_status = ? AND agent_last_activity < ?",
 			model.AgentStatusAskingUser, cutoff).
 		Order("agent_last_activity ASC").
