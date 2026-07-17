@@ -150,7 +150,9 @@ func (m *TracingMiddleware) AfterModelRewriteState(ctx context.Context, state *a
 }
 
 // WrapInvokableToolCall wraps tool execution with an "agent.tool.call" span
-// that records the tool name, duration, and any error.
+// that records the tool name, duration, and any error. When debug content
+// capture is active, it also records tool input (argumentsInJSON) and output
+// (result) as span events for debugging purposes.
 func (m *TracingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 		_, span := m.tracer.Start(ctx, tracing.SpanAgentToolCall,
@@ -160,6 +162,13 @@ func (m *TracingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 			),
 		)
 
+		// Debug: record tool input as span event
+		if m.debugMatched {
+			span.AddEvent("tool.debug.input", trace.WithAttributes(
+				attribute.String("tool.arguments", argumentsInJSON),
+			))
+		}
+
 		start := time.Now()
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		durationMs := time.Since(start).Milliseconds()
@@ -167,6 +176,13 @@ func (m *TracingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 		span.SetAttributes(
 			attribute.Int64(tracing.AttrDurationMs, durationMs),
 		)
+
+		// Debug: record tool output as span event
+		if m.debugMatched {
+			span.AddEvent("tool.debug.output", trace.WithAttributes(
+				attribute.String("tool.result", result),
+			))
+		}
 
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
@@ -191,33 +207,72 @@ func (m *TracingMiddleware) isDebugCaller(ctx context.Context) bool {
 }
 
 // serializeMessages converts messages to a JSON string for debug span events.
+// It captures Role, Content, ToolCalls (for assistant messages), ToolCallID/ToolName
+// (for tool messages), and ReasoningContent (thinking process).
 func (m *TracingMiddleware) serializeMessages(msgs []*schema.Message) string {
+	type toolCallJSON struct {
+		Name string `json:"name"`
+		Args string `json:"args"`
+	}
 	type msgJSON struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
+		Role             string         `json:"role"`
+		Content          string         `json:"content"`
+		ToolCalls        []toolCallJSON `json:"tool_calls,omitempty"`
+		ToolCallID       string         `json:"tool_call_id,omitempty"`
+		ToolName         string         `json:"tool_name,omitempty"`
+		ReasoningContent string         `json:"reasoning_content,omitempty"`
 	}
 	out := make([]msgJSON, 0, len(msgs))
 	for _, msg := range msgs {
-		out = append(out, msgJSON{
-			Role:    string(msg.Role),
-			Content: msg.Content,
-		})
+		mj := msgJSON{
+			Role:             string(msg.Role),
+			Content:          msg.Content,
+			ToolCallID:       msg.ToolCallID,
+			ToolName:         msg.ToolName,
+			ReasoningContent: msg.ReasoningContent,
+		}
+		for _, tc := range msg.ToolCalls {
+			mj.ToolCalls = append(mj.ToolCalls, toolCallJSON{
+				Name: tc.Function.Name,
+				Args: tc.Function.Arguments,
+			})
+		}
+		out = append(out, mj)
 	}
 	data, _ := json.Marshal(out)
 	return string(data)
 }
 
 // serializeMessage converts a single message to a JSON string.
+// It captures Role, Content, ToolCalls (for assistant messages), ToolCallID/ToolName
+// (for tool messages), and ReasoningContent (thinking process).
 func (m *TracingMiddleware) serializeMessage(msg *schema.Message) string {
+	type toolCallJSON struct {
+		Name string `json:"name"`
+		Args string `json:"args"`
+	}
 	type msgJSON struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
+		Role             string         `json:"role"`
+		Content          string         `json:"content"`
+		ToolCalls        []toolCallJSON `json:"tool_calls,omitempty"`
+		ToolCallID       string         `json:"tool_call_id,omitempty"`
+		ToolName         string         `json:"tool_name,omitempty"`
+		ReasoningContent string         `json:"reasoning_content,omitempty"`
 	}
-	out := msgJSON{
-		Role:    string(msg.Role),
-		Content: msg.Content,
+	mj := msgJSON{
+		Role:             string(msg.Role),
+		Content:          msg.Content,
+		ToolCallID:       msg.ToolCallID,
+		ToolName:         msg.ToolName,
+		ReasoningContent: msg.ReasoningContent,
 	}
-	data, _ := json.Marshal(out)
+	for _, tc := range msg.ToolCalls {
+		mj.ToolCalls = append(mj.ToolCalls, toolCallJSON{
+			Name: tc.Function.Name,
+			Args: tc.Function.Arguments,
+		})
+	}
+	data, _ := json.Marshal(mj)
 	return string(data)
 }
 

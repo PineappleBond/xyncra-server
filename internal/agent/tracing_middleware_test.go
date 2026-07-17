@@ -354,3 +354,176 @@ func TestTracingMiddleware_DebugFilter_NoCallerDevice(t *testing.T) {
 		assert.NotEqual(t, "llm.debug.response", e.Name)
 	}
 }
+
+func TestTracingMiddleware_SerializeMessages_IncludesToolCalls(t *testing.T) {
+	m := NewTracingMiddleware("agent-ser-1", "gpt-4")
+
+	msgs := []*schema.Message{
+		schema.UserMessage("What's the weather?"),
+		{
+			Role:    schema.Assistant,
+			Content: "",
+			ToolCalls: []schema.ToolCall{
+				{
+					ID: "call-1",
+					Function: schema.FunctionCall{
+						Name:      "get_weather",
+						Arguments: `{"city":"Beijing"}`,
+					},
+				},
+			},
+		},
+		{
+			Role:       schema.Tool,
+			Content:    `{"temp":"27°C"}`,
+			ToolCallID: "call-1",
+			ToolName:   "get_weather",
+		},
+	}
+
+	result := m.serializeMessages(msgs)
+
+	// Verify tool_calls are included for assistant message
+	assert.Contains(t, result, `"tool_calls"`)
+	assert.Contains(t, result, `"get_weather"`)
+	assert.Contains(t, result, "Beijing")
+
+	// Verify tool message fields are included
+	assert.Contains(t, result, `"tool_call_id"`)
+	assert.Contains(t, result, `"call-1"`)
+	assert.Contains(t, result, `"tool_name"`)
+
+	// Verify the assistant message content is empty but tool_calls present
+	assert.Contains(t, result, `"content":""`)
+}
+
+func TestTracingMiddleware_SerializeMessages_IncludesReasoningContent(t *testing.T) {
+	m := NewTracingMiddleware("agent-ser-2", "gpt-4")
+
+	msgs := []*schema.Message{
+		schema.UserMessage("Solve this math problem"),
+		{
+			Role:             schema.Assistant,
+			Content:          "The answer is 42.",
+			ReasoningContent: "Let me think step by step. First, I need to...",
+		},
+	}
+
+	result := m.serializeMessages(msgs)
+
+	// Verify reasoning_content is included
+	assert.Contains(t, result, `"reasoning_content"`)
+	assert.Contains(t, result, "Let me think step by step")
+}
+
+func TestTracingMiddleware_SerializeMessage_IncludesToolCalls(t *testing.T) {
+	m := NewTracingMiddleware("agent-ser-3", "gpt-4")
+
+	msg := &schema.Message{
+		Role:    schema.Assistant,
+		Content: "",
+		ToolCalls: []schema.ToolCall{
+			{
+				ID: "call-abc",
+				Function: schema.FunctionCall{
+					Name:      "search",
+					Arguments: `{"query":"test"}`,
+				},
+			},
+		},
+		ReasoningContent: "I should search for this",
+	}
+
+	result := m.serializeMessage(msg)
+
+	assert.Contains(t, result, `"tool_calls"`)
+	assert.Contains(t, result, `"search"`)
+	assert.Contains(t, result, `"reasoning_content"`)
+	assert.Contains(t, result, "I should search for this")
+}
+
+func TestTracingMiddleware_WrapInvokableToolCall_DebugEvents(t *testing.T) {
+	startIdx := len(recorder.Ended())
+	m := NewTracingMiddleware("agent-tool-debug", "gpt-4")
+	m.SetDebugFilter([]string{"user-debug"}, nil)
+
+	mockEndpoint := func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+		return `{"result":"sunny"}`, nil
+	}
+
+	tCtx := &adk.ToolContext{Name: "get_weather", CallID: "call-xyz"}
+
+	wrapped, err := m.WrapInvokableToolCall(
+		ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "user-debug", DeviceID: "dev-1"}),
+		mockEndpoint, tCtx,
+	)
+	require.NoError(t, err)
+
+	// Set debugMatched (normally set in BeforeModelRewriteState)
+	m.debugMatched = true
+
+	result, err := wrapped(context.Background(), `{"city":"Shanghai"}`)
+	require.NoError(t, err)
+	assert.Equal(t, `{"result":"sunny"}`, result)
+
+	spans := spansSince(startIdx)
+	require.Len(t, spans, 1)
+
+	// Verify tool.debug.input and tool.debug.output events exist
+	events := spans[0].Events()
+	var hasInput, hasOutput bool
+	for _, e := range events {
+		if e.Name == "tool.debug.input" {
+			hasInput = true
+			// Check the input contains the arguments
+			for _, attr := range e.Attributes {
+				if attr.Key == "tool.arguments" {
+					assert.Contains(t, attr.Value.AsString(), "Shanghai")
+				}
+			}
+		}
+		if e.Name == "tool.debug.output" {
+			hasOutput = true
+			for _, attr := range e.Attributes {
+				if attr.Key == "tool.result" {
+					assert.Contains(t, attr.Value.AsString(), "sunny")
+				}
+			}
+		}
+	}
+	assert.True(t, hasInput, "expected tool.debug.input event for debug-matched user")
+	assert.True(t, hasOutput, "expected tool.debug.output event for debug-matched user")
+}
+
+func TestTracingMiddleware_WrapInvokableToolCall_NoDebugEvents_WhenNotMatched(t *testing.T) {
+	startIdx := len(recorder.Ended())
+	m := NewTracingMiddleware("agent-tool-no-debug", "gpt-4")
+	m.SetDebugFilter([]string{"user-other"}, nil)
+
+	mockEndpoint := func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+		return "ok", nil
+	}
+
+	tCtx := &adk.ToolContext{Name: "test-tool", CallID: "call-999"}
+
+	wrapped, err := m.WrapInvokableToolCall(
+		ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "user-debug", DeviceID: "dev-1"}),
+		mockEndpoint, tCtx,
+	)
+	require.NoError(t, err)
+
+	// debugMatched is false (user doesn't match filter)
+	m.debugMatched = false
+
+	_, err = wrapped(context.Background(), `{"key":"val"}`)
+	require.NoError(t, err)
+
+	spans := spansSince(startIdx)
+	require.Len(t, spans, 1)
+
+	// Verify NO tool.debug.input/output events
+	for _, e := range spans[0].Events() {
+		assert.NotEqual(t, "tool.debug.input", e.Name)
+		assert.NotEqual(t, "tool.debug.output", e.Name)
+	}
+}
