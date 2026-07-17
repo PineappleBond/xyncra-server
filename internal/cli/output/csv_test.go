@@ -16,7 +16,7 @@ func TestOpenExportOutput_Stdout_EmptyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer wc.Close()
+	defer func() { _ = wc.Close() }()
 
 	// Should be a nopCloseWriter wrapping os.Stdout.
 	if _, ok := wc.(*nopCloseWriter); !ok {
@@ -29,7 +29,7 @@ func TestOpenExportOutput_Stdout_DashPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer wc.Close()
+	defer func() { _ = wc.Close() }()
 
 	// Should be a nopCloseWriter wrapping os.Stdout.
 	if _, ok := wc.(*nopCloseWriter); !ok {
@@ -77,7 +77,7 @@ func TestOpenExportOutput_File(t *testing.T) {
 		t.Errorf("expected file %q to exist", path)
 	}
 
-	wc.Close()
+	_ = wc.Close()
 }
 
 func TestOpenExportOutput_File_WriteAndClose(t *testing.T) {

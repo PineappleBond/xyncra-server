@@ -130,10 +130,10 @@ func formatArgs(args []any) string {
 	var b strings.Builder
 	for i := 0; i < len(args); i += 2 {
 		b.WriteByte(' ')
-		b.WriteString(fmt.Sprintf("%v", args[i]))
+		fmt.Fprintf(&b, "%v", args[i])
 		b.WriteByte('=')
 		if i+1 < len(args) {
-			b.WriteString(fmt.Sprintf("%v", args[i+1]))
+			fmt.Fprintf(&b, "%v", args[i+1])
 		} else {
 			b.WriteString("MISSING")
 		}

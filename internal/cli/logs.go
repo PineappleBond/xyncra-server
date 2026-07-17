@@ -115,7 +115,7 @@ func runLogsTail(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("logs tail: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	cw := output.NewConsoleWriter(os.Stdout)
 
@@ -223,7 +223,7 @@ func runLogsSearch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("logs search: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	cw := output.NewConsoleWriter(os.Stdout)
 
@@ -375,7 +375,7 @@ func runLogsStats(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("logs stats: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	cw := output.NewConsoleWriter(os.Stdout)
 
@@ -477,13 +477,13 @@ func runLogsExport(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("logs export: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	out, err := output.OpenExportOutput(outputPath)
 	if err != nil {
 		return fmt.Errorf("logs export: open output: %w", err)
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	switch logType {
 	case "rpc":
@@ -604,7 +604,7 @@ func runLogsCleanup(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("logs cleanup: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	cw := output.NewConsoleWriter(os.Stdout)
 	before := time.Now().Add(-retention)

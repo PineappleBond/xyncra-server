@@ -39,7 +39,7 @@ func Init(cfg Config) (cleanup func(), err error) {
 		stdoutW = cfg.stdoutWriter
 	}
 
-	var w io.Writer = stdoutW
+	w := stdoutW
 	var lj *lumberjack.Logger
 
 	if cfg.Dir != "" {

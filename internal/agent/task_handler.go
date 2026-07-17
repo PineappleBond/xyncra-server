@@ -184,7 +184,7 @@ func NewAgentTaskHandler(
 		}
 
 		// 6. Execute.
-		execPayload := ExecutePayload{
+		execPayload := ExecutePayload{ //nolint:staticcheck // all fields used by executor
 			MessageID:      payload.MessageID,
 			ConversationID: payload.ConversationID,
 			AgentID:        payload.AgentID,

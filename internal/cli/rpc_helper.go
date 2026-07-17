@@ -28,7 +28,7 @@ func standaloneRPC(ctx context.Context, cliCtx *CLIContext, method string, param
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", cliCtx.ServerURL, err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {

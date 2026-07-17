@@ -9,6 +9,17 @@
 #   - lint: golangci-lint (v2.1) + go vet
 #   - unit-test: make test (go test -short)
 #   - docker-build: docker build (validates Dockerfile)
+#
+# Prerequisites:
+#   Unit tests require PostgreSQL and MySQL. Start them via Docker:
+#     docker run -d --name xyncra-pg -p 5432:5432 \
+#       -e POSTGRES_USER=sequify -e POSTGRES_PASSWORD=sequify -e POSTGRES_DB=sequify \
+#       postgres:16
+#     docker run -d --name xyncra-mysql -p 3306:3306 \
+#       -e MYSQL_ROOT_PASSWORD=sequify -e MYSQL_USER=sequify \
+#       -e MYSQL_PASSWORD=sequify -e MYSQL_DATABASE=sequify \
+#       mysql:8
+#   Or use docker compose if a compose file is available.
 
 set -euo pipefail
 
@@ -67,7 +78,7 @@ echo ""
 # =============================================================================
 echo "▶ [3/3] Docker build"
 if command -v docker &>/dev/null; then
-    if ! docker build -t xyncra-server:pre-push-check . >/dev/null 2>&1; then
+    if ! docker build -t xyncra-server:pre-push-check -f deploy/Dockerfile . >/dev/null 2>&1; then
         echo "❌ docker build failed"
         failed=1
     else

@@ -1,0 +1,26 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+  settings:
+    errcheck:
+      ignore: fmt:.*,io:Read|Write|ReadFrom|WriteTo
+      check-blank: false
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - unused
+          - staticcheck
+          - govet
+      - text: "SA4006"
+        linters:
+          - staticcheck

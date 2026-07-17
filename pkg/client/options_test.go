@@ -313,7 +313,7 @@ func TestWithLogger(t *testing.T) {
 
 func TestStdLogger(t *testing.T) {
 	var buf bytes.Buffer
-	slogger := slog.New(slog.NewTextHandler(&buf, nil))
+	slogger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	l := &stdLogger{logger: slogger}
 
 	l.Info("hello", "key", "value")

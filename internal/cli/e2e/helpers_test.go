@@ -36,6 +36,26 @@ import (
 	clientmodel "github.com/PineappleBond/xyncra-server/pkg/store/model"
 )
 
+// TestMain skips the entire E2E package when -short flag is set.
+// These tests require a running Redis (port 16379) and xyncra-server (port 18080).
+func TestMain(m *testing.M) {
+	// Check for short mode. go test -short passes -test.short to the binary.
+	short := false
+	for _, arg := range os.Args {
+		if arg == "-test.short" || arg == "--test.short" ||
+			arg == "-test.short=true" || arg == "--test.short=true" ||
+			arg == "-short" || arg == "--short" {
+			short = true
+			break
+		}
+	}
+	if short {
+		fmt.Println("SKIP: CLI E2E tests require running Redis + server (use make test-cli-e2e)")
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------

@@ -224,8 +224,7 @@ func (sm *syncManager) ApplyUpdate(ctx context.Context, update *protocol.Package
 	// update.Seq == localMaxSeq + 1 → continue processing.
 
 	// Steps 3-5 wrapped in an atomic transaction (H-3).
-	var txErr error
-	txErr = sm.db.Transaction(ctx, func(tx *gorm.DB) error {
+	txErr := sm.db.Transaction(ctx, func(tx *gorm.DB) error {
 		// 3. Deduplicate via NotificationLog (Seq uniqueIndex).
 		nLog := &model.NotificationLog{
 			ID:        uuid.New().String(),

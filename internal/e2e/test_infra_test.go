@@ -8,6 +8,7 @@ package e2e_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,25 @@ import (
 
 	"github.com/PineappleBond/xyncra-server/internal/store"
 )
+
+// TestMain skips the entire E2E package when -short flag is set.
+// These tests require a running Redis instance at localhost:16379.
+func TestMain(m *testing.M) {
+	short := false
+	for _, arg := range os.Args {
+		if arg == "-test.short" || arg == "--test.short" ||
+			arg == "-test.short=true" || arg == "--test.short=true" ||
+			arg == "-short" || arg == "--short" {
+			short = true
+			break
+		}
+	}
+	if short {
+		fmt.Println("SKIP: Server E2E tests require running Redis (use make test-e2e)")
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 // ---------------------------------------------------------------------------
 // Timeout constants

@@ -75,7 +75,7 @@ func runDraftSave(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("draft save: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	draft := &model.Draft{
 		ID:             uuid.New().String(),
@@ -131,7 +131,7 @@ func runDraftGet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("draft get: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	draft, err := db.Drafts.GetByConversation(ctx, convID)
 	if err != nil {
@@ -187,7 +187,7 @@ func runDraftDelete(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("draft delete: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := db.Drafts.DeleteByConversation(ctx, convID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {

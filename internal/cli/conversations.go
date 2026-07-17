@@ -121,7 +121,7 @@ func createConversationStandalone(ctx context.Context, cliCtx *CLIContext, peerI
 	if result.Conversation != nil {
 		db, dbErr := store.New(cliCtx.DBPath)
 		if dbErr == nil {
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			if err := db.Conversations.Upsert(ctx, result.Conversation); err != nil {
 				fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to persist created conversation locally: %v\n", err)
 			}
@@ -253,7 +253,7 @@ func deleteConversationStandalone(ctx context.Context, cliCtx *CLIContext, convI
 	// Sync local DB after RPC success (consistent with IPC handler — D-035).
 	db, dbErr := store.New(cliCtx.DBPath)
 	if dbErr == nil {
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 		if err := db.Conversations.Delete(ctx, convID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to delete conversation locally: %v\n", err)
 		}
@@ -367,7 +367,7 @@ func restoreConversationStandalone(ctx context.Context, cliCtx *CLIContext, conv
 	// Sync local DB after RPC success (consistent with IPC handler — D-035).
 	db, dbErr := store.New(cliCtx.DBPath)
 	if dbErr == nil {
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 		if err := db.Conversations.Restore(ctx, convID); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				// Local record not found, skip (standalone path cannot pull from server to backfill, warn only).
@@ -418,7 +418,7 @@ func runListConversations(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("list-conversations: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Fetch limit+1 to detect hasMore.
 	convs, err := db.Conversations.GetByUser(ctx, cliCtx.UserID, offset, limit+1)
@@ -444,8 +444,8 @@ func printConversationList(convs []*model.Conversation, currentUserID string, ha
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tPEER\tTITLE\tLAST MESSAGE")
-	fmt.Fprintln(w, "--\t----\t-----\t------------")
+	_, _ = fmt.Fprintln(w, "ID\tPEER\tTITLE\tLAST MESSAGE")
+	_, _ = fmt.Fprintln(w, "--\t----\t-----\t------------")
 	for _, conv := range convs {
 		peer := conv.UserID2
 		if conv.UserID2 == currentUserID {
@@ -459,9 +459,9 @@ func printConversationList(convs []*model.Conversation, currentUserID string, ha
 		if !conv.LastMessageAt.IsZero() {
 			lastMsg = conv.LastMessageAt.Format("2006-01-02 15:04:05")
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", conv.ID, peer, title, lastMsg)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", conv.ID, peer, title, lastMsg)
 	}
-	w.Flush()
+	_ = w.Flush()
 
 	if hasMore {
 		fmt.Println("... more conversations available (use --offset to paginate)")
@@ -509,7 +509,7 @@ func runGetConversation(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("get-conversation: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	conv, err := db.Conversations.Get(ctx, convID)
 	if err != nil {

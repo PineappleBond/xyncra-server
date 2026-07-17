@@ -51,21 +51,21 @@ func (b *MCPBridge) ConnectSSE(ctx context.Context, name, url string, toolFilter
 
 	// Initialize (MCP handshake) without storing in the map yet (D-086 review).
 	if err := b.initializeClient(ctx, name, cli); err != nil {
-		cli.Close()
+		_ = cli.Close()
 		return nil, err
 	}
 
 	// getTools must succeed before we track the client (avoids orphan connections).
 	tools, err := b.getTools(ctx, name, cli, toolFilter)
 	if err != nil {
-		cli.Close()
+		_ = cli.Close()
 		return nil, err
 	}
 
 	// All steps succeeded — register the client in the map.
 	b.mu.Lock()
 	if old, exists := b.clients[name]; exists {
-		old.Close()
+		_ = old.Close()
 	}
 	b.clients[name] = cli
 	b.mu.Unlock()
@@ -84,21 +84,21 @@ func (b *MCPBridge) ConnectStdio(ctx context.Context, name, command string, args
 
 	// Initialize (MCP handshake) without storing in the map yet (D-086 review).
 	if err := b.initializeClient(ctx, name, cli); err != nil {
-		cli.Close()
+		_ = cli.Close()
 		return nil, err
 	}
 
 	// getTools must succeed before we track the client (avoids orphan connections).
 	tools, err := b.getTools(ctx, name, cli, toolFilter)
 	if err != nil {
-		cli.Close()
+		_ = cli.Close()
 		return nil, err
 	}
 
 	// All steps succeeded — register the client in the map.
 	b.mu.Lock()
 	if old, exists := b.clients[name]; exists {
-		old.Close()
+		_ = old.Close()
 	}
 	b.clients[name] = cli
 	b.mu.Unlock()

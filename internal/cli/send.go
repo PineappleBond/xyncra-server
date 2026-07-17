@@ -135,7 +135,7 @@ func sendStandalone(ctx context.Context, cliCtx *CLIContext, convID, content str
 	if result.Message != nil {
 		db, dbErr := store.New(cliCtx.DBPath)
 		if dbErr == nil {
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			if err := db.Messages.Create(ctx, result.Message); err != nil {
 				if !errors.Is(err, store.ErrDuplicateKey) {
 					fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to persist sent message locally: %v\n", err)
@@ -172,7 +172,7 @@ func clearDraft(cliCtx *CLIContext, convID string) {
 		fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to open database for draft cleanup: %v\n", err)
 		return
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := db.Drafts.DeleteByConversation(context.Background(), convID); err != nil && !errors.Is(err, store.ErrNotFound) {
 		fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to clear draft: %v\n", err)

@@ -148,11 +148,10 @@ func (cm *DBContextManager) StartCleanup(ctx context.Context, interval time.Dura
 // (see StartCleanup) is not terminated by a single failure.
 func (cm *DBContextManager) cleanupExpired() {
 	defer func() {
-		if r := recover(); r != nil {
-			// Log panic but don't crash the goroutine.
-			// If we had a logger reference, we'd log it here.
-			// For now, silently continue.
-		}
+		_ = recover()
+		// Log panic but don't crash the goroutine.
+		// If we had a logger reference, we'd log it here.
+		// For now, silently continue.
 	}()
 	now := time.Now()
 	cm.cache.Range(func(key, value any) bool {

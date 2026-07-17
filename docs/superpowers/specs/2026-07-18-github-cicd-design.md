@@ -55,7 +55,7 @@ env:
   GOLANGCI_LINT_VERSION: 'v2.1'
 ```
 
-- **Go**: single version (matches `go.mod` and `Dockerfile`). No version matrix — xyncra-server is an application, not a library.
+- **Go**: single version (matches `go.mod` and `deploy/Dockerfile`). No version matrix — xyncra-server is an application, not a library.
 - **golangci-lint**: pinned to `v2.1`. Pre-push hook checks and reports the installed version vs required version.
 
 ## 6. Job Topology
@@ -106,10 +106,28 @@ steps:
 
 ### 7.2 `unit-test` (PR + main)
 
-**Purpose**: Run unit tests (no external dependencies).
+**Purpose**: Run unit tests with database dependencies.
 
 ```yaml
 runs-on: ubuntu-latest
+services:
+  postgres:
+    image: postgres:16
+    env:
+      POSTGRES_USER: sequify
+      POSTGRES_PASSWORD: sequify
+      POSTGRES_DB: sequify
+    ports:
+      - 5432:5432
+  mysql:
+    image: mysql:8
+    env:
+      MYSQL_ROOT_PASSWORD: sequify
+      MYSQL_USER: sequify
+      MYSQL_PASSWORD: sequify
+      MYSQL_DATABASE: sequify
+    ports:
+      - 3306:3306
 steps:
   - uses: actions/checkout@v4
   - uses: actions/setup-go@v5
@@ -119,11 +137,11 @@ steps:
   - run: make test
 ```
 
-`make test` invokes `go test -short ./...` — skips tests requiring Redis or Docker.
+`make test` invokes `go test -short ./...`. Store tests run against SQLite (in-memory), PostgreSQL, and MySQL. The PostgreSQL and MySQL service containers provide the required database backends.
 
 ### 7.3 `docker-build` (PR + main)
 
-**Purpose**: Verify Dockerfile builds successfully. Catches Dockerfile drift before merge.
+**Purpose**: Verify deploy/Dockerfile builds successfully. Catches deploy/Dockerfile drift before merge.
 
 ```yaml
 runs-on: ubuntu-latest
@@ -147,7 +165,7 @@ steps:
   - uses: actions/setup-go@v5
     with:
       go-version: ${{ env.GO_VERSION }}
-  - run: docker compose -f docker-compose.e2e.yml up -d --wait
+  - run: docker compose -f deploy/docker-compose.e2e.yml up -d --wait
   - run: make test-e2e
 ```
 
@@ -167,7 +185,7 @@ steps:
     with:
       go-version: ${{ env.GO_VERSION }}
   - run: make build-client
-  - run: docker compose up -d --wait
+  - run: docker compose -f deploy/docker-compose.e2e.yml up -d --wait
   - run: make test-cli-e2e
 ```
 
@@ -210,7 +228,7 @@ Contains all 6 jobs in one workflow. Jobs 1-3 run in parallel on every trigger. 
 - **Coverage upload**: Project has `coverage.out` locally. CI does not upload coverage artifacts. Can be added later if needed.
 - **Notifications**: No Slack/email on failure. GitHub Actions UI shows run status.
 - **Image tags beyond commit SHA**: No `latest` tag, no branch tags. Clean, simple tagging.
-- **Multi-arch builds**: Dockerfile builds for linux/amd64 only (matches deployment target). ARM builds can be added via `docker/build-push-action` with `platforms: linux/amd64,linux/arm64` if needed.
+- **Multi-arch builds**: deploy/Dockerfile builds for linux/amd64 only (matches deployment target). ARM builds can be added via `docker/build-push-action` with `platforms: linux/amd64,linux/arm64` if needed.
 - **Docker layer caching in CI**: `docker-build` and `push-to-ghcr` both run `docker build` from scratch. Acceptable for now; can optimize with `docker/build-push-action` + BuildKit cache later.
 
 ## 10. Success Criteria

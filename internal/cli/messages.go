@@ -100,7 +100,7 @@ func deleteMessageStandalone(ctx context.Context, cliCtx *CLIContext, msgID stri
 	// RPC成功后同步本地DB（与IPC handler保持一致 — D-035）。
 	db, dbErr := store.New(cliCtx.DBPath)
 	if dbErr == nil {
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 		if err := db.Messages.Delete(ctx, msgID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			fmt.Fprintf(os.Stderr, "[xyncra] warning: failed to delete message locally: %v\n", err)
 		}
@@ -188,7 +188,7 @@ func resolveLastProcessedMessageID(ctx context.Context, cliCtx *CLIContext, conv
 	if err != nil {
 		return 0, fmt.Errorf("mark-as-read: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	conv, err := db.Conversations.Get(ctx, convID)
 	if err != nil {
@@ -298,7 +298,7 @@ func runGetMessages(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("get-messages: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Fetch limit+1 to detect hasMore.
 	msgs, err := db.Messages.ListByConversation(ctx, convID, afterMsgID, limit+1)
@@ -367,7 +367,7 @@ func runSearchMessages(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("search-messages: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Fetch limit+1 to detect hasMore.
 	msgs, err := db.Messages.SearchByConversation(ctx, convID, query, afterMsgID, limit+1)

@@ -53,20 +53,20 @@ func (h *cliUpdateHandler) OnMessage(_ context.Context, msg *model.Message) erro
 	if msg == nil {
 		return nil
 	}
-	fmt.Fprintf(os.Stdout, "[new message] seq=%d from=%s conv=%s %q\n",
+	_, _ = fmt.Fprintf(os.Stdout, "[new message] seq=%d from=%s conv=%s %q\n",
 		msg.MessageID, msg.SenderID, msg.ConversationID, msg.Content)
 	return nil
 }
 
 // OnDeleteMessage prints a message deletion event to stdout.
 func (h *cliUpdateHandler) OnDeleteMessage(_ context.Context, messageID string, conversationID string) error {
-	fmt.Fprintf(os.Stdout, "[delete message] conv=%s msg=%s\n", conversationID, messageID)
+	_, _ = fmt.Fprintf(os.Stdout, "[delete message] conv=%s msg=%s\n", conversationID, messageID)
 	return nil
 }
 
 // OnMarkRead prints a read-cursor advance event to stdout.
 func (h *cliUpdateHandler) OnMarkRead(_ context.Context, conversationID string, messageID uint32) error {
-	fmt.Fprintf(os.Stdout, "[mark read] conv=%s msg_id=%d\n", conversationID, messageID)
+	_, _ = fmt.Fprintf(os.Stdout, "[mark read] conv=%s msg_id=%d\n", conversationID, messageID)
 	return nil
 }
 
@@ -77,17 +77,17 @@ func (h *cliUpdateHandler) OnConversation(ctx context.Context, conv *model.Conve
 	if conv == nil {
 		return nil
 	}
-	fmt.Fprintf(os.Stdout, "[conversation] id=%s title=%q\n", conv.ID, conv.Title)
+	_, _ = fmt.Fprintf(os.Stdout, "[conversation] id=%s title=%q\n", conv.ID, conv.Title)
 
 	// HITL display: when agent is asking_user, show pending questions (D-125).
 	if conv.AgentStatus == model.AgentStatusAskingUser && h.questionsDB != nil {
 		questions, err := h.questionsDB.GetByConversation(ctx, conv.ID)
 		if err == nil && len(questions) > 0 {
-			fmt.Fprintf(os.Stdout, "[hitl] conv=%s agent=%s checkpoint_id=%s\n",
+			_, _ = fmt.Fprintf(os.Stdout, "[hitl] conv=%s agent=%s checkpoint_id=%s\n",
 				conv.ID, conv.AgentID, conv.CheckpointID)
 			for i, q := range questions {
 				if q.Status == "pending" {
-					fmt.Fprintf(os.Stdout, "  [%d] interrupt_id=%s question=%q (%s)\n",
+					_, _ = fmt.Fprintf(os.Stdout, "  [%d] interrupt_id=%s question=%q (%s)\n",
 						i+1, q.InterruptID, q.QuestionText, q.Status)
 				}
 			}
@@ -99,7 +99,7 @@ func (h *cliUpdateHandler) OnConversation(ctx context.Context, conv *model.Conve
 
 // OnGap prints a sequence gap notification to stdout.
 func (h *cliUpdateHandler) OnGap(_ context.Context, seq uint32) error {
-	fmt.Fprintf(os.Stdout, "[gap] seq=%d\n", seq)
+	_, _ = fmt.Fprintf(os.Stdout, "[gap] seq=%d\n", seq)
 	return nil
 }
 
@@ -117,7 +117,7 @@ func (h *cliUpdateHandler) OnTyping(_ context.Context, userID, conversationID st
 			action = "stopped thinking"
 		}
 	}
-	fmt.Fprintf(os.Stdout, "[%s] user=%s conv=%s %s\n", label, userID, conversationID, action)
+	_, _ = fmt.Fprintf(os.Stdout, "[%s] user=%s conv=%s %s\n", label, userID, conversationID, action)
 	return nil
 }
 
@@ -131,21 +131,21 @@ func (h *cliUpdateHandler) OnStreaming(_ context.Context, userID, conversationID
 	if client.IsAgentUser(userID) {
 		prefix = "agent"
 	}
-	fmt.Fprintf(os.Stdout, "[%s] user=%s conv=%s stream=%s status=%s text=%q\n",
+	_, _ = fmt.Fprintf(os.Stdout, "[%s] user=%s conv=%s stream=%s status=%s text=%q\n",
 		prefix, userID, conversationID, streamID, status, text)
 	return nil
 }
 
 // OnAgentStatus prints an agent status change event to stdout (D-087).
 func (h *cliUpdateHandler) OnAgentStatus(_ context.Context, userID, conversationID, status string) error {
-	fmt.Fprintf(os.Stdout, "[agent_status] agent=%s conv=%s status=%s\n",
+	_, _ = fmt.Fprintf(os.Stdout, "[agent_status] agent=%s conv=%s status=%s\n",
 		userID, conversationID, status)
 	return nil
 }
 
 // OnAgentTimeout prints an agent timeout event to stdout (D-087).
 func (h *cliUpdateHandler) OnAgentTimeout(_ context.Context, userID, conversationID, reason string) error {
-	fmt.Fprintf(os.Stdout, "[agent_timeout] agent=%s conv=%s reason=%q\n",
+	_, _ = fmt.Fprintf(os.Stdout, "[agent_timeout] agent=%s conv=%s reason=%q\n",
 		userID, conversationID, reason)
 	return nil
 }
@@ -258,7 +258,7 @@ func runListen(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("listen: open db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Create the IPC server for the Unix socket (D-030).
 	ipcServer := NewIPCServer(cliCtx.SocketPath())

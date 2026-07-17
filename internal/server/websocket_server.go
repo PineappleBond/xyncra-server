@@ -404,7 +404,7 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 		authenticate = defaultAuthenticate
 	}
 
-	var handler MessageHandler = o.messageHandler
+	handler := o.messageHandler
 	if handler == nil {
 		handler = NewDefaultMessageHandler()
 	}

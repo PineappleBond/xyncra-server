@@ -134,7 +134,7 @@ func (s *IPCServer) Start(ctx context.Context) error {
 	}
 
 	if err := os.Chmod(s.sockPath, 0600); err != nil {
-		ln.Close()
+		_ = ln.Close()
 		return fmt.Errorf("ipc server chmod socket: %w", err)
 	}
 
@@ -172,7 +172,7 @@ func (s *IPCServer) acceptLoop() {
 // dispatches them to handlers, and writes back JSON responses.
 func (s *IPCServer) handleConn(conn net.Conn) {
 	defer s.wg.Done()
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -250,7 +250,7 @@ func (c *IPCClient) Call(ctx context.Context, method string, params any) (*IPCRe
 	if err != nil {
 		return nil, fmt.Errorf("ipc client dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Set read deadline so we don't block indefinitely if the server never responds.
 	if err := conn.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {

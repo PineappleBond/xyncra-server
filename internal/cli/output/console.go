@@ -34,35 +34,35 @@ func (cw *ConsoleWriter) Table(headers []string, rows [][]string) {
 	// Print headers separated by tabs.
 	for i, h := range headers {
 		if i > 0 {
-			fmt.Fprint(tw, "\t")
+			_, _ = fmt.Fprint(tw, "\t")
 		}
-		fmt.Fprint(tw, h)
+		_, _ = fmt.Fprint(tw, h)
 	}
-	fmt.Fprintln(tw)
+		_, _ = fmt.Fprintln(tw)
 
 	// Print separator line.
 	for i, h := range headers {
 		if i > 0 {
-			fmt.Fprint(tw, "\t")
+			_, _ = fmt.Fprint(tw, "\t")
 		}
 		for j := 0; j < len(h); j++ {
-			fmt.Fprint(tw, "-")
+			_, _ = fmt.Fprint(tw, "-")
 		}
 	}
-	fmt.Fprintln(tw)
+	_, _ = fmt.Fprintln(tw)
 
 	// Print data rows.
 	for _, row := range rows {
 		for i, cell := range row {
 			if i > 0 {
-				fmt.Fprint(tw, "\t")
+				_, _ = fmt.Fprint(tw, "\t")
 			}
-			fmt.Fprint(tw, cell)
+			_, _ = fmt.Fprint(tw, cell)
 		}
-		fmt.Fprintln(tw)
+		_, _ = fmt.Fprintln(tw)
 	}
 
-	tw.Flush()
+	_ = tw.Flush()
 }
 
 // KeyValue writes aligned key-value pairs. Keys are left-aligned and padded
@@ -81,7 +81,7 @@ func (cw *ConsoleWriter) KeyValue(pairs []KeyValueEntry) {
 	}
 
 	for _, p := range pairs {
-		fmt.Fprintf(cw.w, "%-*s  %s\n", maxKeyLen, p.Key, p.Value)
+		_, _ = fmt.Fprintf(cw.w, "%-*s  %s\n", maxKeyLen, p.Key, p.Value)
 	}
 }
 
@@ -102,15 +102,15 @@ func (cw *ConsoleWriter) JSONPretty(v any) error {
 
 // Section writes a section title followed by a newline.
 func (cw *ConsoleWriter) Section(title string) {
-	fmt.Fprintln(cw.w, title)
+	_, _ = fmt.Fprintln(cw.w, title)
 }
 
 // Info writes an informational message followed by a newline.
 func (cw *ConsoleWriter) Info(msg string) {
-	fmt.Fprintln(cw.w, msg)
+	_, _ = fmt.Fprintln(cw.w, msg)
 }
 
 // Error writes an error message in the format "Error: msg\n".
 func (cw *ConsoleWriter) Error(msg string) {
-	fmt.Fprintf(cw.w, "Error: %s\n", msg)
+	_, _ = fmt.Fprintf(cw.w, "Error: %s\n", msg)
 }

@@ -104,7 +104,7 @@ func newClientDB(db *gorm.DB) (*ClientDB, error) {
 
 	// AutoMigrate all models (D-023).
 	if err := c.AutoMigrate(context.Background()); err != nil {
-		sqlDB.Close()
+		_ = sqlDB.Close()
 		return nil, fmt.Errorf("store: auto-migrate: %w", err)
 	}
 

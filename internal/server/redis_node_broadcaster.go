@@ -111,7 +111,7 @@ func (b *RedisNodeBroadcaster) Subscribe(ctx context.Context, callback func(user
 	pattern := b.keyPrefix + redisBroadcastPrefix + "*"
 
 	ps := b.client.PSubscribe(ctx, pattern)
-	defer ps.Close()
+	defer func() { _ = ps.Close() }()
 
 	b.mu.Lock()
 	b.ps = ps
