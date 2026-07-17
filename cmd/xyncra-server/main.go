@@ -154,7 +154,7 @@ func main() {
 		slog.Error("failed to open database", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Flush pending spans before closing the database (LIFO: deferred after
 	// db.Close so it runs first at shutdown).
@@ -192,7 +192,7 @@ func main() {
 		slog.Error("failed to create connection store", "error", err)
 		os.Exit(1)
 	}
-	defer connStore.Close()
+	defer func() { _ = connStore.Close() }()
 
 	// ---------------------------------------------------------------
 	// Message Broker (Asynq over Redis)
@@ -207,7 +207,7 @@ func main() {
 		slog.Error("failed to create broker", "error", err)
 		os.Exit(1)
 	}
-	defer broker.Close()
+	defer func() { _ = broker.Close() }()
 
 	// ---------------------------------------------------------------
 	// Node Broadcaster (cross-node message routing via Redis Pub/Sub)
@@ -221,7 +221,7 @@ func main() {
 		DB:       *redisDB,
 	})
 	nodeBroadcaster := server.NewRedisNodeBroadcaster(nodeBroadcasterClient, "xyncra")
-	defer nodeBroadcasterClient.Close()
+	defer func() { _ = nodeBroadcasterClient.Close() }()
 
 	// ---------------------------------------------------------------
 	// Message Handlers
@@ -258,7 +258,7 @@ func main() {
 		Password: *redisPassword,
 		DB:       *redisDB,
 	})
-	defer redisIdempotencyClient.Close()
+	defer func() { _ = redisIdempotencyClient.Close() }()
 
 	// PendingStore for reverse-RPC request persistence (Phase 4, D-103).
 	// Reuses the same dedicated redis.Client as idempotency (D-074).
@@ -328,7 +328,7 @@ func main() {
 				slog.Warn("failed to open LLM log file", "path", logPath, "error", err)
 			} else {
 				llmLogger = agent.NewLLMLogger(f, false)
-				defer f.Close()
+				defer func() { _ = f.Close() }()
 				slog.Info("LLM call logging enabled", "path", logPath)
 			}
 		} else {
