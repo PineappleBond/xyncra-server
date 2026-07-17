@@ -52,7 +52,7 @@ permissions:
 ```yaml
 env:
   GO_VERSION: '1.26'
-  GOLANGCI_LINT_VERSION: 'v2.1'
+  GOLANGCI_LINT_VERSION: 'v2.12'
 ```
 
 - **Go**: single version (matches `go.mod` and `deploy/Dockerfile`). No version matrix — xyncra-server is an application, not a library.
@@ -147,7 +147,7 @@ steps:
 runs-on: ubuntu-latest
 steps:
   - uses: actions/checkout@v4
-  - run: docker build -t xyncra-server:${{ github.sha }} .
+  - run: docker build -f deploy/Dockerfile -t xyncra-server:${{ github.sha }} .
 ```
 
 Does not push. Validation only.
@@ -208,7 +208,7 @@ steps:
       password: ${{ secrets.GITHUB_TOKEN }}
   - run: |
       SHA_SHORT=$(echo ${{ github.sha }} | cut -c1-7)
-      docker build -t ghcr.io/${{ github.repository }}:${SHA_SHORT} .
+      docker build -f deploy/Dockerfile -t ghcr.io/${{ github.repository }}:${SHA_SHORT} .
       docker push ghcr.io/${{ github.repository }}:${SHA_SHORT}
 ```
 
