@@ -330,22 +330,70 @@ Xyncra Server ──OTLP/gRPC──▶ OTel Collector ──▶ Jaeger/Tempo
                                                 Grafana UI
 ```
 
-开发环境：
+### 12.1 Docker Compose 集成
 
-```bash
-# 启动 Jaeger all-in-one
-docker run -d --name jaeger \
-  -p 16686:16686 \
-  -p 4317:4317 \
-  -p 4318:4318 \
-  jaegertracing/all-in-one:latest
+三个 compose 文件均添加 Jaeger all-in-one 服务，使用 Badger 嵌入式存储持久化 trace 数据。
 
-# Xyncra Server 配置
-export XYNCRA_TRACING_ENABLED=true
-export XYNCRA_TRACING_EXPORTER=otlp
-export XYNCRA_TRACING_OTLP_ENDPOINT=localhost:4317
-export XYNCRA_TRACING_OTLP_INSECURE=true
-export XYNCRA_TRACING_SAMPLING_RATE=1.0
+#### 公共 Jaeger 服务定义
+
+```yaml
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+      - "16686:16686"  # Jaeger UI
+    environment:
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_KEY=/badger/data_keys
+      - BADGER_DIRECTORY_VALUE=/badger/data
+    volumes:
+      - jaeger-badger:/badger
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:16686"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 ```
 
-访问 http://localhost:16686 查看 traces。
+#### 各 compose 文件的端口分配
+
+| 文件 | Jaeger 端口 | 说明 |
+|------|-------------|------|
+| `docker-compose.yml` | 4317/4318/16686 | 默认端口，开发环境 |
+| `docker-compose.e2e.yml` | 14317/14318/16687 | 避免与开发环境冲突 |
+| `docker-compose.multi-node.yml` | 24317/24318/26686 | 避免与 E2E 冲突 |
+
+#### Xyncra Server 环境变量
+
+各 compose 文件的 xyncra-server 服务需新增：
+
+```yaml
+    environment:
+      - XYNCRA_TRACING_ENABLED=true
+      - XYNCRA_TRACING_EXPORTER=otlp
+      - XYNCRA_TRACING_OTLP_ENDPOINT=jaeger:4317  # compose 内部网络
+      - XYNCRA_TRACING_OTLP_INSECURE=true
+      - XYNCRA_TRACING_SAMPLING_RATE=1.0
+    depends_on:
+      jaeger:
+        condition: service_healthy
+```
+
+#### 新增 volume
+
+```yaml
+volumes:
+  jaeger-badger:   # 每个 compose 文件各一个独立 volume
+```
+
+### 12.2 开发环境快速启动
+
+```bash
+# 启动含 Jaeger 的完整开发环境
+docker compose up -d
+
+# 访问 Jaeger UI
+open http://localhost:16686
+```
