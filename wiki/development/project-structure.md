@@ -14,14 +14,19 @@ xyncra-server/
 ├── internal/               # 私有实现
 ├── pkg/                    # 公共库
 ├── agents/                 # AI Agent 定义
-├── configs/                # 配置模板
 ├── scripts/                # 辅助脚本
 ├── docs/                   # 文档
 ├── wiki/                   # 开发维基（本文档目录）
+├── deploy/                 # Docker 与部署配置
+│   ├── Dockerfile              # Docker 构建
+│   ├── docker-compose.yml      # 生产环境编排
+│   ├── docker-compose.e2e.yml  # E2E 测试环境编排
+│   ├── alertmanager/           # AlertManager 配置
+│   ├── grafana/                # Grafana 仪表盘与数据源
+│   ├── loki/                   # Loki 配置
+│   ├── prometheus/             # Prometheus 规则与配置
+│   └── promtail/               # Promtail 配置
 ├── .claude/                # AI 辅助开发技能
-├── Dockerfile              # Docker 构建
-├── docker-compose.yml      # 生产环境编排
-├── docker-compose.e2e.yml  # E2E 测试环境编排
 ├── Makefile                # 构建/测试命令
 ├── go.mod / go.sum         # Go 模块依赖
 └── README.md / README-ZH.md # 项目说明

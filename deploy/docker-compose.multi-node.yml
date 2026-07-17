@@ -74,11 +74,11 @@ services:
   xyncra-node-a:
     container_name: xyncra-node-a
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: deploy/Dockerfile
     env_file:
-      - .env.agent
-      - .env.test
+      - ../.env.agent
+      - ../.env.test
     ports:
       - "18080:8080"
     environment:
@@ -93,7 +93,7 @@ services:
       - XYNCRA_TRACING_OTLP_INSECURE=true
       - XYNCRA_TRACING_SAMPLING_RATE=1.0
     volumes:
-      - ./llm-logs-mn:/app/llm-logs
+      - ../llm-logs-mn:/app/llm-logs
     user: "root"
     depends_on:
       mysql-mn:
@@ -112,11 +112,11 @@ services:
   xyncra-node-b:
     container_name: xyncra-node-b
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: deploy/Dockerfile
     env_file:
-      - .env.agent
-      - .env.test
+      - ../.env.agent
+      - ../.env.test
     ports:
       - "18081:8080"
     environment:
@@ -131,7 +131,7 @@ services:
       - XYNCRA_TRACING_OTLP_INSECURE=true
       - XYNCRA_TRACING_SAMPLING_RATE=1.0
     volumes:
-      - ./llm-logs-mn:/app/llm-logs
+      - ../llm-logs-mn:/app/llm-logs
     user: "root"
     depends_on:
       mysql-mn:
@@ -150,11 +150,11 @@ services:
   xyncra-node-c:
     container_name: xyncra-node-c
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: deploy/Dockerfile
     env_file:
-      - .env.agent
-      - .env.test
+      - ../.env.agent
+      - ../.env.test
     ports:
       - "18082:8080"
     environment:
@@ -169,7 +169,7 @@ services:
       - XYNCRA_TRACING_OTLP_INSECURE=true
       - XYNCRA_TRACING_SAMPLING_RATE=1.0
     volumes:
-      - ./llm-logs-mn:/app/llm-logs
+      - ../llm-logs-mn:/app/llm-logs
     user: "root"
     depends_on:
       mysql-mn:
@@ -194,7 +194,7 @@ services:
     image: docker:cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./scripts/chaos-agent:/scripts
+      - ../scripts/chaos-agent:/scripts
     environment:
       - PROJECT_NAME=xyncra-server
       - MIN_INTERVAL=10

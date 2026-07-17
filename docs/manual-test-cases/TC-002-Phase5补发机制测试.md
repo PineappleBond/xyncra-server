@@ -67,8 +67,8 @@ make build
 ### 3.2 启动 Docker E2E 环境
 
 ```bash
-docker compose -f docker-compose.e2e.yml build --no-cache && \
-docker compose -f docker-compose.e2e.yml up -d
+docker compose -f deploy/docker-compose.e2e.yml build --no-cache && \
+docker compose -f deploy/docker-compose.e2e.yml up -d
 ```
 
 ### 3.3 健康检查
@@ -372,7 +372,7 @@ $R FLUSHDB
 ./bin/xyncra-client kill --user-id alice --device-id test-device-alice
 ./bin/xyncra-client kill --user-id alice --device-id test-device-alice --force 2>/dev/null
 
-docker compose -f docker-compose.e2e.yml down
+docker compose -f deploy/docker-compose.e2e.yml down
 
 rm -rf "$E2E_HOME"
 rm -rf ~/.xyncra/alice

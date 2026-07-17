@@ -243,15 +243,15 @@ jaeger:
 
 | 环境 | OTLP gRPC | OTLP HTTP | Jaeger UI |
 |------|-----------|-----------|-----------|
-| docker-compose.yml | 4317 | 4318 | 16686 |
-| docker-compose.e2e.yml | 14317 | 14318 | 16687 |
-| docker-compose.multi-node.yml | 24317 | 24318 | 26686 |
+| deploy/docker-compose.yml | 4317 | 4318 | 16686 |
+| deploy/docker-compose.e2e.yml | 14317 | 14318 | 16687 |
+| deploy/docker-compose.multi-node.yml | 24317 | 24318 | 26686 |
 
 ### 快速启动
 
 ```bash
 # 1. 启动 Jaeger
-docker compose up -d jaeger
+docker compose -f deploy/docker-compose.yml up -d jaeger
 
 # 2. 启动 server（启用 tracing）
 XYNCRA_TRACING_ENABLED=true ./bin/xyncra-server

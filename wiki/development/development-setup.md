@@ -156,13 +156,13 @@ make docker-e2e-down   # 停止 E2E 环境
 make docker-up
 
 # 查看日志
-docker compose logs -f
+docker compose -f deploy/docker-compose.yml logs -f
 
 # 停止
 make docker-down
 ```
 
-`docker-compose.yml` 定义了两个服务：
+`deploy/docker-compose.yml` 定义了两个服务：
 - `xyncra-server` — 构建当前代码，监听 8080 端口，使用 SQLite
 - `redis` — Redis 7-alpine，健康检查
 

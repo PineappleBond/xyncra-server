@@ -61,7 +61,7 @@ XYNCRA_DB_DRIVER=sqlite
 XYNCRA_DB_DSN=xyncra.db
 ```
 
-完整的配置模板见 `configs/config.example.env`。
+完整的服务器环境变量列表见 [环境配置](../devops/environment-config.md)。
 
 ---
 
@@ -391,36 +391,14 @@ XYNCRA_LLM_LOG_DIR=/var/log/xyncra/llm
 
 ## 配置模板
 
-### `configs/config.example.env`
+服务器运行时配置通过环境变量和命令行 flags 传入，完整列表见 [环境配置](../devops/environment-config.md)。
 
-```bash
-# Xyncra Server Configuration
-# Copy this file to .env and adjust the values for your environment.
+Agent 和测试相关的配置文件：
 
-# WebSocket Server
-XYNCRA_ADDR=:8080
+- `.env.agent` — Agent LLM API 密钥（从 `.env.agent.example` 复制）
+- `.env.test` — E2E 测试 LLM 配置（从 `.env.test.example` 复制）
 
-# Redis
-XYNCRA_REDIS_ADDR=localhost:6379
-XYNCRA_REDIS_PASSWORD=
-XYNCRA_REDIS_DB=0
-
-# Database
-XYNCRA_DB_DRIVER=sqlite
-XYNCRA_DB_DSN=xyncra.db
-
-# Connection Limits
-XYNCRA_MAX_CONNS_PER_USER=0
-
-# LLM Provider
-# DASHSCOPE_API_KEY=your_api_key_here
-
-# Distributed Tracing
-XYNCRA_TRACING_ENABLED=false
-# XYNCRA_TRACING_OTLP_ENDPOINT=jaeger:4317
-```
-
-### 完整的 `.env` 模板
+---
 
 ```bash
 # ============================================================

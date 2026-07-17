@@ -96,7 +96,7 @@ In Docker Compose, pprof port 6060 is exposed on the `xyncra-server` container. 
 
 ```bash
 # Start with pprof enabled
-XYNCRA_PPROF_ENABLED=true docker compose up -d
+XYNCRA_PPROF_ENABLED=true docker compose -f deploy/docker-compose.yml up -d
 
 # Access via docker exec
 docker exec -it xyncra-server wget -O /tmp/heap.prof http://127.0.0.1:6060/debug/pprof/heap
@@ -125,7 +125,7 @@ go tool pprof heap.prof
 The observability profile includes a Pyroscope service:
 
 ```bash
-docker compose --profile observability up -d
+docker compose -f deploy/docker-compose.yml --profile observability up -d
 ```
 
 Pyroscope is available at `http://localhost:4040`. Grafana is pre-configured with a Pyroscope datasource for flamegraph visualization.

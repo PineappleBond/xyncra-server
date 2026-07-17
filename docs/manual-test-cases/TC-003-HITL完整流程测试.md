@@ -89,8 +89,8 @@ make build
 ### 3.2 启动 Docker E2E 环境
 
 ```bash
-docker compose -f docker-compose.e2e.yml build --no-cache && \
-docker compose -f docker-compose.e2e.yml up -d
+docker compose -f deploy/docker-compose.e2e.yml build --no-cache && \
+docker compose -f deploy/docker-compose.e2e.yml up -d
 ```
 
 ### 3.3 健康检查
@@ -863,7 +863,7 @@ $R EXISTS "agent:checkpoint:$SR_CHECKPOINT_ID"
 #### 步骤 9.3: 💥 停止服务器
 
 ```bash
-docker compose -f docker-compose.e2e.yml stop xyncra-server-e2e
+docker compose -f deploy/docker-compose.e2e.yml stop xyncra-server-e2e
 sleep 2
 
 curl -s --connect-timeout 3 http://localhost:18080/health
@@ -873,7 +873,7 @@ curl -s --connect-timeout 3 http://localhost:18080/health
 #### 步骤 9.4: 🔄 重启服务器
 
 ```bash
-docker compose -f docker-compose.e2e.yml start xyncra-server-e2e
+docker compose -f deploy/docker-compose.e2e.yml start xyncra-server-e2e
 sleep 8
 
 curl -s http://localhost:18080/health
@@ -947,7 +947,7 @@ sleep 3  # 等待 Agent 开始处理
 #### 步骤 10.2: 💥 强制杀死服务器（模拟崩溃）
 
 ```bash
-docker compose -f docker-compose.e2e.yml kill xyncra-server-e2e
+docker compose -f deploy/docker-compose.e2e.yml kill xyncra-server-e2e
 sleep 2
 
 curl -s --connect-timeout 3 http://localhost:18080/health
@@ -957,7 +957,7 @@ curl -s --connect-timeout 3 http://localhost:18080/health
 #### 步骤 10.3: 🔄 重启服务器
 
 ```bash
-docker compose -f docker-compose.e2e.yml start xyncra-server-e2e
+docker compose -f deploy/docker-compose.e2e.yml start xyncra-server-e2e
 sleep 8
 
 curl -s http://localhost:18080/health
@@ -1053,10 +1053,10 @@ echo "=== 部分回答后快照 ==="
 $DB "SELECT id, status, answer FROM questions WHERE conversation_id='$PA_CONV_ID' ORDER BY created_at;"
 # Q1: answered, Q2: pending
 
-docker compose -f docker-compose.e2e.yml kill xyncra-server-e2e
+docker compose -f deploy/docker-compose.e2e.yml kill xyncra-server-e2e
 sleep 2
 
-docker compose -f docker-compose.e2e.yml start xyncra-server-e2e
+docker compose -f deploy/docker-compose.e2e.yml start xyncra-server-e2e
 sleep 8
 
 curl -s http://localhost:18080/health
@@ -1326,7 +1326,7 @@ sqlite3 "$ALICE_DB" "SELECT sender_id, content FROM messages WHERE conversation_
 | Checkpoint 未创建 | Agent 未配置 HITL 或 CheckpointStore 失败 | 检查 Agent 配置和服务器日志 |
 | agent_resume 失败 | checkpoint_id 不匹配或已过期 | 检查 Redis 中的 checkpoint |
 | 会话锁未释放 | TTL 未到期或手动清理不彻底 | 手动删除 Redis 锁 key |
-| 重启后 Questions 表为空 | SQLite DB 未使用持久卷 | 检查 docker-compose.e2e.yml volumes 配置 |
+| 重启后 Questions 表为空 | SQLite DB 未使用持久卷 | 检查 deploy/docker-compose.e2e.yml volumes 配置 |
 | 重启后 Checkpoint 丢失 | Redis 未使用持久卷 | 检查 Redis 持久化配置 |
 | Device B 重复回答未被拒绝 | 幂等检查基于 checkpoint 而非 Question.status | Phase 2 改为 Question.status 检查 |
 | 部分回答后 Agent 直接恢复 | 未实现 "全部 answered 才 resume" | 检查 RPC handler 的 partial 检查 |
@@ -1345,7 +1345,7 @@ sqlite3 "$ALICE_DB" "SELECT sender_id, content FROM messages WHERE conversation_
 ./bin/xyncra-client kill --user-id alice --device-id device-a 2>/dev/null
 ./bin/xyncra-client kill --user-id alice --device-id device-b 2>/dev/null
 
-docker compose -f docker-compose.e2e.yml down
+docker compose -f deploy/docker-compose.e2e.yml down
 
 rm -rf "$E2E_HOME"
 rm -rf ~/.xyncra/alice

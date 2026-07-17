@@ -105,8 +105,8 @@ make build
 ### 3.2 启动 Docker E2E 环境
 
 ```bash
-docker compose -f docker-compose.e2e.yml build --no-cache && \
-docker compose -f docker-compose.e2e.yml up -d
+docker compose -f deploy/docker-compose.e2e.yml build --no-cache && \
+docker compose -f deploy/docker-compose.e2e.yml up -d
 ```
 
 ### 3.3 健康检查
@@ -296,7 +296,7 @@ redis-cli -p 16379 -n 15 SMEMBERS "xyncra:conn:user:alice"
 
 ```bash
 # 检查服务器日志确认 3 个内置函数已注册
-docker compose -f docker-compose.e2e.yml logs xyncra-server-e2e --tail 50 2>&1 | grep -i "functions registered"
+docker compose -f deploy/docker-compose.e2e.yml logs xyncra-server-e2e --tail 50 2>&1 | grep -i "functions registered"
 # 预期: 看到 "functions registered" 且 count=3
 
 # 检查 daemon 日志确认注册成功
@@ -358,7 +358,7 @@ echo "CONV_ID=$CONV_ID"
 **验证（数据库）**：
 
 ```bash
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db "SELECT id, user_id1, user_id2, type FROM conversations WHERE id = '$CONV_ID';"
 # 预期: $CONV_ID|alice|agent/weather-bot|1-on-1
 ```
@@ -455,7 +455,7 @@ for line in sys.stdin:
 **验证（数据库）**：
 
 ```bash
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db \
   "SELECT sender_id, SUBSTR(content, 1, 100) FROM messages WHERE conversation_id = '$CONV_ID' ORDER BY message_id DESC LIMIT 5;"
 # 预期: 包含 sender_id = 'agent/weather-bot' 的消息
@@ -539,7 +539,7 @@ for line in sys.stdin:
 **验证（数据库）**：
 
 ```bash
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db \
   "SELECT sender_id, SUBSTR(content, 1, 200) FROM messages WHERE conversation_id = '$CONV_ID' ORDER BY message_id DESC LIMIT 3;"
 # 预期: 包含 Agent 的最终回复（可能引用了设备状态数据）
@@ -840,7 +840,7 @@ for line in sys.stdin:
 **验证（数据库）**：
 
 ```bash
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db \
   "SELECT sender_id, SUBSTR(content, 1, 100) FROM messages WHERE conversation_id = '$CONV_ID' ORDER BY message_id DESC LIMIT 2;"
 # 预期: 包含 Agent 回复
@@ -880,7 +880,7 @@ ps -p $ALICE_PID 2>&1
 sleep 3
 
 # 检查服务器日志
-docker compose -f docker-compose.e2e.yml logs xyncra-server-e2e --tail 20 2>&1 | grep -i "disconnect\|cleanup\|function"
+docker compose -f deploy/docker-compose.e2e.yml logs xyncra-server-e2e --tail 20 2>&1 | grep -i "disconnect\|cleanup\|function"
 # 预期: 看到设备断连和函数清理相关日志
 ```
 
@@ -937,7 +937,7 @@ for line in sys.stdin:
 **验证（数据库）**：
 
 ```bash
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db \
   "SELECT sender_id, SUBSTR(content, 1, 100) FROM messages WHERE conversation_id = '$CONV_ID' ORDER BY message_id DESC LIMIT 2;"
 # 预期: 包含 Agent 正常回复（不因设备离线而崩溃）
@@ -963,7 +963,7 @@ docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
 ### 7.1 Server DB 验证命令速查
 
 ```bash
-DB_EXEC="docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e sqlite3 /app/xyncra-e2e.db"
+DB_EXEC="docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e sqlite3 /app/xyncra-e2e.db"
 
 # 查看会话
 $DB_EXEC "SELECT id, user_id1, user_id2, type FROM conversations WHERE id='$CONV_ID';"
@@ -1057,7 +1057,7 @@ curl -s -X POST http://localhost:18080/rpc \
   -d '{"jsonrpc":"2.0","method":"reload_agents","id":1}' > /dev/null 2>&1
 
 # 停止 Docker E2E
-docker compose -f docker-compose.e2e.yml down
+docker compose -f deploy/docker-compose.e2e.yml down
 
 # 清理临时目录
 rm -rf "$E2E_HOME"

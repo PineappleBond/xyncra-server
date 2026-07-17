@@ -131,7 +131,7 @@ func (s *WebSocketServer) handleReadiness(w http.ResponseWriter, r *http.Request
 
 ## Docker Healthcheck
 
-Dockerfile 中已配置健康检查：
+deploy/Dockerfile 中已配置健康检查：
 
 ```dockerfile
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
@@ -156,7 +156,7 @@ services:
       retries: 3
 ```
 
-E2E 环境的健康检查（`docker-compose.e2e.yml`）：
+E2E 环境的健康检查（`deploy/docker-compose.e2e.yml`）：
 
 ```yaml
 services:

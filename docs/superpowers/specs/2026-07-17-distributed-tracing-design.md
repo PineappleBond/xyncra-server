@@ -361,9 +361,9 @@ Xyncra Server ──OTLP/gRPC──▶ OTel Collector ──▶ Jaeger/Tempo
 
 | 文件 | Jaeger 端口 | 说明 |
 |------|-------------|------|
-| `docker-compose.yml` | 4317/4318/16686 | 默认端口，开发环境 |
-| `docker-compose.e2e.yml` | 14317/14318/16687 | 避免与开发环境冲突 |
-| `docker-compose.multi-node.yml` | 24317/24318/26686 | 避免与 E2E 冲突 |
+| `deploy/docker-compose.yml` | 4317/4318/16686 | 默认端口，开发环境 |
+| `deploy/docker-compose.e2e.yml` | 14317/14318/16687 | 避免与开发环境冲突 |
+| `deploy/docker-compose.multi-node.yml` | 24317/24318/26686 | 避免与 E2E 冲突 |
 
 #### Xyncra Server 环境变量
 
@@ -392,7 +392,7 @@ volumes:
 
 ```bash
 # 启动含 Jaeger 的完整开发环境
-docker compose up -d
+docker compose -f deploy/docker-compose.yml up -d
 
 # 访问 Jaeger UI
 open http://localhost:16686

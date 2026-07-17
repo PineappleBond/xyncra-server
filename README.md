@@ -124,7 +124,7 @@ That's it. The server is listening on `:8080`.
 ### Docker
 
 ```bash
-docker compose up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ### Configuration
@@ -394,7 +394,6 @@ xyncra-server/
 │   ├── client/               # Go client SDK
 │   └── store/                # Client-side local storage (SQLite via GORM)
 │       └── model/            # Client data models
-├── configs/                  # Configuration templates
 ├── scripts/                  # Shell scripts
 ├── docs/
 │   ├── API.md                    # WebSocket protocol reference
@@ -418,9 +417,17 @@ xyncra-server/
 │   ├── plans/                        # Design plans
 │   ├── testing/                      # Test documents & reports
 │   └── superpowers/                  # AI-generated specs
-├── Dockerfile
-├── docker-compose.yml
-└── docker-compose.e2e.yml    # E2E test environment
+├── deploy/                           # Docker & deployment configurations
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── docker-compose.e2e.yml        # E2E test environment
+│   ├── docker-compose.multi-node.yml # Multi-node distributed test
+│   ├── alertmanager/                 # AlertManager config
+│   ├── grafana/                      # Grafana dashboards & provisioning
+│   ├── loki/                         # Loki config
+│   ├── prometheus/                   # Prometheus rules & config
+│   └── promtail/                     # Promtail config
+└── wiki/                             # Project wiki
 ```
 
 ---

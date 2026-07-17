@@ -278,9 +278,9 @@ XYNCRA_METRICS_ENABLED=true  # 是否启用 /metrics 端点
 #### 3.3 实现方案
 
 **配置文件**：
-- `prometheus/prometheus.yml` - Prometheus 配置
-- `prometheus/alerts.yml` - 告警规则
-- `alertmanager/alertmanager.yml` - AlertManager 配置
+- `deploy/prometheus/prometheus.yml` - Prometheus 配置
+- `deploy/prometheus/alerts.yml` - 告警规则
+- `deploy/alertmanager/alertmanager.yml` - AlertManager 配置
 
 **配置项**：
 
@@ -372,19 +372,20 @@ XYNCRA_PROFILING_APP_NAME=xyncra-server
 
 ```
 .
-├── docker-compose.yml
-├── prometheus/
-│   ├── prometheus.yml
-│   └── alerts.yml
-├── alertmanager/
-│   └── alertmanager.yml
-├── loki/
-│   └── loki.yml
-├── promtail/
-│   └── promtail.yml
-└── grafana/
-    └── provisioning/
-        ├── datasources/
+├── deploy/
+│   ├── docker-compose.yml
+│   ├── prometheus/
+│   │   ├── prometheus.yml
+│   │   └── alerts.yml
+│   ├── alertmanager/
+│   │   └── alertmanager.yml
+│   ├── loki/
+│   │   └── loki.yml
+│   ├── promtail/
+│   │   └── promtail.yml
+│   └── grafana/
+│       └── provisioning/
+│           ├── datasources/
         │   └── datasources.yml
         └── dashboards/
             └── dashboards.yml
@@ -447,7 +448,7 @@ grafana/grafana:latest
 
 ### Phase 4：Docker Compose 和告警（2 天）
 
-1. 编写完整的 docker-compose.yml
+1. 编写完整的 deploy/docker-compose.yml
 2. 配置 Prometheus、AlertManager、Loki、Promtail、Grafana、Pyroscope
 3. 编写告警规则
 4. 配置 Grafana 数据源

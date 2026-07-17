@@ -117,7 +117,7 @@ make build
     外部客户端 (WebSocket)
 ```
 
-**docker-compose.yml**：
+**deploy/docker-compose.yml**：
 ```yaml
 services:
   xyncra-server:
@@ -254,7 +254,7 @@ graph TB
 
 ## Docker 镜像规范
 
-参考 `Dockerfile`：
+参考 `deploy/Dockerfile`：
 
 - **基础镜像**：`alpine:3.20`
 - **Go 版本**：`1.26`（构建阶段）
@@ -266,7 +266,7 @@ graph TB
 
 ## E2E 测试环境
 
-参考 `docker-compose.e2e.yml`：
+参考 `deploy/docker-compose.e2e.yml`：
 
 ```
 ┌──────────────────────────────┐
@@ -294,7 +294,7 @@ graph TB
 
 所有 docker-compose 文件都集成了 Jaeger All-in-One 作为链路追踪后端，使用 Badger 嵌入式存储（无需外部数据库）。
 
-### docker-compose.yml（开发/生产）
+### deploy/docker-compose.yml（开发/生产）
 
 ```
 ┌──────────────────────────────┐
@@ -317,7 +317,7 @@ graph TB
 └──────────────────────────────┘
 ```
 
-### docker-compose.e2e.yml（E2E 测试）
+### deploy/docker-compose.e2e.yml（E2E 测试）
 
 端口偏移避免与开发环境冲突：
 
@@ -327,7 +327,7 @@ graph TB
 | jaeger-e2e OTLP HTTP | 14318:4318 |
 | jaeger-e2e UI | 16687:16686 |
 
-### docker-compose.multi-node.yml（多节点）
+### deploy/docker-compose.multi-node.yml（多节点）
 
 多节点环境共享同一个 Jaeger 实例：
 

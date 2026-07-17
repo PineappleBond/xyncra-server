@@ -79,8 +79,8 @@ make build
 ### 3.2 启动 Docker E2E 环境
 
 ```bash
-docker compose -f docker-compose.e2e.yml build --no-cache && \
-docker compose -f docker-compose.e2e.yml up -d
+docker compose -f deploy/docker-compose.e2e.yml build --no-cache && \
+docker compose -f deploy/docker-compose.e2e.yml up -d
 ```
 
 ### 3.3 健康检查
@@ -146,7 +146,7 @@ context:
 >
 > ```bash
 > docker cp agents/context-test-bot.md xyncra-server-xyncra-server-e2e-1:/app/agents/context-test-bot.md
-> docker compose -f docker-compose.e2e.yml restart xyncra-server-e2e
+> docker compose -f deploy/docker-compose.e2e.yml restart xyncra-server-e2e
 > sleep 5
 > curl -s http://localhost:18080/health
 > # 预期: {"status":"ok"}
@@ -381,7 +381,7 @@ if records:
 #### 步骤 B2: 重启服务器
 
 ```bash
-docker compose -f docker-compose.e2e.yml restart xyncra-server-e2e
+docker compose -f deploy/docker-compose.e2e.yml restart xyncra-server-e2e
 sleep 5
 curl -s http://localhost:18080/health
 # 预期: {"status":"ok"}
@@ -660,7 +660,7 @@ sqlite3 $E2E_HOME/alice/*/xyncra.db \
 bin/xyncra-client --user alice --home $E2E_HOME/alice kill
 
 # 停止 Docker 环境
-docker compose -f docker-compose.e2e.yml down
+docker compose -f deploy/docker-compose.e2e.yml down
 
 # 清理临时目录
 rm -rf $E2E_HOME

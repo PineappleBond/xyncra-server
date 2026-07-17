@@ -48,20 +48,20 @@ git clone https://github.com/PineappleBond/xyncra-server.git
 cd xyncra-server
 
 # 2. 一键启动（服务器 + Redis）
-docker compose up -d
+docker compose -f deploy/docker-compose.yml up -d
 
 # 3. 验证服务器正在运行
 curl http://localhost:8080/health
 
 # 4. 查看日志
-docker compose logs -f xyncra-server
+docker compose -f deploy/docker-compose.yml logs -f xyncra-server
 ```
 
 启动成功后，服务器会在 `:8080` 监听 WebSocket 连接。
 
 ### Docker Compose 架构
 
-`docker-compose.yml` 定义了两个服务：
+`deploy/docker-compose.yml` 定义了两个服务：
 
 | 服务 | 镜像 | 端口 | 说明 |
 |------|------|------|------|
@@ -76,7 +76,7 @@ docker compose logs -f xyncra-server
 ### 停止环境
 
 ```bash
-docker compose down
+docker compose -f deploy/docker-compose.yml down
 ```
 
 ---
@@ -283,7 +283,7 @@ You are a helpful assistant. Answer questions concisely.
 ### 1. 启动环境
 
 ```bash
-docker compose up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ### 2. 启动两个用户的守护进程
@@ -397,5 +397,5 @@ ls -la xyncra.db
 ls -la agents/
 
 # 5. 服务器日志
-docker compose logs xyncra-server
+docker compose -f deploy/docker-compose.yml logs xyncra-server
 ```

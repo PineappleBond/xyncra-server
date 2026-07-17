@@ -9,7 +9,7 @@
 #   make test-e2e     Run server E2E tests (Redis on port 16379 required)
 #   make test-cli-e2e Run CLI E2E tests (Docker E2E environment required)
 #   make test-all     Run all tests (unit + e2e + cli-e2e)
-#   make clean        Remove build artifacts
+#   make clean        Remove build artifacts (bin/, dist/, *.test, coverage, runtime DBs, logs)
 #   make fmt          Format Go source code
 #   make vet          Run Go static analysis
 #   make tidy         Tidy go.mod dependencies
@@ -118,23 +118,23 @@ test-all: test test-e2e test-cli-e2e
 
 ## docker-build: Build the Docker image for xyncra-server
 docker-build:
-	docker build -t xyncra-server:$(VERSION) .
+	docker build -t xyncra-server:$(VERSION) -f deploy/Dockerfile .
 
-## docker-up: Start the production Docker environment (docker-compose.yml)
+## docker-up: Start the production Docker environment (deploy/docker-compose.yml)
 docker-up:
-	docker compose up -d
+	docker compose -f deploy/docker-compose.yml up -d
 
 ## docker-down: Stop the production Docker environment
 docker-down:
-	docker compose down
+	docker compose -f deploy/docker-compose.yml down
 
 ## docker-e2e-up: Start the E2E Docker environment (Redis 16379, Server 18080, DB 15)
 docker-e2e-up:
-	docker compose -f docker-compose.e2e.yml up -d --wait
+	docker compose -f deploy/docker-compose.e2e.yml up -d --wait
 
 ## docker-e2e-down: Stop the E2E Docker environment and remove volumes
 docker-e2e-down:
-	docker compose -f docker-compose.e2e.yml down -v
+	docker compose -f deploy/docker-compose.e2e.yml down -v
 
 # -----------------------------------------------------------------------------
 # Code quality targets
@@ -188,9 +188,15 @@ release: clean
 
 .PHONY: clean
 
-## clean: Remove all build artifacts (bin/ and dist/)
+## clean: Remove all build artifacts (bin/, dist/, test binaries, coverage, runtime DBs, logs)
 clean:
 	rm -rf $(BIN_DIR) $(DIST_DIR)
+	rm -f *.test                       # Go test binaries (agent.test, e2e.test, …)
+	rm -f xyncra-server xyncra-client  # Root-level compiled binaries
+	rm -f xyncra-server.exe xyncra-client.exe
+	rm -f xyncra.db dump.rdb           # Runtime databases
+	rm -f coverage.out coverage.html   # Coverage reports
+	rm -rf llm-logs-e2e/               # E2E LLM log dumps
 
 # -----------------------------------------------------------------------------
 # Help

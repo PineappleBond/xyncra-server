@@ -91,8 +91,8 @@ make build
 ### 3.2 启动 Docker E2E 环境
 
 ```bash
-docker compose -f docker-compose.e2e.yml build --no-cache && \
-docker compose -f docker-compose.e2e.yml up -d
+docker compose -f deploy/docker-compose.e2e.yml build --no-cache && \
+docker compose -f deploy/docker-compose.e2e.yml up -d
 ```
 
 ### 3.3 健康检查
@@ -127,10 +127,10 @@ cp -r agents/ "$E2E_HOME/agents-backup/"
 > ```bash
 > # 修改宿主机文件后
 > docker cp agents/error-test-bot.md xyncra-server-xyncra-server-e2e-1:/app/agents/error-test-bot.md
-> docker compose -f docker-compose.e2e.yml restart xyncra-server-e2e
+> docker compose -f deploy/docker-compose.e2e.yml restart xyncra-server-e2e
 > ```
 >
-> 仅执行 `docker compose restart` **不会**加载宿主机上的新配置。
+> 仅执行 `docker compose -f deploy/docker-compose.yml restart` **不会**加载宿主机上的新配置。
 
 ---
 
@@ -273,7 +273,7 @@ grep "api_key_env:" agents/error-test-bot.md
 ```bash
 # 必须 docker cp，因为容器内 agents/ 是构建时 COPY 的（见 3.6）
 docker cp agents/error-test-bot.md xyncra-server-xyncra-server-e2e-1:/app/agents/error-test-bot.md
-docker compose -f docker-compose.e2e.yml restart xyncra-server-e2e
+docker compose -f deploy/docker-compose.e2e.yml restart xyncra-server-e2e
 sleep 5
 
 curl -s http://localhost:18080/health
@@ -361,7 +361,7 @@ sleep 10
 #### 步骤 1.8: 验证 — 服务器 DB 直接查询
 
 ```bash
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db \
   "SELECT sender_id, content FROM messages WHERE conversation_id = '$CONV_ID' ORDER BY message_id ASC;"
 ```
@@ -378,7 +378,7 @@ agent/error-test-bot|抱歉，我的配置有误，请联系管理员检查设�
 #### 步骤 1.9: 验证 — 服务器日志
 
 ```bash
-docker compose -f docker-compose.e2e.yml logs xyncra-server-e2e 2>&1 | grep -i "error\|API key\|配置" | tail -5
+docker compose -f deploy/docker-compose.e2e.yml logs xyncra-server-e2e 2>&1 | grep -i "error\|API key\|配置" | tail -5
 ```
 
 **预期**：日志中包含 `API key environment variable not set` 或类似错误信息（原始错误，用于开发调试）。
@@ -437,7 +437,7 @@ grep "base_url:" agents/error-test-bot.md
 
 ```bash
 docker cp agents/error-test-bot.md xyncra-server-xyncra-server-e2e-1:/app/agents/error-test-bot.md
-docker compose -f docker-compose.e2e.yml restart xyncra-server-e2e
+docker compose -f deploy/docker-compose.e2e.yml restart xyncra-server-e2e
 sleep 5
 
 curl -s http://localhost:18080/health
@@ -494,7 +494,7 @@ sleep 15
 #### 步骤 2.7: 验证 — 服务器 DB 直接查询
 
 ```bash
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db \
   "SELECT sender_id, content FROM messages WHERE conversation_id = '$CONV_ID' AND sender_id = 'agent/error-test-bot';"
 ```
@@ -504,7 +504,7 @@ docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
 #### 步骤 2.8: 验证 — 服务器日志
 
 ```bash
-docker compose -f docker-compose.e2e.yml logs xyncra-server-e2e 2>&1 | grep -i "timeout\|unreachable\|connect\|build" | tail -5
+docker compose -f deploy/docker-compose.e2e.yml logs xyncra-server-e2e 2>&1 | grep -i "timeout\|unreachable\|connect\|build" | tail -5
 ```
 
 **预期**：日志中包含连接超时或拒绝相关的错误信息。
@@ -545,16 +545,16 @@ EOF
 #### 步骤 3.2: 设置无效 API Key 环境变量并重启服务器
 
 ```bash
-# 在 docker-compose.e2e.yml 中临时添加环境变量
-# 或直接通过 docker compose 传递
-docker compose -f docker-compose.e2e.yml down
+# 在 deploy/docker-compose.e2e.yml 中临时添加环境变量
+# 或直接通过 docker compose -f deploy/docker-compose.yml 传递
+docker compose -f deploy/docker-compose.e2e.yml down
 XYNCRA_INVALID_KEY_FOR_TEST="sk-invalid-test-key-12345" \
-  docker compose -f docker-compose.e2e.yml up -d
+  docker compose -f deploy/docker-compose.e2e.yml up -d
 sleep 5
 
 # 必须 docker cp 重新同步 agent 配置（容器被重建）
 docker cp agents/error-test-bot.md xyncra-server-xyncra-server-e2e-1:/app/agents/error-test-bot.md
-docker compose -f docker-compose.e2e.yml restart xyncra-server-e2e
+docker compose -f deploy/docker-compose.e2e.yml restart xyncra-server-e2e
 sleep 5
 
 curl -s http://localhost:18080/health
@@ -614,7 +614,7 @@ sleep 15
 #### 步骤 3.7: 验证 — 服务器 DB 直接查询
 
 ```bash
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db \
   "SELECT sender_id, content FROM messages WHERE conversation_id = '$CONV_ID' AND sender_id = 'agent/error-test-bot';"
 ```
@@ -624,7 +624,7 @@ docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
 #### 步骤 3.8: 验证 — 服务器日志
 
 ```bash
-docker compose -f docker-compose.e2e.yml logs xyncra-server-e2e 2>&1 | grep -i "rate\|429\|401\|unauthorized\|timeout\|stream" | tail -5
+docker compose -f deploy/docker-compose.e2e.yml logs xyncra-server-e2e 2>&1 | grep -i "rate\|429\|401\|unauthorized\|timeout\|stream" | tail -5
 ```
 
 **预期**：日志中包含 LLM 返回的错误码或超时信息。
@@ -653,7 +653,7 @@ cat agents/hitl-bot.md
 
 ```bash
 docker cp agents/hitl-bot.md xyncra-server-xyncra-server-e2e-1:/app/agents/hitl-bot.md
-docker compose -f docker-compose.e2e.yml restart xyncra-server-e2e
+docker compose -f deploy/docker-compose.e2e.yml restart xyncra-server-e2e
 sleep 5
 
 curl -s http://localhost:18080/health
@@ -711,7 +711,7 @@ sleep 15
 #### 步骤 4.7: 验证 — 服务器 DB（无错误消息）
 
 ```bash
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db \
   "SELECT sender_id, content FROM messages WHERE conversation_id = '$HITL_CONV_ID' ORDER BY message_id ASC;"
 ```
@@ -768,7 +768,7 @@ EOF
 
 ```bash
 docker cp agents/error-test-bot.md xyncra-server-xyncra-server-e2e-1:/app/agents/error-test-bot.md
-docker compose -f docker-compose.e2e.yml restart xyncra-server-e2e
+docker compose -f deploy/docker-compose.e2e.yml restart xyncra-server-e2e
 sleep 5
 
 curl -s http://localhost:18080/health
@@ -826,7 +826,7 @@ sleep 15
 #### 步骤 5.7: 验证 — 服务器 DB（正常消息）
 
 ```bash
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db \
   "SELECT sender_id, SUBSTR(content, 1, 80) FROM messages WHERE conversation_id = '$CONV_ID' ORDER BY message_id ASC;"
 ```
@@ -842,7 +842,7 @@ docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
 ### 7.1 Server DB 验证命令速查
 
 ```bash
-DB_EXEC="docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e sqlite3 /app/xyncra-e2e.db"
+DB_EXEC="docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e sqlite3 /app/xyncra-e2e.db"
 
 # 查看指定会话的所有消息（含错误消息）
 $DB_EXEC "SELECT sender_id, content FROM messages WHERE conversation_id = '<conv-id>' ORDER BY message_id ASC;"
@@ -921,10 +921,10 @@ sqlite3 "$CLIENT_DB" \
 | 错误消息不是中文 | `classifyError()` 走了 default 分支 | 检查服务器日志中的原始错误，确认 sentinel error 匹配 |
 | API Key 缺失但无错误消息 | 环境变量意外存在 | `env | grep XYNCRA_NONEXISTENT` 确认环境变量确实不存在 |
 | 修改 Agent 配置后未生效 | 容器内 `agents/` 是构建时 COPY 的，非挂载 | 必须 `docker cp` 到容器内再重启，见 §3.6 |
-| 错误分类与预期不符 | `api_key_env` 指向容器中不存在的变量 | 确认 `docker compose exec ... env` 中变量存在，否则 Build 阶段会提前失败为配置错误 |
+| 错误分类与预期不符 | `api_key_env` 指向容器中不存在的变量 | 确认 `docker compose -f deploy/docker-compose.yml exec ... env` 中变量存在，否则 Build 阶段会提前失败为配置错误 |
 | HITL 未触发 | Agent 没有使用 `ask_user` 工具 | 检查 hitl-bot 配置、确认 middleware 中未禁用 HITL |
-| 阶段 5 仍然报错 | 服务器未正确重启或 Agent 配置未更新 | `docker cp` + `docker compose restart` + `curl /health` 确认 |
-| 容器内看不到环境变量 | docker-compose 未传递环境变量 | 检查 `docker-compose.e2e.yml` 的 `environment` 配置 |
+| 阶段 5 仍然报错 | 服务器未正确重启或 Agent 配置未更新 | `docker cp` + `docker compose -f deploy/docker-compose.yml restart` + `curl /health` 确认 |
+| 容器内看不到环境变量 | docker-compose 未传递环境变量 | 检查 `deploy/docker-compose.e2e.yml` 的 `environment` 配置 |
 | 消息顺序不对 | sync-updates 未执行 | 先执行 `sync-updates`，再执行 `get-messages` |
 
 ---
@@ -937,7 +937,7 @@ sqlite3 "$CLIENT_DB" \
 ./bin/xyncra-client kill --user-id alice --device-id test-device-alice --force 2>/dev/null
 
 # 停止 Docker E2E 环境
-docker compose -f docker-compose.e2e.yml down
+docker compose -f deploy/docker-compose.e2e.yml down
 
 # 恢复原始 Agent 配置
 rm -f agents/error-test-bot.md

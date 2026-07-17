@@ -717,7 +717,7 @@ xyncra-client send --conversation-id conv-abc123 --content "最终的回复"
 | 问题 | 解决方法 |
 |------|---------|
 | `address already in use` | 守护进程已在运行，或上次未正常退出。用 `xyncra-client kill` 停止 |
-| `connection refused` | 服务器未运行。先 `./bin/xyncra-server` 或 `docker compose up -d` |
+| `connection refused` | 服务器未运行。先 `./bin/xyncra-server` 或 `docker compose -f deploy/docker-compose.yml up -d` |
 | `user-id is required` | 通过 `--user-id` 或 `XYNCRA_USER_ID` 环境变量设置 |
 | 看不到实时推送 | `listen` 命令未运行。先启动守护进程 |
 | 消息发送失败 | 检查会话 ID 是否正确，或尝试 `kill` 后重启守护进程 |

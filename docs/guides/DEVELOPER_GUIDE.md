@@ -15,7 +15,6 @@ xyncra-server/
 ├── cmd/
 │   ├── xyncra-server/main.go      # 服务端入口：配置解析、组件初始化、启动服务
 │   └── xyncra-client/main.go      # 客户端 CLI 入口
-├── configs/config.example.env     # 环境变量配置示例
 ├── docs/
 │   ├── API.md                     # WebSocket 协议 API 文档
 │   ├── PRODUCT_DECISIONS.md       # 产品决策文档（所有开发者必须遵守）

@@ -114,7 +114,7 @@ make build
 ### Docker
 
 ```bash
-docker compose up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ### 配置
@@ -384,7 +384,6 @@ xyncra-server/
 │   ├── client/               # Go 客户端 SDK
 │   └── store/                # 客户端本地存储（通过 GORM 使用 SQLite）
 │       └── model/            # 客户端数据模型
-├── configs/                  # 配置模板
 ├── scripts/                  # Shell 脚本
 ├── docs/
 │   ├── API.md                    # WebSocket 协议参考
@@ -408,9 +407,17 @@ xyncra-server/
 │   ├── plans/                        # 设计计划
 │   ├── testing/                      # 测试文档与报告
 │   └── superpowers/                  # AI 生成的规格文档
-├── Dockerfile
-├── docker-compose.yml
-└── docker-compose.e2e.yml    # E2E 测试环境
+├── deploy/                           # Docker 与部署配置
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── docker-compose.e2e.yml        # E2E 测试环境
+│   ├── docker-compose.multi-node.yml # 多节点分布式测试
+│   ├── alertmanager/                 # AlertManager 配置
+│   ├── grafana/                      # Grafana 仪表盘与数据源
+│   ├── loki/                         # Loki 配置
+│   ├── prometheus/                   # Prometheus 规则与配置
+│   └── promtail/                     # Promtail 配置
+└── wiki/                             # 项目 Wiki
 ```
 
 ---

@@ -160,7 +160,7 @@ make clean
 
 ### 多阶段构建
 
-Docker 构建使用两阶段策略（参考 `Dockerfile`）：
+Docker 构建使用两阶段策略（参考 `deploy/Dockerfile`）：
 
 ```
 阶段 1: golang:1.26-alpine (构建)
@@ -176,10 +176,10 @@ Docker 构建使用两阶段策略（参考 `Dockerfile`）：
 
 ```bash
 # 构建镜像
-docker build -t xyncra-server:latest .
+docker build -f deploy/Dockerfile -t xyncra-server:latest .
 
 # 带版本标签
-docker build -t xyncra-server:$(git describe --tags) .
+docker build -f deploy/Dockerfile -t xyncra-server:$(git describe --tags) .
 ```
 
 ### 镜像优化
@@ -200,8 +200,8 @@ rsync bin/xyncra-server user@host:/opt/xyncra/
 ssh user@host 'systemctl restart xyncra'
 
 # 方式二：Docker Compose 部署
-scp docker-compose.yml user@host:/opt/xyncra/
-ssh user@host 'cd /opt/xyncra && docker compose pull && docker compose up -d'
+scp deploy/docker-compose.yml user@host:/opt/xyncra/
+ssh user@host 'cd /opt/xyncra && docker compose pull && docker compose -f deploy/docker-compose.yml up -d'
 
 # 方式三：Docker 单容器部署
 docker run -d \
@@ -233,8 +233,8 @@ deploy:
         key: ${{ secrets.DEPLOY_KEY }}
         script: |
           cd /opt/xyncra
-          docker compose pull
-          docker compose up -d --wait
+          docker compose -f deploy/docker-compose.yml pull
+          docker compose -f deploy/docker-compose.yml up -d --wait
           # 健康检查
           if curl -f http://localhost:8080/health; then
             echo "Deploy successful"
@@ -274,7 +274,7 @@ git push origin v1.0.0
 make release
 
 # 5. 构建 Docker 镜像
-docker build -t xyncra-server:v1.0.0 .
+docker build -f deploy/Dockerfile -t xyncra-server:v1.0.0 .
 docker tag xyncra-server:v1.0.0 registry.example.com/xyncra-server:v1.0.0
 docker push registry.example.com/xyncra-server:v1.0.0
 

@@ -8,11 +8,11 @@ last_updated: 2026-07-17
 
 ## Overview
 
-Xyncra Server ships with 11 pre-defined Prometheus alert rules in `prometheus/alerts.yml`. Alerts are grouped by domain and follow a high signal-to-noise philosophy (D-127). Each alert is designed to catch a specific failure mode with minimal false positives.
+Xyncra Server ships with 11 pre-defined Prometheus alert rules in `deploy/prometheus/alerts.yml`. Alerts are grouped by domain and follow a high signal-to-noise philosophy (D-127). Each alert is designed to catch a specific failure mode with minimal false positives.
 
 ## Alert Rules
 
-Alert rules are defined in `prometheus/alerts.yml` and loaded by Prometheus. The evaluation interval is 15 seconds (configured in `prometheus/prometheus.yml`).
+Alert rules are defined in `deploy/prometheus/alerts.yml` and loaded by Prometheus. The evaluation interval is 15 seconds (configured in `prometheus/prometheus.yml`).
 
 ### System Alerts
 
@@ -62,7 +62,7 @@ Detect message delivery issues.
 
 ## AlertManager Configuration
 
-AlertManager is configured in `alertmanager/alertmanager.yml`:
+AlertManager is configured in `deploy/alertmanager/alertmanager.yml`:
 
 ```yaml
 global:
@@ -129,15 +129,15 @@ AlertManager sends a JSON payload with the following structure:
 
 ### Modifying Existing Rules
 
-Edit `prometheus/alerts.yml` and restart Prometheus:
+Edit `deploy/prometheus/alerts.yml` and restart Prometheus:
 
 ```bash
-docker compose --profile observability restart prometheus
+docker compose -f deploy/docker-compose.yml --profile observability restart prometheus
 ```
 
 ### Adding New Rules
 
-Add rules under the appropriate group in `prometheus/alerts.yml`:
+Add rules under the appropriate group in `deploy/prometheus/alerts.yml`:
 
 ```yaml
 groups:
@@ -166,7 +166,7 @@ Thresholds should be tuned to your deployment size. For example, `HighConnection
 
 ```bash
 # Start with observability stack
-docker compose --profile observability up -d
+docker compose -f deploy/docker-compose.yml --profile observability up -d
 
 # Verify Prometheus is running
 curl http://localhost:9090/-/healthy

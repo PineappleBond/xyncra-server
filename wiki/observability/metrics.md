@@ -110,7 +110,7 @@ Monitor Redis connectivity and async task queue health. Redis is a critical depe
 
 ## Prometheus Configuration
 
-Add to `prometheus.yml`:
+Add to `deploy/prometheus/prometheus.yml`:
 
 ```yaml
 scrape_configs:

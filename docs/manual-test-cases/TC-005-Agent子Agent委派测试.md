@@ -88,8 +88,8 @@ make build
 ### 3.2 启动 Docker E2E 环境
 
 ```bash
-docker compose -f docker-compose.e2e.yml build --no-cache && \
-docker compose -f docker-compose.e2e.yml up -d
+docker compose -f deploy/docker-compose.e2e.yml build --no-cache && \
+docker compose -f deploy/docker-compose.e2e.yml up -d
 ```
 
 ### 3.3 健康检查
@@ -460,7 +460,7 @@ echo "PARENT_CONV_ID=$PARENT_CONV_ID"
 **验证**：
 
 ```bash
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db "SELECT id, user_id1, user_id2, type FROM conversations WHERE id = '$PARENT_CONV_ID';"
 # 预期: $PARENT_CONV_ID|alice|agent/parent-bot|1-on-1
 ```
@@ -542,7 +542,7 @@ for line in sys.stdin:
 #### 步骤 2.7: 验证 Server DB — 只有父 Agent 发消息
 
 ```bash
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db "SELECT sender_id, SUBSTR(content, 1, 80) FROM messages WHERE conversation_id = '$PARENT_CONV_ID' ORDER BY message_id ASC;"
 ```
 
@@ -661,7 +661,7 @@ echo "ORPHAN_CONV_ID=$ORPHAN_CONV_ID"
 
 ```bash
 # 检查 Docker 容器日志
-docker compose -f docker-compose.e2e.yml logs xyncra-server-e2e 2>&1 | \
+docker compose -f deploy/docker-compose.e2e.yml logs xyncra-server-e2e 2>&1 | \
   grep -i "nonexistent-bot\|sub-agent.*not found\|D-081" | tail -5
 ```
 
@@ -701,7 +701,7 @@ sleep 15  # 等待处理
 
 ```bash
 # 验证 Server DB
-docker compose -f docker-compose.e2e.yml exec xyncra-server-e2e \
+docker compose -f deploy/docker-compose.e2e.yml exec xyncra-server-e2e \
   sqlite3 /app/xyncra-e2e.db "SELECT sender_id, SUBSTR(content, 1, 80) FROM messages WHERE conversation_id = '$ORPHAN_CONV_ID' ORDER BY message_id ASC;"
 ```
 
@@ -1045,7 +1045,7 @@ websocat -n1 ws://localhost:18080/ws?user_id=e2e-admin \
 # 或使用 Python websockets（见步骤 1.5 中的方法 B）
 
 # 停止 Docker 环境
-docker compose -f docker-compose.e2e.yml down
+docker compose -f deploy/docker-compose.e2e.yml down
 
 # 清理临时目录
 rm -rf $E2E_HOME

@@ -69,8 +69,8 @@ docs/manual-test-cases/
 ### 4. 前置条件
 
 - 构建二进制：`make build`
-- 构建镜像：`docker compose -f docker-compose.e2e.yml build --no-cache`
-- 启动 Docker E2E：`docker compose -f docker-compose.e2e.yml up -d`
+- 构建镜像：`docker compose -f deploy/docker-compose.e2e.yml build --no-cache`
+- 启动 Docker E2E：`docker compose -f deploy/docker-compose.e2e.yml up -d`
 - 健康检查（Redis PONG、Server /health）
 - 创建测试工作目录：`mktemp -d`
 - 特定于本测试的额外准备
@@ -292,6 +292,6 @@ flowchart TD
 
 - [PRODUCT_DECISIONS.md](../../../docs/decisions/PRODUCT_DECISIONS.md) — 产品决策文档（D-XXX 编号引用）
 - [CLI_E2E_TEST_STRATEGY.md](../../../docs/CLI_E2E_TEST_STRATEGY.md) — 自动化测试策略
-- [docker-compose.e2e.yml](../../../docker-compose.e2e.yml) — E2E Docker 配置
+- [deploy/docker-compose.e2e.yml](../../../deploy/docker-compose.e2e.yml) — E2E Docker 配置
 - [.env.test.example](../../../.env.test.example) — LLM 测试配置模板
 - [.env.test](../../../.env.test) — 真实LLM配置（可能会被厂商限流）
