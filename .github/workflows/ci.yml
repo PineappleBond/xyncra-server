@@ -100,5 +100,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - run: |
           SHA_SHORT=$(echo ${{ github.sha }} | cut -c1-7)
-          docker build -f deploy/Dockerfile -t ghcr.io/${{ github.repository }}:${SHA_SHORT} .
-          docker push ghcr.io/${{ github.repository }}:${SHA_SHORT}
+          REPO_LOWER=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
+          docker build -f deploy/Dockerfile -t ghcr.io/${REPO_LOWER}:${SHA_SHORT} .
+          docker push ghcr.io/${REPO_LOWER}:${SHA_SHORT}
