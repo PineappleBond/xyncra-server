@@ -1,10 +1,11 @@
-# TC-002: Phase 5 补发机制测试
+# TC-002: Phase 5 补发机制测试（双版本 Client）
 
 > **测试编号**: TC-002
 > **测试类型**: 端到端集成测试
 > **覆盖范围**: ReverseRPC Pending Store (D-103)、system.reconnect (D-108)、补发机制 (D-109)、设备替换 (D-095)
 > **环境**: Docker E2E (D-043)
-> **最后更新**: 2026-07-14
+> **客户端版本**: Go Client (`./bin/xyncra-client`) + TypeScript Client (`$CLIENT_TS`)
+> **最后更新**: 2026-07-18
 
 ---
 
@@ -12,9 +13,31 @@
 
 本测试用例覆盖 Xyncra 消息系统 Phase 5 的补发机制：当 ReverseRPC 请求超时后，请求被持久化到 Redis Pending Store，客户端重连后通过 `system.reconnect` RPC 触发补发。
 
-**测试目标**：验证断连期间的 ReverseRPC 请求能够在重连后正确补发，确保 HITL 等场景的可靠性。
+### 1.0.1 双版本 Client 测试策略
+
+本测试同时覆盖 **Go Client** 和 **TypeScript Client** 两个版本。TS Client 是 Go Client 的 1:1 功能复刻（TS-D-005），CLI 命令、参数和输出格式完全一致。
+
+**测试方法**：
+- 阶段 1-4 使用 Go Client 作为主测试路径（文档中的默认命令）
+- 每个阶段末尾标注 TS Client 的适配要点
+- 两个版本应表现出相同的补发机制行为
+
+**关键差异**（影响测试验证步骤）：
+
+| 差异项 | Go Client | TS Client | 决策编号 |
+| --- | --- | --- | --- |
+| 二进制路径 | `./bin/xyncra-client` | `xyncra-client`（npm link 后） | — |
+| 本地存储 | SQLite 文件 (`xyncra.db`) | IndexedDB (Dexie.js / fake-indexeddb) | TS-D-012 |
+| `--device-id` | 必需参数 | 可选（默认 SHA256(hostname)[:8]） | D-033 |
+| 进程锁实现 | fcntl | fs-ext | D-031 |
+
+> **源码位置**：TS Client 源码在 `demo/web/packages/xyncra-client-cli/`
+> **维护提醒**：如果 TS Client 代码更新，需同步更新本文档。
+
+**测试目标**：验证断连期间的 ReverseRPC 请求能够在重连后正确补发，确保 HITL 等场景的可靠性。验证 Go/TS 两个版本 Client 的补发机制行为一致性。
 
 **覆盖的关键决策**：
+
 - D-095: 设备替换策略（Close Frame 4001）
 - D-103: ReverseRPC Pending Store（Redis 持久化）
 - D-104: 幂等键与 Seq 协议扩展
@@ -59,10 +82,43 @@
 
 ### 3.1 构建二进制
 
+#### 3.1.1 Go Client & Server
+
 ```bash
 cd /path/to/xyncra-server
 make build
 ```
+
+#### 3.1.2 TypeScript Client
+
+> **源码位置**：`demo/web/packages/xyncra-client-cli/`
+> **编译入口**：`demo/web/packages/xyncra-client-cli/dist/bin/xyncra-client.js`
+> **维护提醒**：如果 TS Client 代码更新，需同步更新本文档。
+
+```bash
+# 构建 TS Client
+cd demo/web
+npm install
+cd packages/xyncra-client-cli
+npm run build
+
+# 方式 1: npm link（推荐，使命令全局可用）
+npm link
+
+# 方式 2: 直接 node 调用（从项目根目录）
+# node demo/web/packages/xyncra-client-cli/dist/bin/xyncra-client.js
+```
+
+验证：
+
+```bash
+xyncra-client --version
+# 预期: 0.1.0
+```
+
+> **变量定义**：
+> - `$CLIENT_GO` = `./bin/xyncra-client`（从项目根目录执行）
+> - `$CLIENT_TS` = `xyncra-client`（npm link 后）或 `node demo/web/packages/xyncra-client-cli/dist/bin/xyncra-client.js`
 
 ### 3.2 启动 Docker E2E 环境
 
@@ -105,6 +161,8 @@ echo "E2E_HOME=$E2E_HOME"
 | `$E2E_HOME` | `/tmp/xe2e-XXXXXX` | 临时测试目录 |
 | `$DEVICE_ID` | (运行时获取) | Alice 的设备 ID |
 | `$PENDING_KEY` | `pending:alice\x00$DEVICE_ID` | Redis Pending Key |
+| `$CLIENT_GO` | `./bin/xyncra-client` | Go Client 二进制路径 |
+| `$CLIENT_TS` | `xyncra-client` | TS Client 命令（npm link 后） |
 
 ---
 
@@ -196,6 +254,28 @@ cat "$E2E_HOME/server.log" | grep "system.register_functions" | tail -3
 # 预期: 看到函数注册日志
 ```
 
+#### 步骤 1.4: 📘 TS Client 适配要点（阶段 1）
+
+> TS Client 的 daemon 启动行为与 Go Client 完全一致，仅二进制路径和 device-id 默认值不同。
+
+```bash
+# TS Client 启动（使用不同的 device-id 避免冲突）
+xyncra-client listen \
+  --user-id alice --device-id test-device-alice-ts \
+  --server ws://localhost:18080/ws \
+  > "$E2E_HOME/alice-ts-daemon.log" 2>&1 &
+ALICE_TS_PID=$!
+sleep 2
+
+# 验证函数注册
+cat "$E2E_HOME/server.log" | grep "system.register_functions" | tail -3
+# 预期: 看到 TS Client 的函数注册日志
+```
+
+**差异点**：
+- `--device-id` 可选（TS 默认 SHA256(hostname)[:8]）
+- 状态文件无 `xyncra.db`（TS 使用 IndexedDB 内存存储）
+
 ---
 
 ### 阶段 2: 触发 ReverseRPC 并模拟超时
@@ -242,6 +322,33 @@ redis-cli -p 16379 -n 15 KEYS "pending:*"
 # 预期: 包含 pending:alice* 的 key
 ```
 
+#### 步骤 2.5: 📘 TS Client 适配要点（阶段 2）
+
+> TS Client 的 ReverseRPC 超时和 Pending Store 行为与 Go Client 完全一致。
+
+```bash
+# TS Client 创建 Agent 会话
+TS_CONV_ID=$(xyncra-client create-conversation \
+  --user-id alice --device-id test-device-alice-ts \
+  --server ws://localhost:18080/ws \
+  --peer-id "agent/weather-bot" | grep "ID:" | awk '{print $2}')
+
+# 发送消息触发 Agent 处理
+xyncra-client send \
+  --user-id alice --device-id test-device-alice-ts \
+  --server ws://localhost:18080/ws \
+  --conversation-id "$TS_CONV_ID" \
+  --content "What's the weather? Call a client tool."
+
+# 暂停 TS daemon 进程
+kill -STOP $ALICE_TS_PID
+sleep 35  # 等待 ReverseRPC 超时
+
+# 验证 Redis Pending Store
+redis-cli -p 16379 -n 15 KEYS "pending:alice*"
+# 预期: 包含 TS Client 的 pending 请求
+```
+
 ---
 
 ### 阶段 3: 客户端重连并补发
@@ -280,6 +387,28 @@ sleep 5  # 等待补发完成
 PENDING_KEY="pending:alice\x00$DEVICE_ID"
 redis-cli -p 16379 -n 15 GET "$PENDING_KEY"
 # 预期: (nil) 或空数组（请求已被处理并清理）
+```
+
+#### 步骤 3.5: 📘 TS Client 适配要点（阶段 3）
+
+> TS Client 的重连和补发行为与 Go Client 完全一致。
+
+```bash
+# 恢复 TS daemon 进程
+kill -CONT $ALICE_TS_PID
+sleep 2
+
+# 检查 TS daemon 日志，确认 system.reconnect
+cat "$E2E_HOME/alice-ts-daemon.log" | grep "system.reconnect" | tail -3
+
+# 验证补发请求
+cat "$E2E_HOME/server.log" | grep "s-replay-" | tail -5
+# 预期: 看到 TS Client 的补发请求
+
+# 验证 Redis Pending 已清理
+sleep 5
+redis-cli -p 16379 -n 15 KEYS "pending:alice*"
+# 预期: TS Client 的 pending 请求已被清理
 ```
 
 ---
@@ -322,6 +451,28 @@ redis-cli -p 16379 -n 15 GET "$PENDING_KEY"
 ./bin/xyncra-client kill --user-id alice --device-id "$DEVICE_ID"
 ```
 
+#### 步骤 4.5: 📘 TS Client 适配要点（阶段 4）
+
+> TS Client 的设备替换行为与 Go Client 完全一致。
+
+```bash
+# TS Client 设备替换测试
+# 使用相同的 device-id 启动新连接
+xyncra-client listen \
+  --user-id alice --device-id test-device-alice-ts \
+  --server ws://localhost:18080/ws \
+  > "$E2E_HOME/alice-ts-daemon-2.log" 2>&1 &
+ALICE_TS_PID_2=$!
+sleep 2
+
+# 验证旧 TS daemon 收到 Close 4001
+cat "$E2E_HOME/alice-ts-daemon.log" | grep -i "4001\|replaced" | tail -3
+# 预期: 看到 Close 4001 或 replaced 信息
+
+# 停止第二个 TS daemon
+xyncra-client kill --user-id alice --device-id test-device-alice-ts
+```
+
 ---
 
 ## 7. 数据库验证汇总
@@ -349,10 +500,10 @@ $R FLUSHDB
 
 | 阶段 | 判定条件 |
 |------|---------|
-| 阶段 1 | daemon 正常启动，device_id 正确生成，函数注册成功 |
-| 阶段 2 | ReverseRPC 超时后，请求被持久化到 Redis Pending Store |
-| 阶段 3 | 重连后 system.reconnect 触发补发，Pending 被清理 |
-| 阶段 4 | 设备替换时旧连接收到 Close 4001，Pending 不被清理 |
+| 阶段 1 | Go/TS daemon 正常启动，device_id 正确生成，函数注册成功 |
+| 阶段 2 | ReverseRPC 超时后，Go/TS 请求都被持久化到 Redis Pending Store |
+| 阶段 3 | 重连后 system.reconnect 触发补发，Go/TS 的 Pending 都被清理 |
+| 阶段 4 | 设备替换时 Go/TS 旧连接都收到 Close 4001，Pending 不被清理 |
 
 ---
 
@@ -369,8 +520,13 @@ $R FLUSHDB
 ## 10. 环境清理
 
 ```bash
+# Go Client daemons
 ./bin/xyncra-client kill --user-id alice --device-id test-device-alice
 ./bin/xyncra-client kill --user-id alice --device-id test-device-alice --force 2>/dev/null
+
+# TS Client daemons（如果使用）
+xyncra-client kill --user-id alice --device-id test-device-alice-ts 2>/dev/null || true
+xyncra-client kill --user-id alice --device-id test-device-alice-ts --force 2>/dev/null || true
 
 docker compose -f deploy/docker-compose.e2e.yml down
 
@@ -406,13 +562,14 @@ redis-cli -p 16379 -n 15 FLUSHDB
 | Git Commit | <sha> |
 | 测试者 | <name> |
 | 环境 | Docker E2E |
+| 客户端版本 | Go / TS / 双版本 |
 
-| 阶段 | 结果 | 备注 |
-|------|------|------|
-| 阶段 1: Daemon 启动 | ✅ / ❌ | |
-| 阶段 2: Pending 验证 | ✅ / ❌ | D-103 |
-| 阶段 3: 补发验证 | ✅ / ❌ | D-108 |
-| 阶段 4: 设备替换 | ✅ / ❌ | D-095 |
+| 阶段 | 结果 (Go) | 结果 (TS) | 备注 |
+|------|-----------|-----------|------|
+| 阶段 1: Daemon 启动 | ✅ / ❌ | ✅ / ❌ | |
+| 阶段 2: Pending 验证 | ✅ / ❌ | ✅ / ❌ | D-103 |
+| 阶段 3: 补发验证 | ✅ / ❌ | ✅ / ❌ | D-108 |
+| 阶段 4: 设备替换 | ✅ / ❌ | ✅ / ❌ | D-095 |
 
 **发现的问题**：
 1. (描述)
