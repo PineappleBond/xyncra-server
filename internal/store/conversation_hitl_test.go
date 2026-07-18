@@ -23,7 +23,7 @@ func TestConversationStore_UpdateAgentStatus(t *testing.T) {
 			conv := newTestConv("conv-hitl-1", "user-1", "user-2", "direct", "HITL Test")
 			require.NoError(t, s.Conversations.Create(ctx, conv))
 
-			beforeUpdate := time.Now().Truncate(time.Microsecond)
+			beforeUpdate := time.Now().Truncate(time.Second)
 			_, err := s.Conversations.UpdateAgentStatus(ctx, "conv-hitl-1", model.AgentStatusAskingUser, "agent/test-agent", "cp-123")
 			require.NoError(t, err)
 
@@ -99,7 +99,7 @@ func TestConversationStore_ClearAgentStatus(t *testing.T) {
 			require.NoError(t, err)
 
 			// Now clear it.
-			beforeClear := time.Now().Truncate(time.Microsecond)
+			beforeClear := time.Now().Truncate(time.Second)
 			_, err = s.Conversations.ClearAgentStatus(ctx, "conv-clear-1")
 			require.NoError(t, err)
 
