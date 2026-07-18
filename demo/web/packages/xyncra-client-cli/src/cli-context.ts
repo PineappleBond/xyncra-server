@@ -22,7 +22,7 @@ export function resolveStringFlag(
   defaultVal: string,
 ): string {
   // Check if flag was explicitly set on command line.
-  const opts = cmd.opts();
+  const opts = cmd.optsWithGlobals();
   const flagKey = flagName.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
   if (opts[flagKey] !== undefined && opts[flagKey] !== '') {
     return opts[flagKey] as string;

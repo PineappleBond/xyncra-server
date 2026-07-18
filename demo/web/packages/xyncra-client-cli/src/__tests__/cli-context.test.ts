@@ -170,4 +170,21 @@ describe('CLIContext.fromCommand', () => {
     expect(parsed.searchParams.get('user_id')).toBe('testuser');
     expect(parsed.searchParams.get('device_id')).toBe('dev1');
   });
+
+  test('resolves global flags from subcommand via optsWithGlobals', () => {
+    const program = new Command('test-root');
+    registerGlobalFlags(program);
+    const sub = program.command('send');
+    sub.option('-c, --conversation-id <id>', 'Conv ID');
+    sub.action(async (options, cmd) => {
+      const ctx = CLIContext.fromCommand(cmd);
+      expect(ctx.userID).toBe('alice');
+      expect(ctx.serverURL).toBe('ws://localhost:8080/ws');
+    });
+    program.exitOverride();
+    program.configureOutput({ writeErr: () => {}, writeOut: () => {} });
+
+    // Parse with global flag before subcommand
+    program.parse(['node', 'test', '--user-id', 'alice', 'send', '-c', 'conv-1']);
+  });
 });

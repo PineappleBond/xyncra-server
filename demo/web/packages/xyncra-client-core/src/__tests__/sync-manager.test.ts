@@ -244,4 +244,40 @@ describe('SyncManager', () => {
     const seq = await db.syncStatesStore.getLocalMaxSeq();
     expect(seq).toBe(3);
   });
+
+  // ---------------------------------------------------------------------------
+  // Snake_case data flow: server sends snake_case JSON → stored correctly
+  // ---------------------------------------------------------------------------
+
+  test('fullSync stores snake_case conversation data queryable via Dexie indexes', async () => {
+    const syncMgr = createSyncManager();
+
+    // Simulate server response with snake_case keys (matching Go JSON tags)
+    rpcFn.mockResolvedValueOnce({
+      updates: [{
+        seq: 1,
+        type: 'conversation',
+        payload: {
+          action: 'create',
+          conversation: createConversation({
+            id: 'conv-snake-1',
+            user_id1: 'alice',
+            user_id2: 'bob',
+            type: '1-on-1',
+          }),
+        },
+      }],
+      has_more: false,
+      latest_seq: 1,
+    });
+
+    await syncMgr.fullSync();
+
+    // Verify conversation was stored and is queryable by snake_case fields
+    const convs = await db.conversationsStore.getByUser('alice', 0, 10);
+    expect(convs).toHaveLength(1);
+    expect(convs[0].id).toBe('conv-snake-1');
+    expect(convs[0].user_id1).toBe('alice');
+    expect(convs[0].user_id2).toBe('bob');
+  });
 });
