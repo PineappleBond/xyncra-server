@@ -1,0 +1,16 @@
+export { CLIContext, resolveStringFlag, registerGlobalFlags } from './cli-context.js';
+export { defaultDeviceID, ensureUserDir, socketPath, lockPath, dbPathDefault, logDirDefault, serverURLWithUser } from './paths.js';
+export { acquireLock, readLockInfo, isProcessAlive, cleanupDaemonFiles, LockError } from './lock.js';
+export type { LockInfo } from './lock.js';
+export { IPCServer, IPCClient, newIPCRequest, newIPCResponse, newIPCErrorResponse } from './ipc.js';
+export type { IPCRequest, IPCResponse, IPCError, IPCHandlerFunc } from './ipc.js';
+export { CLILogger } from './logger.js';
+export { CLIUpdateHandler } from './update-handler.js';
+export { runListen } from './daemon.js';
+export { builtinFunctionInfos, registerBuiltinHandlers } from './builtin-functions.js';
+export { registerIPCHandlers } from './ipc-handlers.js';
+export { startLogCleanup } from './log-cleanup.js';
+export { standaloneRPC, isMutationMethod } from './rpc-helper.js';
+export { ConsoleWriter } from './output/console.js';
+export { openExportOutput } from './output/csv.js';
+export type { ExportOutput } from './output/csv.js';

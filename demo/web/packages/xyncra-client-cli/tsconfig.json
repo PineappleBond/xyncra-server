@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": ".",
+    "types": ["jest", "node"],
+    "paths": {
+      "@xyncra/protocol": ["../xyncra-protocol/src"],
+      "@xyncra/client-core": ["../xyncra-client-core/src"]
+    }
+  },
+  "include": ["src/**/*", "bin/**/*"],
+  "references": [
+    { "path": "../xyncra-protocol" },
+    { "path": "../xyncra-client-core" }
+  ]
+}

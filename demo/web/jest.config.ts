@@ -12,9 +12,11 @@ export default async (): Promise<any> => {
       target: 'browser',
     }),
   });
-  return {
+
+  // Base config for the main web app tests (jsdom environment)
+  const baseConfig = {
     ...config,
-    testPathIgnorePatterns: ['/node_modules/', '/.worktrees/'],
+    testPathIgnorePatterns: ['/node_modules/', '/.worktrees/', '/packages/xyncra-client-core/', '/packages/xyncra-client-cli/'],
     moduleNameMapper: {
       '\\.md$': '<rootDir>/tests/__mocks__/raw.js',
       ...(config.moduleNameMapper || {}),
@@ -32,5 +34,46 @@ export default async (): Promise<any> => {
       __UMI_VERSION__: readPkgVersion('@umijs/max'),
       __UTOO_VERSION__: readPkgVersion('@utoo/pack'),
     },
+  };
+
+  // Config for @xyncra/client-core tests (node environment, no jsdom)
+  const coreConfig = {
+    ...config,
+    displayName: 'xyncra-client-core',
+    testMatch: ['<rootDir>/packages/xyncra-client-core/src/__tests__/**/*.test.ts'],
+    testPathIgnorePatterns: ['/node_modules/', '/.worktrees/'],
+    testEnvironment: 'node',
+    moduleNameMapper: {
+      ...(config.moduleNameMapper || {}),
+      '^@xyncra/protocol$': '<rootDir>/packages/xyncra-protocol/src',
+    },
+    setupFiles: [
+      '<rootDir>/packages/xyncra-client-core/src/__tests__/setup.ts',
+    ],
+    transform: {
+      '^.+\\.tsx?$': 'ts-jest',
+    },
+  };
+
+  // Config for @xyncra/client-cli tests (node environment, no jsdom)
+  const cliConfig = {
+    ...config,
+    displayName: 'xyncra-client-cli',
+    testMatch: ['<rootDir>/packages/xyncra-client-cli/src/__tests__/**/*.test.ts'],
+    testPathIgnorePatterns: ['/node_modules/', '/.worktrees/'],
+    testEnvironment: 'node',
+    moduleNameMapper: {
+      ...(config.moduleNameMapper || {}),
+      '^@xyncra/protocol$': '<rootDir>/packages/xyncra-protocol/src',
+      '^@xyncra/client-core$': '<rootDir>/packages/xyncra-client-core/src',
+      '^(\\.{1,2}/.*)\\.js$': '$1',
+    },
+    transform: {
+      '^.+\\.tsx?$': 'ts-jest',
+    },
+  };
+
+  return {
+    projects: [baseConfig, coreConfig, cliConfig],
   };
 };
