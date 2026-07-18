@@ -10,6 +10,8 @@ linters:
     - staticcheck
     - unused
   exclusions:
+    paths:
+      - demo/web/node_modules
     rules:
       - path: _test\.go
         linters:
