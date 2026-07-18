@@ -71,10 +71,11 @@ func seedLocalConversation(t *testing.T, sm *syncManager, convID string, updated
 // makeEphemeralConvUpdate constructs a Seq=0 conversation "update" payload
 // with the given updated_at value.
 func makeEphemeralConvUpdate(convID string, updatedAt int64) *protocol.PackageDataUpdate {
+	raw, _ := json.Marshal(updatedAt)
 	payload := conversationUpdatePayload{
 		ConversationID: convID,
 		Action:         "update",
-		UpdatedAt:      updatedAt,
+		UpdatedAt:      raw,
 	}
 	data, _ := json.Marshal(payload)
 	return &protocol.PackageDataUpdate{

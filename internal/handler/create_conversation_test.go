@@ -62,6 +62,14 @@ func TestCreateConversation_HappyPath(t *testing.T) {
 	assert.Equal(t, conv.ID, persisted.ID)
 	assert.Equal(t, "alice", persisted.UserID1)
 	assert.Equal(t, "bob", persisted.UserID2)
+
+	// Verify wire-format: JSON keys must be snake_case (TS client compatibility).
+	var rawConvMap map[string]any
+	require.NoError(t, json.Unmarshal(data, &rawConvMap))
+	wrapperMap := rawConvMap["conversation"].(map[string]any)
+	for _, key := range []string{"id", "user_id1", "user_id2", "type", "title", "created_at", "updated_at", "last_message_at"} {
+		assert.Contains(t, wrapperMap, key, "conversation JSON should contain snake_case key %q", key)
+	}
 }
 
 // ---------------------------------------------------------------------------

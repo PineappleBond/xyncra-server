@@ -254,19 +254,21 @@ describe('SyncManager', () => {
 
     // Simulate server response with snake_case keys (matching Go JSON tags)
     rpcFn.mockResolvedValueOnce({
-      updates: [{
-        seq: 1,
-        type: 'conversation',
-        payload: {
-          action: 'create',
-          conversation: createConversation({
-            id: 'conv-snake-1',
-            user_id1: 'alice',
-            user_id2: 'bob',
-            type: '1-on-1',
-          }),
+      updates: [
+        {
+          seq: 1,
+          type: 'conversation',
+          payload: {
+            action: 'create',
+            conversation: createConversation({
+              id: 'conv-snake-1',
+              user_id1: 'alice',
+              user_id2: 'bob',
+              type: '1-on-1',
+            }),
+          },
         },
-      }],
+      ],
       has_more: false,
       latest_seq: 1,
     });

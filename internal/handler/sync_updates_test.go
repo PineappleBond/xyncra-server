@@ -116,10 +116,15 @@ func TestSyncUpdates_HappyPath_WithUpdates(t *testing.T) {
 	// Seed 5 updates with seq 1..5
 	seedUserUpdates(t, s, userID, 5, 1)
 
-	result := callSyncUpdates(t, handler, userID, map[string]interface{}{
+	ctx := context.Background()
+	client := server.NewTestClient(userID)
+	req := newTestRequest("req-sync", "sync_updates", map[string]interface{}{
 		"after_seq": 0,
 		"limit":     10,
 	})
+	data, err := handler.HandleRequest(ctx, client, req)
+	require.NoError(t, err)
+	result := parseSyncUpdatesResponse(t, data)
 
 	assert.Len(t, result.Updates, 5, "should return all 5 updates")
 	assert.False(t, result.HasMore, "has_more should be false when all updates fit")
@@ -132,6 +137,13 @@ func TestSyncUpdates_HappyPath_WithUpdates(t *testing.T) {
 		assert.NotEmpty(t, u.Payload, "payload should not be empty")
 		assert.Equal(t, "message", u.Type, "Type should be 'message' for seeded updates")
 	}
+
+	// Verify wire-format: JSON keys must be snake_case (TS client compatibility).
+	var rawSyncMap map[string]any
+	require.NoError(t, json.Unmarshal(data, &rawSyncMap))
+	assert.Contains(t, rawSyncMap, "updates")
+	assert.Contains(t, rawSyncMap, "has_more")
+	assert.Contains(t, rawSyncMap, "latest_seq")
 }
 
 // ---------------------------------------------------------------------------

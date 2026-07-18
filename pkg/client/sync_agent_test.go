@@ -417,10 +417,11 @@ func TestConversationUpdate_ParsesAndStoresQuestions(t *testing.T) {
 	t.Cleanup(func() { sm.Stop() })
 
 	// Send an ephemeral conversation update with updated_at > 0 (triggers RPC).
+	unixRaw, _ := json.Marshal(time.Now().Unix())
 	payload := conversationUpdatePayload{
 		ConversationID: convID,
 		Action:         "update",
-		UpdatedAt:      time.Now().Unix(),
+		UpdatedAt:      unixRaw,
 	}
 	payloadData, _ := json.Marshal(payload)
 	update := &protocol.PackageDataUpdate{

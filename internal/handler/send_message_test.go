@@ -127,6 +127,14 @@ func TestSendMessage_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, bobUpdates, 1)
 	assert.Equal(t, protocol.UpdateTypeMessage, bobUpdates[0].Type, "UserUpdate Type should be 'message'")
+
+	// Verify wire-format: JSON keys must be snake_case (TS client compatibility).
+	var rawMsgMap map[string]any
+	require.NoError(t, json.Unmarshal(data, &rawMsgMap))
+	wrapperMap := rawMsgMap["message"].(map[string]any)
+	for _, key := range []string{"id", "conversation_id", "sender_id", "client_message_id", "message_id", "content", "type", "reply_to", "status", "created_at"} {
+		assert.Contains(t, wrapperMap, key, "message JSON should contain snake_case key %q", key)
+	}
 }
 
 // ---------------------------------------------------------------------------

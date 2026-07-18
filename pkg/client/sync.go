@@ -47,10 +47,34 @@ type markReadPayload struct {
 // lightweight "update" action broadcast by SendConversationUpdate (D-118, D-124).
 // UpdatedAt carries the server-side updated_at as Unix seconds so the client
 // can decide whether to pull (D-124).
+//
+// UpdatedAt accepts both JSON number (Unix seconds) and string (RFC3339) for
+// backward compatibility with payloads that embed the full model.Conversation.
 type conversationUpdatePayload struct {
-	ConversationID string `json:"conversation_id"`
-	Action         string `json:"action"` // "delete", "restore", "update", or "" (legacy create)
-	UpdatedAt      int64  `json:"updated_at,omitempty"`
+	ConversationID string          `json:"conversation_id"`
+	Action         string          `json:"action"` // "delete", "restore", "update", or "" (legacy create)
+	UpdatedAt      json.RawMessage `json:"updated_at,omitempty"`
+}
+
+// updatedAtUnix parses UpdatedAt as either a JSON number (Unix seconds) or
+// RFC3339 string, returning the Unix seconds. Returns 0 if unparseable.
+func (p *conversationUpdatePayload) updatedAtUnix() int64 {
+	if len(p.UpdatedAt) == 0 {
+		return 0
+	}
+	// Try JSON number first (most common: int64 Unix seconds).
+	var n int64
+	if err := json.Unmarshal(p.UpdatedAt, &n); err == nil {
+		return n
+	}
+	// Try RFC3339 string (from model.Conversation time.Time fields).
+	var s string
+	if err := json.Unmarshal(p.UpdatedAt, &s); err == nil {
+		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			return t.Unix()
+		}
+	}
+	return 0
 }
 
 // createConversationUpdatePayload is the JSON structure of a "create" action
@@ -386,7 +410,7 @@ func (sm *syncManager) handleConversationTx(ctx context.Context, tx *gorm.DB, pa
 		// handled by handleEphemeralConversationUpdate. If it arrives as
 		// non-ephemeral (defensive), apply the same updated_at comparison
 		// logic and fetch if stale.
-		return sm.handleConversationUpdateTx(ctx, tx, peek.ConversationID, peek.UpdatedAt)
+		return sm.handleConversationUpdateTx(ctx, tx, peek.ConversationID, peek.updatedAtUnix())
 	case "":
 		// No action field — treat as a full conversation record (backward
 		// compatibility with legacy create events that omit the action).
@@ -625,12 +649,12 @@ func (sm *syncManager) handleEphemeralConversationUpdate(ctx context.Context, up
 	// D-124: If updated_at is present and the local cache is up-to-date, skip
 	// the RPC. updated_at == 0 means old server — always pull for backward
 	// compatibility.
-	if peek.UpdatedAt > 0 {
+	if peek.updatedAtUnix() > 0 {
 		localConv, err := sm.db.Conversations.Get(ctx, peek.ConversationID)
-		if err == nil && localConv != nil && peek.UpdatedAt <= localConv.UpdatedAt.Unix() {
+		if err == nil && localConv != nil && peek.updatedAtUnix() <= localConv.UpdatedAt.Unix() {
 			sm.logger.Debug("skipping conversation update — local cache is current",
 				"conversation_id", peek.ConversationID,
-				"payload_updated_at", peek.UpdatedAt,
+				"payload_updated_at", peek.updatedAtUnix(),
 				"local_updated_at", localConv.UpdatedAt.Unix())
 			// Notify handler with local data (already up-to-date).
 			if sm.handler != nil {

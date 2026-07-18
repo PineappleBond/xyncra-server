@@ -8,21 +8,21 @@ import (
 
 // Conversation represents a 1-on-1 messaging conversation between two users.
 type Conversation struct {
-	ID                     string `gorm:"primaryKey;size:36"`
-	UserID1                string `gorm:"size:64;index:idx_conversation_user1_deleted,priority:1;uniqueIndex:idx_conversation_users_unique,priority:1"`
-	UserID2                string `gorm:"size:64;index:idx_conversation_user2_deleted,priority:1;uniqueIndex:idx_conversation_users_unique,priority:2"` // only 1-on-1 not null
-	Type                   string `gorm:"size:20;index"`                                                                                                // 1-on-1 / group / channel
-	Title                  string `gorm:"size:255"`
-	Pinned                 bool
-	Muted                  bool
-	AvatarURL              string `gorm:"size:512"`
-	Description            string `gorm:"type:text"`
-	LastProcessedMessageID uint32
-	CreatedAt              time.Time `gorm:"index"`
-	UpdatedAt              time.Time
-	LastMessageAt          time.Time `gorm:"index:idx_conversation_lastmsg_deleted,priority:1"`
-	LastReadMessageID1     uint32    // UserID1's read cursor position (D-012)
-	LastReadMessageID2     uint32    // UserID2's read cursor position (D-012)
+	ID                     string         `gorm:"primaryKey;size:36" json:"id"`
+	UserID1                string         `gorm:"size:64;index:idx_conversation_user1_deleted,priority:1;uniqueIndex:idx_conversation_users_unique,priority:1" json:"user_id1"`
+	UserID2                string         `gorm:"size:64;index:idx_conversation_user2_deleted,priority:1;uniqueIndex:idx_conversation_users_unique,priority:2" json:"user_id2"` // only 1-on-1 not null
+	Type                   string         `gorm:"size:20;index" json:"type"`                                                                                                   // 1-on-1 / group / channel
+	Title                  string         `gorm:"size:255" json:"title"`
+	Pinned                 bool           `json:"pinned"`
+	Muted                  bool           `json:"muted"`
+	AvatarURL              string         `gorm:"size:512" json:"avatar_url"`
+	Description            string         `gorm:"type:text" json:"description"`
+	LastProcessedMessageID uint32         `json:"last_processed_message_id"`
+	CreatedAt              time.Time      `gorm:"index" json:"created_at"`
+	UpdatedAt              time.Time      `json:"updated_at"`
+	LastMessageAt          time.Time      `gorm:"index:idx_conversation_lastmsg_deleted,priority:1" json:"last_message_at"`
+	LastReadMessageID1     uint32         `json:"last_read_message_id1"` // UserID1's read cursor position (D-012)
+	LastReadMessageID2     uint32         `json:"last_read_message_id2"` // UserID2's read cursor position (D-012)
 
 	// HITL state machine fields (D-125). Mirrors the server-side model so that
 	// get_conversation responses deserialise correctly.

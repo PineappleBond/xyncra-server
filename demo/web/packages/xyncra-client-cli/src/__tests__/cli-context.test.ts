@@ -2,7 +2,7 @@
  * Tests for cli-context.ts — CLIContext and flag resolution.
  */
 
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -18,7 +18,11 @@ import * as os from 'node:os';
 
 import { Command } from 'commander';
 
-import { resolveStringFlag, CLIContext, registerGlobalFlags } from '../cli-context';
+import {
+  CLIContext,
+  registerGlobalFlags,
+  resolveStringFlag,
+} from '../cli-context';
 
 /** Create a test Command with global flags registered. */
 function newTestCommand(): Command {
@@ -54,21 +58,36 @@ describe('resolveStringFlag', () => {
   test('flag takes priority over env and default', () => {
     process.env.XYNCRA_USER_ID = 'env-user';
     const cmd = parseArgs(['--user-id', 'flag-user']);
-    const got = resolveStringFlag(cmd, 'user-id', 'XYNCRA_USER_ID', 'default-user');
+    const got = resolveStringFlag(
+      cmd,
+      'user-id',
+      'XYNCRA_USER_ID',
+      'default-user',
+    );
     expect(got).toBe('flag-user');
   });
 
   test('env takes priority over default', () => {
     process.env.XYNCRA_USER_ID = 'env-user';
     const cmd = parseArgs([]);
-    const got = resolveStringFlag(cmd, 'user-id', 'XYNCRA_USER_ID', 'default-user');
+    const got = resolveStringFlag(
+      cmd,
+      'user-id',
+      'XYNCRA_USER_ID',
+      'default-user',
+    );
     expect(got).toBe('env-user');
   });
 
   test('returns default when no flag or env', () => {
     delete process.env.XYNCRA_USER_ID;
     const cmd = parseArgs([]);
-    const got = resolveStringFlag(cmd, 'user-id', 'XYNCRA_USER_ID', 'default-user');
+    const got = resolveStringFlag(
+      cmd,
+      'user-id',
+      'XYNCRA_USER_ID',
+      'default-user',
+    );
     expect(got).toBe('default-user');
   });
 });
@@ -99,9 +118,12 @@ describe('CLIContext.fromCommand', () => {
 
   test('resolves all fields from flags', () => {
     const cmd = parseArgs([
-      '--user-id', 'testuser',
-      '--device-id', 'testdevice',
-      '--server', 'ws://example.com/ws',
+      '--user-id',
+      'testuser',
+      '--device-id',
+      'testdevice',
+      '--server',
+      'ws://example.com/ws',
     ]);
 
     const ctx = CLIContext.fromCommand(cmd);
@@ -160,9 +182,12 @@ describe('CLIContext.fromCommand', () => {
 
   test('getServerURLWithUser appends user_id and device_id', () => {
     const cmd = parseArgs([
-      '--user-id', 'testuser',
-      '--device-id', 'dev1',
-      '--server', 'ws://example.com/ws',
+      '--user-id',
+      'testuser',
+      '--device-id',
+      'dev1',
+      '--server',
+      'ws://example.com/ws',
     ]);
     const ctx = CLIContext.fromCommand(cmd);
     const url = ctx.getServerURLWithUser();
@@ -176,7 +201,7 @@ describe('CLIContext.fromCommand', () => {
     registerGlobalFlags(program);
     const sub = program.command('send');
     sub.option('-c, --conversation-id <id>', 'Conv ID');
-    sub.action(async (options, cmd) => {
+    sub.action(async (_options, cmd) => {
       const ctx = CLIContext.fromCommand(cmd);
       expect(ctx.userID).toBe('alice');
       expect(ctx.serverURL).toBe('ws://localhost:8080/ws');
@@ -185,6 +210,14 @@ describe('CLIContext.fromCommand', () => {
     program.configureOutput({ writeErr: () => {}, writeOut: () => {} });
 
     // Parse with global flag before subcommand
-    program.parse(['node', 'test', '--user-id', 'alice', 'send', '-c', 'conv-1']);
+    program.parse([
+      'node',
+      'test',
+      '--user-id',
+      'alice',
+      'send',
+      '-c',
+      'conv-1',
+    ]);
   });
 });

@@ -94,10 +94,15 @@ func TestListConversations_NormalList_HasMoreFalse(t *testing.T) {
 	base := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	seedConversationsForUser(t, s, userID, 3, base)
 
-	result := callListConversations(t, handler, userID, map[string]interface{}{
+	ctx := context.Background()
+	client := server.NewTestClient(userID)
+	req := newTestRequest("req-list-convos", "list_conversations", map[string]interface{}{
 		"offset": 0,
 		"limit":  10,
 	})
+	data, err := handler.HandleRequest(ctx, client, req)
+	require.NoError(t, err)
+	result := parseListConversationsResponse(t, data)
 
 	require.Len(t, result.Conversations, 3, "should return all 3 conversations")
 	assert.False(t, result.HasMore, "has_more should be false when all results fit in limit")
@@ -106,6 +111,18 @@ func TestListConversations_NormalList_HasMoreFalse(t *testing.T) {
 	for _, c := range result.Conversations {
 		assert.Equal(t, userID, c.UserID1, "UserID1 should be alice")
 		assert.NotEmpty(t, c.ID, "conversation should have an ID")
+	}
+
+	// Verify wire-format: JSON keys must be snake_case (TS client compatibility).
+	var rawListMap map[string]any
+	require.NoError(t, json.Unmarshal(data, &rawListMap))
+	assert.Contains(t, rawListMap, "conversations")
+	assert.Contains(t, rawListMap, "has_more")
+	if convs, ok := rawListMap["conversations"].([]any); ok && len(convs) > 0 {
+		firstConv := convs[0].(map[string]any)
+		for _, key := range []string{"id", "user_id1", "user_id2", "type", "title"} {
+			assert.Contains(t, firstConv, key, "list conversation item should contain snake_case key %q", key)
+		}
 	}
 }
 
