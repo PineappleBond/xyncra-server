@@ -1,10 +1,11 @@
-# TC-003: HITL 完整流程测试
+# TC-003: HITL 完整流程测试（双版本 Client）
 
 > **测试编号**: TC-003
 > **测试类型**: 端到端集成测试 + 韧性测试
 > **覆盖范围**: HITL 完整流程、Question 持久化 (D-116)、多设备竞态、并行多 Question、服务器重启恢复 (Scenario 1-7)、HITL 超时自动清理 (D-123)、Conversation updated_at 同步优化 (D-124)、HITL 事件流简化 (D-125)
 > **环境**: Docker E2E (D-043)
-> **最后更新**: 2026-07-16
+> **客户端版本**: Go Client (`./bin/xyncra-client`) + TypeScript Client (`$CLIENT_TS`)
+> **最后更新**: 2026-07-18
 
 ---
 
@@ -15,9 +16,33 @@
 - **基础流程** (阶段 1-5)：Agent 遇到需要用户确认的场景时，保存 checkpoint 并暂停执行，等待用户响应后通过 `agent_resume` RPC 恢复执行。
 - **韧性场景** (阶段 6-11)：覆盖 DESIGN_HITL_RESILIENCE.md 的 7 个故障/边界场景——离线用户恢复、并行多 Question、多设备竞态、服务器重启恢复等。
 
-**测试目标**：验证 HITL 流程的完整性和韧性，包括 checkpoint 创建、Question 持久化、resume 机制、并发锁协调、以及各种故障场景下的恢复能力。
+### 1.0.1 双版本 Client 测试策略
+
+本测试同时覆盖 **Go Client** 和 **TypeScript Client** 两个版本。TS Client 是 Go Client 的 1:1 功能复刻（TS-D-005），CLI 命令、参数和输出格式完全一致。
+
+**测试方法**：
+
+- 阶段 1-12 使用 Go Client 作为主测试路径（文档中的默认命令）
+- 每个 Part 末尾标注 TS Client 的适配要点
+- 两个版本应表现出相同的 HITL 流程行为
+
+**关键差异**（影响测试验证步骤）：
+
+| 差异项 | Go Client | TS Client | 决策编号 |
+| --- | --- | --- | --- |
+| 二进制路径 | `./bin/xyncra-client` | `xyncra-client`（npm link 后） | — |
+| 本地存储 | SQLite 文件 (`xyncra.db`) | IndexedDB (Dexie.js / fake-indexeddb) | TS-D-012 |
+| `--device-id` | 必需参数 | 可选（默认 SHA256(hostname)[:8]） | D-033 |
+| 进程锁实现 | fcntl | fs-ext | D-031 |
+| 查询命令离线可用 | ✅ 直接读 SQLite | ❌ 需要 daemon | D-035 |
+
+> **源码位置**：TS Client 源码在 `demo/web/packages/xyncra-client-cli/`
+> **维护提醒**：如果 TS Client 代码更新，需同步更新本文档。
+
+**测试目标**：验证 HITL 流程的完整性和韧性，包括 checkpoint 创建、Question 持久化、resume 机制、并发锁协调、以及各种故障场景下的恢复能力。验证 Go/TS 两个版本 Client 的 HITL 行为一致性。
 
 **覆盖的关键决策**：
+
 - 基础流程：D-083 (CheckpointStore)、D-084 (并发锁)、D-085 (agent_resume RPC)、D-087 (agent_timeout 通知; agent_question/agent_checkpoint_created 已由 D-125 移除)、D-092 (ReverseRPC)
 - 韧性设计：D-116 (Question 持久化表)、D-112 (Checkpoint 清理)、D-071 (幂等性)、D-114 (agent-resume IPC-only)
 - 自动清理：D-123 (HITL 超时自动清理)、D-124 (Conversation updated_at 同步优化)
@@ -81,10 +106,43 @@
 
 ### 3.1 构建二进制
 
+#### 3.1.1 Go Client & Server
+
 ```bash
 cd /path/to/xyncra-server
 make build
 ```
+
+#### 3.1.2 TypeScript Client
+
+> **源码位置**：`demo/web/packages/xyncra-client-cli/`
+> **编译入口**：`demo/web/packages/xyncra-client-cli/dist/bin/xyncra-client.js`
+> **维护提醒**：如果 TS Client 代码更新，需同步更新本文档。
+
+```bash
+# 构建 TS Client
+cd demo/web
+npm install
+cd packages/xyncra-client-cli
+npm run build
+
+# 方式 1: npm link（推荐，使命令全局可用）
+npm link
+
+# 方式 2: 直接 node 调用（从项目根目录）
+# node demo/web/packages/xyncra-client-cli/dist/bin/xyncra-client.js
+```
+
+验证：
+
+```bash
+xyncra-client --version
+# 预期: 0.1.0
+```
+
+> **变量定义**：
+> - `$CLIENT_GO` = `./bin/xyncra-client`（从项目根目录执行）
+> - `$CLIENT_TS` = `xyncra-client`（npm link 后）或 `node demo/web/packages/xyncra-client-cli/dist/bin/xyncra-client.js`
 
 ### 3.2 启动 Docker E2E 环境
 
@@ -173,6 +231,8 @@ tools:
 | `$QUESTION_ID` | (运行时获取) | Question ID |
 | `$DEVICE_A` | `device-a` | 阶段 9: Device A 设备 ID |
 | `$DEVICE_B` | `device-b` | 阶段 9: Device B 设备 ID |
+| `$CLIENT_GO` | `./bin/xyncra-client` | Go Client 二进制路径 |
+| `$CLIENT_TS` | `xyncra-client` | TS Client 命令（npm link 后） |
 
 ---
 
@@ -465,6 +525,27 @@ sleep 10
   --limit 3
 # 预期: Agent 正常响应
 ```
+
+#### 📘 TS Client 适配要点（Part I: 阶段 1-5）
+
+> TS Client 的 HITL 基础流程与 Go Client 完全一致，仅二进制路径不同。
+
+```bash
+# TS Client 启动
+xyncra-client listen \
+  --user-id alice --device-id test-device-alice-ts \
+  --server ws://localhost:18080/ws \
+  > "$E2E_HOME/alice-ts-daemon.log" 2>&1 &
+ALICE_TS_PID=$!
+
+# 创建会话、发送消息、agent-resume 命令格式完全一致
+xyncra-client create-conversation --user-id alice --device-id test-device-alice-ts --peer-id "agent/hitl-bot"
+xyncra-client agent-resume --user-id alice --device-id test-device-alice-ts --conversation-id "$HITL_CONV_ID" --checkpoint-id "$CHECKPOINT_ID" --agent-id "agent/hitl-bot" --answer "确认"
+```
+
+**差异点**：
+- `--device-id` 可选（TS 默认 SHA256(hostname)[:8]）
+- `agent-resume` 是 IPC-only 命令，两个版本都需要 daemon 运行
 
 ---
 
@@ -1341,9 +1422,13 @@ sqlite3 "$ALICE_DB" "SELECT sender_id, content FROM messages WHERE conversation_
 ## 10. 环境清理
 
 ```bash
+# Go Client daemons
 ./bin/xyncra-client kill --user-id alice --device-id test-device-alice 2>/dev/null
 ./bin/xyncra-client kill --user-id alice --device-id device-a 2>/dev/null
 ./bin/xyncra-client kill --user-id alice --device-id device-b 2>/dev/null
+
+# TS Client daemons（如果使用）
+xyncra-client kill --user-id alice --device-id test-device-alice-ts 2>/dev/null || true
 
 docker compose -f deploy/docker-compose.e2e.yml down
 
@@ -1355,13 +1440,13 @@ redis-cli -p 16379 -n 15 FLUSHDB
 
 ---
 
-## 11. 真实 LLM 测试配置 (.env.test)
+## 11. 真实 LLM 测试配置 (.env)
 
 本测试需要真实 LLM 交互来触发 HITL 中断。
 
 ```bash
-cp .env.test.example .env.test
-# 编辑 .env.test 填入真实 API Key
+cp .env.example .env
+# 编辑 .env 填入真实 API Key
 ```
 
 | 变量 | 说明 |
@@ -1369,7 +1454,7 @@ cp .env.test.example .env.test
 | `XYNCRA_TEST_REAL_API_KEY` | LLM API 密钥 |
 | `XYNCRA_TEST_REAL_BASE_URL` | LLM API 地址（可选，有默认值） |
 
-> ⚠️ **安全提示**: .env.test 已加入 .gitignore，不要提交到版本库。
+> ⚠️ **安全提示**: .env 已加入 .gitignore，不要提交到版本库。
 > 💰 **成本控制**: 本测试覆盖多个场景，预计消耗 ~8000-12000 tokens（D-090）。阶段 10 的崩溃重试可能导致 tokens 翻倍。
 
 ---
@@ -1408,52 +1493,55 @@ cp .env.test.example .env.test
 | Git Commit | <sha> |
 | 测试者 | <name> |
 | 环境 | Docker E2E |
+| 客户端版本 | Go / TS / 双版本 |
 
 #### Part I: 基础流程
 
-| 阶段 | 结果 | 备注 |
-|------|------|------|
-| 阶段 1: Daemon 启动 | ✅ / ❌ | |
-| 阶段 2: HITL 触发 + Question 持久化 | ✅ / ❌ | D-083, D-125, D-116 |
-| 阶段 3: Resume | ✅ / ❌ | D-085 |
-| 阶段 4: 并发锁 | ✅ / ❌ | D-084 |
-| 阶段 5: 超时处理 | ✅ / ❌ | |
+| 阶段 | 结果 (Go) | 结果 (TS) | 备注 |
+|------|-----------|-----------|------|
+| 阶段 1: Daemon 启动 | ✅ / ❌ | ✅ / ❌ | |
+| 阶段 2: HITL 触发 + Question 持久化 | ✅ / ❌ | ✅ / ❌ | D-083, D-125, D-116 |
+| 阶段 3: Resume | ✅ / ❌ | ✅ / ❌ | D-085 |
+| 阶段 4: 并发锁 | ✅ / ❌ | ✅ / ❌ | D-084 |
+| 阶段 5: 超时处理 | ✅ / ❌ | ✅ / ❌ | |
 
 #### Part II: 离线用户 (Scenario 1)
 
-| 阶段 | 结果 | 备注 |
-|------|------|------|
-| 阶段 6: 离线恢复 | ✅ / ❌ | D-116 |
+| 阶段 | 结果 (Go) | 结果 (TS) | 备注 |
+|------|-----------|-----------|------|
+| 阶段 6: 离线恢复 | ✅ / ❌ | ✅ / ❌ | D-116 |
 
 #### Part III: 并行多 Question (Scenario 3)
 
-| 阶段 | 结果 | 备注 |
-|------|------|------|
-| 阶段 7.A4: 双子代理 Composite Interrupt | ✅ / ❌ / N/A | 方式 A: 真实双子代理 |
-| 阶段 7.4: 部分回答 | ✅ / ❌ | D-116 Phase 2 |
-| 阶段 7.5: 全部回答 → Resume | ✅ / ❌ | |
+#### Part III: 并行多 Question (Scenario 3)
+
+| 阶段 | 结果 (Go) | 结果 (TS) | 备注 |
+|------|-----------|-----------|------|
+| 阶段 7.A4: 双子代理 Composite Interrupt | ✅ / ❌ / N/A | ✅ / ❌ / N/A | 方式 A: 真实双子代理 |
+| 阶段 7.4: 部分回答 | ✅ / ❌ | ✅ / ❌ | D-116 Phase 2 |
+| 阶段 7.5: 全部回答 → Resume | ✅ / ❌ | ✅ / ❌ | |
 
 #### Part IV: 多设备竞态 (Scenario 2)
 
-| 阶段 | 结果 | 备注 |
-|------|------|------|
-| 阶段 8.4: Device A 回答 | ✅ / ❌ | D-116 |
-| 阶段 8.5: Device B 同步 | ✅ / ❌ | |
-| 阶段 8.6: 重复回答拒绝 | ✅ / ❌ | 409 / 幂等 |
+| 阶段 | 结果 (Go) | 结果 (TS) | 备注 |
+|------|-----------|-----------|------|
+| 阶段 8.4: Device A 回答 | ✅ / ❌ | ✅ / ❌ | D-116 |
+| 阶段 8.5: Device B 同步 | ✅ / ❌ | ✅ / ❌ | |
+| 阶段 8.6: 重复回答拒绝 | ✅ / ❌ | ✅ / ❌ | 409 / 幂等 |
 
 #### Part V: 服务器重启恢复 (Scenario 4-7)
 
-| 阶段 | 结果 | 备注 |
-|------|------|------|
-| 阶段 9: 等待期重启 | ✅ / ❌ | Scenario 4 |
-| 阶段 10: 执行期崩溃 | ✅ / ❌ | Scenario 5+7, D-071 |
-| **阶段 11: 部分回答重启** | ✅ / ❌ | **Scenario 6, D-116 Phase 2** |
+| 阶段 | 结果 (Go) | 结果 (TS) | 备注 |
+|------|-----------|-----------|------|
+| 阶段 9: 等待期重启 | ✅ / ❌ | ✅ / ❌ | Scenario 4 |
+| 阶段 10: 执行期崩溃 | ✅ / ❌ | ✅ / ❌ | Scenario 5+7, D-071 |
+| **阶段 11: 部分回答重启** | ✅ / ❌ | ✅ / ❌ | **Scenario 6, D-116 Phase 2** |
 
 #### Part VI: HITL 超时自动清理 (D-123)
 
-| 阶段 | 结果 | 备注 |
-|------|------|------|
-| 阶段 12: 超时自动清理 | ✅ / ❌ | D-123, 后台 goroutine 清理过期 asking_user |
+| 阶段 | 结果 (Go) | 结果 (TS) | 备注 |
+|------|-----------|-----------|------|
+| 阶段 12: 超时自动清理 | ✅ / ❌ | ✅ / ❌ | D-123, 后台 goroutine 清理过期 asking_user |
 
 **发现的问题**：
 1. (描述)
