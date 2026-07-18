@@ -51,3 +51,9 @@ docs/superpowers
 # cloudflare wrangler
 .wrangler
 requestRecord.mock.js
+
+# typescript build info
+*.tsbuildinfo
+
+# workspace package dist
+**/dist
