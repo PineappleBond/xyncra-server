@@ -84,6 +84,7 @@ func newTestConv(id, uid1, uid2, typ, title string) *model.Conversation {
 	return &model.Conversation{
 		ID: id, UserID1: uid1, UserID2: uid2, Type: typ, Title: title,
 		CreatedAt: testNow, UpdatedAt: testNow, LastMessageAt: testNow,
+		AgentLastActivity: testNow,
 	}
 }
 

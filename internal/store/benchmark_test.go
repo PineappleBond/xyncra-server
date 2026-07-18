@@ -40,12 +40,13 @@ func BenchmarkMessageStore_Create(b *testing.B) {
 	convID := "bench-conv"
 	now := time.Now()
 	err := s.ConversationStore().Create(ctx, &model.Conversation{
-		ID:        convID,
-		UserID1:   "user-a",
-		UserID2:   "user-b",
-		Type:      "1-on-1",
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:                convID,
+		UserID1:           "user-a",
+		UserID2:           "user-b",
+		Type:              "1-on-1",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		AgentLastActivity: now,
 	})
 	if err != nil {
 		b.Fatalf("create conversation: %v", err)
@@ -178,13 +179,14 @@ func BenchmarkConversationStore_GetByUser(b *testing.B) {
 			// so that the user_id1/user_id2 indexes are exercised.
 			for i := 0; i < count; i++ {
 				conv := &model.Conversation{
-					ID:            uuid.New().String(),
-					UserID1:       userID,
-					UserID2:       fmt.Sprintf("peer-%d", i),
-					Type:          "1-on-1",
-					CreatedAt:     now,
-					UpdatedAt:     now,
-					LastMessageAt: now.Add(time.Duration(i) * time.Millisecond),
+					ID:                uuid.New().String(),
+					UserID1:           userID,
+					UserID2:           fmt.Sprintf("peer-%d", i),
+					Type:              "1-on-1",
+					CreatedAt:         now,
+					UpdatedAt:         now,
+					LastMessageAt:     now.Add(time.Duration(i) * time.Millisecond),
+					AgentLastActivity: now,
 				}
 				if err := s.ConversationStore().Create(ctx, conv); err != nil {
 					b.Fatalf("seed conversation %d: %v", i, err)
