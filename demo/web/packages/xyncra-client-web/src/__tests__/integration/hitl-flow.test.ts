@@ -1,5 +1,5 @@
 /**
- * Integration test: HITL flow — question received, answered, agent resumed.
+ * Integration test: HITL flow — questions received, answered, agent resumed.
  */
 
 import { act, renderHook } from '@testing-library/react';
@@ -43,8 +43,27 @@ describe('HITL Flow Integration', () => {
       );
   }
 
-  it('should handle full HITL lifecycle: question -> answer -> resume', async () => {
-    const { result: hitlResult } = renderHook(() => useHITL(), {
+  it('should handle full HITL lifecycle: questions -> answerAll -> resume', async () => {
+    mockClient.getConversation = jest.fn().mockResolvedValue({
+      conversation: {
+        id: 'conv-1',
+        user_id2: 'agent1',
+        agent_status: 'asking_user',
+      },
+      questions: [
+        {
+          id: 'q-1',
+          conversation_id: 'conv-1',
+          checkpoint_id: 'cp-1',
+          interrupt_id: 'intr-1',
+          question_text: 'Should I proceed with the deployment?',
+          status: 'pending',
+          created_at: new Date(),
+        },
+      ],
+    });
+
+    const { result: hitlResult } = renderHook(() => useHITL('conv-1'), {
       wrapper: createWrapper(),
     });
 
@@ -63,38 +82,29 @@ describe('HITL Flow Integration', () => {
 
     expect(statusResult.current.status?.status).toBe('timeout');
 
-    // Agent raises HITL question
-    act(() => {
+    // Agent raises HITL question - triggers fetch
+    await act(async () => {
       emitter.emit('hitl:question', {
         userId: 'agent1',
         conversationId: 'conv-1',
         reason: 'Should I proceed with the deployment?',
       });
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    expect(hitlResult.current.pendingQuestion).toEqual({
+    expect(hitlResult.current.pendingQuestions).toHaveLength(1);
+    expect(hitlResult.current.pendingQuestions[0]).toMatchObject({
       userId: 'agent1',
       conversationId: 'conv-1',
       question: 'Should I proceed with the deployment?',
     });
 
-    // User answers the question
-    mockClient.getConversation = jest.fn().mockResolvedValue({
-      questions: [
-        {
-          id: 'q-1',
-          conversation_id: 'conv-1',
-          checkpoint_id: 'cp-1',
-          interrupt_id: 'intr-1',
-          question_text: 'Should I proceed with the deployment?',
-          status: 'pending',
-          created_at: new Date(),
-        },
-      ],
-    });
+    // User answers all questions
+    const answers = new Map<string, string>();
+    answers.set('q-1', 'Yes, proceed');
 
     await act(async () => {
-      await hitlResult.current.answer('q-1', 'Yes, proceed');
+      await hitlResult.current.answerAll(answers);
     });
 
     expect(mockClient.call).toHaveBeenCalledWith('agent_resume', {
@@ -105,9 +115,6 @@ describe('HITL Flow Integration', () => {
       agent_id: 'agent1',
       answer: 'Yes, proceed',
     });
-
-    // Question is cleared
-    expect(hitlResult.current.pendingQuestion).toBeNull();
 
     // Agent resumes
     act(() => {
@@ -122,59 +129,95 @@ describe('HITL Flow Integration', () => {
     expect(statusResult.current.isTyping).toBe(true);
   });
 
-  it('should handle HITL dismiss', () => {
-    const { result } = renderHook(() => useHITL(), {
+  it('should handle HITL dismiss', async () => {
+    mockClient.getConversation = jest.fn().mockResolvedValue({
+      conversation: {
+        id: 'conv-1',
+        user_id2: 'agent1',
+        agent_status: 'asking_user',
+      },
+      questions: [
+        {
+          id: 'q-1',
+          conversation_id: 'conv-1',
+          checkpoint_id: 'cp-1',
+          interrupt_id: 'intr-1',
+          question_text: 'Need input',
+          status: 'pending',
+          created_at: new Date(),
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => useHITL('conv-1'), {
       wrapper: createWrapper(),
     });
 
-    act(() => {
-      emitter.emit('hitl:question', {
-        userId: 'agent1',
-        conversationId: 'conv-1',
-        reason: 'Need input',
-      });
+    // Wait for initial fetch
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    expect(result.current.pendingQuestion).not.toBeNull();
+    expect(result.current.pendingQuestions.length).toBeGreaterThan(0);
 
     act(() => {
       result.current.dismiss();
     });
 
-    expect(result.current.pendingQuestion).toBeNull();
+    expect(result.current.pendingQuestions).toEqual([]);
   });
 
-  it('should handle multiple sequential HITL questions', async () => {
-    const { result } = renderHook(() => useHITL(), {
+  it('should handle batch questions', async () => {
+    mockClient.getConversation = jest.fn().mockResolvedValue({
+      conversation: {
+        id: 'conv-1',
+        user_id2: 'agent1',
+        agent_status: 'asking_user',
+      },
+      questions: [
+        {
+          id: 'q-1',
+          conversation_id: 'conv-1',
+          checkpoint_id: 'cp-1',
+          interrupt_id: 'intr-1',
+          question_text: 'Question 1?',
+          status: 'pending',
+          created_at: new Date(),
+        },
+        {
+          id: 'q-2',
+          conversation_id: 'conv-1',
+          checkpoint_id: 'cp-2',
+          interrupt_id: 'intr-2',
+          question_text: 'Question 2?',
+          status: 'pending',
+          created_at: new Date(),
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => useHITL('conv-1'), {
       wrapper: createWrapper(),
     });
 
-    // First question
-    act(() => {
-      emitter.emit('hitl:question', {
-        userId: 'agent1',
-        conversationId: 'conv-1',
-        reason: 'Question 1?',
-      });
+    // Wait for initial fetch
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    expect(result.current.pendingQuestion?.question).toBe('Question 1?');
+    expect(result.current.pendingQuestions).toHaveLength(2);
+    expect(result.current.pendingQuestions[0].question).toBe('Question 1?');
+    expect(result.current.pendingQuestions[1].question).toBe('Question 2?');
+
+    // Answer all questions
+    const answers = new Map<string, string>();
+    answers.set('q-1', 'Answer 1');
+    answers.set('q-2', 'Answer 2');
 
     await act(async () => {
-      await result.current.answer('q-1', 'Answer 1');
+      await result.current.answerAll(answers);
     });
 
-    expect(result.current.pendingQuestion).toBeNull();
-
-    // Second question
-    act(() => {
-      emitter.emit('hitl:question', {
-        userId: 'agent1',
-        conversationId: 'conv-1',
-        reason: 'Question 2?',
-      });
-    });
-
-    expect(result.current.pendingQuestion?.question).toBe('Question 2?');
+    expect(mockClient.call).toHaveBeenCalledTimes(2);
   });
 });

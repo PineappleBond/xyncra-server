@@ -2,14 +2,14 @@
  * @packageDocumentation
  * useHITL — React hook for Human-in-the-Loop question handling.
  *
- * Subscribes to the `hitl:question` event emitted by ReactUpdateHandler
- * (triggered by agent timeout / HITL interrupts) and provides helpers
- * to answer or dismiss the pending question.
+ * Manages a batch of HITL questions. All questions are shown at once
+ * and must be answered together. After submission, fetches again to
+ * check for new questions.
  *
  * @module
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useXyncra } from './useXyncra';
 
 // ---------------------------------------------------------------------------
@@ -35,15 +35,18 @@ export interface HITLQuestion {
 }
 
 export interface UseHITLReturn {
-  /** The currently pending HITL question, or null if none. */
-  pendingQuestion: HITLQuestion | null;
+  /** Array of pending HITL questions, or empty array if none. */
+  pendingQuestions: HITLQuestion[];
   /**
-   * Answer a HITL question by ID. Sends `agent_resume` RPC to the server.
+   * Answer all HITL questions. Sends `agent_resume` RPC for each question.
+   * After all answers are sent, fetches again to check for new questions.
    * Throws on failure; the UI should handle the error.
    */
-  answer: (questionID: string, answer: string) => Promise<void>;
-  /** Dismiss the current pending question without answering. */
+  answerAll: (answers: Map<string, string>) => Promise<void>;
+  /** Dismiss all pending questions without answering. */
   dismiss: () => void;
+  /** Whether answers are currently being submitted. */
+  isSubmitting: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -51,20 +54,61 @@ export interface UseHITLReturn {
 // ---------------------------------------------------------------------------
 
 /**
- * Manages HITL (Human-in-the-Loop) questions.
+ * Manages HITL (Human-in-the-Loop) questions in batch mode.
  *
- * When the agent times out or raises an interrupt, the `hitl:question` event
- * fires and the question is stored as `pendingQuestion`. The UI can render
- * it for user input, then call `answer()` to resume the agent or `dismiss()`
- * to clear it.
+ * All pending questions are fetched and displayed together. The user must
+ * answer all questions before submitting. After submission, fetches again
+ * to check for new questions.
  */
 export function useHITL(conversationId?: string): UseHITLReturn {
   const { client, eventEmitter } = useXyncra();
-  const [pendingQuestion, setPendingQuestion] = useState<HITLQuestion | null>(
-    null,
-  );
+  const [pendingQuestions, setPendingQuestions] = useState<HITLQuestion[]>([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const isFetching = useRef(false);
 
-  // Check for pending questions on mount and conversation change
+  // Fetch all pending questions
+  const fetchQuestions = useCallback(async () => {
+    if (!client || !conversationId || isFetching.current) {
+      return;
+    }
+
+    console.log('[useHITL] Fetching questions from server...');
+    isFetching.current = true;
+
+    try {
+      const result = await client.getConversation(conversationId);
+      console.log('[useHITL] Got conversation:', {
+        id: result.conversation.id,
+        questionsCount: result.questions?.length,
+        agent_status: result.conversation.agent_status,
+      });
+
+      if (result.questions && result.questions.length > 0) {
+        const questions: HITLQuestion[] = result.questions
+          .filter((q) => q.status === 'pending')
+          .map((q) => ({
+            userId: result.conversation.user_id2,
+            conversationId: result.conversation.id,
+            question: q.question_text,
+            questionId: q.id,
+            checkpointId: q.checkpoint_id,
+            interruptId: q.interrupt_id,
+          }));
+
+        console.log('[useHITL] Found', questions.length, 'pending questions');
+        setPendingQuestions(questions);
+      } else {
+        console.log('[useHITL] No more questions');
+        setPendingQuestions([]);
+      }
+    } catch (error) {
+      console.error('[useHITL] Failed to fetch questions:', error);
+    } finally {
+      isFetching.current = false;
+    }
+  }, [client, conversationId]);
+
+  // Initial load and conversation change
   useEffect(() => {
     console.log('[useHITL] useEffect triggered:', { client: !!client, conversationId });
     if (!client || !conversationId) {
@@ -72,101 +116,82 @@ export function useHITL(conversationId?: string): UseHITLReturn {
       return;
     }
 
-    const checkPendingQuestions = async () => {
-      console.log('[useHITL] Checking for pending questions...');
-      try {
-        const result = await client.getConversation(conversationId);
-        console.log('[useHITL] Got conversation:', {
-          id: result.conversation.id,
-          questionsCount: result.questions?.length,
-          agent_status: result.conversation.agent_status,
-        });
-        if (result.questions && result.questions.length > 0) {
-          const pendingQ = result.questions.find((q) => q.status === 'pending');
-          console.log('[useHITL] Pending question:', pendingQ);
-          if (pendingQ) {
-            console.log('[useHITL] Found pending question on load:', {
-              conversationId,
-              questionId: pendingQ.id,
-            });
-            setPendingQuestion({
-              userId: result.conversation.user_id2,
-              conversationId: result.conversation.id,
-              question: pendingQ.question_text,
-              questionId: pendingQ.id,
-              checkpointId: pendingQ.checkpoint_id,
-              interruptId: pendingQ.interrupt_id,
-            });
-          }
-        }
-      } catch (error) {
-        console.error('[useHITL] Failed to check pending questions:', error);
-      }
-    };
+    fetchQuestions();
+  }, [client, conversationId, fetchQuestions]);
 
-    checkPendingQuestions();
-  }, [client, conversationId]);
-
+  // Listen for new HITL events
   useEffect(() => {
-    const unsub = eventEmitter.on(
-      'hitl:question',
-      ({ userId, conversationId, reason, questionId, checkpointId, interruptId }) => {
-        setPendingQuestion({
-          userId,
-          conversationId,
-          question: reason,
-          questionId,
-          checkpointId,
-          interruptId,
-        });
-      },
-    );
+    const unsub = eventEmitter.on('hitl:question', () => {
+      console.log('[useHITL] Received hitl:question event, re-fetching...');
+      fetchQuestions();
+    });
 
     return unsub;
-  }, [eventEmitter]);
+  }, [eventEmitter, fetchQuestions]);
 
-  const answer = useCallback(
-    async (questionID: string, answerText: string): Promise<void> => {
+  const answerAll = useCallback(
+    async (answers: Map<string, string>): Promise<void> => {
       if (!client) throw new Error('client not initialized');
-      const pending = pendingQuestion;
-      if (!pending) throw new Error('no pending question to answer');
+      if (pendingQuestions.length === 0) throw new Error('no pending questions to answer');
 
-      // Recovery metadata must come from the local question store, not the
-      // ephemeral hitl:question event, because the event alone lacks the
-      // checkpoint/interrupt ids the server requires (D-125).
-      let checkpointId = pending.checkpointId;
-      let interruptId = pending.interruptId;
-      if ((!checkpointId || !interruptId) && pending.conversationId) {
-        try {
-          const conv = await client.getConversation(pending.conversationId);
-          const q =
-            conv.questions.find((item) => item.id === pending.questionId) ??
-            conv.questions[0];
-          if (q) {
-            checkpointId = q.checkpoint_id;
-            interruptId = q.interrupt_id;
+      console.log('[useHITL] Answering', answers.size, 'questions');
+      setIsSubmitting(true);
+
+      try {
+        // Send answers sequentially
+        for (const q of pendingQuestions) {
+          const answerText = answers.get(q.questionId ?? '');
+          if (!answerText) {
+            throw new Error(`No answer provided for question ${q.questionId}`);
           }
-        } catch {
-          // Fall back to whatever metadata the event carried.
-        }
-      }
 
-      await client.call('agent_resume', {
-        conversation_id: pending.conversationId,
-        question_id: questionID,
-        checkpoint_id: checkpointId ?? '',
-        interrupt_id: interruptId ?? '',
-        agent_id: pending.userId,
-        answer: answerText,
-      });
-      setPendingQuestion(null);
+          console.log('[useHITL] Submitting answer for question:', q.questionId);
+
+          // Get checkpoint/interrupt IDs from local store
+          let checkpointId = q.checkpointId;
+          let interruptId = q.interruptId;
+          if ((!checkpointId || !interruptId) && q.conversationId) {
+            try {
+              const conv = await client.getConversation(q.conversationId);
+              const storedQ = conv.questions.find((item) => item.id === q.questionId);
+              if (storedQ) {
+                checkpointId = storedQ.checkpoint_id;
+                interruptId = storedQ.interrupt_id;
+              }
+            } catch {
+              // Fall back to event data
+            }
+          }
+
+          await client.call('agent_resume', {
+            conversation_id: q.conversationId,
+            question_id: q.questionId,
+            checkpoint_id: checkpointId ?? '',
+            interrupt_id: interruptId ?? '',
+            agent_id: q.userId,
+            answer: answerText,
+          });
+        }
+
+        console.log('[useHITL] All answers submitted, clearing questions');
+
+        // Clear questions - don't fetch again to avoid delay issues
+        // New questions will be handled by hitl:question events
+        setPendingQuestions([]);
+      } catch (error) {
+        console.error('[useHITL] Failed to submit answers:', error);
+        throw error;
+      } finally {
+        setIsSubmitting(false);
+      }
     },
-    [client, pendingQuestion],
+    [client, pendingQuestions],
   );
 
   const dismiss = useCallback(() => {
-    setPendingQuestion(null);
+    console.log('[useHITL] Dismissing all questions');
+    setPendingQuestions([]);
   }, []);
 
-  return { pendingQuestion, answer, dismiss };
+  return { pendingQuestions, answerAll, dismiss, isSubmitting };
 }

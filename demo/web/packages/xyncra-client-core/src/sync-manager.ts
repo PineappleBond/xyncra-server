@@ -741,15 +741,16 @@ export class SyncManager {
       const localConv = await convTable.get(convID);
       if (
         localConv &&
-        localConv.deleted_at === null &&
-        updatedAt <= Math.floor(localConv.updated_at.getTime() / 1000)
+        localConv.deleted_at == null &&
+        localConv.updated_at &&
+        updatedAt <= Math.floor(new Date(localConv.updated_at).getTime() / 1000)
       ) {
         this.options.logger.debug(
           `Skipping conversation update — local cache is current`,
           {
             conversation_id: convID,
             payload_updated_at: updatedAt,
-            local_updated_at: Math.floor(localConv.updated_at.getTime() / 1000),
+            local_updated_at: Math.floor(new Date(localConv.updated_at).getTime() / 1000),
           },
         );
         return;
@@ -930,14 +931,15 @@ export class SyncManager {
       const localConv = await this.options.db.conversationsStore.get(convID);
       if (
         localConv &&
-        updatedAt <= Math.floor(localConv.updated_at.getTime() / 1000)
+        localConv.updated_at &&
+        updatedAt <= Math.floor(new Date(localConv.updated_at).getTime() / 1000)
       ) {
         this.options.logger.debug(
           `Skipping conversation update — local cache is current`,
           {
             conversation_id: convID,
             payload_updated_at: updatedAt,
-            local_updated_at: Math.floor(localConv.updated_at.getTime() / 1000),
+            local_updated_at: Math.floor(new Date(localConv.updated_at).getTime() / 1000),
           },
         );
         // Notify handler with local data (already up-to-date).

@@ -38,20 +38,39 @@ describe('useHITL', () => {
       );
   }
 
-  it('should start with no pending question', () => {
+  it('should start with no pending questions', () => {
     const { result } = renderHook(() => useHITL(), {
       wrapper: createWrapper(),
     });
 
-    expect(result.current.pendingQuestion).toBeNull();
+    expect(result.current.pendingQuestions).toEqual([]);
   });
 
-  it('should set pending question on hitl:question event', () => {
-    const { result } = renderHook(() => useHITL(), {
+  it('should fetch questions on hitl:question event', async () => {
+    mockClient.getConversation = jest.fn().mockResolvedValue({
+      conversation: {
+        id: 'conv-1',
+        user_id2: 'agent1',
+        agent_status: 'asking_user',
+      },
+      questions: [
+        {
+          id: 'q-1',
+          conversation_id: 'conv-1',
+          checkpoint_id: 'cp-1',
+          interrupt_id: 'intr-1',
+          question_text: 'Need confirmation',
+          status: 'pending',
+          created_at: new Date(),
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => useHITL('conv-1'), {
       wrapper: createWrapper(),
     });
 
-    act(() => {
+    await act(async () => {
       emitter.emit('hitl:question', {
         userId: 'agent1',
         conversationId: 'conv-1',
@@ -59,19 +78,21 @@ describe('useHITL', () => {
       });
     });
 
-    expect(result.current.pendingQuestion).toEqual({
+    expect(result.current.pendingQuestions).toHaveLength(1);
+    expect(result.current.pendingQuestions[0]).toMatchObject({
       userId: 'agent1',
       conversationId: 'conv-1',
       question: 'Need confirmation',
     });
   });
 
-  it('should answer question with full agent_resume contract', async () => {
-    const { result } = renderHook(() => useHITL(), {
-      wrapper: createWrapper(),
-    });
-
+  it('should answer all questions with full agent_resume contract', async () => {
     mockClient.getConversation = jest.fn().mockResolvedValue({
+      conversation: {
+        id: 'conv-1',
+        user_id2: 'agent1',
+        agent_status: 'asking_user',
+      },
       questions: [
         {
           id: 'q-1',
@@ -85,16 +106,20 @@ describe('useHITL', () => {
       ],
     });
 
-    act(() => {
-      emitter.emit('hitl:question', {
-        userId: 'agent1',
-        conversationId: 'conv-1',
-        reason: 'Confirm?',
-      });
+    const { result } = renderHook(() => useHITL('conv-1'), {
+      wrapper: createWrapper(),
     });
 
+    // Wait for initial fetch
     await act(async () => {
-      await result.current.answer('q-1', 'Yes');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const answers = new Map<string, string>();
+    answers.set('q-1', 'Yes');
+
+    await act(async () => {
+      await result.current.answerAll(answers);
     });
 
     expect(mockClient.call).toHaveBeenCalledWith('agent_resume', {
@@ -105,30 +130,45 @@ describe('useHITL', () => {
       agent_id: 'agent1',
       answer: 'Yes',
     });
-    expect(result.current.pendingQuestion).toBeNull();
   });
 
-  it('should dismiss pending question', () => {
-    const { result } = renderHook(() => useHITL(), {
+  it('should dismiss pending questions', async () => {
+    mockClient.getConversation = jest.fn().mockResolvedValue({
+      conversation: {
+        id: 'conv-1',
+        user_id2: 'agent1',
+        agent_status: 'asking_user',
+      },
+      questions: [
+        {
+          id: 'q-1',
+          conversation_id: 'conv-1',
+          checkpoint_id: 'cp-1',
+          interrupt_id: 'intr-1',
+          question_text: 'Confirm?',
+          status: 'pending',
+          created_at: new Date(),
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => useHITL('conv-1'), {
       wrapper: createWrapper(),
     });
 
-    act(() => {
-      emitter.emit('hitl:question', {
-        userId: 'agent1',
-        conversationId: 'conv-1',
-        reason: 'Confirm?',
-      });
+    // Wait for initial fetch
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
     act(() => {
       result.current.dismiss();
     });
 
-    expect(result.current.pendingQuestion).toBeNull();
+    expect(result.current.pendingQuestions).toEqual([]);
   });
 
-  it('should throw on answer when client not initialized', async () => {
+  it('should throw on answerAll when client not initialized', async () => {
     const contextValue: XyncraContextValue = {
       client: null,
       connectionStatus: 'disconnected',
@@ -149,7 +189,8 @@ describe('useHITL', () => {
 
     const { result } = renderHook(() => useHITL(), { wrapper });
 
-    await expect(result.current.answer('q-1', 'Yes')).rejects.toThrow(
+    const answers = new Map<string, string>();
+    await expect(result.current.answerAll(answers)).rejects.toThrow(
       'client not initialized',
     );
   });

@@ -7,19 +7,22 @@ import { XyncraContext } from '../../context/XyncraProvider';
 import { TypedEventEmitter } from '../../internal/EventEmitter';
 import { FunctionRegistry } from '../../internal/FunctionRegistry';
 
-const mockAnswer = jest.fn();
+const mockAnswerAll = jest.fn();
 const mockDismiss = jest.fn();
 
 jest.mock('../../hooks/useHITL', () => ({
   useHITL: () => ({
-    pendingQuestion: {
-      userId: 'agent1',
-      conversationId: 'conv-1',
-      question: 'Should I proceed?',
-      questionId: 'q-abc',
-    },
-    answer: mockAnswer,
+    pendingQuestions: [
+      {
+        userId: 'agent1',
+        conversationId: 'conv-1',
+        question: 'Should I proceed?',
+        questionId: 'q-abc',
+      },
+    ],
+    answerAll: mockAnswerAll,
     dismiss: mockDismiss,
+    isSubmitting: false,
   }),
 }));
 
@@ -61,8 +64,11 @@ jest.mock('antd', () => ({
         {
           validateFields: jest
             .fn()
-            .mockResolvedValue({ answer: 'test-answer' }),
+            .mockResolvedValue({ answer_0: 'test-answer' }),
           resetFields: jest.fn(),
+          getFieldsValue: jest
+            .fn()
+            .mockReturnValue({ answer_0: 'test-answer' }),
         },
       ],
     },
@@ -77,11 +83,23 @@ jest.mock('antd', () => ({
   Radio: {
     Group: ({ children }: any) => mockReact.createElement('div', null, children),
   },
+  Tabs: ({ items }: any) =>
+    mockReact.createElement(
+      'div',
+      { 'data-testid': 'tabs' },
+      items?.map((item: any) =>
+        mockReact.createElement('div', { key: item.key }, item.children),
+      ),
+    ),
+  message: {
+    success: jest.fn(),
+    error: jest.fn(),
+  },
 }));
 
 describe('HITLDialog', () => {
   beforeEach(() => {
-    mockAnswer.mockClear();
+    mockAnswerAll.mockClear();
     mockDismiss.mockClear();
   });
 
@@ -105,7 +123,7 @@ describe('HITLDialog', () => {
     );
   }
 
-  it('should render the HITL dialog with question', () => {
+  it('should render the HITL dialog with questions', () => {
     renderDialog();
     expect(screen.getByTestId('modal')).toBeTruthy();
     expect(screen.getByText('Should I proceed?')).toBeTruthy();
@@ -113,7 +131,7 @@ describe('HITLDialog', () => {
 
   it('should have submit and cancel buttons', () => {
     renderDialog();
-    expect(screen.getByText('提交')).toBeTruthy();
+    expect(screen.getByText('提交全部')).toBeTruthy();
     expect(screen.getByText('取消')).toBeTruthy();
   });
 
@@ -123,11 +141,13 @@ describe('HITLDialog', () => {
     expect(mockDismiss).toHaveBeenCalled();
   });
 
-  it('should pass questionId (not userId) to answer', async () => {
+  it('should call answerAll with all answers', async () => {
     renderDialog();
-    fireEvent.click(screen.getByText('提交'));
+    fireEvent.click(screen.getByText('提交全部'));
     // The answer handler resolves asynchronously; wait a tick.
     await new Promise((r) => setTimeout(r, 0));
-    expect(mockAnswer).toHaveBeenCalledWith('q-abc', 'test-answer');
+    expect(mockAnswerAll).toHaveBeenCalled();
+    const answers = mockAnswerAll.mock.calls[0][0];
+    expect(answers.get('q-abc')).toBe('test-answer');
   });
 });
