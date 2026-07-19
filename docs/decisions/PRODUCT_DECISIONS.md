@@ -62,6 +62,8 @@
 | D-131 | 客户端 deviceInfo 自动填充 | Web 自动 `{platform:'web',userAgent}`，CLI 自动 `{platform:'cli',os}`，符合 D-001 开箱即用 |
 | D-132 | 客户端错误消息分层 | error:rpc 事件暴露 `{method,message,code}` 公共通道，UI 映射友好提示，不泄露内部堆栈 |
 | D-133 | Web Agent 超时复用 hitl:question 事件 | 维持 `hitl:question` 映射，不拆独立 `agent:timeout`，与 075 HITL 恢复链路一致 |
+| D-134 | 双层函数注册策略：页面级 + 通用级 fallback | 页面函数按需注册/注销，通用函数常驻注册 |
+| D-135 | 每设备最大函数数上调至 500 | 全量适配预期 230+ 函数，上调提供安全边际 |
 
 ---
 

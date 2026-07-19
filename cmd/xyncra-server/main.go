@@ -91,7 +91,7 @@ func main() {
 	agentsDir := flag.String("agents-dir", envOrDefault("XYNCRA_AGENTS_DIR", "agents"),
 		"Path to agent config directory")
 	maxFunctionsPerDevice := flag.Int("max-functions-per-device",
-		envOrDefaultInt("XYNCRA_MAX_FUNCTIONS_PER_DEVICE", 200),
+		envOrDefaultInt("XYNCRA_MAX_FUNCTIONS_PER_DEVICE", 500),
 		"Max functions a device can register")
 	tracingEnabled := flag.Bool("tracing-enabled",
 		envOrDefault("XYNCRA_TRACING_ENABLED", "false") == "true",

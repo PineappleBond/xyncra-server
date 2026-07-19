@@ -28,7 +28,7 @@ type FunctionRegistryConfig struct {
 const (
 	// DefaultMaxFunctionsPerDevice is the default upper bound on the number
 	// of functions a single device may register (D-099).
-	DefaultMaxFunctionsPerDevice = 200
+	DefaultMaxFunctionsPerDevice = 500
 
 	// DefaultMaxFunctionNameLength is the default maximum length for a
 	// function name (D-099).
