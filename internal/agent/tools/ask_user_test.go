@@ -39,9 +39,12 @@ func TestAskUserTool_EmptyQuestion(t *testing.T) {
 		t.Fatalf("NewAskUserTool: %v", err)
 	}
 
-	_, err = tl.InvokableRun(context.Background(), `{"question":""}`)
-	if err == nil {
-		t.Fatal("expected error for empty question, got nil")
+	out, err := tl.InvokableRun(context.Background(), `{"question":""}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, `"success":false`) {
+		t.Fatalf("expected soft failure for empty question, got: %s", out)
 	}
 }
 

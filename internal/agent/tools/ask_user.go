@@ -27,7 +27,7 @@ func NewAskUserTool() (tool.InvokableTool, error) {
 		"Ask the user a question and wait for their response. Use this for sensitive operations that require human confirmation. The agent will pause until the user responds.",
 		func(ctx context.Context, input AskUserInput) (string, error) {
 			if input.Question == "" {
-				return "", fmt.Errorf("question is required")
+				return SoftFailure("question is required"), nil
 			}
 
 			// Check if we are being resumed after an interrupt.

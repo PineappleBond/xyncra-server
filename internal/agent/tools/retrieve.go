@@ -229,21 +229,21 @@ type RetrieveOutput struct {
 // NewRetrieveTool creates a retrieve_tool_result tool backed by the given
 // ToolResultStore.
 func NewRetrieveTool(store *ToolResultStore) (tool.InvokableTool, error) {
-	if store == nil {
-		store = DefaultToolResultStore
+		if store == nil {
+			store = DefaultToolResultStore
+		}
+		return utils.InferTool(
+			"retrieve_tool_result",
+			"Retrieve the full content of a previously truncated tool result by its retrieval ID (D-080). Returns a JSON envelope {\"success\":true,\"data\":{...}} on success or {\"success\":false,\"error\":\"...\"} on failure.",
+			func(ctx context.Context, input RetrieveInput) (string, error) {
+				if input.ResultID == "" {
+					return SoftFailure("result_id is required"), nil
+				}
+				content, ok := store.Retrieve(input.ResultID)
+				if !ok {
+					return SoftFailure(fmt.Sprintf("result %q not found or expired. The result may have been garbage-collected or the ID is incorrect.", input.ResultID)), nil
+				}
+				return SuccessResult(&RetrieveOutput{Content: content})
+			},
+		)
 	}
-	return utils.InferTool(
-		"retrieve_tool_result",
-		"Retrieve the full content of a previously truncated tool result by its retrieval ID (D-080)",
-		func(ctx context.Context, input RetrieveInput) (*RetrieveOutput, error) {
-			if input.ResultID == "" {
-				return nil, fmt.Errorf("result_id is required")
-			}
-			content, ok := store.Retrieve(input.ResultID)
-			if !ok {
-				return nil, fmt.Errorf("result %q not found or expired", input.ResultID)
-			}
-			return &RetrieveOutput{Content: content}, nil
-		},
-	)
-}

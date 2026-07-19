@@ -202,9 +202,12 @@ func TestRetrieveTool_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRetrieveTool: %v", err)
 	}
-	_, err = tl.InvokableRun(context.Background(), `{"result_id":"nonexistent"}`)
-	if err == nil {
-		t.Fatal("expected error for non-existent ID, got nil")
+	out, err := tl.InvokableRun(context.Background(), `{"result_id":"nonexistent"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, `"success":false`) {
+		t.Fatalf("expected soft failure for non-existent ID, got: %s", out)
 	}
 }
 
@@ -271,9 +274,12 @@ func TestRetrieveTool_EmptyResultID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRetrieveTool: %v", err)
 	}
-	_, err = tl.InvokableRun(context.Background(), `{"result_id":""}`)
-	if err == nil {
-		t.Fatal("expected error for empty result_id, got nil")
+	out, err := tl.InvokableRun(context.Background(), `{"result_id":""}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, `"success":false`) {
+		t.Fatalf("expected soft failure for empty result_id, got: %s", out)
 	}
 }
 
