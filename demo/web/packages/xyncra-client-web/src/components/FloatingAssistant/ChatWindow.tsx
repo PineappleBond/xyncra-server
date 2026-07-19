@@ -18,6 +18,7 @@ import { ConversationList } from './ConversationList';
 import { HITLDialog } from './HITLDialog';
 import { MessageArea } from './MessageArea';
 import { FLOATING_ASSISTANT_STYLES } from './styles';
+import { getAgentName } from '../../constants/agents';
 
 export interface ChatWindowProps {
   /** Called when the user closes the chat window. */
@@ -56,6 +57,7 @@ export function ChatWindow({ onClose }: ChatWindowProps): React.JSX.Element {
         <ConversationList
           activeConversationID={selectedConversationID}
           selectedAgentID={selectedAgentID}
+          selectedAgentName={getAgentName(selectedAgentID) ?? null}
           onSelect={setSelectedConversationID}
         />
         <MessageArea conversationID={selectedConversationID} />

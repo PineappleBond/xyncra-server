@@ -68,9 +68,10 @@ describe('ConversationList', () => {
       React.createElement(
         XyncraContext.Provider,
         { value: contextValue },
-        React.createElement(ConversationList, {
+         React.createElement(ConversationList, {
           activeConversationID: null,
           selectedAgentID: 'test-agent',
+          selectedAgentName: null,
           onSelect,
         }),
       ),

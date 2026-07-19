@@ -25,13 +25,16 @@ type WeatherOutput struct {
 // NewWeatherTool creates a mock weather tool.
 // The tool returns deterministic fake data based on the city name so that
 // the same city always produces the same result within a process lifetime.
+// A missing city is a recoverable failure returned as a ToolResult envelope
+// (success=false) so the LLM can supply the argument, rather than aborting
+// the run (D-101).
 func NewWeatherTool() (tool.InvokableTool, error) {
 	return utils.InferTool(
 		"get_weather",
-		"Get current weather information for a city (mock implementation for development)",
-		func(ctx context.Context, input WeatherInput) (*WeatherOutput, error) {
+		"Get current weather information for a city (mock implementation for development). Returns a JSON envelope {\"success\":true,\"data\":{...}} on success or {\"success\":false,\"error\":\"...\"} on failure.",
+		func(ctx context.Context, input WeatherInput) (string, error) {
 			if input.City == "" {
-				return nil, fmt.Errorf("city is required")
+				return SoftFailure("city is required"), nil
 			}
 			// Deterministic pseudo-random values based on city name so that
 			// repeated calls for the same city return consistent data.
@@ -45,11 +48,11 @@ func NewWeatherTool() (tool.InvokableTool, error) {
 			temp := r.Intn(40) - 5 // range: -5 to 34
 			humidity := r.Intn(60) + 30
 
-			return &WeatherOutput{
+			return SuccessResult(&WeatherOutput{
 				Temperature: fmt.Sprintf("%d°C", temp),
 				Condition:   conditions[r.Intn(len(conditions))],
 				Humidity:    fmt.Sprintf("%d%%", humidity),
-			}, nil
+			})
 		},
 	)
 }

@@ -100,9 +100,13 @@ func TestNewClientFunctionTool_InvokeDeviceOffline(t *testing.T) {
 	tool, err := newClientFunctionTool(funcInfo, caller, "alice", "dev-1", 30*time.Second)
 	require.NoError(t, err)
 
-	_, err = tool.InvokableRun(context.Background(), `{}`)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "device is offline")
+	// Recoverable failure is surfaced as a ToolResult envelope (success=false)
+	// with a readable reason, NOT as a Go error, so the LLM can self-correct
+	// (D-101).
+	result, err := tool.InvokableRun(context.Background(), `{}`)
+	require.NoError(t, err)
+	assert.Contains(t, result, `"success":false`)
+	assert.Contains(t, result, "device is offline")
 }
 
 // errCaller is a minimal caller that always returns the given error.
@@ -135,9 +139,11 @@ func TestNewClientFunctionTool_InvokeTimeout(t *testing.T) {
 	tool, err := newClientFunctionTool(funcInfo, caller, "alice", "dev-1", 30*time.Second)
 	require.NoError(t, err)
 
-	_, err = tool.InvokableRun(context.Background(), `{}`)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "timed out")
+	// Recoverable failure → ToolResult envelope (success=false), not a Go error (D-101).
+	result, err := tool.InvokableRun(context.Background(), `{}`)
+	require.NoError(t, err)
+	assert.Contains(t, result, `"success":false`)
+	assert.Contains(t, result, "timed out")
 }
 
 // ---------------------------------------------------------------------------
@@ -156,10 +162,12 @@ func TestNewClientFunctionTool_InvokeClientErrorCode(t *testing.T) {
 	tool, err := newClientFunctionTool(funcInfo, caller, "alice", "dev-1", 30*time.Second)
 	require.NoError(t, err)
 
-	_, err = tool.InvokableRun(context.Background(), `{}`)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "client returned error (code -1)")
-	assert.Contains(t, err.Error(), "permission denied")
+	// Client business error → ToolResult envelope (success=false), not a Go error (D-101).
+	result, err := tool.InvokableRun(context.Background(), `{}`)
+	require.NoError(t, err)
+	assert.Contains(t, result, `"success":false`)
+	assert.Contains(t, result, "client returned error (code -1)")
+	assert.Contains(t, result, "permission denied")
 }
 
 // ---------------------------------------------------------------------------
@@ -271,9 +279,11 @@ func TestNewClientFunctionTool_InvokeConnectionLost(t *testing.T) {
 	tool, err := newClientFunctionTool(funcInfo, caller, "alice", "dev-1", 30*time.Second)
 	require.NoError(t, err)
 
-	_, err = tool.InvokableRun(context.Background(), `{}`)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unable to reach")
+	// Recoverable failure → ToolResult envelope (success=false), not a Go error (D-101).
+	result, err := tool.InvokableRun(context.Background(), `{}`)
+	require.NoError(t, err)
+	assert.Contains(t, result, `"success":false`)
+	assert.Contains(t, result, "unable to reach")
 }
 
 // ---------------------------------------------------------------------------
@@ -293,9 +303,11 @@ func TestNewClientFunctionTool_InvokeUnknownError(t *testing.T) {
 	tool, err := newClientFunctionTool(funcInfo, caller, "alice", "dev-1", 30*time.Second)
 	require.NoError(t, err)
 
-	_, err = tool.InvokableRun(context.Background(), `{}`)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unable to reach")
+	// Recoverable failure → ToolResult envelope (success=false), not a Go error (D-101).
+	result, err := tool.InvokableRun(context.Background(), `{}`)
+	require.NoError(t, err)
+	assert.Contains(t, result, `"success":false`)
+	assert.Contains(t, result, "unable to reach")
 }
 
 // ---------------------------------------------------------------------------

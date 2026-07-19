@@ -24,6 +24,7 @@
  */
 
 import type {
+  FunctionInfo,
   Package,
   PackageDataRequest,
   PackageDataResponse,
@@ -851,6 +852,18 @@ export class XyncraClient {
 
     // Step 2: re-register functions (fail-open).
     await this.reregisterFunctions();
+  }
+
+  /**
+   * setFunctions updates the function list used by the reconnect handshake's
+   * reregisterFunctions (D-101). The initial system.register_functions may be
+   * dropped if sent before the socket is open (sendPackage silently drops when
+   * not connected), so the handshake — which runs after the socket is open —
+   * is the reliable re-send path. Callers (e.g. XyncraProvider) should keep
+   * this in sync with their local function registry.
+   */
+  setFunctions(fns: FunctionInfo[]): void {
+    this.options.functions = fns;
   }
 
   /**

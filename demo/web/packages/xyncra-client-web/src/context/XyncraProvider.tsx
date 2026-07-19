@@ -288,6 +288,41 @@ export function XyncraProvider({
   const { client, deviceID, functionRegistry, eventEmitter, updateHandler } =
     stableRef.current;
 
+  // -- Function registry sync (D-3) --
+  // syncFunctionsToClient pushes the full function list to the client: it
+  // (1) registers reverse-RPC request handlers so the server's tool calls can
+  // be dispatched to the local handler, (2) keeps client.options.functions in
+  // sync so the reconnect handshake re-sends them after the socket is open,
+  // and (3) sends system.register_functions to the server (fail-open; a
+  // not-connected send is silently dropped, but setFunctions covers it via
+  // the reconnect handshake). Defined at component scope so both the
+  // onChange subscription and the connection-ready effect can call it.
+  const syncFunctionsToClient = useCallback(() => {
+    const infos = functionRegistry.getFunctionInfos();
+    if (infos.length === 0) return;
+
+    // 1. Register reverse-RPC handlers for each function on the client.
+    for (const info of infos) {
+      const reqHandler = functionRegistry.createRequestHandler(info.name);
+      if (reqHandler) {
+        client.registerRequestHandler(info.name, reqHandler);
+      }
+    }
+
+    // 2. Keep client.options.functions in sync for the reconnect handshake.
+    client.setFunctions(infos);
+
+    // 3. Sync the full function list to the server (full-replacement model).
+    client
+      .call('system.register_functions', { functions: infos })
+      .catch((err: unknown) => {
+        // Log but do not throw — function registration failures are
+        // non-fatal (fail-open, D-072).
+        const msg = err instanceof Error ? err.message : String(err);
+        handleError('system.register_functions', msg, 0);
+      });
+  }, [client, functionRegistry, handleError]);
+
   // ---- Lifecycle effect: start client, track status, sync functions ----
   useEffect(() => {
     setConnectionStatus('connecting');
@@ -329,34 +364,12 @@ export function XyncraProvider({
       const version = functionRegistry.getVersion();
       if (version === stableRef.current!.lastSyncedVersion) return;
       stableRef.current!.lastSyncedVersion = version;
-
-      // Register reverse-RPC handlers for each function on the client.
-      for (const info of functionRegistry.getFunctionInfos()) {
-        const reqHandler = functionRegistry.createRequestHandler(info.name);
-        if (reqHandler) {
-          client.registerRequestHandler(info.name, reqHandler);
-        }
-      }
-
-      // Sync the full function list to the server (full-replacement model).
-      client
-        .call('system.register_functions', {
-          functions: functionRegistry.getFunctionInfos(),
-        })
-        .catch((err: unknown) => {
-          // Log but do not throw — function registration failures are
-          // non-fatal (fail-open, D-072).
-          const msg = err instanceof Error ? err.message : String(err);
-          handleError('system.register_functions', msg, 0);
-        });
+      syncFunctionsToClient();
     });
 
     // -- Start the client (blocks until stop() or 4001) --
     client
       .start()
-      .then(() => {
-        setConnectionStatus('disconnected');
-      })
       .catch((err: unknown) => {
         console.error('[xyncra] Client start failed:', err);
         setConnectionStatus('disconnected');
@@ -373,6 +386,20 @@ export function XyncraProvider({
       client.stop();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- Sync client functions once the WebSocket is open ----
+  // DemoFunctions (mounted as children) registers its functions in an effect
+  // that runs BEFORE this provider's effect, so its register_functions call
+  // would either miss the onChange subscription or be dropped by sendPackage
+  // (which silently drops when not connected). We therefore (re)sync the full
+  // function list — including reverse-RPC request handlers — when the
+  // connection first becomes ready (D-101).
+  useEffect(() => {
+    if (connectionStatus !== 'connected' && connectionStatus !== 'syncing') {
+      return;
+    }
+    syncFunctionsToClient();
+  }, [connectionStatus, syncFunctionsToClient]);
 
   // ---- Build the context value (re-computed only when connectionStatus changes) ----
   const contextValue = useMemo<XyncraContextValue>(

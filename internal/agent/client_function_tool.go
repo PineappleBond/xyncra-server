@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/eino-contrib/jsonschema"
 
+	agenttools "github.com/PineappleBond/xyncra-server/internal/agent/tools"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
 
@@ -89,11 +90,18 @@ func executeClientFunction(
 
 	resp, err := c.ServerRequest(ctx, userID, deviceID, funcInfo.Name, input, timeout)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", formatClientToolError(err), err)
+		// Recoverable failure: surface the reason as normal tool content so the
+		// LLM can self-correct or retry, instead of aborting the run (D-101).
+		return agenttools.SoftFailure(formatClientToolError(err)), nil
 	}
 
 	if resp.Code < 0 {
-		return "", fmt.Errorf("tool call failed: client returned error (code %d): %s", resp.Code, resp.Msg)
+		// Client returned a business error (e.g. unknown method, handler
+		// failure). Return it as content, not a Go error, so the LLM sees the
+		// reason and can adapt (D-101).
+		return agenttools.SoftFailure(fmt.Sprintf(
+			"client returned error (code %d): %s", resp.Code, resp.Msg,
+		)), nil
 	}
 
 	return string(resp.Data), nil

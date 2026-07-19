@@ -53,8 +53,13 @@ func TestTimeTool_Invoke_InvalidTimezone_Error(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTimeTool: %v", err)
 	}
-	_, err = tl.InvokableRun(context.Background(), `{"timezone":"Invalid/Zone"}`)
-	if err == nil {
-		t.Fatal("expected error for invalid timezone, got nil")
+	result, err := tl.InvokableRun(context.Background(), `{"timezone":"Invalid/Zone"}`)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	// Recoverable failure: returned as a ToolResult envelope (success=false),
+	// not as a Go error (D-101).
+	if !strings.Contains(result, `"success":false`) {
+		t.Errorf("expected success:false envelope for invalid timezone, got: %s", result)
 	}
 }

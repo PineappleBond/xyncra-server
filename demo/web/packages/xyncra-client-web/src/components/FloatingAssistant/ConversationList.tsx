@@ -22,6 +22,8 @@ export interface ConversationListProps {
   activeConversationID: string | null;
   /** The currently selected agent ID, or null if none. */
   selectedAgentID: string | null;
+  /** The display name of the selected agent, used as the new conversation title. */
+  selectedAgentName: string | null;
   /** Called when the user selects a conversation. */
   onSelect: (id: string) => void;
 }
@@ -33,6 +35,7 @@ export interface ConversationListProps {
 export function ConversationList({
   activeConversationID,
   selectedAgentID,
+  selectedAgentName,
   onSelect,
 }: ConversationListProps): React.JSX.Element {
   const { conversations, createConversation, deleteConversation } =
@@ -74,8 +77,10 @@ export function ConversationList({
     }
     // Create a conversation with the selected agent as the other user.
     // Agent IDs are already full userIDs (e.g. agent/xxx).
-    void createConversation(selectedAgentID, '新会话');
-  }, [createConversation, selectedAgentID]);
+    // Title defaults to the agent's display name so the conversation list
+    // shows which agent it belongs to.
+    void createConversation(selectedAgentID, selectedAgentName ?? '新会话');
+  }, [createConversation, selectedAgentID, selectedAgentName]);
 
   return (
     <div style={FLOATING_ASSISTANT_STYLES.conversationList}>

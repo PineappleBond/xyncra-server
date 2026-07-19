@@ -60,9 +60,14 @@ func TestWeatherTool_EmptyCity(t *testing.T) {
 		t.Fatalf("NewWeatherTool: %v", err)
 	}
 
-	_, err = tl.InvokableRun(context.Background(), `{"city":""}`)
-	if err == nil {
-		t.Fatal("expected error for empty city, got nil")
+	result, err := tl.InvokableRun(context.Background(), `{"city":""}`)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	// Recoverable failure: returned as a ToolResult envelope (success=false),
+	// not as a Go error (D-101).
+	if !strings.Contains(result, `"success":false`) {
+		t.Errorf("expected success:false envelope for empty city, got: %s", result)
 	}
 }
 
