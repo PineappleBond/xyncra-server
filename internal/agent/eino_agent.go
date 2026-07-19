@@ -487,17 +487,20 @@ func (b *AgentBuilder) Build(ctx context.Context, config *AgentConfig) (built *B
 // ---------------------------------------------------------------------------
 
 // convertMessages maps Xyncra model.Message slices to Eino schema.Message
-// slices suitable for passing to an LLM. The role mapping uses the SenderID
-// convention from D-054: messages from "agent/*" senders become assistant
-// messages; all others become user messages.
-func convertMessages(messages []*xyncramodel.Message) []*schema.Message {
+// slices suitable for passing to an LLM. The role mapping uses the registry
+// for exact-match agent identification (D-054 revised): messages from
+// registered agents become assistant messages; all others become user messages.
+// When registry is nil, all messages are treated as user messages (nil-safe, D-063).
+func convertMessages(messages []*xyncramodel.Message, registry *AgentRegistry) []*schema.Message {
 	result := make([]*schema.Message, 0, len(messages))
 	for _, msg := range messages {
-		if strings.HasPrefix(msg.SenderID, "agent/") {
-			result = append(result, schema.AssistantMessage(msg.Content, nil))
-		} else {
-			result = append(result, schema.UserMessage(msg.Content))
+		if registry != nil {
+			if _, ok := registry.IsAgent(msg.SenderID); ok {
+				result = append(result, schema.AssistantMessage(msg.Content, nil))
+				continue
+			}
 		}
+		result = append(result, schema.UserMessage(msg.Content))
 	}
 	return result
 }

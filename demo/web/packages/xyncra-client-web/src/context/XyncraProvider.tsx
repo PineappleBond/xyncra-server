@@ -256,6 +256,11 @@ export function XyncraProvider({
       logger,
       updateHandler,
       onError: handleError,
+      onSyncComplete: () => {
+        // Initial fullSync completed. If still in 'syncing' state
+        // (empty database, no data events received), transition to 'connected'.
+        setConnectionStatus((prev) => (prev === 'syncing' ? 'connected' : prev));
+      },
       deviceInfo: {
         platform: 'web',
         userAgent:

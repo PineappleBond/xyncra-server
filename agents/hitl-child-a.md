@@ -1,5 +1,5 @@
 ---
-id: hitl-child-a
+id: agent/hitl-child-a
 name: HITL Child A
 description: "处理文件 A 操作 — 需要用户确认"
 model: qwen3.7-plus

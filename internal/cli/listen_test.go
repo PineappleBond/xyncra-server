@@ -975,19 +975,20 @@ func TestCLIUpdateHandler_OnTyping_Matrix(t *testing.T) {
 		name       string
 		userID     string
 		isTyping   bool
+		isAgent    bool
 		wantLabel  string // "[typing]" or "[thinking]"
 		wantAction string
 	}{
-		{"agent started typing", "agent/bot1", true, "[thinking]", "started typing"},
-		{"agent stopped typing", "agent/bot1", false, "[thinking]", "stopped thinking"},
-		{"human started typing", "alice", true, "[typing]", "started typing"},
-		{"human stopped typing", "alice", false, "[typing]", "stopped typing"},
+		{"agent started typing", "agent/bot1", true, true, "[thinking]", "started typing"},
+		{"agent stopped typing", "agent/bot1", false, true, "[thinking]", "stopped thinking"},
+		{"human started typing", "alice", true, false, "[typing]", "started typing"},
+		{"human stopped typing", "alice", false, false, "[typing]", "stopped typing"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newCLIUpdateHandler(nil)
 			output := captureStdout(func() {
-				require.NoError(t, h.OnTyping(context.Background(), tc.userID, "conv-1", tc.isTyping))
+				require.NoError(t, h.OnTyping(context.Background(), tc.userID, "conv-1", tc.isTyping, tc.isAgent))
 			})
 			assert.Contains(t, output, tc.wantLabel)
 			assert.Contains(t, output, tc.wantAction)
@@ -1003,19 +1004,20 @@ func TestCLIUpdateHandler_OnStreaming_Matrix(t *testing.T) {
 		name       string
 		userID     string
 		isDone     bool
+		isAgent    bool
 		wantLabel  string // "[streaming]" or "[agent]"
 		wantStatus string
 	}{
-		{"agent streaming", "agent/bot1", false, "[agent]", "streaming"},
-		{"agent done", "agent/bot1", true, "[agent]", "done"},
-		{"human streaming", "alice", false, "[streaming]", "streaming"},
-		{"human done", "alice", true, "[streaming]", "done"},
+		{"agent streaming", "agent/bot1", false, true, "[agent]", "streaming"},
+		{"agent done", "agent/bot1", true, true, "[agent]", "done"},
+		{"human streaming", "alice", false, false, "[streaming]", "streaming"},
+		{"human done", "alice", true, false, "[streaming]", "done"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newCLIUpdateHandler(nil)
 			output := captureStdout(func() {
-				require.NoError(t, h.OnStreaming(context.Background(), tc.userID, "conv-1", "stream-1", "hello", tc.isDone))
+				require.NoError(t, h.OnStreaming(context.Background(), tc.userID, "conv-1", "stream-1", "hello", tc.isDone, tc.isAgent))
 			})
 			assert.Contains(t, output, tc.wantLabel)
 			assert.Contains(t, output, tc.wantStatus)

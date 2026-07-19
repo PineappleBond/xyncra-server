@@ -3,7 +3,7 @@
 > **测试编号**: TC-005
 > **测试类型**: 端到端集成测试（人工评审）
 > **覆盖范围**: Sub-Agent 委派 (D-081)、深度限制、Fail-Open、热加载、消息归属验证
-> **环境**: Docker E2E (D-043) + 真实 LLM（.env.test）
+> **环境**: Docker E2E (D-043) + 真实 LLM（.env）
 > **最后更新**: 2026-07-15
 
 ---
@@ -110,12 +110,12 @@ echo "E2E_HOME=$E2E_HOME"
 mkdir -p $E2E_HOME/agent-logs
 ```
 
-### 3.5 配置真实 LLM（.env.test）
+### 3.5 配置真实 LLM（.env）
 
-确保 `.env.test` 已配置（参考 `.env.test.example`）：
+确保 `.env` 已配置（参考 `.env.example`）：
 
 ```bash
-test -f .env.test && echo "✓ .env.test exists" || echo "✗ .env.test missing"
+test -f .env && echo "✓ .env exists" || echo "✗ .env missing"
 ```
 
 ### 3.6 备份现有 Agent 配置
@@ -202,7 +202,7 @@ flowchart TD
 ```bash
 cat > agents/child-bot.md << 'EOF'
 ---
-id: child-bot
+id: agent/child-bot
 name: Child Bot
 description: "研究助手 — 专门负责分析和研究任务"
 model: qwen3.7-plus
@@ -233,7 +233,7 @@ cat agents/child-bot.md | head -5
 ```bash
 cat > agents/parent-bot.md << 'EOF'
 ---
-id: parent-bot
+id: agent/parent-bot
 name: Parent Bot
 description: "协调助手 — 通过委派子任务来完成复杂请求"
 model: qwen3.7-plus
@@ -246,7 +246,7 @@ context:
   max_tokens: 8000
   max_messages: 20
 sub_agents:
-  - child-bot
+  - agent/child-bot
 ---
 
 你是一个协调助手。你有一个名为 "Child Bot" 的研究助手可以委派任务。
@@ -271,7 +271,7 @@ grep "sub_agents" agents/parent-bot.md
 ```bash
 cat > agents/orphan-bot.md << 'EOF'
 ---
-id: orphan-bot
+id: agent/orphan-bot
 name: Orphan Bot
 description: "测试 Fail-Open — 引用不存在的 sub-agent"
 model: qwen3.7-plus
@@ -284,7 +284,7 @@ context:
   max_tokens: 4000
   max_messages: 10
 sub_agents:
-  - nonexistent-bot
+  - agent/nonexistent-bot
 ---
 
 你是一个测试助手。直接回答用户问题。
@@ -296,7 +296,7 @@ EOF
 ```bash
 cat > agents/grandchild-bot.md << 'EOF'
 ---
-id: grandchild-bot
+id: agent/grandchild-bot
 name: Grandchild Bot
 description: "最底层 Agent — 不应被 top-bot 直接调用"
 model: qwen3.7-plus
@@ -315,7 +315,7 @@ EOF
 
 cat > agents/mid-bot.md << 'EOF'
 ---
-id: mid-bot
+id: agent/mid-bot
 name: Mid Bot
 description: "中间层 Agent — 有自己的 sub-agent 引用（应被清空）"
 model: qwen3.7-plus
@@ -328,7 +328,7 @@ context:
   max_tokens: 4000
   max_messages: 10
 sub_agents:
-  - grandchild-bot
+  - agent/grandchild-bot
 ---
 
 你是中间层助手。
@@ -336,7 +336,7 @@ EOF
 
 cat > agents/top-bot.md << 'EOF'
 ---
-id: top-bot
+id: agent/top-bot
 name: Top Bot
 description: "顶层 Agent — 委派给 mid-bot"
 model: qwen3.7-plus
@@ -349,7 +349,7 @@ context:
   max_tokens: 4000
   max_messages: 10
 sub_agents:
-  - mid-bot
+  - agent/mid-bot
 ---
 
 你是顶层助手。当用户需要帮助时，使用 "Mid Bot" 工具委派任务。
@@ -1009,7 +1009,7 @@ docker cp agents/child-bot.md xyncra-server-xyncra-server-e2e-1:/app/agents/chil
 | LLM 日志为空 | Agent 未触发或 Logger 未配置 | 检查 `XYNCRA_LLM_LOG_DIR` 环境变量，查看服务器日志 |
 | tool_call 中无 child-bot | LLM 未选择调用子 Agent | 调整 parent-bot 系统提示，更明确指示委派 |
 | `reload_agents` 返回 count=0 | agents/ 目录为空或路径错误 | 检查 `XYNCRA_AGENTS_DIR` 配置 |
-| Agent 回复为空 | LLM API 超时或限流 | 检查 `.env.test` API Key，查看服务器日志 |
+| Agent 回复为空 | LLM API 超时或限流 | 检查 `.env` API Key，查看服务器日志 |
 | child-bot 直接发送了消息 | 消息归属逻辑错误 | 这是 bug，应报告（D-054 规定只有父 Agent 发消息） |
 | mid-bot tools 包含 grandchild-bot | 深度限制未生效 | 这是 bug，检查 `resolveSubAgents` 中的 `childConfig.SubAgents = nil` |
 | orphan-bot 构建失败 | Fail-Open 未生效 | 这是 bug，检查 `resolveSubAgents` 中的 `!ok` 分支 |
@@ -1059,9 +1059,9 @@ redis-cli -p 16379 -n 15 FLUSHDB
 
 ---
 
-## 11. 真实 LLM 测试配置（.env.test）
+## 11. 真实 LLM 测试配置（.env）
 
-本测试需要真实 LLM 调用，依赖 `.env.test` 配置：
+本测试需要真实 LLM 调用，依赖 `.env` 配置：
 
 | 变量 | 说明 | 默认值 | 必需 |
 |------|------|--------|------|
@@ -1071,8 +1071,8 @@ redis-cli -p 16379 -n 15 FLUSHDB
 | `XYNCRA_TEST_LLM_MODEL` | 模型名称 | `qwen3.7-plus` | 否 |
 
 **安全提示**：
-- ❌ 不要提交 `.env.test` 到 git
-- ✅ 使用 `.env.test.example` 作为模板
+- ❌ 不要提交 `.env` 到 git
+- ✅ 使用 `.env.example` 作为模板
 - ✅ 定期轮换 API Key
 
 **成本控制 (D-090)**：

@@ -1,5 +1,5 @@
 ---
-id: mcp-bot
+id: agent/mcp-bot
 name: MCP Bot
 description: Agent with MCP server connections for external tools
 model: gpt-4

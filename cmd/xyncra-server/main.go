@@ -361,6 +361,9 @@ func main() {
 	agentBuilder.SetRegistry(agentRegistry)
 	streamBridge := agent.NewStreamBridge()
 	broadcastHelper := agent.NewBroadcastHelper(srv, srv.Logger())
+	// Wire the agent registry so BroadcastHelper can resolve is_agent
+	// for event recipients (D-054 revised).
+	broadcastHelper.SetRegistry(agentRegistry)
 	contextManager := agent.NewDBContextManager(dataStore.MessageStore())
 
 	logMetrics := agent.NewLogMetrics(srv.Logger())

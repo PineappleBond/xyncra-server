@@ -3,7 +3,7 @@
 > **测试编号**: TC-007
 > **测试类型**: 端到端集成测试
 > **覆盖范围**: DynamicToolProvider 动态工具注入 (D-100)、客户端函数注册与调用 (D-101)、设备上下文传递 (D-102)、function_tags 过滤、excluded_functions 过滤、设备离线降级、函数清理
-> **环境**: Docker E2E (D-043) + 真实 LLM (.env.test)
+> **环境**: Docker E2E (D-043) + 真实 LLM (.env)
 > **最后更新**: 2026-07-15 (D-115: daemon 内置函数自动注册)
 
 ---
@@ -126,12 +126,12 @@ export E2E_HOME=$(mktemp -d /tmp/xe2e-XXXXXX)
 echo "E2E_HOME=$E2E_HOME"
 ```
 
-### 3.5 配置真实 LLM (.env.test)
+### 3.5 配置真实 LLM (.env)
 
-确保 `.env.test` 已配置（参考 `.env.test.example`）：
+确保 `.env` 已配置（参考 `.env.example`）：
 
 ```bash
-test -f .env.test && echo "✓ .env.test exists" || echo "✗ .env.test missing"
+test -f .env && echo "✓ .env exists" || echo "✗ .env missing"
 ```
 
 ### 3.6 确认 Agent 配置
@@ -1074,12 +1074,12 @@ redis-cli -p 16379 -n 15 FLUSHDB
 
 ---
 
-## 11. 真实 LLM 测试配置 (.env.test)
+## 11. 真实 LLM 测试配置 (.env)
 
-本测试需要真实 LLM 调用，依赖 `.env.test` 配置：
+本测试需要真实 LLM 调用，依赖 `.env` 配置：
 
 ```bash
-# .env.test 示例（参考 .env.test.example）
+# .env 示例（参考 .env.example）
 XYNCRA_TEST_REAL_LLM_ENABLED=true
 XYNCRA_TEST_LLM_API_KEY=your_api_key_here
 XYNCRA_TEST_LLM_BASE_URL=https://coding.dashscope.aliyuncs.com/v1
@@ -1088,8 +1088,8 @@ XYNCRA_TEST_LLM_PROVIDER=qwen
 ```
 
 **安全提示**：
-- ❌ 不要提交 `.env.test` 到 git（已在 `.gitignore` 中排除）
-- ✅ 使用 `.env.test.example` 作为模板
+- ❌ 不要提交 `.env` 到 git（已在 `.gitignore` 中排除）
+- ✅ 使用 `.env.example` 作为模板
 - ✅ 定期轮换 API Key
 
 **成本控制 (D-090)**：

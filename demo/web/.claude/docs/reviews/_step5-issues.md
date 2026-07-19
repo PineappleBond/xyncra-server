@@ -4,6 +4,8 @@
 > 基线：`demo/web/packages/xyncra-client-cli`（已验证通过）
 > 前序依据：`_step1-baseline.md` / `_step2-matrix.md` / `_step3-checklist.md` / `_step4-compliance.md` / `PRODUCT_DECISIONS.md`
 > 循环工作目录：`demo/web/packages/xyncra-client-web`
+>
+> **注（2026-07-19 后续更新）**：CON-1 中提到的 `isAgentUser` 已在 Agent 身份判定重构中删除。Agent 身份判定改为 Registry 精确匹配（D-054）。
 
 ---
 

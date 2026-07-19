@@ -1,5 +1,5 @@
 ---
-id: hitl-parent
+id: agent/hitl-parent
 name: HITL Parent
 description: "并行协调助手 — 同时委派两个子任务"
 model: qwen3.7-plus

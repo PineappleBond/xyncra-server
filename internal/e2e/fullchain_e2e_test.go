@@ -7,7 +7,7 @@
 // persistence.
 //
 // Run with: go test -tags real_llm ./internal/e2e/ -run TestFullChainE2E -v -timeout 300s
-// Requires: .env.test with XYNCRA_TEST_REAL_LLM_ENABLED=true and XYNCRA_TEST_LLM_API_KEY
+// Requires: .env with XYNCRA_TEST_REAL_LLM_ENABLED=true and XYNCRA_TEST_LLM_API_KEY
 package e2e_test
 
 import (
@@ -180,7 +180,7 @@ func (h *fullChainUpdateHandler) OnGap(_ context.Context, seq uint32) error {
 }
 
 // OnTyping records a typing indicator event.
-func (h *fullChainUpdateHandler) OnTyping(_ context.Context, userID, conversationID string, isTyping bool) error {
+func (h *fullChainUpdateHandler) OnTyping(_ context.Context, userID, conversationID string, isTyping bool, isAgent bool) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.typingEvents = append(h.typingEvents, typingEvent{
@@ -192,7 +192,7 @@ func (h *fullChainUpdateHandler) OnTyping(_ context.Context, userID, conversatio
 }
 
 // OnStreaming records a streaming text event.
-func (h *fullChainUpdateHandler) OnStreaming(_ context.Context, userID, conversationID, streamID, text string, isDone bool) error {
+func (h *fullChainUpdateHandler) OnStreaming(_ context.Context, userID, conversationID, streamID, text string, isDone bool, isAgent bool) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.streamingTexts = append(h.streamingTexts, streamingEvent{

@@ -39,7 +39,7 @@ func (noopLogger) Debug(string, ...any) {}
 type ExecutePayload struct {
 	MessageID      string // ID of the triggering message
 	ConversationID string // Conversation to operate in
-	AgentID        string // Full "agent/xxx" userID
+	AgentID        string // Full userID of the agent (exact match in registry, D-054 revised)
 	SenderID       string // Human user who sent the message
 	DeviceID       string // Device that initiated the conversation (D-102)
 }
@@ -235,11 +235,10 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 	ctx, cancel := context.WithTimeout(ctx, e.totalTimeout)
 	defer cancel()
 
-	// 3. Look up agent config by trimming "agent/" prefix.
-	agentID := strings.TrimPrefix(payload.AgentID, "agent/")
-	config, ok := e.registry.Get(agentID)
+	// 3. Look up agent config by exact match in the registry (D-054 revised).
+	config, ok := e.registry.Get(payload.AgentID)
 	if !ok {
-		return fmt.Errorf("execute agent: %w: %s", ErrAgentNotFound, agentID)
+		return fmt.Errorf("execute agent: %w: %s", ErrAgentNotFound, payload.AgentID)
 	}
 
 	// 4. Send typing=true to the human user (D-065).
@@ -293,7 +292,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 	}
 
 	// 8. Convert messages to Eino schema.
-	schemaMessages := convertMessages(messages)
+	schemaMessages := convertMessages(messages, e.registry)
 
 	// 9. Generate stream_id and checkpoint_id for this execution.
 	streamID := uuid.New().String()

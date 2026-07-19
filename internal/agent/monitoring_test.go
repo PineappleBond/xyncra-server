@@ -383,7 +383,7 @@ func TestPrometheusMetrics_Record_Success(t *testing.T) {
 	ctx := context.Background()
 
 	event := LLMCallEvent{
-		AgentID:      "test-agent-prom",
+		AgentID:      "agent/test-agent-prom",
 		Model:        "gpt-4",
 		Duration:     2 * time.Second,
 		InputTokens:  100,
@@ -393,7 +393,7 @@ func TestPrometheusMetrics_Record_Success(t *testing.T) {
 	pm.Record(ctx, event)
 
 	// Verify AgentExecutions incremented.
-	counter, err := metrics.AgentExecutions.GetMetricWithLabelValues("test-agent-prom", "gpt-4")
+	counter, err := metrics.AgentExecutions.GetMetricWithLabelValues("agent/test-agent-prom", "gpt-4")
 	if err != nil {
 		t.Fatalf("get counter: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestPrometheusMetrics_Record_Success(t *testing.T) {
 	}
 
 	// Verify LLMCallsTotal incremented.
-	llmCounter, err := metrics.LLMCallsTotal.GetMetricWithLabelValues("test-agent-prom", "gpt-4")
+	llmCounter, err := metrics.LLMCallsTotal.GetMetricWithLabelValues("agent/test-agent-prom", "gpt-4")
 	if err != nil {
 		t.Fatalf("get counter: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestPrometheusMetrics_Record_Success(t *testing.T) {
 	}
 
 	// Verify LLMTokensInput.
-	inputCounter, err := metrics.LLMTokensInput.GetMetricWithLabelValues("test-agent-prom", "gpt-4")
+	inputCounter, err := metrics.LLMTokensInput.GetMetricWithLabelValues("agent/test-agent-prom", "gpt-4")
 	if err != nil {
 		t.Fatalf("get counter: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestPrometheusMetrics_Record_Success(t *testing.T) {
 	}
 
 	// Verify LLMTokensOutput.
-	outputCounter, err := metrics.LLMTokensOutput.GetMetricWithLabelValues("test-agent-prom", "gpt-4")
+	outputCounter, err := metrics.LLMTokensOutput.GetMetricWithLabelValues("agent/test-agent-prom", "gpt-4")
 	if err != nil {
 		t.Fatalf("get counter: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestPrometheusMetrics_Record_Error(t *testing.T) {
 
 	testErr := errors.New("rate limited")
 	event := LLMCallEvent{
-		AgentID:  "error-agent-prom",
+		AgentID:  "agent/error-agent-prom",
 		Model:    "gpt-3.5",
 		Duration: time.Second,
 		Error:    testErr,
@@ -448,7 +448,7 @@ func TestPrometheusMetrics_Record_Error(t *testing.T) {
 	pm.Record(ctx, event)
 
 	// Verify AgentExecutionsFailed incremented with classified error label.
-	failCounter, err := metrics.AgentExecutionsFailed.GetMetricWithLabelValues("error-agent-prom", "rate_limit")
+	failCounter, err := metrics.AgentExecutionsFailed.GetMetricWithLabelValues("agent/error-agent-prom", "rate_limit")
 	if err != nil {
 		t.Fatalf("get counter: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestPrometheusMetrics_Record_Error(t *testing.T) {
 	}
 
 	// Verify LLMCallsFailed incremented with classified error label.
-	llmFail, err := metrics.LLMCallsFailed.GetMetricWithLabelValues("error-agent-prom", "gpt-3.5", "rate_limit")
+	llmFail, err := metrics.LLMCallsFailed.GetMetricWithLabelValues("agent/error-agent-prom", "gpt-3.5", "rate_limit")
 	if err != nil {
 		t.Fatalf("get counter: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestMultiMetrics_FanOut(t *testing.T) {
 
 	ctx := context.Background()
 	event := LLMCallEvent{
-		AgentID:      "multi-agent",
+		AgentID:      "agent/multi-agent",
 		Model:        "claude-3",
 		Duration:     time.Second,
 		InputTokens:  200,
@@ -524,7 +524,7 @@ func TestMultiMetrics_FanOut(t *testing.T) {
 func TestMultiMetrics_Empty(t *testing.T) {
 	mm := NewMultiMetrics()
 	// Should not panic.
-	mm.Record(context.Background(), LLMCallEvent{AgentID: "test", Model: "test"})
+	mm.Record(context.Background(), LLMCallEvent{AgentID: "agent/test", Model: "test"})
 }
 
 // TestMultiMetrics_Record_FansOut is an alias test matching the acceptance
@@ -540,7 +540,7 @@ func TestMultiMetrics_Record_FansOut(t *testing.T) {
 	mm := NewMultiMetrics(r1, r2)
 
 	event := LLMCallEvent{
-		AgentID:      "fans-out-agent",
+		AgentID:      "agent/fans-out-agent",
 		Model:        "gpt-4",
 		Duration:     time.Second,
 		InputTokens:  10,

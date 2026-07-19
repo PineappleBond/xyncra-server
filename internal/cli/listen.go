@@ -105,13 +105,14 @@ func (h *cliUpdateHandler) OnGap(_ context.Context, seq uint32) error {
 
 // OnTyping prints a typing indicator event to stdout (D-050 ephemeral push).
 // D-065: agent typing shows as "thinking", human typing as "typing".
-func (h *cliUpdateHandler) OnTyping(_ context.Context, userID, conversationID string, isTyping bool) error {
+// The isAgent parameter indicates whether userID belongs to a registered agent (D-054 revised).
+func (h *cliUpdateHandler) OnTyping(_ context.Context, userID, conversationID string, isTyping bool, isAgent bool) error {
 	action := "started typing"
 	label := "typing"
 	if !isTyping {
 		action = "stopped typing"
 	}
-	if client.IsAgentUser(userID) {
+	if isAgent {
 		label = "thinking"
 		if !isTyping {
 			action = "stopped thinking"
@@ -122,13 +123,14 @@ func (h *cliUpdateHandler) OnTyping(_ context.Context, userID, conversationID st
 }
 
 // OnStreaming prints a streaming text event to stdout (D-051 ephemeral push).
-func (h *cliUpdateHandler) OnStreaming(_ context.Context, userID, conversationID, streamID, text string, isDone bool) error {
+// The isAgent parameter indicates whether userID belongs to a registered agent (D-054 revised).
+func (h *cliUpdateHandler) OnStreaming(_ context.Context, userID, conversationID, streamID, text string, isDone bool, isAgent bool) error {
 	status := "streaming"
 	if isDone {
 		status = "done"
 	}
 	prefix := "streaming"
-	if client.IsAgentUser(userID) {
+	if isAgent {
 		prefix = "agent"
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "[%s] user=%s conv=%s stream=%s status=%s text=%q\n",

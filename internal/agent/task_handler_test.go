@@ -60,7 +60,7 @@ func newTestHandler(
 ) {
 	registry := NewRegistry()
 	registry.Register(&AgentConfig{
-		ID:        "test-agent",
+		ID:        "agent/test-agent",
 		Name:      "Test",
 		Model:     "gpt-4",
 		APIKeyEnv: "",
@@ -750,7 +750,7 @@ func TestNewAgentTaskHandler_TransientError_NoProcessedKey_ReturnsError(t *testi
 	// Build a handler with a context manager that returns ErrLLMTimeout (transient).
 	registry := NewRegistry()
 	registry.Register(&AgentConfig{
-		ID: "test-agent", Name: "Test", Model: "gpt-4", APIKeyEnv: "",
+		ID: "agent/test-agent", Name: "Test", Model: "gpt-4", APIKeyEnv: "",
 	})
 	mockStore := &mockStoreAPI{}
 	mockBS := &mockBroadcastServer{}
@@ -885,7 +885,7 @@ func TestNewAgentTaskHandler_HITLInterrupt_NoProcessedKey(t *testing.T) {
 	// Build a handler with a context manager that returns ErrHITLInterrupted.
 	registry := NewRegistry()
 	registry.Register(&AgentConfig{
-		ID: "test-agent", Name: "Test", Model: "gpt-4", APIKeyEnv: "",
+		ID: "agent/test-agent", Name: "Test", Model: "gpt-4", APIKeyEnv: "",
 	})
 	mockStore := &mockStoreAPI{}
 	mockBS := &mockBroadcastServer{}

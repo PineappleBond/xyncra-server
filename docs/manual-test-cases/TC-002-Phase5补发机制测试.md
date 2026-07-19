@@ -248,10 +248,16 @@ grep "device_id" "$E2E_HOME/alice-daemon.log" | head -1
 
 #### 步骤 1.3: 验证函数注册
 
+> **注意**：函数注册通过 `system.reconnect` 流程在 daemon 启动时静默完成，服务器日志不会显式记录 `system.register_functions` 调用。因此需要检查 **daemon 日志** 而非服务器日志来确认函数注册。
+
 ```bash
-# 检查服务器日志，确认 system.register_functions 被调用
-cat "$E2E_HOME/server.log" | grep "system.register_functions" | tail -3
-# 预期: 看到函数注册日志
+# 检查 daemon 日志，确认函数注册完成
+grep -i "register\|reconnect\|connected" "$E2E_HOME/alice-daemon.log" | tail -5
+# 预期: 看到 daemon 已连接并完成注册的日志
+
+# 也可以通过 Redis 连接信息间接验证
+redis-cli -p 16379 -n 15 KEYS "xyncra:conn:info:*"
+# 预期: 看到 test-device-alice 对应的连接信息 key
 ```
 
 #### 步骤 1.4: 📘 TS Client 适配要点（阶段 1）
@@ -267,9 +273,9 @@ xyncra-client listen \
 ALICE_TS_PID=$!
 sleep 2
 
-# 验证函数注册
-cat "$E2E_HOME/server.log" | grep "system.register_functions" | tail -3
-# 预期: 看到 TS Client 的函数注册日志
+# 验证函数注册（检查 TS daemon 日志）
+grep -i "register\|reconnect\|connected" "$E2E_HOME/alice-ts-daemon.log" | tail -5
+# 预期: 看到 TS daemon 已连接并完成注册的日志
 ```
 
 **差异点**：
@@ -371,6 +377,15 @@ sleep 2
 cat "$E2E_HOME/alice-daemon.log" | grep "system.reconnect" | tail -3
 ```
 
+> **注意: Seq 过滤与 Replay 行为**
+>
+> 服务器的 `system.reconnect` 处理逻辑会根据客户端上报的 `last_seen_seq` 来判断哪些 pending 请求需要 replay。如果客户端在暂停/恢复期间经历了多次自动重连，每次重连都会更新 `last_seen_seq`，可能导致以下情况：
+>
+> - 最后一次重连时 `last_seen_seq` 已经等于（或大于）pending item 的 seq
+> - 服务器认为客户端已同步了该 seq 的所有更新，因此**不会 replay 该 pending 请求**
+>
+> 这在 TS Client 中尤为常见，因为 TS daemon 在暂停/恢复期间可能会触发多次自动重连。如果观察到 pending 未被 replay，请检查 daemon 日志中的 `last_seen_seq` 值是否与 pending item 的 seq 相同。
+
 #### 步骤 3.3: 验证补发请求 (D-107)
 
 ```bash
@@ -417,16 +432,30 @@ redis-cli -p 16379 -n 15 KEYS "pending:alice*"
 
 #### 步骤 4.1: 启动第二个连接（相同 device_id）
 
-```bash
-# 使用相同的 device_id 启动新连接
-./bin/xyncra-client listen \
-  --user-id alice --device-id test-device-alice \
-  --device-id "$DEVICE_ID" \
-  --server ws://localhost:18080/ws \
-  > "$E2E_HOME/alice-daemon-2.log" 2>&1 &
-ALICE_PID_2=$!
-sleep 2
-```
+> **注意: PID 锁问题**
+>
+> Go/TS Client 都使用进程锁（Go: fcntl / TS: fs-ext）防止同一 `--user-id` + `--device-id` 组合重复启动 daemon。直接启动第二个实例会因锁冲突而失败。
+>
+> **绕过方法**（任选其一）：
+>
+> 1. **使用 `--db-path` 参数**：指定不同的数据库文件路径，避开锁检测
+> 2. **使用 `websocat` 直接连接**：绕过 client CLI，直接用 WebSocket 客户端建立连接
+>
+> ```bash
+> # 方法 1: 使用 --db-path 绕过 PID 锁
+> ./bin/xyncra-client listen \
+>   --user-id alice --device-id test-device-alice \
+>   --server ws://localhost:18080/ws \
+>   --db-path "$E2E_HOME/xyncra-2.db" \
+>   > "$E2E_HOME/alice-daemon-2.log" 2>&1 &
+> ALICE_PID_2=$!
+> sleep 2
+>
+> # 方法 2: 使用 websocat 直接建立 WebSocket 连接
+> websocat ws://localhost:18080/ws > "$E2E_HOME/alice-ws-2.log" 2>&1 &
+> WS_PID=$!
+> sleep 2
+> ```
 
 #### 步骤 4.2: 验证旧连接收到 Close 4001
 
@@ -448,7 +477,11 @@ redis-cli -p 16379 -n 15 GET "$PENDING_KEY"
 #### 步骤 4.4: 停止第二个 daemon
 
 ```bash
-./bin/xyncra-client kill --user-id alice --device-id "$DEVICE_ID"
+# 停止第二个 daemon（注意需要指定相同的 --db-path 才能正确找到进程）
+./bin/xyncra-client kill --user-id alice --device-id test-device-alice --db-path "$E2E_HOME/xyncra-2.db"
+
+# 如果使用了 websocat 方法
+kill $WS_PID 2>/dev/null
 ```
 
 #### 步骤 4.5: 📘 TS Client 适配要点（阶段 4）
@@ -576,3 +609,26 @@ redis-cli -p 16379 -n 15 FLUSHDB
 
 **结论**：PASS / FAIL
 ```
+
+---
+
+## 13. TS Client 已知问题
+
+以下问题在 TS Client 的当前版本中存在，但不影响主要功能（补发机制、设备替换）的测试验证：
+
+### 问题 1: 日志格式化问题
+
+- **表现**: 日志输出中出现 `[object Object]=MISSING`，原因是日志格式化时对象未正确序列化
+- **影响**: 仅影响日志可读性，不影响功能
+
+### 问题 2: IndexedDB 告警
+
+- **表现**: Node.js 环境缺少原生 IndexedDB API，导致 retry poll loop 报错。TS Client 使用 `fake-indexeddb` polyfill 但部分场景仍有告警
+- **影响**: 仅影响重试机制在 Node.js 环境的表现，核心 WebSocket 通信不受影响
+
+### 问题 3: MODULE_TYPELESS_PACKAGE_JSON 警告
+
+- **表现**: `xyncra-protocol` 的 `package.json` 缺少 `"type": "module"` 字段，Node.js 运行时会输出模块类型警告
+- **影响**: 仅产生警告日志，不影响模块加载和功能执行
+
+> **说明**：这些问题均为 TS Client 的实现细节问题，不涉及协议层或服务器行为。在测试过程中遇到上述警告属于已知现象，不应视为测试失败。

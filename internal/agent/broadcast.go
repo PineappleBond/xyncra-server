@@ -20,6 +20,7 @@ type StreamingPayload struct {
 	StreamID       string `json:"stream_id"`
 	Text           string `json:"text"`
 	IsDone         bool   `json:"is_done"`
+	IsAgent        bool   `json:"is_agent"`
 	Timestamp      int64  `json:"timestamp"`
 }
 
@@ -28,6 +29,7 @@ type TypingPayload struct {
 	UserID         string `json:"user_id"`
 	ConversationID string `json:"conversation_id"`
 	IsTyping       bool   `json:"is_typing"`
+	IsAgent        bool   `json:"is_agent"`
 	Timestamp      int64  `json:"timestamp"`
 }
 
@@ -52,6 +54,7 @@ type AgentTimeoutPayload struct {
 // returned to the caller.
 type BroadcastHelper struct {
 	wsServer BroadcastServer
+	registry *AgentRegistry // for IsAgent lookups (D-054 revised); nil = agent detection disabled (D-063)
 	logger   Logger
 }
 
@@ -67,6 +70,23 @@ func NewBroadcastHelper(wsServer BroadcastServer, logger Logger) *BroadcastHelpe
 	}
 }
 
+// SetRegistry sets the agent registry used to determine whether a userID
+// belongs to a registered agent (D-054 revised). When nil, IsAgent defaults
+// to false for all payloads.
+func (bh *BroadcastHelper) SetRegistry(registry *AgentRegistry) {
+	bh.registry = registry
+}
+
+// isAgent reports whether userID corresponds to a registered agent.
+// Returns false when the registry is nil (nil-safe, D-063).
+func (bh *BroadcastHelper) isAgent(userID string) bool {
+	if bh.registry == nil {
+		return false
+	}
+	_, ok := bh.registry.IsAgent(userID)
+	return ok
+}
+
 // SendStreamUpdate broadcasts an ephemeral streaming update (Seq=0, D-050 /
 // D-051) to both the human user and the agent user so that every participant
 // sees the streamed text in real time.
@@ -79,6 +99,7 @@ func (bh *BroadcastHelper) SendStreamUpdate(ctx context.Context, humanUserID, ag
 		StreamID:       streamID,
 		Text:           text,
 		IsDone:         isDone,
+		IsAgent:        bh.isAgent(agentUserID),
 		Timestamp:      time.Now().Unix(),
 	})
 	if err != nil {
@@ -114,6 +135,7 @@ func (bh *BroadcastHelper) SendTyping(ctx context.Context, agentUserID, targetUs
 		UserID:         agentUserID,
 		ConversationID: conversationID,
 		IsTyping:       isTyping,
+		IsAgent:        bh.isAgent(agentUserID),
 		Timestamp:      time.Now().Unix(),
 	})
 	if err != nil {

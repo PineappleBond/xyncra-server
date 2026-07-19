@@ -6,6 +6,8 @@
 **基准**：xyncra-client-cli（已验证基线，84 测试通过）
 **关联文档**：docs/decisions/PRODUCT_DECISIONS.md（D-117/118/124/126/130/131/132）、上一轮 076-web-vs-cli-review.md
 
+> **注（2026-07-19 后续更新）**：本文档中提到的 `isAgentUser` / `AGENT_USER_ID_PREFIX` 已在 Agent 身份判定重构中从代码中删除。Agent 身份判定改为 Registry 精确匹配（D-054）。
+
 ---
 
 ## 1.1 可复用接口 / 类型 / 函数清单

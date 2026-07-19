@@ -24,7 +24,7 @@ export function HITLDialog(): React.JSX.Element | null {
   const handleOk = useCallback(async () => {
     if (!pendingQuestion) return;
     const values = await form.validateFields();
-    await answer(pendingQuestion.userId, values.answer);
+    await answer(pendingQuestion.questionId ?? pendingQuestion.userId, values.answer);
     form.resetFields();
   }, [pendingQuestion, form, answer]);
 

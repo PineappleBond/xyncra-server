@@ -138,7 +138,7 @@
 
 ## Real LLM 测试详情 (14 tests, ~160s)
 
-构建标签：`//go:build real_llm`，需 `.env.test` 配置 LLM 凭据。
+构建标签：`//go:build real_llm`，需 `.env` 配置 LLM 凭据。
 
 | ID | 测试名 | 分类 | 验证内容 | 耗时 | 结果 |
 |----|--------|------|----------|------|------|
@@ -213,8 +213,8 @@
 # Quick 模式：59 个 mock 测试，~60s，零外部依赖
 go test ./internal/e2e/ -run "^TestAgent" -count=1 -timeout 120s
 
-# Full 模式：14 个 real LLM 测试，~160s，需要 .env.test
-source .env.test && go test -tags real_llm ./internal/e2e/ -run "^TestAgentRealLLM" -count=1 -timeout 600s
+# Full 模式：14 个 real LLM 测试，~160s，需要 .env
+source .env && go test -tags real_llm ./internal/e2e/ -run "^TestAgentRealLLM" -count=1 -timeout 600s
 ```
 
 ## 相关文档

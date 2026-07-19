@@ -1,5 +1,5 @@
 ---
-id: test-bot
+id: agent/test-bot
 name: Test Bot
 description: "Basic conversational test agent for distributed deployment testing"
 model: qwen3.7-plus

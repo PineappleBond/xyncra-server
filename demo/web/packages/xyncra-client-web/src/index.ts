@@ -88,4 +88,4 @@ export type {
 export { TypedEventEmitter } from './internal/EventEmitter';
 export type { FunctionHandler } from './internal/FunctionRegistry';
 export { FunctionRegistry } from './internal/FunctionRegistry';
-export { isAgentUser, ReactUpdateHandler } from './internal/ReactUpdateHandler';
+export { ReactUpdateHandler } from './internal/ReactUpdateHandler';

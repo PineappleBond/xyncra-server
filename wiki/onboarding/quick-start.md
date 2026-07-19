@@ -236,7 +236,7 @@ information, forecasts, and weather-related advice.
 
 ### 配置 API Key
 
-在 `.env.agent` 文件中设置 LLM 提供商 API Key：
+在 `.env` 文件中设置 LLM 提供商 API Key：
 
 ```bash
 DASHSCOPE_API_KEY=sk-your-api-key-here

@@ -9,12 +9,11 @@
  * import {
  *   IWebSocket, IWebSocketFactory, IIndexedDBProvider, ILogger,
  *   IUpdateHandler, ClientError, ConnectionError, TimeoutError, SyncError,
- *   ClientOptions, isAgentUser, AGENT_USER_ID_PREFIX,
+ *   ClientOptions,
  * } from '@xyncra/client-core';
  * ```
  */
 
-export * from './agent';
 export * from './connection-manager';
 export * from './constants';
 export * from './errors';

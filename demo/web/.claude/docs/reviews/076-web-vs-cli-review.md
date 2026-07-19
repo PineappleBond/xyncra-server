@@ -6,6 +6,7 @@
 **Integration points:** `demo/web/src/`
 **Reference docs:** `_step1-baseline.md`, `_step2-matrix.md`, `_step3-checklist.md`, `_step4-compliance.md`, `_step5-issues.md`, `_step5b-core-fix.md`, `PRODUCT_DECISIONS.md`
 
+> **注（2026-07-19 后续更新）**：CON-1 中提到的 `isAgentUser` 已在 Agent 身份判定重构中从 Go 和 TS 代码中删除。Agent 身份判定改为 Registry 精确匹配（D-054），不再依赖 `agent/` 前缀。详见 PRODUCT_DECISIONS_DETAILS.md D-054。
 ---
 
 ## 1. Overview

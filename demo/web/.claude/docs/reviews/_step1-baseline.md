@@ -4,6 +4,8 @@
 > web 端：`demo/web/packages/xyncra-client-web`
 > 集成点：`demo/web/src/`
 > 架构约束：`demo/web/docs/decisions/PRODUCT_DECISIONS.md`（TS-D-001/003/007/008/012）
+>
+> **注（2026-07-19 后续更新）**：本文档中提到的 `isAgentUser` 已在 Agent 身份判定重构中从代码中删除。Agent 身份判定改为 Registry 精确匹配（D-054），`agent/` 前缀保留为示例约定而非强制。
 
 ---
 

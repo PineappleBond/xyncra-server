@@ -257,7 +257,7 @@ func TestExecute_ContextCancellationWithSemaphore(t *testing.T) {
 	registry := NewRegistry()
 	// Register an agent so the lookup succeeds.
 	registry.Register(&AgentConfig{
-		ID:        "test-agent",
+		ID:        "agent/test-agent",
 		Name:      "Test",
 		Model:     "gpt-4",
 		APIKeyEnv: "",
@@ -301,7 +301,7 @@ func TestExecute_ContextCancellationWithSemaphore(t *testing.T) {
 func TestExecute_SendsTypingBeforeContextLoad(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(&AgentConfig{
-		ID:        "test-agent",
+		ID:        "agent/test-agent",
 		Name:      "Test",
 		Model:     "gpt-4",
 		APIKeyEnv: "",
@@ -382,7 +382,7 @@ func TestSendErrorMessage_PersistsMessage(t *testing.T) {
 func TestExecute_ContextLoadFails_TypingCleared(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(&AgentConfig{
-		ID:        "test-agent",
+		ID:        "agent/test-agent",
 		Name:      "Test",
 		Model:     "gpt-4",
 		APIKeyEnv: "",
@@ -614,7 +614,7 @@ func (m *contextCapturingContextManager) InvalidateCache(_ string) {}
 func TestExecute_DeviceID_InjectedIntoContext(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(&AgentConfig{
-		ID:    "test-agent",
+		ID:    "agent/test-agent",
 		Name:  "Test",
 		Model: "gpt-4",
 	})
@@ -649,7 +649,7 @@ func TestExecute_DeviceID_InjectedIntoContext(t *testing.T) {
 func TestExecute_EmptyDeviceID_NoCallerDeviceInContext(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(&AgentConfig{
-		ID:    "test-agent",
+		ID:    "agent/test-agent",
 		Name:  "Test",
 		Model: "gpt-4",
 	})

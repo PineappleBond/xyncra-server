@@ -117,17 +117,17 @@
 
 ---
 
-## D-054: Agent UserID 命名约定
+## D-054: Agent 身份判定：Registry 精确匹配
 
-**决策**：Agent 使用 agent/{id} 格式的 UserID，agent/ 前缀为系统保留命名空间。Agent 在协议层与普通用户完全等价，不新增 User 类型或字段。
+**决策**：Agent 身份判定通过检查 userID 是否存在于 `AgentRegistry` 中（精确匹配），不再依赖任何命名前缀。Agent `.md` 配置文件的 `id` 字段使用完整 userID（如 `agent/weather-bot`），其中 `agent/` 为示例约定而非系统强制。Agent 在协议层与普通用户完全等价，不新增 User 类型或字段。
 
-**原因**：命名空间隔离、协议复用（复用用户机制）、可识别性（前缀快速判断身份类型）、向后兼容。
+**原因**：精确匹配消除前缀硬编码、支持任意格式的 Agent ID（如 `my-project/bot-1`）、`agent/` 约定保留兼容性、向后兼容（现有 `agent/xxx` 配置无需修改）。
 
 ---
 
 ## D-055: Agent 消息格式复用
 
-**决策**：Agent 消息与普通用户消息格式完全相同，不新增 Message.Type 或 Package 类型。通过 agent/ 前缀的 UserID 标识。
+**决策**：Agent 消息与普通用户消息格式完全相同，不新增 Message.Type 或 Package 类型。Agent 通过注册在 `AgentRegistry` 中的 UserID 标识。
 
 **原因**：协议简洁性、复用现有基础设施（Store/MQ/广播全部复用）、客户端无需改动、与 D-054 配合。
 
@@ -143,7 +143,7 @@
 
 ## D-062: Agent 消息路由触发模型
 
-**决策**：用户向 Agent 发消息时，消息正常持久化，然后通过 MQ 入队 TypeAgentProcess 异步任务触发 Agent 处理。仅当发送者是人类用户（非 agent/ 前缀）且接收者是已注册 Agent 时才触发。
+**决策**：用户向 Agent 发消息时，消息正常持久化，然后通过 MQ 入队 TypeAgentProcess 异步任务触发 Agent 处理。仅当发送者不在 AgentRegistry 中（即非 Agent 用户）且接收者是已注册 Agent 时才触发。
 
 **原因**：与 D-007（MQ fire-and-forget）一致、与 D-055 一致（路由在 MQ 层对协议透明）、防递归保护（Agent 回复不触发二次处理）、零侵入非 Agent 路径。
 
@@ -393,6 +393,7 @@
 
 | 日期       | 版本  | 变更                                                                                           |
 | ---------- | ----- | ---------------------------------------------------------------------------------------------- |
+| 2026-07-19 | v3.27 | D-054 更新为 Registry 精确匹配模型、D-055/D-062 去除前缀依赖描述                                |
 | 2026-07-17 | v3.26 | D-128（/metrics 端点在同一 HTTP 端口暴露，WSWithExtraRoutes）                                   |
 | 2026-07-17 | v3.25 | D-127（手动业务级追踪，移除自动埋点库）                                                         |
 | 2026-07-16 | v3.23 | D-121（两阶段幂等性）、D-036（新增 reload-agents IPC-only）、D-126（FetchMoreMessages）         |

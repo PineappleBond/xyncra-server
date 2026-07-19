@@ -106,6 +106,7 @@ describe('useAgentStatus', () => {
         userId: 'agent1',
         conversationId: 'conv-1',
         isTyping: true,
+        isAgent: true,
       });
     });
 
@@ -123,6 +124,7 @@ describe('useAgentStatus', () => {
         userId: 'agent1',
         conversationId: 'conv-1',
         isTyping: false,
+        isAgent: true,
       });
     });
 

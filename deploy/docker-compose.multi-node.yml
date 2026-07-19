@@ -77,8 +77,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     env_file:
-      - ../.env.agent
-      - ../.env.test
+      - ../.env
     ports:
       - "18080:8080"
     environment:
@@ -115,8 +114,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     env_file:
-      - ../.env.agent
-      - ../.env.test
+      - ../.env
     ports:
       - "18081:8080"
     environment:
@@ -153,8 +151,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     env_file:
-      - ../.env.agent
-      - ../.env.test
+      - ../.env
     ports:
       - "18082:8080"
     environment:

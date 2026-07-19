@@ -91,6 +91,7 @@ type typingUpdatePayload struct {
 	UserID         string `json:"user_id"`
 	ConversationID string `json:"conversation_id"`
 	IsTyping       bool   `json:"is_typing"`
+	IsAgent        bool   `json:"is_agent"`
 	Timestamp      int64  `json:"timestamp"`
 }
 
@@ -101,6 +102,7 @@ type streamingUpdatePayload struct {
 	ConversationID string `json:"conversation_id"`
 	Text           string `json:"text"`
 	IsDone         bool   `json:"is_done"`
+	IsAgent        bool   `json:"is_agent"`
 	Timestamp      int64  `json:"timestamp"`
 }
 
@@ -590,14 +592,14 @@ func (sm *syncManager) notifyHandler(ctx context.Context, update *protocol.Packa
 		var tp typingUpdatePayload
 		if err := json.Unmarshal(update.Payload, &tp); err == nil {
 			if th, ok := sm.handler.(TypingHandler); ok {
-				_ = th.OnTyping(ctx, tp.UserID, tp.ConversationID, tp.IsTyping)
+				_ = th.OnTyping(ctx, tp.UserID, tp.ConversationID, tp.IsTyping, tp.IsAgent)
 			}
 		}
 	case protocol.UpdateTypeStreaming:
 		var sp streamingUpdatePayload
 		if err := json.Unmarshal(update.Payload, &sp); err == nil {
 			if sh, ok := sm.handler.(StreamingHandler); ok {
-				_ = sh.OnStreaming(ctx, sp.UserID, sp.ConversationID, sp.StreamID, sp.Text, sp.IsDone)
+				_ = sh.OnStreaming(ctx, sp.UserID, sp.ConversationID, sp.StreamID, sp.Text, sp.IsDone, sp.IsAgent)
 			}
 		}
 	case protocol.UpdateTypeAgentStatus:

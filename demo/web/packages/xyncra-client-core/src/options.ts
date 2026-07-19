@@ -51,6 +51,19 @@ export interface ClientOptions {
   /** Handler that receives processed data updates from the sync pipeline. */
   updateHandler: IUpdateHandler;
 
+  /**
+   * Optional callback invoked when an RPC call fails with a server error.
+   * Used for displaying error messages to the user.
+   */
+  onError?: (method: string, message: string, code: number) => void;
+
+  /**
+   * Optional callback invoked when the initial fullSync completes.
+   * Used by the UI to transition from 'syncing' to 'connected' state,
+   * especially when the database is empty and no data events arrive.
+   */
+  onSyncComplete?: () => void;
+
   // ---- Optional fields (defaults in constants.ts) ----
 
   /** Interval between heartbeat pings (ms). Default: 30000. */

@@ -3,7 +3,7 @@
 > **测试编号**: TC-004
 > **测试类型**: 端到端集成测试（人工评审）
 > **覆盖范围**: Agent 上下文加载、Token/消息裁剪、缓存机制、LLM 日志验证
-> **环境**: Docker E2E (D-043) + 真实 LLM（.env.test）
+> **环境**: Docker E2E (D-043) + 真实 LLM（.env）
 > **最后更新**: 2026-07-15
 
 ---
@@ -101,13 +101,13 @@ echo "E2E_HOME=$E2E_HOME"
 mkdir -p $E2E_HOME/agent-logs
 ```
 
-### 3.5 配置真实 LLM（.env.test）
+### 3.5 配置真实 LLM（.env）
 
-确保 `.env.test` 已配置（参考 `.env.test.example`）：
+确保 `.env` 已配置（参考 `.env.example`）：
 
 ```bash
-# 验证 .env.test 存在
-test -f .env.test && echo "✓ .env.test exists" || echo "✗ .env.test missing"
+# 验证 .env 存在
+test -f .env && echo "✓ .env exists" || echo "✗ .env missing"
 ```
 
 ### 3.6 配置上下文测试 Agent
@@ -116,7 +116,7 @@ test -f .env.test && echo "✓ .env.test exists" || echo "✗ .env.test missing"
 
 ```markdown
 ---
-id: context-test-bot
+id: agent/context-test-bot
 name: 上下文测试助手
 description: 用于测试上下文管理的 Agent
 model: qwen3.7-plus
@@ -161,7 +161,7 @@ context:
 | `$SERVER_URL` | `ws://localhost:18080/ws` | E2E 服务器地址 |
 | `$REDIS_ADDR` | `localhost:16379` | E2E Redis |
 | `$E2E_HOME` | `/tmp/xe2e-*` | 测试工作目录 |
-| `$AGENT_ID` | `context-test-bot` | 测试 Agent ID |
+| `$AGENT_ID` | `agent/context-test-bot` | 测试 Agent ID |
 | `$CONV_ID` | 运行时生成 | 测试会话 ID |
 | `MaxTokens` | 4000 | Agent 配置的 token 限制 |
 | `MaxMessages` | 0 | 禁用消息数裁剪 |
@@ -175,7 +175,7 @@ flowchart TD
     Start([开始]) --> Prep[🟢 环境准备<br/>构建、启动 Docker<br/>配置 Agent]
 
     Prep --> ScenarioA[🔵 场景 A: Token 裁剪测试]
-    ScenarioA --> A1[创建会话<br/>alice ↔ context-test-bot]
+    ScenarioA --> A1[创建会话<br/>alice ↔ agent/context-test-bot]
     A1 --> A2[发送 20 条长消息<br/>每条约 300 tokens]
     A2 --> A3[发送触发消息<br/>"你看到了多少条消息？"]
     A3 --> A4[🟡 收集 LLM 日志<br/>从 volume 读取 JSONL 文件]
@@ -648,7 +648,7 @@ sqlite3 $E2E_HOME/alice/*/xyncra.db \
 | Messages 数量异常 | Token/消息裁剪配置错误 | 检查 `agents/*.md` 的 `context` 部分 |
 | 消息顺序混乱 | `reverseMessages` 逻辑错误 | 检查 `db_context_manager.go` |
 | 缓存未生效 | TTL 配置过短或缓存 key 错误 | 检查 `WithCacheTTL` 配置 |
-| Agent 响应超时 | LLM API 限流或网络问题 | 检查 `.env.test` 配置、查看服务器日志 |
+| Agent 响应超时 | LLM API 限流或网络问题 | 检查 `.env` 配置、查看服务器日志 |
 | 数据库查询失败 | SQLite 连接问题 | 检查 Docker 容器状态、数据库文件权限 |
 
 ---
@@ -674,20 +674,20 @@ redis-cli -p 16379 -n 15 FLUSHDB
 
 ---
 
-## 11. 真实 LLM 测试配置（.env.test）
+## 11. 真实 LLM 测试配置（.env）
 
-本测试需要真实 LLM 调用，依赖 `.env.test` 配置：
+本测试需要真实 LLM 调用，依赖 `.env` 配置：
 
 ```bash
-# .env.test 示例
+# .env 示例
 XYNCRA_TEST_REAL_API_KEY=your_api_key_here
 XYNCRA_TEST_REAL_MODEL=qwen3.7-plus
 XYNCRA_TEST_REAL_BASE_URL=https://coding.dashscope.aliyuncs.com/v1
 ```
 
 **安全提示**：
-- ❌ 不要提交 `.env.test` 到 git
-- ✅ 使用 `.env.test.example` 作为模板
+- ❌ 不要提交 `.env` 到 git
+- ✅ 使用 `.env.example` 作为模板
 - ✅ 定期轮换 API Key
 
 **成本控制**（D-090）：

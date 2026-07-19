@@ -8,7 +8,15 @@
  */
 
 import type { Command } from 'commander';
-import { ensureUserDir, socketPath, lockPath, dbPathDefault, logDirDefault, serverURLWithUser, defaultDeviceID } from './paths.js';
+import {
+  dbPathDefault,
+  defaultDeviceID,
+  ensureUserDir,
+  lockPath,
+  logDirDefault,
+  serverURLWithUser,
+  socketPath,
+} from './paths.js';
 
 /**
  * Resolve a string flag with priority: flag > env var > default.
@@ -23,7 +31,9 @@ export function resolveStringFlag(
 ): string {
   // Check if flag was explicitly set on command line.
   const opts = cmd.optsWithGlobals();
-  const flagKey = flagName.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+  const flagKey = flagName.replace(/-([a-z])/g, (_, c: string) =>
+    c.toUpperCase(),
+  );
   if (opts[flagKey] !== undefined && opts[flagKey] !== '') {
     return opts[flagKey] as string;
   }
@@ -99,21 +109,40 @@ export class CLIContext {
     // Resolve user-id (required).
     const userID = resolveStringFlag(cmd, 'user-id', 'XYNCRA_USER_ID', '');
     if (!userID) {
-      throw new Error('context: user-id is required (set via --user-id flag or XYNCRA_USER_ID env var)');
+      throw new Error(
+        'context: user-id is required (set via --user-id flag or XYNCRA_USER_ID env var)',
+      );
     }
 
     // Resolve device-id (default: SHA256(hostname)[:8]).
-    const deviceID = resolveStringFlag(cmd, 'device-id', 'XYNCRA_DEVICE_ID', '') || defaultDeviceID();
+    const deviceID =
+      resolveStringFlag(cmd, 'device-id', 'XYNCRA_DEVICE_ID', '') ||
+      defaultDeviceID();
 
     // Resolve server URL.
-    const serverURL = resolveStringFlag(cmd, 'server', 'XYNCRA_SERVER', 'ws://localhost:8080/ws');
+    const serverURL = resolveStringFlag(
+      cmd,
+      'server',
+      'XYNCRA_SERVER',
+      'ws://localhost:8080/ws',
+    );
 
     // Create user directory to compute dynamic defaults.
     const userDir = ensureUserDir(userID, deviceID);
 
     // Resolve db-path and log-dir with dynamic defaults.
-    const resolvedDBPath = resolveStringFlag(cmd, 'db-path', 'XYNCRA_DB_PATH', dbPathDefault(userDir));
-    const resolvedLogDir = resolveStringFlag(cmd, 'log-dir', 'XYNCRA_LOG_DIR', logDirDefault(userDir));
+    const resolvedDBPath = resolveStringFlag(
+      cmd,
+      'db-path',
+      'XYNCRA_DB_PATH',
+      dbPathDefault(userDir),
+    );
+    const resolvedLogDir = resolveStringFlag(
+      cmd,
+      'log-dir',
+      'XYNCRA_LOG_DIR',
+      logDirDefault(userDir),
+    );
 
     return new CLIContext({
       userID,
@@ -134,8 +163,17 @@ export class CLIContext {
 export function registerGlobalFlags(program: Command): void {
   program
     .option('-u, --user-id <id>', 'User ID (env: XYNCRA_USER_ID)')
-    .option('--device-id <id>', 'Device ID (default: SHA256(hostname)[:8], env: XYNCRA_DEVICE_ID)')
+    .option(
+      '--device-id <id>',
+      'Device ID (default: SHA256(hostname)[:8], env: XYNCRA_DEVICE_ID)',
+    )
     .option('-s, --server <url>', 'Server URL (env: XYNCRA_SERVER)')
-    .option('--db-path <path>', 'Database path (default: $USER_DIR/xyncra.db) (env: XYNCRA_DB_PATH)')
-    .option('--log-dir <dir>', 'Log directory (default: $USER_DIR/logs/) (env: XYNCRA_LOG_DIR)');
+    .option(
+      '--db-path <path>',
+      'Database path (default: $USER_DIR/xyncra.db) (env: XYNCRA_DB_PATH)',
+    )
+    .option(
+      '--log-dir <dir>',
+      'Log directory (default: $USER_DIR/logs/) (env: XYNCRA_LOG_DIR)',
+    );
 }

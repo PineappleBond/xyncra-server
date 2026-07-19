@@ -64,8 +64,13 @@ func TestDetectProvider(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConvertMessages(t *testing.T) {
+	// Create a registry with test agents for exact-match lookup (D-054 revised).
+	reg := NewRegistry()
+	reg.Register(&AgentConfig{ID: "agent/weather-bot"})
+	reg.Register(&AgentConfig{ID: "agent/other-agent"})
+
 	t.Run("empty messages", func(t *testing.T) {
-		result := convertMessages(nil)
+		result := convertMessages(nil, reg)
 		assert.Empty(t, result)
 	})
 
@@ -73,7 +78,7 @@ func TestConvertMessages(t *testing.T) {
 		msgs := []*xyncramodel.Message{
 			{SenderID: "user/123", Content: "Hello"},
 		}
-		result := convertMessages(msgs)
+		result := convertMessages(msgs, reg)
 		require.Len(t, result, 1)
 		assert.Equal(t, schema.User, result[0].Role)
 		assert.Equal(t, "Hello", result[0].Content)
@@ -83,7 +88,7 @@ func TestConvertMessages(t *testing.T) {
 		msgs := []*xyncramodel.Message{
 			{SenderID: "agent/weather-bot", Content: "It's sunny"},
 		}
-		result := convertMessages(msgs)
+		result := convertMessages(msgs, reg)
 		require.Len(t, result, 1)
 		assert.Equal(t, schema.Assistant, result[0].Role)
 		assert.Equal(t, "It's sunny", result[0].Content)
@@ -96,7 +101,7 @@ func TestConvertMessages(t *testing.T) {
 			{SenderID: "user/alice", Content: "Thanks!"},
 			{SenderID: "agent/other-agent", Content: "I can help too"},
 		}
-		result := convertMessages(msgs)
+		result := convertMessages(msgs, reg)
 		require.Len(t, result, 4)
 
 		assert.Equal(t, schema.User, result[0].Role)
@@ -112,11 +117,11 @@ func TestConvertMessages(t *testing.T) {
 		assert.Equal(t, "I can help too", result[3].Content)
 	})
 
-	t.Run("non-agent prefix treated as user", func(t *testing.T) {
+	t.Run("unregistered userID treated as user", func(t *testing.T) {
 		msgs := []*xyncramodel.Message{
 			{SenderID: "bob", Content: "Hi"},
 		}
-		result := convertMessages(msgs)
+		result := convertMessages(msgs, reg)
 		require.Len(t, result, 1)
 		assert.Equal(t, schema.User, result[0].Role)
 	})
@@ -125,10 +130,19 @@ func TestConvertMessages(t *testing.T) {
 		msgs := []*xyncramodel.Message{
 			{SenderID: "user/alice", Content: ""},
 		}
-		result := convertMessages(msgs)
+		result := convertMessages(msgs, reg)
 		require.Len(t, result, 1)
 		assert.Equal(t, schema.User, result[0].Role)
 		assert.Equal(t, "", result[0].Content)
+	})
+
+	t.Run("nil registry treats all as user", func(t *testing.T) {
+		msgs := []*xyncramodel.Message{
+			{SenderID: "agent/weather-bot", Content: "It's sunny"},
+		}
+		result := convertMessages(msgs, nil)
+		require.Len(t, result, 1)
+		assert.Equal(t, schema.User, result[0].Role)
 	})
 }
 
@@ -367,7 +381,7 @@ func TestAgentBuilder_SetToolRegistry(t *testing.T) {
 	builder.SetToolRegistry(reg)
 
 	config := &AgentConfig{
-		ID:    "test-agent",
+		ID:    "agent/test-agent",
 		Name:  "Test Agent",
 		Model: "gpt-4",
 		Tools: []string{"test_tool"},
@@ -386,7 +400,7 @@ func TestAgentBuilder_BuildWithNoTools(t *testing.T) {
 	builder.SetToolRegistry(reg)
 
 	config := &AgentConfig{
-		ID:    "test-agent",
+		ID:    "agent/test-agent",
 		Name:  "Test Agent",
 		Model: "gpt-4",
 		Tools: []string{},
@@ -402,7 +416,7 @@ func TestAgentBuilder_BuildWithToolRegistry_NilRegistry(t *testing.T) {
 	// Do NOT call SetToolRegistry — backward-compatible path.
 
 	config := &AgentConfig{
-		ID:    "test-agent",
+		ID:    "agent/test-agent",
 		Name:  "Test Agent",
 		Model: "gpt-4",
 		Tools: []string{"get_weather"},

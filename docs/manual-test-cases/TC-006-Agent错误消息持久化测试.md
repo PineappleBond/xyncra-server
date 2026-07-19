@@ -143,7 +143,7 @@ cp -r agents/ "$E2E_HOME/agents-backup/"
 | `$REDIS_DB` | `15` | E2E Redis DB 编号 |
 | `$ALICE` | `alice` | 测试用户 Alice |
 | `$E2E_HOME` | `/tmp/xe2e-XXXXXX` | 临时测试目录 |
-| `$AGENT_ID` | `error-test-bot` | 错误测试 Agent ID |
+| `$AGENT_ID` | `agent/error-test-bot` | 错误测试 Agent ID |
 | `$CONV_ID` | (运行时获取) | 测试会话 ID |
 
 ---
@@ -158,7 +158,7 @@ flowchart TD
 
     subgraph Phase1 [阶段 1: 配置错误 — API Key 缺失]
         P1A[🔵 修改 Agent 配置<br/>api_key_env 指向不存在的环境变量] --> P1B[🟢 docker cp + 重启服务器<br/>重新加载 Agent 配置]
-        P1B --> P1C[🔵 创建会话<br/>alice ↔ error-test-bot]
+        P1B --> P1C[🔵 创建会话<br/>alice ↔ agent/error-test-bot]
         P1C --> P1D[🔵 发送消息<br/>"你好"]
         P1D --> P1E[🟡 等待处理<br/>sleep 10]
         P1E --> P1F[🔴 双重验证<br/>CLI: get-messages<br/>DB: SELECT messages]
@@ -242,7 +242,7 @@ flowchart TD
 ```bash
 cat > agents/error-test-bot.md << 'EOF'
 ---
-id: error-test-bot
+id: agent/error-test-bot
 name: 错误测试助手
 description: "用于测试 Agent 错误消息持久化"
 model: qwen3.7-plus
@@ -405,7 +405,7 @@ echo "Phase 1 CONV_ID=$PHASE1_CONV_ID"
 ```bash
 cat > agents/error-test-bot.md << 'EOF'
 ---
-id: error-test-bot
+id: agent/error-test-bot
 name: 错误测试助手
 description: "用于测试 Agent 错误消息持久化"
 model: qwen3.7-plus
@@ -524,7 +524,7 @@ docker compose -f deploy/docker-compose.e2e.yml logs xyncra-server-e2e 2>&1 | gr
 ```bash
 cat > agents/error-test-bot.md << 'EOF'
 ---
-id: error-test-bot
+id: agent/error-test-bot
 name: 错误测试助手
 description: "用于测试 Agent 错误消息持久化"
 model: qwen3.7-plus
@@ -743,10 +743,10 @@ redis-cli -p 16379 -n 15 KEYS "agent:lock:*"
 #### 步骤 5.1: 恢复正常的 Agent 配置
 
 ```bash
-# 使用 .env.test 中配置的有效 API Key
+# 使用 .env 中配置的有效 API Key
 cat > agents/error-test-bot.md << 'EOF'
 ---
-id: error-test-bot
+id: agent/error-test-bot
 name: 错误测试助手
 description: "用于测试 Agent 错误消息持久化"
 model: qwen3.7-plus
@@ -902,7 +902,7 @@ sqlite3 "$CLIENT_DB" \
 | 阶段 2 (LLM 不可达) | Agent 消息 content 包含 "抱歉" 且为错误消息（"处理遇到问题" 或 "暂时无法回复"） | ✅ | 检查 base_url 配置、网络连通性、服务器日志 |
 | 阶段 3 (无效 API Key) | Agent 消息 content 包含 "抱歉" 且为错误消息（"暂时无法回复" 或 "处理遇到问题"） | ✅ | 检查环境变量是否正确传递到容器 |
 | 阶段 4 (HITL 无错误) | Agent 消息中**不包含**"抱歉"等错误消息；Redis 存在 checkpoint key | ✅ | 检查 hitl-bot 配置、ask_user 工具是否正确触发 |
-| 阶段 5 (恢复正常) | Agent 消息为正常回复，不含"抱歉" | ✅ | 检查 .env.test 配置、API Key 有效性 |
+| 阶段 5 (恢复正常) | Agent 消息为正常回复，不含"抱歉" | ✅ | 检查 .env 配置、API Key 有效性 |
 
 ### 通用验证标准
 
@@ -955,7 +955,7 @@ redis-cli -p 16379 -n 15 FLUSHDB
 
 ---
 
-## 11. 真实 LLM 测试配置（.env.test）
+## 11. 真实 LLM 测试配置（.env）
 
 阶段 3 和阶段 5 需要真实 LLM 服务（阶段 3 需要 LLM 返回错误，阶段 5 需要正常响应）。
 
@@ -970,7 +970,7 @@ redis-cli -p 16379 -n 15 FLUSHDB
 
 ### 安全提示
 
-> ⚠️ `.env.test` 包含 API 密钥，**已在 `.gitignore` 中排除**，切勿提交到版本控制。
+> ⚠️ `.env` 包含 API 密钥，**已在 `.gitignore` 中排除**，切勿提交到版本控制。
 
 ### 成本控制 (D-090)
 
@@ -988,9 +988,9 @@ redis-cli -p 16379 -n 15 FLUSHDB
 |---------|-----------|------|
 | 阶段 1 (API Key 缺失) | ✅ | 环境准备 |
 | 阶段 2 (LLM 不可达) | ✅ | 环境准备 |
-| 阶段 3 (无效 API Key) | ✅ | 环境准备 + .env.test |
+| 阶段 3 (无效 API Key) | ✅ | 环境准备 + .env |
 | 阶段 4 (HITL 无错误) | ✅ | 环境准备 + hitl-bot 配置 |
-| 阶段 5 (恢复正常) | ✅ | 环境准备 + .env.test |
+| 阶段 5 (恢复正常) | ✅ | 环境准备 + .env |
 
 **执行顺序建议**：1 → 2 → 3 → 4 → 5（从错误到正常，验证渐进恢复）
 

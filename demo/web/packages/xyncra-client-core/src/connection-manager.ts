@@ -129,7 +129,7 @@ export interface ConnectionManagerOptions {
  */
 export class ConnectionManager {
   private ws: IWebSocket | null = null;
-  private sendBuffer: Uint8Array[] = [];
+  private sendBuffer: string[] = [];
   private connected = false;
   private closing = false;
   private replaced = false;
@@ -291,7 +291,8 @@ export class ConnectionManager {
       return;
     }
 
-    const data = new TextEncoder().encode(JSON.stringify(pkg));
+    // Send as text JSON for easier debugging (server supports both text and binary)
+    const data = JSON.stringify(pkg);
     this.sendBuffer.push(data);
     this.flushSendBuffer();
   }
@@ -535,31 +536,20 @@ export class ConnectionManager {
   // ---------------------------------------------------------------------------
 
   /**
-   * Schedules a protocol-level ping to be sent after pingInterval ms.
-   * After sending, starts a pong timer to detect missing responses.
+   * Schedules a heartbeat check.
    *
-   * Go uses native WebSocket ping frames via conn.WriteMessage(PingMessage).
-   * Since IWebSocket does not expose a native ping API, we use protocol-level
-   * ping packages instead.
+   * Note: The Go server uses WebSocket protocol-level ping/pong frames
+   * (websocket.PingMessage), not application-level messages. The browser
+   * WebSocket API handles pong responses automatically.
+   *
+   * Application-level heartbeats are handled by XyncraClient.heartbeatLoop()
+   * which sends heartbeat RPCs. This method is kept for potential future use
+   * but currently does nothing to avoid sending invalid protocol messages.
    */
   private schedulePing(): void {
-    this.clearPingTimer();
-
-    this.pingTimer = setTimeout(() => {
-      if (this.connected && this.ws) {
-        // Send protocol-level ping package.
-        // C1: version is forced to 1 by sendPackage.
-        const pingPkg: Package = {
-          type: 'ping' as unknown as 0,
-          version: 1,
-          data: null,
-        };
-        this.sendPackage(pingPkg);
-
-        // Start pong timeout: if no pong received within pongWait, close.
-        this.schedulePong();
-      }
-    }, this.opts.pingInterval);
+    // Intentionally empty: WebSocket-level ping/pong is handled by the browser,
+    // and application-level heartbeats are sent by XyncraClient.heartbeatLoop().
+    // See: https://github.com/PineappleBond/xyncra-server/issues/XXX
   }
 
   /**

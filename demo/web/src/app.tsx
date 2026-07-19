@@ -10,6 +10,8 @@ import React from 'react';
 // Initialize dayjs plugins globally
 dayjs.extend(relativeTime);
 
+import { FloatingAssistant, XyncraProvider } from '@xyncra/client-web';
+import { DemoFunctions } from '@/functions';
 import {
   AvatarDropdown,
   DocLink,
@@ -150,9 +152,13 @@ export const layout: RunTimeLayoutConfig = ({
     // 增加一个 loading 的状态
     childrenRender: (children) => {
       // if (initialState?.loading) return <PageLoading />;
+      const wsUrl = process.env.XYNCRA_WS_URL || `ws://localhost:8080/ws`;
+      console.log('[Xyncra] WebSocket URL:', wsUrl);
       return (
-        <>
+        <XyncraProvider wsUrl={wsUrl}>
           {children}
+          <DemoFunctions />
+          <FloatingAssistant />
           <SettingDrawer
             disableUrlParams
             enableDarkTheme
@@ -171,7 +177,7 @@ export const layout: RunTimeLayoutConfig = ({
               }));
             }}
           />
-        </>
+        </XyncraProvider>
       );
     },
     ...initialState?.settings,

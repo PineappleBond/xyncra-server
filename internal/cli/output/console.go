@@ -38,7 +38,7 @@ func (cw *ConsoleWriter) Table(headers []string, rows [][]string) {
 		}
 		_, _ = fmt.Fprint(tw, h)
 	}
-		_, _ = fmt.Fprintln(tw)
+	_, _ = fmt.Fprintln(tw)
 
 	// Print separator line.
 	for i, h := range headers {

@@ -12,7 +12,7 @@ import (
 
 // validFullContent is the raw text of a fully-populated agent definition.
 const validFullContent = `---
-id: test-bot
+id: agent/test-bot
 name: Test Bot
 description: "A full test configuration"
 model: gpt-4
@@ -35,7 +35,7 @@ Do testing things.
 `
 
 const validMinimalContent = `---
-id: minimal-bot
+id: agent/minimal-bot
 name: Minimal Bot
 model: gpt-3.5-turbo
 api_key_env: MINIMAL_KEY
@@ -43,7 +43,7 @@ api_key_env: MINIMAL_KEY
 `
 
 const validSecondContent = `---
-id: weather-bot
+id: agent/weather-bot
 name: Weather Bot
 model: gpt-4
 api_key_env: WEATHER_KEY
@@ -89,12 +89,12 @@ func TestRegistry_Load_ValidConfigs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, r.Count())
 
-	cfg, ok := r.Get("test-bot")
+	cfg, ok := r.Get("agent/test-bot")
 	require.True(t, ok)
 	assert.Equal(t, "Test Bot", cfg.Name)
 	assert.Equal(t, "gpt-4", cfg.Model)
 
-	cfg, ok = r.Get("minimal-bot")
+	cfg, ok = r.Get("agent/minimal-bot")
 	require.True(t, ok)
 	assert.Equal(t, "Minimal Bot", cfg.Name)
 }
@@ -112,16 +112,16 @@ func TestRegistry_Load_SkipsInvalid(t *testing.T) {
 
 	// Only the two valid configs should be loaded.
 	assert.Equal(t, 2, r.Count())
-	_, ok := r.Get("test-bot")
+	_, ok := r.Get("agent/test-bot")
 	assert.True(t, ok)
-	_, ok = r.Get("minimal-bot")
+	_, ok = r.Get("agent/minimal-bot")
 	assert.True(t, ok)
 }
 
 func TestRegistry_Load_DuplicateID(t *testing.T) {
 	// Two files with the same ID — the first one wins.
 	first := `---
-id: dup-bot
+id: agent/dup-bot
 name: First
 model: gpt-4
 api_key_env: KEY
@@ -129,7 +129,7 @@ api_key_env: KEY
 first
 `
 	second := `---
-id: dup-bot
+id: agent/dup-bot
 name: Second
 model: gpt-3.5-turbo
 api_key_env: KEY
@@ -145,7 +145,7 @@ second
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, r.Count())
-	cfg, ok := r.Get("dup-bot")
+	cfg, ok := r.Get("agent/dup-bot")
 	require.True(t, ok)
 	// os.ReadDir sorts by filename, so a.md loads before b.md.
 	// Therefore "First" (from a.md) should win.
@@ -177,10 +177,10 @@ func TestRegistry_Get_Exists(t *testing.T) {
 	r := NewRegistry()
 	require.NoError(t, r.Load(dir))
 
-	cfg, ok := r.Get("test-bot")
+	cfg, ok := r.Get("agent/test-bot")
 	assert.True(t, ok)
 	assert.NotNil(t, cfg)
-	assert.Equal(t, "test-bot", cfg.ID)
+	assert.Equal(t, "agent/test-bot", cfg.ID)
 }
 
 func TestRegistry_Get_NotExists(t *testing.T) {
@@ -199,7 +199,7 @@ func TestRegistry_IsAgent_ValidAgent(t *testing.T) {
 	cfg, ok := r.IsAgent("agent/weather-bot")
 	assert.True(t, ok)
 	assert.NotNil(t, cfg)
-	assert.Equal(t, "weather-bot", cfg.ID)
+	assert.Equal(t, "agent/weather-bot", cfg.ID)
 }
 
 func TestRegistry_IsAgent_NormalUser(t *testing.T) {
@@ -215,7 +215,13 @@ func TestRegistry_IsAgent_UnknownAgent(t *testing.T) {
 	r := NewRegistry()
 	require.NoError(t, r.Load(dir))
 
+	// Registered ID is "agent/test-bot", not "agent/unknown".
 	cfg, ok := r.IsAgent("agent/unknown")
+	assert.False(t, ok)
+	assert.Nil(t, cfg)
+
+	// Bare name without "agent/" prefix also returns false (exact match).
+	cfg, ok = r.IsAgent("test-bot")
 	assert.False(t, ok)
 	assert.Nil(t, cfg)
 }
@@ -248,7 +254,7 @@ func TestRegistry_ListAll_ReturnsCopy(t *testing.T) {
 	list = list[:0]
 
 	assert.Equal(t, 1, r.Count())
-	cfg, ok := r.Get("test-bot")
+	cfg, ok := r.Get("agent/test-bot")
 	assert.True(t, ok)
 	assert.NotNil(t, cfg)
 }
@@ -266,9 +272,9 @@ func TestRegistry_Reload(t *testing.T) {
 	require.NoError(t, r.Reload())
 	assert.Equal(t, 2, r.Count())
 
-	_, ok := r.Get("test-bot")
+	_, ok := r.Get("agent/test-bot")
 	assert.True(t, ok)
-	_, ok = r.Get("minimal-bot")
+	_, ok = r.Get("agent/minimal-bot")
 	assert.True(t, ok)
 }
 
@@ -283,7 +289,7 @@ func TestRegistry_Reload_PreservesDir(t *testing.T) {
 	// Reload should use the same directory that was set by Load.
 	require.NoError(t, r.Reload())
 	assert.Equal(t, 1, r.Count())
-	_, ok := r.Get("test-bot")
+	_, ok := r.Get("agent/test-bot")
 	assert.True(t, ok)
 }
 
@@ -310,9 +316,9 @@ func TestRegistry_Reload_RemovesDeletedConfigs(t *testing.T) {
 	require.NoError(t, r.Reload())
 	assert.Equal(t, 1, r.Count())
 
-	_, ok := r.Get("test-bot")
+	_, ok := r.Get("agent/test-bot")
 	assert.True(t, ok)
-	_, ok = r.Get("minimal-bot")
+	_, ok = r.Get("agent/minimal-bot")
 	assert.False(t, ok)
 }
 
@@ -334,7 +340,7 @@ func TestRegistry_ConcurrentReads(t *testing.T) {
 			defer wg.Done()
 			for range iterations {
 				if i%2 == 0 {
-					r.Get("test-bot")
+					r.Get("agent/test-bot")
 					r.Get("nonexistent")
 				} else {
 					r.IsAgent("agent/weather-bot")
@@ -368,7 +374,7 @@ func TestRegistry_ConcurrentLoadAndGet(t *testing.T) {
 			for range iterations {
 				switch i % 4 {
 				case 0:
-					r.Get("test-bot")
+					r.Get("agent/test-bot")
 					r.Get("nonexistent")
 				case 1:
 					r.IsAgent("agent/test-bot")

@@ -15,6 +15,7 @@
 
 import type {
   Conversation,
+  ConversationAction,
   IAgentStatusHandler,
   IAgentTimeoutHandler,
   IStreamingHandler,
@@ -22,7 +23,6 @@ import type {
   IUpdateHandler,
   Message,
 } from '@xyncra/client-core';
-import { isAgentUser } from '@xyncra/client-core';
 import {
   type ConversationEvent,
   type MessageEvent,
@@ -73,10 +73,26 @@ export class ReactUpdateHandler
     });
   }
 
-  async onConversation(conversation: Conversation): Promise<void> {
-    this.emitter.emit('conversation:added', {
-      conversation: toConversationEvent(conversation),
-    });
+  async onConversation(
+    conversation: Conversation,
+    action: ConversationAction = 'updated',
+  ): Promise<void> {
+    switch (action) {
+      case 'created':
+        this.emitter.emit('conversation:added', {
+          conversation: toConversationEvent(conversation),
+        });
+        break;
+      case 'removed':
+        this.emitter.emit('conversation:removed', { conversationId: conversation.id });
+        break;
+      case 'updated':
+      default:
+        this.emitter.emit('conversation:updated', {
+          conversation: toConversationEvent(conversation),
+        });
+        break;
+    }
   }
 
   async onGap(_seq: number): Promise<void> {
@@ -90,11 +106,13 @@ export class ReactUpdateHandler
     userId: string,
     conversationId: string,
     isTyping: boolean,
+    isAgent: boolean,
   ): Promise<void> {
     this.emitter.emit('agent:thinking', {
       userId,
       conversationId,
       isTyping,
+      isAgent,
     });
   }
 
@@ -106,6 +124,7 @@ export class ReactUpdateHandler
     streamId: string,
     text: string,
     isDone: boolean,
+    isAgent: boolean,
   ): Promise<void> {
     if (isDone) {
       this.emitter.emit('stream:done', { userId, conversationId, streamId });
@@ -180,7 +199,3 @@ function toMessageEvent(msg: Message): MessageEvent {
   };
 }
 
-/**
- * Check whether a userId belongs to an agent. Re-exported for convenience.
- */
-export { isAgentUser };

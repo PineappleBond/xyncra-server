@@ -10,6 +10,7 @@
 
 import type {
   Conversation,
+  ConversationAction,
   IAgentStatusHandler,
   IAgentTimeoutHandler,
   IStreamingHandler,
@@ -17,7 +18,6 @@ import type {
   IUpdateHandler,
   Message,
 } from '@xyncra/client-core';
-import { isAgentUser } from '@xyncra/client-core';
 
 /**
  * CLIUpdateHandler prints received data updates to stdout.
@@ -45,9 +45,12 @@ export class CLIUpdateHandler
     process.stdout.write(`[mark read] conv=${conversationId} msg_id=${messageId}\n`);
   }
 
-  async onConversation(conversation: Conversation): Promise<void> {
+  async onConversation(
+    conversation: Conversation,
+    action: ConversationAction = 'updated',
+  ): Promise<void> {
     process.stdout.write(
-      `[conversation] id=${conversation.id} title="${conversation.title ?? ''}"\n`,
+      `[conversation] ${action} id=${conversation.id} title="${conversation.title ?? ''}"\n`,
     );
   }
 
@@ -60,11 +63,12 @@ export class CLIUpdateHandler
     userId: string,
     conversationId: string,
     isTyping: boolean,
+    isAgent: boolean,
   ): Promise<void> {
     let action = 'started typing';
     let label = 'typing';
     if (!isTyping) action = 'stopped typing';
-    if (isAgentUser(userId)) {
+    if (isAgent) {
       label = 'thinking';
       if (!isTyping) action = 'stopped thinking';
     }
@@ -80,9 +84,10 @@ export class CLIUpdateHandler
     streamId: string,
     text: string,
     isDone: boolean,
+    isAgent: boolean,
   ): Promise<void> {
     const status = isDone ? 'done' : 'streaming';
-    const prefix = isAgentUser(userId) ? 'agent' : 'streaming';
+    const prefix = isAgent ? 'agent' : 'streaming';
     process.stdout.write(
       `[${prefix}] user=${userId} conv=${conversationId} stream=${streamId} status=${status} text="${text}"\n`,
     );

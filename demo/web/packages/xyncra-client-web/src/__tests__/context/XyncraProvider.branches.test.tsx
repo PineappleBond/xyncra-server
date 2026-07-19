@@ -13,7 +13,6 @@ const mockClient: any = {
 
 jest.mock('@xyncra/client-core', () => ({
   XyncraClient: jest.fn(() => mockClient),
-  isAgentUser: (id: string) => id.startsWith('agent'),
 }));
 
 jest.mock('../../adapters/websocket', () => ({

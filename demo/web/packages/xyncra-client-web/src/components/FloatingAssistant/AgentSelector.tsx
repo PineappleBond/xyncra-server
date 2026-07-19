@@ -30,24 +30,39 @@ interface AgentItem {
  */
 const DEFAULT_AGENTS: AgentItem[] = [
   {
-    id: 'test-bot',
+    id: 'agent/test-bot',
     name: 'Test Bot',
     description: '基础对话测试助手',
   },
   {
-    id: 'weather-bot',
+    id: 'agent/weather-bot',
     name: 'Weather Bot',
     description: '全球城市天气查询',
   },
   {
-    id: 'hitl-bot',
+    id: 'agent/hitl-bot',
     name: 'HITL 测试助手',
     description: '需要用户确认的测试 Agent',
   },
   {
-    id: 'hitl-parent',
+    id: 'agent/hitl-parent',
     name: 'HITL Parent',
     description: '并行协调助手 — 同时委派两个子任务',
+  },
+  {
+    id: 'agent/hitl-child-a',
+    name: 'HITL Child A',
+    description: 'HITL 子 Agent A — 由 Parent 委派',
+  },
+  {
+    id: 'agent/hitl-child-b',
+    name: 'HITL Child B',
+    description: 'HITL 子 Agent B — 由 Parent 委派',
+  },
+  {
+    id: 'agent/mcp-bot',
+    name: 'MCP Bot',
+    description: 'MCP 工具调用测试助手',
   },
 ];
 

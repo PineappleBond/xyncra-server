@@ -9,6 +9,16 @@
 import type { PackageDataUpdate } from '@xyncra/protocol';
 
 // ---------------------------------------------------------------------------
+// Conversation action
+// ---------------------------------------------------------------------------
+
+/**
+ * ConversationAction describes the kind of change behind an onConversation call.
+ * Mirrors the `action` field of a "conversation" type PackageDataUpdate.
+ */
+export type ConversationAction = 'created' | 'updated' | 'removed';
+
+// ---------------------------------------------------------------------------
 // Domain model types (placeholders)
 // ---------------------------------------------------------------------------
 
@@ -139,8 +149,16 @@ export interface IUpdateHandler {
   onDeleteMessage(messageId: string, conversationId: string): Promise<void>;
   /** Called when a read cursor advance is received. */
   onMarkRead(conversationId: string, messageId: string): Promise<void>;
-  /** Called when a conversation state change is received. */
-  onConversation(conversation: Conversation): Promise<void>;
+  /**
+   * Called when a conversation state change is received.
+   * @param conversation The affected conversation. For `removed` actions only
+   *        the `id` field is guaranteed to be populated.
+   * @param action The kind of change: `created`, `updated`, or `removed`.
+   */
+  onConversation(
+    conversation: Conversation,
+    action: ConversationAction,
+  ): Promise<void>;
   /** Called when a sequence gap is detected during sync. */
   onGap(seq: number): Promise<void>;
 }
@@ -161,6 +179,7 @@ export interface ITypingHandler {
     userId: string,
     conversationId: string,
     isTyping: boolean,
+    isAgent: boolean,
   ): Promise<void>;
 }
 
@@ -177,6 +196,7 @@ export interface IStreamingHandler {
     streamId: string,
     text: string,
     isDone: boolean,
+    isAgent: boolean,
   ): Promise<void>;
 }
 

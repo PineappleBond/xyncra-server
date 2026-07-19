@@ -32,6 +32,7 @@ import type {
 import { ErrDuplicateKey, SyncError } from './errors';
 import type {
   Conversation,
+  ConversationAction,
   IAgentStatusHandler,
   IAgentTimeoutHandler,
   ILogger,
@@ -441,7 +442,9 @@ export class SyncManager {
     update: PackageDataUpdate,
     tx: Transaction,
   ): Promise<void> {
-    const msg = update.payload as DBMessage;
+    const msg = this.transformMessageDates(
+      update.payload as Record<string, unknown>,
+    );
     const msgTable = tx.table('messages') as Dexie.Table<DBMessage, string>;
 
     // Persist the message. Ignore duplicate key errors (idempotent).
@@ -678,7 +681,7 @@ export class SyncManager {
   ): Promise<void> {
     const payload = update.payload as {
       action: string;
-      conversation: DBConversation;
+      conversation: Record<string, unknown>;
     };
 
     if (!payload.conversation) {
@@ -688,11 +691,21 @@ export class SyncManager {
       return;
     }
 
+    // Debug: log the raw conversation data
+    this.options.logger.debug('Received conversation create payload', {
+      raw: payload.conversation,
+      id: payload.conversation.id,
+      idType: typeof payload.conversation.id,
+    });
+
+    // Transform date strings to Date objects (server sends ISO strings)
+    const conv = this.transformConversationDates(payload.conversation);
+
     const convTable = tx.table('conversations') as Dexie.Table<
       DBConversation,
       string
     >;
-    await convTable.put(payload.conversation);
+    await convTable.put(conv);
   }
 
   /**
@@ -739,7 +752,16 @@ export class SyncManager {
     update: PackageDataUpdate,
     tx: Transaction,
   ): Promise<void> {
-    const conv = update.payload as DBConversation;
+    // Debug: log the raw update payload
+    this.options.logger.debug('Received legacy conversation upsert', {
+      raw: update.payload,
+      id: (update.payload as Record<string, unknown>).id,
+      idType: typeof (update.payload as Record<string, unknown>).id,
+    });
+
+    const conv = this.transformConversationDates(
+      update.payload as Record<string, unknown>,
+    );
     const convTable = tx.table('conversations') as Dexie.Table<
       DBConversation,
       string
@@ -758,7 +780,7 @@ export class SyncManager {
     const result = (await this.options.rpcFn('get_conversation', {
       conversation_id: convID,
     })) as {
-      conversation: DBConversation;
+      conversation: Record<string, unknown>;
       questions?: Array<{
         id: string;
         conversation_id: string;
@@ -766,7 +788,7 @@ export class SyncManager {
         interrupt_id: string;
         question_text: string;
         status: string;
-        created_at: Date;
+        created_at: string;
       }>;
     };
 
@@ -777,11 +799,12 @@ export class SyncManager {
       return;
     }
 
+    const conv = this.transformConversationDates(result.conversation);
     const convTable = tx.table('conversations') as Dexie.Table<
       DBConversation,
       string
     >;
-    await convTable.put(result.conversation);
+    await convTable.put(conv);
 
     // Handle questions (D-125): clear stale questions and upsert new ones.
     if (result.questions && result.questions.length > 0) {
@@ -839,6 +862,7 @@ export class SyncManager {
         // Notify handler with local data (already up-to-date).
         await this.options.handler.onConversation(
           conversationToHandler(localConv),
+          'updated',
         );
         return;
       }
@@ -898,6 +922,7 @@ export class SyncManager {
 
       await this.options.handler.onConversation(
         conversationToHandler(result.conversation),
+        'updated',
       );
     } catch (error) {
       this.options.logger.error(
@@ -952,12 +977,16 @@ export class SyncManager {
         if (action === 'create' && payload.conversation) {
           await handler.onConversation(
             conversationToHandler(payload.conversation as DBConversation),
+            'created',
           );
         } else if (payload.conversation_id) {
           // For delete/restore/update: notify with minimal data (cache invalidation).
-          await handler.onConversation({
-            id: payload.conversation_id as string,
-          } as unknown as Conversation);
+          const convAction: ConversationAction =
+            action === 'delete' ? 'removed' : 'updated';
+          await handler.onConversation(
+            { id: payload.conversation_id as string } as unknown as Conversation,
+            convAction,
+          );
         }
         break;
       }
@@ -967,11 +996,13 @@ export class SyncManager {
             user_id: string;
             conversation_id: string;
             is_typing: boolean;
+            is_agent?: boolean;
           };
           await (handler as IUpdateHandler & ITypingHandler).onTyping(
             tp.user_id,
             tp.conversation_id,
             tp.is_typing,
+            tp.is_agent ?? false,
           );
         }
         break;
@@ -984,6 +1015,7 @@ export class SyncManager {
             stream_id: string;
             text: string;
             is_done: boolean;
+            is_agent?: boolean;
           };
           await (handler as IUpdateHandler & IStreamingHandler).onStreaming(
             sp.user_id,
@@ -991,6 +1023,7 @@ export class SyncManager {
             sp.stream_id,
             sp.text,
             sp.is_done,
+            sp.is_agent ?? false,
           );
         }
         break;
@@ -1039,6 +1072,79 @@ export class SyncManager {
       return error.name === 'ConstraintError';
     }
     return false;
+  }
+
+  /**
+   * Transforms a message object from server format (JSON with date strings)
+   * to IndexedDB format (with Date objects).
+   */
+  private transformMessageDates(msg: Record<string, unknown>): DBMessage {
+    // Ensure required fields have valid values
+    const id = msg.id as string | undefined;
+    if (!id || typeof id !== 'string') {
+      throw new Error(`Invalid message id: ${JSON.stringify(msg.id)}`);
+    }
+
+    return {
+      id,
+      client_message_id: (msg.client_message_id as string) ?? '',
+      conversation_id: (msg.conversation_id as string) ?? '',
+      message_id: (msg.message_id as number) ?? 0,
+      sender_id: (msg.sender_id as string) ?? '',
+      content: (msg.content as string) ?? '',
+      type: (msg.type as string) ?? 'text',
+      reply_to: (msg.reply_to as number) ?? 0,
+      status: (msg.status as string) ?? 'sent',
+      created_at: msg.created_at
+        ? new Date(msg.created_at as string)
+        : new Date(),
+      deleted_at: msg.deleted_at ? new Date(msg.deleted_at as string) : null,
+    };
+  }
+
+  /**
+   * Transforms a conversation object from server format (JSON with date strings)
+   * to IndexedDB format (with Date objects).
+   */
+  private transformConversationDates(
+    conv: Record<string, unknown>,
+  ): DBConversation {
+    // Ensure required fields have valid values
+    const id = conv.id as string | undefined;
+    if (!id || typeof id !== 'string') {
+      throw new Error(`Invalid conversation id: ${JSON.stringify(conv.id)}`);
+    }
+
+    return {
+      id,
+      user_id1: (conv.user_id1 as string) ?? '',
+      user_id2: (conv.user_id2 as string) ?? '',
+      type: (conv.type as string) ?? '1-on-1',
+      title: (conv.title as string) ?? '',
+      pinned: (conv.pinned as boolean) ?? false,
+      muted: (conv.muted as boolean) ?? false,
+      avatar_url: (conv.avatar_url as string) ?? '',
+      description: (conv.description as string) ?? '',
+      last_processed_message_id: (conv.last_processed_message_id as number) ?? 0,
+      created_at: conv.created_at
+        ? new Date(conv.created_at as string)
+        : new Date(),
+      updated_at: conv.updated_at
+        ? new Date(conv.updated_at as string)
+        : new Date(),
+      last_message_at: conv.last_message_at
+        ? new Date(conv.last_message_at as string)
+        : new Date(),
+      last_read_message_id1: (conv.last_read_message_id1 as number) ?? 0,
+      last_read_message_id2: (conv.last_read_message_id2 as number) ?? 0,
+      agent_status: (conv.agent_status as string) ?? 'idle',
+      agent_id: (conv.agent_id as string) ?? '',
+      checkpoint_id: (conv.checkpoint_id as string) ?? '',
+      agent_last_activity: conv.agent_last_activity
+        ? new Date(conv.agent_last_activity as string)
+        : new Date(),
+      deleted_at: conv.deleted_at ? new Date(conv.deleted_at as string) : null,
+    };
   }
 }
 

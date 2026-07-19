@@ -40,7 +40,7 @@ Typical workflow:
     .requiredOption('--checkpoint-id <id>', 'Checkpoint ID from HITL notification')
     .option('--interrupt-id <id>', 'Interrupt ID from HITL notification (optional)')
     .requiredOption('--answer <text>', "Answer to the agent's question")
-    .requiredOption('--agent-id <id>', 'Agent ID to resume (e.g. agent/xxx)')
+    .requiredOption('--agent-id <id>', 'Agent ID to resume (full userID, e.g. agent/xxx)')
     .action(
       async (
         options: {

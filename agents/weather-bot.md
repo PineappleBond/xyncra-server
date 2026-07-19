@@ -1,5 +1,5 @@
 ---
-id: weather-bot
+id: agent/weather-bot
 name: Weather Bot
 description: "Provides weather information for cities worldwide"
 model: qwen3.7-plus

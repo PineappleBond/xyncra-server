@@ -111,6 +111,20 @@ describe('CLIUpdateHandler', () => {
     expect(line).toContain('Test Chat');
   });
 
+  test('onConversation includes the action in stdout', async () => {
+    const conv: Conversation = {
+      id: 'conv-2',
+      userId1: 'user1',
+      userId2: 'user2',
+      title: 'Removed Chat',
+      createdAt: '2026-07-18T10:00:00Z',
+    };
+    await handler.onConversation(conv, 'removed');
+    const line = stdoutSpy.mock.calls[0][0] as string;
+    expect(line).toContain('[conversation] removed');
+    expect(line).toContain('id=conv-2');
+  });
+
   test('onGap writes [gap] to stdout', async () => {
     await handler.onGap(42);
     const line = stdoutSpy.mock.calls[0][0] as string;
@@ -120,7 +134,7 @@ describe('CLIUpdateHandler', () => {
 
   describe('onTyping', () => {
     test('shows "typing" for human users when typing starts', async () => {
-      await handler.onTyping('user1', 'conv-1', true);
+      await handler.onTyping('user1', 'conv-1', true, false);
       const line = stdoutSpy.mock.calls[0][0] as string;
       expect(line).toContain('[typing]');
       expect(line).toContain('user=user1');
@@ -128,7 +142,7 @@ describe('CLIUpdateHandler', () => {
     });
 
     test('shows "thinking" label for agent users when typing starts', async () => {
-      await handler.onTyping('agent/claude', 'conv-1', true);
+      await handler.onTyping('agent/claude', 'conv-1', true, true);
       const line = stdoutSpy.mock.calls[0][0] as string;
       expect(line).toContain('[thinking]');
       expect(line).toContain('user=agent/claude');
@@ -137,14 +151,14 @@ describe('CLIUpdateHandler', () => {
     });
 
     test('shows "stopped typing" for human users when typing stops', async () => {
-      await handler.onTyping('user1', 'conv-1', false);
+      await handler.onTyping('user1', 'conv-1', false, false);
       const line = stdoutSpy.mock.calls[0][0] as string;
       expect(line).toContain('[typing]');
       expect(line).toContain('stopped typing');
     });
 
     test('shows "stopped thinking" for agent users when typing stops', async () => {
-      await handler.onTyping('agent/gpt-4', 'conv-1', false);
+      await handler.onTyping('agent/gpt-4', 'conv-1', false, true);
       const line = stdoutSpy.mock.calls[0][0] as string;
       expect(line).toContain('[thinking]');
       expect(line).toContain('stopped thinking');
@@ -152,7 +166,7 @@ describe('CLIUpdateHandler', () => {
   });
 
   test('onStreaming writes [streaming] for human users', async () => {
-    await handler.onStreaming('user1', 'conv-1', 'stream-1', 'hello', false);
+    await handler.onStreaming('user1', 'conv-1', 'stream-1', 'hello', false, false);
     const line = stdoutSpy.mock.calls[0][0] as string;
     expect(line).toContain('[streaming]');
     expect(line).toContain('user=user1');
@@ -161,7 +175,7 @@ describe('CLIUpdateHandler', () => {
   });
 
   test('onStreaming writes [agent] for agent users', async () => {
-    await handler.onStreaming('agent/claude', 'conv-1', 'stream-1', 'hello', true);
+    await handler.onStreaming('agent/claude', 'conv-1', 'stream-1', 'hello', true, true);
     const line = stdoutSpy.mock.calls[0][0] as string;
     expect(line).toContain('[agent]');
     expect(line).toContain('user=agent/claude');

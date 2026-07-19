@@ -4,7 +4,8 @@
 // matter contains configuration (ID, model, parameters), and the body is
 // the agent's system prompt.
 //
-// Agent userIDs follow the format "agent/{id}" (D-054).
+// Agent identity is determined by exact-match lookup in the AgentRegistry;
+// the "agent/{id}" format is a convention, not enforced by the server (D-054 revised).
 //
 // # Context Management
 //

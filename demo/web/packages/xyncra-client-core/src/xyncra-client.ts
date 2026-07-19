@@ -200,6 +200,7 @@ export class XyncraClient {
 
   private readonly logger: ILogger;
   private readonly options: ClientOptions;
+  private readonly onError?: (method: string, message: string, code: number) => void;
 
   // ---- Resolved option values (with defaults applied) ----
 
@@ -223,6 +224,7 @@ export class XyncraClient {
 
     this.options = options;
     this.logger = options.logger;
+    this.onError = options.onError;
 
     // Resolve tunable options with defaults.
     this.heartbeatInterval =
@@ -539,6 +541,12 @@ export class XyncraClient {
     this.db.rpcLogsStore.update(rpcLog).catch((err) => {
       this.logger.debug('RPC log update failed', err);
     });
+
+    // Notify error callback if provided
+    if (this.onError) {
+      this.onError(method, response.msg, response.code);
+    }
+
     throw new ClientError(response.msg, response.code);
   }
 
@@ -1035,6 +1043,8 @@ export class XyncraClient {
         } catch (syncError) {
           this.logger.error('Initial full sync failed', syncError);
         }
+        // Notify UI that initial sync is complete (even if database is empty).
+        this.options.onSyncComplete?.();
         break; // Connected — move to Phase 2.
       } catch (error) {
         if (this.closed || signal.aborted) return;

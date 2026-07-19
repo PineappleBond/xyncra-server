@@ -768,7 +768,7 @@ func TestSendMessage_AgentDetection_EnqueuesAgentTask(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &recordingBroker{}
 	registry := agent.NewRegistry()
-	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
+	registry.Register(&agent.AgentConfig{ID: "agent/assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
 	handler := NewSendMessageHandler(s, broker, registry, nil)
 	ctx := context.Background()
 
@@ -804,7 +804,7 @@ func TestSendMessage_AgentDetection_PayloadCorrectness(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &recordingBroker{}
 	registry := agent.NewRegistry()
-	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
+	registry.Register(&agent.AgentConfig{ID: "agent/assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
 	handler := NewSendMessageHandler(s, broker, registry, nil)
 	ctx := context.Background()
 
@@ -882,7 +882,7 @@ func TestSendMessage_AgentDetection_NilRegistry(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// EC-04: Empty agent ID — peerID = "agent/" (no ID suffix)
+// EC-04: Unregistered agent peer with empty ID — peerID = "agent/" (not in registry)
 // ---------------------------------------------------------------------------
 
 func TestSendMessage_AgentDetection_EmptyAgentID(t *testing.T) {
@@ -894,7 +894,7 @@ func TestSendMessage_AgentDetection_EmptyAgentID(t *testing.T) {
 	ctx := context.Background()
 
 	convID := "conv-emptyid-1"
-	// peerID will be "agent/" — IsAgent returns false for empty ID suffix.
+	// peerID will be "agent/" — not registered in the registry, so IsAgent returns false.
 	createTestConversation(t, s, convID, "alice", "agent/")
 
 	params := map[string]interface{}{
@@ -912,7 +912,7 @@ func TestSendMessage_AgentDetection_EmptyAgentID(t *testing.T) {
 	assert.False(t, dup)
 	assert.NotNil(t, msg)
 
-	// "agent/" has no ID suffix, so IsAgent returns false; only 1 Enqueue.
+	// "agent/" is not registered in the registry, so IsAgent returns false; only 1 Enqueue.
 	assert.Equal(t, 1, broker.callCount(), "empty agent ID should result in only 1 Enqueue call")
 }
 
@@ -958,7 +958,7 @@ func TestSendMessage_AgentDetection_AgentSenderNoRecursion(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &recordingBroker{}
 	registry := agent.NewRegistry()
-	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
+	registry.Register(&agent.AgentConfig{ID: "agent/assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
 	handler := NewSendMessageHandler(s, broker, registry, nil)
 	ctx := context.Background()
 
@@ -995,7 +995,7 @@ func TestSendMessage_AgentDetection_EnqueueAgentFails(t *testing.T) {
 	// Fail on call 2 (the agent task enqueue); call 1 (send_message) succeeds.
 	broker := &nthFailBroker{failOnCall: 2}
 	registry := agent.NewRegistry()
-	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
+	registry.Register(&agent.AgentConfig{ID: "agent/assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
 	handler := NewSendMessageHandler(s, broker, registry, nil)
 	ctx := context.Background()
 
@@ -1038,7 +1038,7 @@ func TestSendMessage_AgentDetection_PersistFailsNoEnqueue(t *testing.T) {
 	s := setupTestSQLite(t)
 	broker := &recordingBroker{}
 	registry := agent.NewRegistry()
-	registry.Register(&agent.AgentConfig{ID: "assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
+	registry.Register(&agent.AgentConfig{ID: "agent/assistant", Name: "Test Agent", Model: "gpt-4", APIKeyEnv: "TEST_KEY"})
 	handler := NewSendMessageHandler(s, broker, registry, nil)
 	ctx := context.Background()
 

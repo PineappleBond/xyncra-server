@@ -13,7 +13,6 @@ jest.mock('@xyncra/client-core', () => {
   };
   return {
     XyncraClient: jest.fn(() => mockClient),
-    isAgentUser: (id: string) => id.startsWith('agent'),
   };
 });
 

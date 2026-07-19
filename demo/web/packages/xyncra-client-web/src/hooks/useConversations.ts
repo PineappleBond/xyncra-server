@@ -29,6 +29,12 @@ function dbConversationToEvent(conv: DBConversation): ConversationEvent {
     userId2: conv.user_id2,
     title: conv.title || undefined,
     lastMessageAt: safeISODate(conv.last_message_at),
+    lastReadMessageId1: conv.last_read_message_id1
+      ? String(conv.last_read_message_id1)
+      : undefined,
+    lastReadMessageId2: conv.last_read_message_id2
+      ? String(conv.last_read_message_id2)
+      : undefined,
     createdAt: safeISODate(conv.created_at) ?? '',
     updatedAt: safeISODate(conv.updated_at),
     deletedAt: safeISODate(conv.deleted_at),
@@ -120,10 +126,24 @@ export function useConversations(): UseConversationsReturn {
       },
     );
 
+    const unsubRead = eventEmitter.on('read:updated', ({ conversationId, lastReadMessageId }) => {
+      const readId = String(lastReadMessageId);
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== conversationId) return c;
+          // The read cursor is advanced by a peer; without the acting user id
+          // in the event payload we update both columns (mirrors core's
+          // userID-less markRead path in sync-manager).
+          return { ...c, lastReadMessageId1: readId, lastReadMessageId2: readId };
+        }),
+      );
+    });
+
     return () => {
       unsubAdded();
       unsubUpdated();
       unsubRemoved();
+      unsubRead();
     };
   }, [client, eventEmitter]);
 

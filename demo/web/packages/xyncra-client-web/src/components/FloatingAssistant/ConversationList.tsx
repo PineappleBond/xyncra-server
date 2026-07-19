@@ -73,6 +73,7 @@ export function ConversationList({
       return;
     }
     // Create a conversation with the selected agent as the other user.
+    // Agent IDs are already full userIDs (e.g. agent/xxx).
     void createConversation(selectedAgentID, '新会话');
   }, [createConversation, selectedAgentID]);
 

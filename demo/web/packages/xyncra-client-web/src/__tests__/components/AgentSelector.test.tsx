@@ -102,6 +102,6 @@ describe('AgentSelector', () => {
     const { onSelect } = renderSelector();
     const items = screen.getAllByTestId('list-item');
     items[0].click();
-    expect(onSelect).toHaveBeenCalledWith('test-bot');
+    expect(onSelect).toHaveBeenCalledWith('agent/test-bot');
   });
 });

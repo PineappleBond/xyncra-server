@@ -219,14 +219,16 @@ type UpdateHandler interface {
 
 // TypingHandler is an optional interface that UpdateHandler implementations
 // may adopt to receive ephemeral typing indicators.
+// The isAgent parameter indicates whether the userID belongs to a registered agent (D-054 revised).
 type TypingHandler interface {
-	OnTyping(ctx context.Context, userID string, conversationID string, isTyping bool) error
+	OnTyping(ctx context.Context, userID string, conversationID string, isTyping bool, isAgent bool) error
 }
 
 // StreamingHandler is an optional interface that UpdateHandler implementations
 // may adopt to receive ephemeral streaming text updates (D-051).
+// The isAgent parameter indicates whether the userID belongs to a registered agent (D-054 revised).
 type StreamingHandler interface {
-	OnStreaming(ctx context.Context, userID string, conversationID string, streamID string, text string, isDone bool) error
+	OnStreaming(ctx context.Context, userID string, conversationID string, streamID string, text string, isDone bool, isAgent bool) error
 }
 
 // AgentStatusHandler is an optional interface that UpdateHandler implementations

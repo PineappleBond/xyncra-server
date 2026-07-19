@@ -151,12 +151,13 @@ describe('ReactUpdateHandler', () => {
       const callback = jest.fn();
       emitter.on('agent:thinking', callback);
 
-      await handler.onTyping('agent1', 'conv-1', true);
+      await handler.onTyping('agent1', 'conv-1', true, true);
 
       expect(callback).toHaveBeenCalledWith({
         userId: 'agent1',
         conversationId: 'conv-1',
         isTyping: true,
+        isAgent: true,
       });
     });
 
@@ -164,12 +165,13 @@ describe('ReactUpdateHandler', () => {
       const callback = jest.fn();
       emitter.on('agent:thinking', callback);
 
-      await handler.onTyping('agent1', 'conv-1', false);
+      await handler.onTyping('agent1', 'conv-1', false, true);
 
       expect(callback).toHaveBeenCalledWith({
         userId: 'agent1',
         conversationId: 'conv-1',
         isTyping: false,
+        isAgent: true,
       });
     });
   });
@@ -179,7 +181,7 @@ describe('ReactUpdateHandler', () => {
       const callback = jest.fn();
       emitter.on('stream:text', callback);
 
-      await handler.onStreaming('agent1', 'conv-1', 'stream-1', 'Hello', false);
+      await handler.onStreaming('agent1', 'conv-1', 'stream-1', 'Hello', false, true);
 
       expect(callback).toHaveBeenCalledWith({
         userId: 'agent1',
@@ -193,7 +195,7 @@ describe('ReactUpdateHandler', () => {
       const callback = jest.fn();
       emitter.on('stream:done', callback);
 
-      await handler.onStreaming('agent1', 'conv-1', 'stream-1', '', true);
+      await handler.onStreaming('agent1', 'conv-1', 'stream-1', '', true, true);
 
       expect(callback).toHaveBeenCalledWith({
         userId: 'agent1',

@@ -26,6 +26,12 @@ export interface HITLQuestion {
   conversationId: string;
   /** The question text / reason from the agent. */
   question: string;
+  /** Opaque question id used to resume the agent. */
+  questionId?: string;
+  /** Checkpoint id required by the agent_resume RPC. */
+  checkpointId?: string;
+  /** Interrupt id required by the agent_resume RPC. */
+  interruptId?: string;
 }
 
 export interface UseHITLReturn {
@@ -61,11 +67,14 @@ export function useHITL(): UseHITLReturn {
   useEffect(() => {
     const unsub = eventEmitter.on(
       'hitl:question',
-      ({ userId, conversationId, reason }) => {
+      ({ userId, conversationId, reason, questionId, checkpointId, interruptId }) => {
         setPendingQuestion({
           userId,
           conversationId,
           question: reason,
+          questionId,
+          checkpointId,
+          interruptId,
         });
       },
     );
@@ -76,13 +85,40 @@ export function useHITL(): UseHITLReturn {
   const answer = useCallback(
     async (questionID: string, answerText: string): Promise<void> => {
       if (!client) throw new Error('client not initialized');
+      const pending = pendingQuestion;
+      if (!pending) throw new Error('no pending question to answer');
+
+      // Recovery metadata must come from the local question store, not the
+      // ephemeral hitl:question event, because the event alone lacks the
+      // checkpoint/interrupt ids the server requires (D-125).
+      let checkpointId = pending.checkpointId;
+      let interruptId = pending.interruptId;
+      if ((!checkpointId || !interruptId) && pending.conversationId) {
+        try {
+          const conv = await client.getConversation(pending.conversationId);
+          const q =
+            conv.questions.find((item) => item.id === pending.questionId) ??
+            conv.questions[0];
+          if (q) {
+            checkpointId = q.checkpoint_id;
+            interruptId = q.interrupt_id;
+          }
+        } catch {
+          // Fall back to whatever metadata the event carried.
+        }
+      }
+
       await client.call('agent_resume', {
+        conversation_id: pending.conversationId,
         question_id: questionID,
+        checkpoint_id: checkpointId ?? '',
+        interrupt_id: interruptId ?? '',
+        agent_id: pending.userId,
         answer: answerText,
       });
       setPendingQuestion(null);
     },
-    [client],
+    [client, pendingQuestion],
   );
 
   const dismiss = useCallback(() => {

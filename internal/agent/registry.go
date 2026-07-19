@@ -110,18 +110,10 @@ func (r *AgentRegistry) Get(id string) (*AgentConfig, bool) {
 }
 
 // IsAgent reports whether the given userID corresponds to a registered agent.
-// Agent userIDs have the format "agent/{id}" (D-054).
+// It performs an exact-match lookup in the registry (D-054 revised).
 // Returns the AgentConfig and true if found, nil and false otherwise.
 func (r *AgentRegistry) IsAgent(userID string) (*AgentConfig, bool) {
-	const prefix = "agent/"
-	if !strings.HasPrefix(userID, prefix) {
-		return nil, false
-	}
-	id := strings.TrimPrefix(userID, prefix)
-	if id == "" {
-		return nil, false
-	}
-	return r.Get(id)
+	return r.Get(userID)
 }
 
 // ListAll returns a copy of all registered agent configurations.

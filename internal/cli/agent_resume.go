@@ -39,7 +39,7 @@ Typical workflow:
 	cmd.Flags().String("checkpoint-id", "", "Checkpoint ID from HITL notification (required)")
 	cmd.Flags().String("interrupt-id", "", "Interrupt ID from HITL notification (optional)")
 	cmd.Flags().String("answer", "", "Answer to the agent's question (required)")
-	cmd.Flags().String("agent-id", "", "Agent ID to resume (e.g. agent/xxx, required)")
+	cmd.Flags().String("agent-id", "", "Agent user ID to resume (must match a registered agent ID, e.g. agent/my-bot; required)")
 
 	_ = cmd.MarkFlagRequired("conversation-id")
 	_ = cmd.MarkFlagRequired("checkpoint-id")

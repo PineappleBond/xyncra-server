@@ -34,12 +34,12 @@ Xyncra Server 使用命令行标志和环境变量两种方式进行配置。命
 
 | 环境变量 | 说明 | 使用位置 |
 |----------|------|----------|
-| `DASHSCOPE_API_KEY` | DashScope（阿里云通义千问）API Key | `.env.agent`, Agent 配置 |
+| `DASHSCOPE_API_KEY` | DashScope（阿里云通义千问）API Key | `.env`, Agent 配置 |
 | `OPENAI_API_KEY` | OpenAI API Key | `mcp-bot.md` 配置 |
-| `XYNCRA_TEST_LLM_API_KEY` | E2E 测试用 LLM API Key | `.env.test` |
-| `XYNCRA_TEST_LLM_BASE_URL` | E2E 测试用 LLM Base URL | `.env.test` |
-| `XYNCRA_TEST_LLM_MODEL` | E2E 测试用模型名 | `.env.test` |
-| `XYNCRA_TEST_LLM_PROVIDER` | E2E 测试用 Provider | `.env.test` |
+| `XYNCRA_TEST_LLM_API_KEY` | E2E 测试用 LLM API Key | `.env` |
+| `XYNCRA_TEST_LLM_BASE_URL` | E2E 测试用 LLM Base URL | `.env` |
+| `XYNCRA_TEST_LLM_MODEL` | E2E 测试用模型名 | `.env` |
+| `XYNCRA_TEST_LLM_PROVIDER` | E2E 测试用 Provider | `.env` |
 | `XYNCRA_LLM_LOG_DIR` | LLM 调用日志输出目录 | `main.go`（可选，不设置则不开启） |
 
 ### E2E 测试配置
@@ -66,25 +66,21 @@ Xyncra Server 使用命令行标志和环境变量两种方式进行配置。命
 
 项目使用以下 `.env` 文件（均被 `.gitignore` 排除）：
 
-| 文件 | 用途 | 来源 |
-|------|------|------|
-| `.env.agent` | Agent LLM API 密钥 | 开发者从 `.env.agent.example` 复制 |
-| `.env.test` | E2E 测试 LLM 配置 | 开发者从 `.env.test.example` 复制 |
+| 文件     | 用途                                     | 来源                           |
+|--------|----------------------------------------|------------------------------|
+| `.env` | Agent LLM API 密钥 + E2E 测试 LLM 配置       | 开发者从 `.env.example` 复制       |
 
 ### .env 文件示例
 
-**`.env.agent.example`**：
+**`.env.example`**：
 ```bash
+# Xyncra Environment Configuration
+# Copy to .env and fill in your credentials.
+
 # Agent Configuration
-# Copy to .env.agent and fill in your API key.
 DASHSCOPE_API_KEY=your-api-key-here
-```
 
-**`.env.test.example`**：
-```bash
-# Xyncra Agent E2E Test — Real LLM Configuration (EXAMPLE)
-# Copy to .env.test and fill in your credentials.
-
+# E2E Test — Real LLM Configuration
 XYNCRA_TEST_REAL_LLM_ENABLED=true
 XYNCRA_TEST_LLM_API_KEY=your-api-key-here
 XYNCRA_TEST_LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -98,11 +94,9 @@ XYNCRA_TEST_REAL_LLM_MAX_TOKENS=500
 
 ### 当前方案
 
-目前 API Key 直接存储在环境变量文件中：
-- `.env.agent` — DashScope API Key（Agent 使用）
-- `.env.test` — 测试用 LLM API Key（E2E 测试使用）
+目前 API Key 直接存储在 `.env` 文件中（包括 DashScope API Key 和测试用 LLM API Key）。
 
-这些文件已加入 `.gitignore`，不会被提交到版本控制。
+该文件已加入 `.gitignore`，不会被提交到版本控制。
 
 ### 推荐方案（生产环境）
 
@@ -115,7 +109,7 @@ XYNCRA_TEST_REAL_LLM_MAX_TOKENS=500
 
 ### 最佳实践
 
-- 开发环境使用 `.env.agent` 文件
+- 开发环境使用 `.env` 文件
 - 不在代码中硬编码密钥
 - 定期轮换 API Key
 - 审计密钥使用情况

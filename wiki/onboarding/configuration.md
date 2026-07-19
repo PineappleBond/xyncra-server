@@ -395,8 +395,7 @@ XYNCRA_LLM_LOG_DIR=/var/log/xyncra/llm
 
 Agent 和测试相关的配置文件：
 
-- `.env.agent` — Agent LLM API 密钥（从 `.env.agent.example` 复制）
-- `.env.test` — E2E 测试 LLM 配置（从 `.env.test.example` 复制）
+- `.env` — Agent LLM API 密钥 + E2E 测试 LLM 配置（从 `.env.example` 复制）
 
 ---
 

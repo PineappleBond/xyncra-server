@@ -160,7 +160,7 @@ func (h *mockUpdateHandler) OnGap(ctx context.Context, seq uint32) error {
 }
 
 // OnTyping records the typing indicator parameters (implements TypingHandler).
-func (h *mockUpdateHandler) OnTyping(ctx context.Context, userID string, conversationID string, isTyping bool) error {
+func (h *mockUpdateHandler) OnTyping(ctx context.Context, userID string, conversationID string, isTyping bool, isAgent bool) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.typings = append(h.typings, typingRecord{
@@ -172,7 +172,7 @@ func (h *mockUpdateHandler) OnTyping(ctx context.Context, userID string, convers
 }
 
 // OnStreaming records the streaming text parameters (implements StreamingHandler).
-func (h *mockUpdateHandler) OnStreaming(ctx context.Context, userID, conversationID, streamID, text string, isDone bool) error {
+func (h *mockUpdateHandler) OnStreaming(ctx context.Context, userID, conversationID, streamID, text string, isDone bool, isAgent bool) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.streamings = append(h.streamings, streamingRecord{

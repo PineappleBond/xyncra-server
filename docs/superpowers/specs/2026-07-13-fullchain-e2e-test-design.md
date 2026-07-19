@@ -12,7 +12,7 @@ A single integration test that exercises the **entire Xyncra business chain** en
 ## Prerequisites
 
 - Redis at `localhost:16379` (standard E2E requirement)
-- `.env.test` with valid DashScope API key (`XYNCRA_TEST_REAL_LLM_ENABLED=true`)
+- `.env` with valid DashScope API key (`XYNCRA_TEST_REAL_LLM_ENABLED=true`)
 - Run command: `go test -tags real_llm ./internal/e2e/ -run TestFullChainE2E -v -timeout 300s`
 
 ## Implementation Order

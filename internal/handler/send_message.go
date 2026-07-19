@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,7 +55,7 @@ type sendMessageRecipient struct {
 type agentProcessPayload struct {
 	MessageID      string `json:"message_id"`
 	ConversationID string `json:"conversation_id"`
-	AgentID        string `json:"agent_id"` // full "agent/xxx" userID
+	AgentID        string `json:"agent_id"` // full userID of the agent (D-054 revised)
 	SenderID       string `json:"sender_id"`
 	DeviceID       string `json:"device_id"` // Phase 6 (D-102)
 }
@@ -202,31 +201,33 @@ func (h *sendMessageHandler) HandleRequest(ctx context.Context, client *server.C
 		enqueueFinish(nil)
 	}
 
-	// 5b. If the sender is human and the peer is a registered agent, enqueue
-	// an agent processing task (fire-and-forget, D-007, D-062).
-	if h.agentRegistry != nil && !strings.HasPrefix(senderID, "agent/") {
-		peerID := peerUserID(conv, client.UserID())
-		if peerID != "" {
-			if _, ok := h.agentRegistry.IsAgent(peerID); ok {
-				agentPayload := agentProcessPayload{
-					MessageID:      sendResult.Message.ID,
-					ConversationID: conv.ID,
-					AgentID:        peerID,
-					SenderID:       senderID,
-					DeviceID:       client.DeviceID(), // Phase 6 (D-102)
-				}
-				if payloadBytes, err := json.Marshal(agentPayload); err != nil {
-					h.logger.Error("send_message: failed to marshal agent MQ payload", "error", err)
-				} else {
-					agentTask := &mq.Task{
-						Type:    mq.TypeAgentProcess,
-						Payload: payloadBytes,
+	// 5b. If the sender is human (not a registered agent) and the peer is a
+	// registered agent, enqueue an agent processing task (fire-and-forget, D-007, D-062).
+	if h.agentRegistry != nil {
+		if _, senderIsAgent := h.agentRegistry.IsAgent(senderID); !senderIsAgent {
+			peerID := peerUserID(conv, client.UserID())
+			if peerID != "" {
+				if _, ok := h.agentRegistry.IsAgent(peerID); ok {
+					agentPayload := agentProcessPayload{
+						MessageID:      sendResult.Message.ID,
+						ConversationID: conv.ID,
+						AgentID:        peerID,
+						SenderID:       senderID,
+						DeviceID:       client.DeviceID(), // Phase 6 (D-102)
 					}
-					enqueueCtx, enqueueFinish := startBrokerEnqueueSpan(ctx, mq.TypeAgentProcess)
-					if _, err := h.broker.Enqueue(enqueueCtx, agentTask, mq.WithMaxRetry(20)); err != nil {
-						h.logger.Info("send_message: agent MQ enqueue failed (fire-and-forget)", "error", err)
+					if payloadBytes, err := json.Marshal(agentPayload); err != nil {
+						h.logger.Error("send_message: failed to marshal agent MQ payload", "error", err)
+					} else {
+						agentTask := &mq.Task{
+							Type:    mq.TypeAgentProcess,
+							Payload: payloadBytes,
+						}
+						enqueueCtx, enqueueFinish := startBrokerEnqueueSpan(ctx, mq.TypeAgentProcess)
+						if _, err := h.broker.Enqueue(enqueueCtx, agentTask, mq.WithMaxRetry(20)); err != nil {
+							h.logger.Info("send_message: agent MQ enqueue failed (fire-and-forget)", "error", err)
+						}
+						enqueueFinish(nil)
 					}
-					enqueueFinish(nil)
 				}
 			}
 		}

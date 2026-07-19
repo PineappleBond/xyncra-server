@@ -169,12 +169,12 @@ flowchart TD
 - 清理 ~/.xyncra 测试数据
 - 清理 Redis（可选）
 
-### 12. 真实 LLM 测试配置（.env.test）（如适用）
+### 12. 真实 LLM 测试配置（.env）（如适用）
 
 如果测试涉及 Agent 真实 LLM 交互：
-- 引用 `.env.test` 环境变量
+- 引用 `.env` 环境变量
 - 说明每个变量的用途
-- 安全提示（不提交 .env.test）
+- 安全提示（不提交 .env）
 - 成本控制说明 (D-090)
 
 ### 13. 依赖关系说明
@@ -239,7 +239,7 @@ flowchart TD
 | Redis | 16379 | 6379 |
 | Server | 18080 | 8080 |
 | Redis DB | 15 | 15 |
-| [.env.test](../../../.env.test) | 真实LLM配置（可能会被厂商限流）|  |
+| [.env](../../../.env) | 真实LLM配置（可能会被厂商限流）|  |
 
 ### 用户 ID 约定
 
@@ -293,5 +293,5 @@ flowchart TD
 - [PRODUCT_DECISIONS.md](../../../docs/decisions/PRODUCT_DECISIONS.md) — 产品决策文档（D-XXX 编号引用）
 - [CLI_E2E_TEST_STRATEGY.md](../../../docs/CLI_E2E_TEST_STRATEGY.md) — 自动化测试策略
 - [deploy/docker-compose.e2e.yml](../../../deploy/docker-compose.e2e.yml) — E2E Docker 配置
-- [.env.test.example](../../../.env.test.example) — LLM 测试配置模板
-- [.env.test](../../../.env.test) — 真实LLM配置（可能会被厂商限流）
+- [.env.example](../../../.env.example) — LLM 测试配置模板
+- [.env](../../../.env) — 真实LLM配置（可能会被厂商限流）

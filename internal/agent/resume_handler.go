@@ -144,8 +144,8 @@ func NewAgentResumeHandler(
 			}
 		}
 
-		// 4. Look up agent config.
-		agentID := strings.TrimPrefix(payload.AgentID, "agent/")
+		// 4. Look up agent config by exact match in the registry (D-054 revised).
+		agentID := payload.AgentID
 		config, ok := registry.Get(agentID)
 		if !ok {
 			logger.Error("agent resume: agent not found", "agent_id", agentID)

@@ -24,7 +24,7 @@
 | D-036 | 部分 CLI 命令为 IPC-only | sync-updates/agent-resume/reload-agents 等依赖 daemon 状态 |
 | D-044 | listen daemon 连接韧性策略 | 无限重试 WS 连接（4001 设备替换除外），IPC 始终可用 |
 | D-050 | Ephemeral Push 模式 (Seq=0) | typing/presence 等瞬时业务零持久化 |
-| D-054 | Agent UserID 命名约定 | `agent/{id}` 格式，命名空间隔离 |
+| D-054 | Agent 身份判定：Registry 精确匹配 | 检查 userID 是否存在于 AgentRegistry，`agent/{id}` 为示例约定而非强制 |
 | D-055 | Agent 消息格式复用 | 不新增 Message 类型，复用现有协议 |
 | D-060 | Agent 上下文管理策略 | DB 存储 + 内存缓存，Token 裁剪 |
 | D-062 | Agent 消息路由触发模型 | 消息先持久化再异步入队 MQ，fire-and-forget |
@@ -61,6 +61,7 @@
 | D-130 | Web 客户端连接状态机 | idle→connecting→syncing→connected→disconnected(+reconnecting)，2s 空库兜底显示 syncing 而非假 connected |
 | D-131 | 客户端 deviceInfo 自动填充 | Web 自动 `{platform:'web',userAgent}`，CLI 自动 `{platform:'cli',os}`，符合 D-001 开箱即用 |
 | D-132 | 客户端错误消息分层 | error:rpc 事件暴露 `{method,message,code}` 公共通道，UI 映射友好提示，不泄露内部堆栈 |
+| D-133 | Web Agent 超时复用 hitl:question 事件 | 维持 `hitl:question` 映射，不拆独立 `agent:timeout`，与 075 HITL 恢复链路一致 |
 
 ---
 

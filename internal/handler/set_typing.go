@@ -34,6 +34,7 @@ type typingBroadcastPayload struct {
 	UserID         string `json:"user_id"`
 	ConversationID string `json:"conversation_id"`
 	IsTyping       bool   `json:"is_typing"`
+	IsAgent        bool   `json:"is_agent"`
 	Timestamp      int64  `json:"timestamp"`
 }
 
@@ -173,6 +174,7 @@ func (h *setTypingHandler) HandleRequest(ctx context.Context, client *server.Cli
 		UserID:         callerID,
 		ConversationID: params.ConversationID,
 		IsTyping:       params.IsTyping,
+		IsAgent:        false, // human user typing (D-054 revised)
 		Timestamp:      time.Now().Unix(),
 	})
 	if err != nil {

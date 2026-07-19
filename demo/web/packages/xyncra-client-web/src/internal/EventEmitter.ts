@@ -41,11 +41,16 @@ export type UpdateHandlerEventMap = {
     userId: string;
     conversationId: string;
     isTyping: boolean;
+    isAgent: boolean;
   };
   'hitl:question': {
     userId: string;
     conversationId: string;
     reason: string;
+    /** Optional recovery metadata sourced from the local question store. */
+    questionId?: string;
+    checkpointId?: string;
+    interruptId?: string;
   };
   'error:rpc': {
     method: string;

@@ -266,7 +266,7 @@ curl -s -X POST $WEBHOOK_URL \
 
 ```text
 1. 检查 LLM API Key 是否有效
-   - 查看 .env.agent 文件中的 Key
+   - 查看 .env 文件中的 Key
    - 尝试手动调用 API
 
 2. 检查 LLM API 服务状态

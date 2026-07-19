@@ -2,7 +2,7 @@
 
 // Package e2e_test contains real LLM E2E tests for the Agent system.
 // Run with: go test -tags real_llm ./internal/e2e/ -run "^TestAgentRealLLM" -v -timeout 300s
-// Requires: .env.test with XYNCRA_TEST_REAL_LLM_ENABLED=true and XYNCRA_TEST_LLM_API_KEY
+// Requires: .env with XYNCRA_TEST_REAL_LLM_ENABLED=true and XYNCRA_TEST_LLM_API_KEY
 //
 // These tests exercise the real LLM integration seam — the actual API call,
 // streaming response handling, error classification, and persistence. Because

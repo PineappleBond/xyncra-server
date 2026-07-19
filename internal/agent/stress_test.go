@@ -194,7 +194,7 @@ func TestReloadAgents(t *testing.T) {
 	// Write 10 agent .md files.
 	for i := 0; i < 10; i++ {
 		content := fmt.Sprintf(`---
-id: test-%d
+id: agent/test-%d
 name: Test Agent %d
 model: gpt-4
 api_key_env: TEST_KEY_%d
@@ -224,9 +224,9 @@ System prompt for agent %d.
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			id := fmt.Sprintf("test-%d", idx%10)
+			id := fmt.Sprintf("agent/test-%d", idx%10)
 			registry.Get(id)
-			registry.IsAgent("agent/" + id)
+			registry.IsAgent(id)
 			_ = registry.ListAll()
 		}(i)
 	}

@@ -97,7 +97,7 @@
 
 > **环境命名约定**：
 >
-> - Docker 容器名: `xyncra-server-xyncra-server-e2e-1`（docker-compose 自动生成的格式为 `{project}_{service}_{index}`）
+> - Docker 容器名: `deploy-xyncra-server-e2e-1`（docker-compose 自动生成的格式为 `{project}_{service}_{index}`）
 > - Docker compose service 名: `xyncra-server-e2e`（用于 `docker compose` 命令）
 > - 服务器 DB 路径: `/app/xyncra-e2e.db`
 > - `agent-resume` 命令需要 `--agent-id` 参数
@@ -166,7 +166,7 @@ curl -s http://localhost:18080/health
 > **注意**: E2E 容器默认不包含 sqlite3，需要在容器重启后重新安装。
 
 ```bash
-docker exec xyncra-server-xyncra-server-e2e-1 apk add --no-cache sqlite
+docker exec deploy-xyncra-server-e2e-1 apk add --no-cache sqlite
 # 预期: OK: xx MiB in xx packages
 ```
 
@@ -285,7 +285,7 @@ flowchart TD
         direction TB
         P8A[阶段 8.1-8.3:\n🟢 启动 Device A + B daemon\n🔵 触发 HITL\n🟡 确认 Question pending]
         P8A --> P8B[阶段 8.4-8.5:\n🔵 Device A 回答\n🟡 Question=answered\n🔵 Device B sync → 看到 answered]
-        P8B --> P8C[阶段 8.6-8.7:\n🔵 Device B 重复回答\n🔴 验证: 409 / 幂等拒绝]
+        P8B --> P8C[阶段 8.6-8.7:\n🔵 Device B 重复回答\n🔴 验证: no pending question found / 幂等拒绝]
     end
 
     P8C --> PartV
@@ -369,7 +369,7 @@ cat "$E2E_HOME/alice-daemon.log" | grep -i "\[hitl\]\|conversation.*update" | ta
 #### 步骤 2.4: 验证 Question 持久化到 DB (D-116)
 
 ```bash
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 $DB "SELECT id, conversation_id, checkpoint_id, interrupt_id, question_text, status FROM questions WHERE conversation_id='$HITL_CONV_ID';"
 # 预期: 至少一行记录，status=pending
@@ -487,7 +487,7 @@ $R GET "$LOCK_KEY"
   --content "这是一条新消息"
 
 # 检查服务器日志，确认新消息的 Agent 处理被跳过或排队
-docker logs xyncra-server-xyncra-server-e2e-1 2>&1 | grep "lock.*held\|skip.*agent" | tail -3
+docker logs deploy-xyncra-server-e2e-1 2>&1 | grep "lock.*held\|skip.*agent" | tail -3
 # 预期: 看到锁被持有、跳过 Agent 处理的日志
 ```
 
@@ -567,7 +567,7 @@ xyncra-client agent-resume --user-id alice --device-id test-device-alice-ts --co
 
 sleep 15
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 # 确认 Question 已创建
 $DB "SELECT id, status FROM questions WHERE conversation_id='$HITL_CONV_ID' AND status='pending' ORDER BY created_at DESC LIMIT 1;"
@@ -589,7 +589,7 @@ sleep 1
 #### 步骤 6.3: 确认 Question 仍在 DB（持久化验证）
 
 ```bash
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 $DB "SELECT id, status, question_text FROM questions WHERE id='$QUESTION_ID';"
 # 预期: status=pending，Question 不因 daemon 离线而消失
@@ -613,7 +613,7 @@ sleep 3
 ./bin/xyncra-client sync-updates --user-id alice --device-id test-device-alice
 
 # 服务器 DB 直接验证
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 $DB "SELECT agent_status FROM conversations WHERE id='$HITL_CONV_ID';"
 # 预期: asking_user
 ```
@@ -631,7 +631,7 @@ $DB "SELECT agent_status FROM conversations WHERE id='$HITL_CONV_ID';"
 
 sleep 10
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 $DB "SELECT id, status, answer FROM questions WHERE id='$QUESTION_ID';"
 # 预期: status=answered
@@ -672,7 +672,7 @@ echo "NEW_CONV_ID=$NEW_CONV_ID"
 
 sleep 15
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 CHECKPOINT_ID=$($DB "SELECT checkpoint_id FROM questions WHERE conversation_id='$NEW_CONV_ID' AND status='pending' LIMIT 1;")
 Q1_ID=$($DB "SELECT id FROM questions WHERE conversation_id='$NEW_CONV_ID' AND status='pending' LIMIT 1;")
@@ -698,7 +698,7 @@ $DB "SELECT id, interrupt_id, question_text, status FROM questions WHERE convers
 
 ```bash
 # D-124: 验证 UpdateAgentStatus 更新了 updated_at
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 $DB "SELECT id, updated_at FROM conversations WHERE id='$NEW_CONV_ID';"
 # 预期: updated_at 为当前时间（HITL 中断时 UpdateAgentStatus 调用）
 
@@ -723,7 +723,7 @@ echo "UPDATED_AT_BEFORE=$UPDATED_AT_BEFORE"
 ##### 步骤 7.4: 验证部分回答状态
 
 ```bash
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 $DB "SELECT id, status, answer FROM questions WHERE conversation_id='$MULTI_CONV_ID' ORDER BY created_at;"
 # 预期:
@@ -748,7 +748,7 @@ $DB "SELECT agent_status FROM conversations WHERE id='$MULTI_CONV_ID';"
 
 sleep 15
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 # 全部 answered
 $DB "SELECT id, status, answer FROM questions WHERE conversation_id='$MULTI_CONV_ID' ORDER BY created_at;"
@@ -821,7 +821,7 @@ sleep 3
 
 sleep 15
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 CHECKPOINT_ID=$($DB "SELECT checkpoint_id FROM questions WHERE conversation_id='$HITL_CONV_ID' AND status='pending' ORDER BY created_at DESC LIMIT 1;")
 QUESTION_ID=$($DB "SELECT id FROM questions WHERE conversation_id='$HITL_CONV_ID' AND status='pending' ORDER BY created_at DESC LIMIT 1;")
@@ -842,7 +842,7 @@ echo "QUESTION_ID=$QUESTION_ID"
 
 sleep 5
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 $DB "SELECT id, status, answer, answered_by, answered_device_id FROM questions WHERE id='$QUESTION_ID';"
 # 预期: status=answered, answered_by=alice, answered_device_id=device-a
@@ -871,7 +871,7 @@ $DB "SELECT id, status, answer, answered_by, answered_device_id FROM questions W
   --checkpoint-id "$CHECKPOINT_ID" \
   --agent-id "agent/hitl-bot" \
   --answer "确认"
-# 预期: 返回错误（409 Conflict 或幂等拒绝）
+# 预期: 返回错误（no pending question found / 幂等拒绝）
 ```
 
 **判定**: ✅ Device B 重复回答被拒绝。
@@ -920,7 +920,7 @@ echo "SR_CONV_ID=$SR_CONV_ID"
 
 sleep 15
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 SR_CHECKPOINT_ID=$($DB "SELECT checkpoint_id FROM questions WHERE conversation_id='$SR_CONV_ID' AND status='pending' LIMIT 1;")
 SR_QUESTION_ID=$($DB "SELECT id FROM questions WHERE conversation_id='$SR_CONV_ID' AND status='pending' LIMIT 1;")
@@ -964,7 +964,7 @@ curl -s http://localhost:18080/health
 #### 步骤 9.5: 验证重启后状态完整
 
 ```bash
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 R="redis-cli -p 16379 -n 15"
 
 # Questions 仍在
@@ -993,7 +993,7 @@ $R EXISTS "agent:checkpoint:$SR_CHECKPOINT_ID"
 
 sleep 15
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 $DB "SELECT status, answer FROM questions WHERE id='$SR_QUESTION_ID';"
 # 预期: status=answered
@@ -1050,14 +1050,14 @@ curl -s http://localhost:18080/health
 ```bash
 sleep 35  # 等待 Asynq visibility timeout + 重试
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 $DB "SELECT sender_id, content FROM messages WHERE conversation_id='$HITL_CONV_ID' AND sender_id LIKE 'agent/%' ORDER BY created_at DESC LIMIT 3;"
 # 预期: Agent 重新执行并生成消息
 
 # 幂等 key 存在
 R="redis-cli -p 16379 -n 15"
-$R KEYS "agent:idempotent:*"
+$R KEYS "agent:processed:*"
 # 预期: 有幂等 key（D-071）
 ```
 
@@ -1096,7 +1096,7 @@ sleep 25  # 等待并行委派 + 两个子代理各自触发 HITL
 #   --peer-id "agent/hitl-bot" | grep "Conversation ID:" | awk '{print $3}')
 # ... 发送消息后手动 INSERT 第二条 Question（同阶段 7 方式 B）
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 PA_CHECKPOINT_ID=$($DB "SELECT DISTINCT checkpoint_id FROM questions WHERE conversation_id='$PA_CONV_ID' LIMIT 1;")
 PA_Q1_ID=$($DB "SELECT id FROM questions WHERE conversation_id='$PA_CONV_ID' AND status='pending' ORDER BY created_at LIMIT 1;")
@@ -1121,7 +1121,7 @@ echo "PA_Q2_ID=$PA_Q2_ID"
 
 sleep 2
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 $DB "SELECT id, status, answer FROM questions WHERE id='$PA_Q1_ID';"
 # 预期: status=answered, answer=yes
@@ -1147,7 +1147,7 @@ curl -s http://localhost:18080/health
 #### 步骤 11.4: 验证重启后 Q1 的 answer 存活
 
 ```bash
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 $DB "SELECT id, status, answer FROM questions WHERE id='$PA_Q1_ID';"
 # 预期: status=answered, answer=yes ← **核心验证点**
@@ -1169,7 +1169,7 @@ $DB "SELECT id, status, answer FROM questions WHERE id='$PA_Q1_ID';"
 
 sleep 15
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 # 全部 answered
 $DB "SELECT id, status, answer FROM questions WHERE conversation_id='$PA_CONV_ID' ORDER BY created_at;"
@@ -1215,7 +1215,7 @@ echo "TO_CONV_ID=$TO_CONV_ID"
 
 sleep 15
 
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 # 确认 HITL 中断已触发
 $DB "SELECT id, agent_status, updated_at FROM conversations WHERE id='$TO_CONV_ID';"
@@ -1225,7 +1225,7 @@ $DB "SELECT id, agent_status, updated_at FROM conversations WHERE id='$TO_CONV_I
 #### 步骤 12.2: 手动修改 updated_at 和 agent_last_activity 为 25 小时前（模拟超时）
 
 ```bash
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 # 将 updated_at 和 agent_last_activity 都设置为 25 小时前
 # 注意：后台清理任务使用 agent_last_activity 判断超时，必须同时修改两个字段
@@ -1246,7 +1246,7 @@ sleep 360
 #### 步骤 12.4: 验证会话已被自动清理
 
 ```bash
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 # 验证 agent_status 已恢复为 idle
 $DB "SELECT id, agent_status, agent_id, checkpoint_id, updated_at FROM conversations WHERE id='$TO_CONV_ID';"
@@ -1307,7 +1307,7 @@ sleep 10
 ### 7.1 Server DB 验证命令速查
 
 ```bash
-DB="docker exec xyncra-server-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 # Questions 表
 $DB "SELECT id, status, answer, answered_by, answered_device_id FROM questions WHERE conversation_id='<conv-id>';"
@@ -1335,7 +1335,7 @@ $R KEYS "agent:lock:*"
 $R GET "agent:lock:<conversation-id>"
 
 # 幂等性
-$R KEYS "agent:idempotent:*"
+$R KEYS "agent:processed:*"
 $R KEYS "agent:resume:*"
 
 # Asynq 队列
@@ -1383,7 +1383,7 @@ sqlite3 "$ALICE_DB" "SELECT sender_id, content FROM messages WHERE conversation_
 | **Part IV: 多设备竞态** | | | |
 | 阶段 8.4 | Device A 回答后 Question=answered | ✅ | D-116 |
 | 阶段 8.5 | Device B 同步看到 answered | ✅ | |
-| 阶段 8.6 | Device B 重复回答被拒绝 | ✅ | 409 / 幂等拒绝 |
+| 阶段 8.6 | Device B 重复回答被拒绝 | ✅ | no pending question found / 幂等拒绝 |
 | **Part V: 服务器重启** | | | |
 | 阶段 9.5 | 重启后 Questions + agent_status + Checkpoint 存活 | ✅ | D-116, D-083 |
 | 阶段 9.6 | 重启后 Resume 成功 | ✅ | |
@@ -1527,7 +1527,7 @@ cp .env.example .env
 |------|-----------|-----------|------|
 | 阶段 8.4: Device A 回答 | ✅ / ❌ | ✅ / ❌ | D-116 |
 | 阶段 8.5: Device B 同步 | ✅ / ❌ | ✅ / ❌ | |
-| 阶段 8.6: 重复回答拒绝 | ✅ / ❌ | ✅ / ❌ | 409 / 幂等 |
+| 阶段 8.6: 重复回答拒绝 | ✅ / ❌ | ✅ / ❌ | no pending question found / 幂等 |
 
 #### Part V: 服务器重启恢复 (Scenario 4-7)
 

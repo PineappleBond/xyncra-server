@@ -181,8 +181,7 @@ git clone <repository>
 cd xyncra-server
 
 # 2. 恢复配置
-cp /secure/backup/.env.agent .env.agent
-cp /secure/backup/.env.test .env.test
+cp /secure/backup/.env .env
 
 # 3. 恢复数据库
 # （见场景一）
