@@ -16,7 +16,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --build --force",
     "test": "jest --config jest.config.cjs",
     "typecheck": "tsc --noEmit",
     "tsc": "tsc --noEmit"

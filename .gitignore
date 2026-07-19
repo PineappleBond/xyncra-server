@@ -44,6 +44,25 @@ go.work.sum
 /build/
 /bin/
 
+# TypeScript 编译产物
+*.d.ts
+*.js.map
+
+# Demo web 编译产物
+demo/web/src/**/*.js
+demo/web/config/**/*.js
+demo/web/cloudflare-worker/src/**/*.js
+
+# 测试覆盖率
+**/coverage/
+
+# 计划文档
+docs/plans/
+demo/web/docs/task-planner-prompts/
+
+# Claude Code 临时文档（保留 skills）
+demo/web/.claude/docs/
+
 # === 临时文件 ===
 *.tmp
 *.bak
@@ -60,6 +79,20 @@ llm-logs-e2e/
 !.claude/skills/xyncra-manual-test/**
 !.claude/skills/xyncra-task-planner/
 !.claude/skills/xyncra-task-planner/**
+
+# Demo web 的 Claude skills（保留所有）
+demo/web/.claude/*
+!demo/web/.claude/skills/
+demo/web/.claude/skills/*
+!demo/web/.claude/skills/antd/
+!demo/web/.claude/skills/antd/**
+!demo/web/.claude/skills/xyncra-ts-client-usage/
+!demo/web/.claude/skills/xyncra-ts-client-usage/**
+!demo/web/.claude/skills/xyncra-web-task-planner/
+!demo/web/.claude/skills/xyncra-web-task-planner/**
+!demo/web/.claude/docs/
+!demo/web/.claude/docs/**
+
 .codegraph/
 .superpowers/
 logs/

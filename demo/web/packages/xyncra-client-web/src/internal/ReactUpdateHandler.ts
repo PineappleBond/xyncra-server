@@ -77,6 +77,13 @@ export class ReactUpdateHandler
     conversation: Conversation,
     action: ConversationAction = 'updated',
   ): Promise<void> {
+    console.log('[HITL Debug] onConversation called:', {
+      action,
+      agentStatus: conversation.agentStatus,
+      hasQuestions: !!conversation.questions,
+      questionsCount: conversation.questions?.length,
+    });
+
     switch (action) {
       case 'created':
         this.emitter.emit('conversation:added', {
@@ -91,6 +98,28 @@ export class ReactUpdateHandler
         this.emitter.emit('conversation:updated', {
           conversation: toConversationEvent(conversation),
         });
+        // HITL: Check if agent is asking user and emit hitl:question event
+        if (
+          conversation.agentStatus === 'asking_user' &&
+          conversation.questions &&
+          conversation.questions.length > 0
+        ) {
+          const question = conversation.questions[0];
+          console.log('[HITL Debug] Emitting hitl:question event:', {
+            userId: conversation.userId2,
+            conversationId: conversation.id,
+            questionId: question.id,
+            questionText: question.question_text,
+          });
+          this.emitter.emit('hitl:question', {
+            userId: conversation.userId2, // agent ID
+            conversationId: conversation.id,
+            reason: question.question_text,
+            questionId: question.id,
+            checkpointId: question.checkpoint_id,
+            interruptId: question.interrupt_id,
+          });
+        }
         break;
     }
   }

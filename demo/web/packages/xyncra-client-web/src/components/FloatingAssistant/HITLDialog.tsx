@@ -17,8 +17,8 @@ import { useHITL } from '../../hooks/useHITL';
  * Renders the HITL dialog when a pending question exists.
  * Returns null when there is no pending question.
  */
-export function HITLDialog(): React.JSX.Element | null {
-  const { pendingQuestion, answer, dismiss } = useHITL();
+export function HITLDialog({ conversationId }: { conversationId?: string }): React.JSX.Element | null {
+  const { pendingQuestion, answer, dismiss } = useHITL(conversationId);
   const [form] = Form.useForm<{ answer: string }>();
 
   const handleOk = useCallback(async () => {

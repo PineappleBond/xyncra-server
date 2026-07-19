@@ -44,6 +44,8 @@ export function ChatWindow({ onClose }: ChatWindowProps): React.JSX.Element {
     setSelectedConversationID(null);
   }, []);
 
+  console.log('[ChatWindow] selectedConversationID:', selectedConversationID);
+
   return (
     <XProvider>
       <div style={FLOATING_ASSISTANT_STYLES.chatWindow}>
@@ -58,7 +60,7 @@ export function ChatWindow({ onClose }: ChatWindowProps): React.JSX.Element {
         />
         <MessageArea conversationID={selectedConversationID} />
       </div>
-      <HITLDialog />
+      <HITLDialog conversationId={selectedConversationID ?? undefined} />
     </XProvider>
   );
 }

@@ -48,7 +48,8 @@ export class ConversationStore {
    */
   async get(id: string): Promise<Conversation | undefined> {
     const conv = await this.db.conversations.get(id);
-    if (!conv || conv.deleted_at !== null) {
+    // Use != null to match both null and undefined (deleted_at may not be initialized)
+    if (!conv || conv.deleted_at != null) {
       return undefined;
     }
     return conv;
@@ -76,13 +77,13 @@ export class ConversationStore {
       .where('[user_id1+user_id2]')
       .equals([user1, user2])
       .first();
-    if (conv && conv.deleted_at === null) return conv;
+    if (conv && conv.deleted_at == null) return conv;
 
     conv = await this.db.conversations
       .where('[user_id1+user_id2]')
       .equals([user2, user1])
       .first();
-    if (conv && conv.deleted_at === null) return conv;
+    if (conv && conv.deleted_at == null) return conv;
 
     return undefined;
   }
@@ -97,31 +98,33 @@ export class ConversationStore {
     offset: number,
     limit: number,
   ): Promise<Conversation[]> {
+    // Database is already scoped by userID+deviceID (xyncra-{userID}-{deviceID}),
+    // so we can return all non-deleted conversations without filtering by user_id.
+    console.log('[ConversationStore] getByUser: returning all conversations (DB is user-scoped)');
     if (limit <= 0 || limit > 101) limit = 20;
     if (offset < 0) offset = 0;
 
-    // Gather candidates from both user columns, deduplicate, sort, and paginate.
-    const byUser1 = await this.db.conversations
-      .where('user_id1')
-      .equals(userID)
-      .toArray();
-    const byUser2 = await this.db.conversations
-      .where('user_id2')
-      .equals(userID)
+    // Debug: get all conversations without filtering
+    const allConvs = await this.db.conversations.toArray();
+    console.log('[ConversationStore] Total conversations in DB:', allConvs.length);
+    allConvs.forEach((conv, i) => {
+      console.log(`[ConversationStore] Conv ${i}:`, {
+        id: conv.id,
+        user_id1: conv.user_id1,
+        user_id2: conv.user_id2,
+        deleted_at: conv.deleted_at,
+        deleted_at_type: typeof conv.deleted_at,
+        deleted_at_is_null: conv.deleted_at == null,
+      });
+    });
+
+    // Get all conversations, filter out soft-deleted ones
+    // Use == null to match both null and undefined (deleted_at may not be initialized)
+    const all = await this.db.conversations
+      .filter((conv) => conv.deleted_at == null && !!conv.user_id2)
       .toArray();
 
-    // Deduplicate by id (a conversation could appear in both queries if user1 === user2).
-    const seen = new Set<string>();
-    const all: Conversation[] = [];
-    for (const conv of [...byUser1, ...byUser2]) {
-      // Exclude soft-deleted and conversations where user_id2 is empty.
-      if (conv.deleted_at !== null) continue;
-      if (!conv.user_id2) continue;
-      if (!seen.has(conv.id)) {
-        seen.add(conv.id);
-        all.push(conv);
-      }
-    }
+    console.log('[ConversationStore] Found', all.length, 'non-deleted conversations');
 
     // Sort by last_message_at descending.
     all.sort(
@@ -181,7 +184,7 @@ export class ConversationStore {
       [this.db.conversations, this.db.messages],
       async () => {
         const conv = await this.db.conversations.get(id);
-        if (!conv || conv.deleted_at !== null) {
+        if (!conv || conv.deleted_at != null) {
           throw ErrNotFound;
         }
 
@@ -193,7 +196,7 @@ export class ConversationStore {
           .where('conversation_id')
           .equals(id)
           .modify((msg) => {
-            if (msg.deleted_at === null) {
+            if (msg.deleted_at == null) {
               msg.deleted_at = now;
             }
           });
@@ -219,7 +222,7 @@ export class ConversationStore {
         }
 
         // Restore the conversation if it was soft-deleted.
-        if (conv.deleted_at !== null) {
+        if (conv.deleted_at != null) {
           await this.db.conversations.update(id, { deleted_at: null });
 
           // Cascade restore all messages in this conversation (D-015).
@@ -227,7 +230,7 @@ export class ConversationStore {
             .where('conversation_id')
             .equals(id)
             .modify((msg) => {
-              if (msg.deleted_at !== null) {
+              if (msg.deleted_at != null) {
                 msg.deleted_at = null;
               }
             });
@@ -298,14 +301,16 @@ export class ConversationStore {
   }
 
   /**
-   * Searches conversations for the given user that contain the specified title
-   * substring (case-insensitive), ordered by last_message_at descending.
+   * Searches conversations that contain the specified title substring
+   * (case-insensitive), ordered by last_message_at descending.
    *
    * Note: Dexie does not support LIKE queries. We perform case-insensitive
    * substring matching in JavaScript after fetching candidates.
+   *
+   * Note: Database is already scoped by userID+deviceID, so no user_id filtering needed.
    */
   async searchByTitle(
-    userID: string,
+    _userID: string,
     title: string,
     limit: number,
   ): Promise<Conversation[]> {
@@ -314,26 +319,10 @@ export class ConversationStore {
 
     const lowerTitle = title.toLowerCase();
 
-    // Fetch candidates from both user columns.
-    const byUser1 = await this.db.conversations
-      .where('user_id1')
-      .equals(userID)
+    // Database is single-user scoped; just filter by title.
+    const matches = await this.db.conversations
+      .filter((conv) => conv.deleted_at == null && conv.title.toLowerCase().includes(lowerTitle))
       .toArray();
-    const byUser2 = await this.db.conversations
-      .where('user_id2')
-      .equals(userID)
-      .toArray();
-
-    const seen = new Set<string>();
-    const matches: Conversation[] = [];
-    for (const conv of [...byUser1, ...byUser2]) {
-      if (conv.deleted_at !== null) continue;
-      if (seen.has(conv.id)) continue;
-      seen.add(conv.id);
-      if (conv.title.toLowerCase().includes(lowerTitle)) {
-        matches.push(conv);
-      }
-    }
 
     // Sort by last_message_at descending.
     matches.sort(
@@ -449,7 +438,7 @@ export class ConversationStore {
     const msgTable = tx.table('messages') as Dexie.Table<Message, string>;
 
     const conv = await convTable.get(id);
-    if (!conv || conv.deleted_at !== null) {
+    if (!conv || conv.deleted_at != null) {
       throw ErrNotFound;
     }
 
@@ -461,7 +450,7 @@ export class ConversationStore {
       .where('conversation_id')
       .equals(id)
       .modify((msg) => {
-        if (msg.deleted_at === null) {
+        if (msg.deleted_at == null) {
           msg.deleted_at = now;
         }
       });
@@ -482,7 +471,7 @@ export class ConversationStore {
       throw ErrNotFound;
     }
 
-    if (conv.deleted_at !== null) {
+    if (conv.deleted_at != null) {
       await convTable.update(id, { deleted_at: null });
 
       // Cascade restore messages (D-015).
@@ -490,7 +479,7 @@ export class ConversationStore {
         .where('conversation_id')
         .equals(id)
         .modify((msg) => {
-          if (msg.deleted_at !== null) {
+          if (msg.deleted_at != null) {
             msg.deleted_at = null;
           }
         });

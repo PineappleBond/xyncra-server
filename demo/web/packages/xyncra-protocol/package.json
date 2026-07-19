@@ -15,7 +15,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --build --force",
     "test": "jest",
     "typecheck": "tsc --noEmit"
   },

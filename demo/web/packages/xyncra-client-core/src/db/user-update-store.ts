@@ -28,49 +28,47 @@ export class UserUpdateStore {
   }
 
   /**
-   * Returns user updates for the given userID with seq greater than afterSeq,
+   * Returns user updates with seq greater than afterSeq,
    * ordered by seq ascending, limited to at most limit rows.
+   *
+   * Note: Database is already scoped by userID+deviceID, so no user_id filtering needed.
    */
   async listByUser(
-    userID: string,
+    _userID: string,
     afterSeq: number,
     limit: number,
   ): Promise<UserUpdate[]> {
     if (limit <= 0 || limit > 1000) limit = 100;
 
-    // Use compound index for efficient range query.
-    const lowerBound: [string, number] = [userID, afterSeq + 1];
-    const upperBound: [string, number] = [userID, Number.MAX_SAFE_INTEGER];
-
+    // Database is single-user scoped; just filter by seq.
     const updates = await this.db.userUpdates
-      .where('[user_id+seq]')
-      .between(lowerBound, upperBound, true, true)
+      .where('seq')
+      .above(afterSeq)
       .toArray();
 
-    // Sort by seq ascending (should already be sorted by compound index, but ensure).
+    // Sort by seq ascending.
     updates.sort((a, b) => a.seq - b.seq);
 
     return updates.slice(0, limit);
   }
 
   /**
-   * Returns user updates for the given userID with seq in the range
-   * (afterSeq, maxSeq] (exclusive start, inclusive end), ordered by seq
-   * ascending.
+   * Returns user updates with seq in the range (afterSeq, maxSeq]
+   * (exclusive start, inclusive end), ordered by seq ascending.
+   *
+   * Note: Database is already scoped by userID+deviceID, so no user_id filtering needed.
    */
   async listByUserRange(
-    userID: string,
+    _userID: string,
     afterSeq: number,
     maxSeq: number,
   ): Promise<UserUpdate[]> {
     if (maxSeq <= afterSeq) return [];
 
-    const lowerBound: [string, number] = [userID, afterSeq + 1];
-    const upperBound: [string, number] = [userID, maxSeq];
-
+    // Database is single-user scoped; just filter by seq range.
     const updates = await this.db.userUpdates
-      .where('[user_id+seq]')
-      .between(lowerBound, upperBound, true, true)
+      .where('seq')
+      .between(afterSeq + 1, maxSeq, true, true)
       .toArray();
 
     // Sort by seq ascending.
@@ -80,14 +78,12 @@ export class UserUpdateStore {
   }
 
   /**
-   * Returns the highest seq value for the given user. Returns 0 if the user
-   * has no update records.
+   * Returns the highest seq value. Returns 0 if no update records exist.
+   *
+   * Note: Database is already scoped by userID+deviceID, so no user_id filtering needed.
    */
-  async getLatestSeq(userID: string): Promise<number> {
-    const updates = await this.db.userUpdates
-      .where('user_id')
-      .equals(userID)
-      .toArray();
+  async getLatestSeq(_userID: string): Promise<number> {
+    const updates = await this.db.userUpdates.toArray();
 
     if (updates.length === 0) return 0;
     return Math.max(...updates.map((u) => u.seq));

@@ -353,7 +353,9 @@ func decodeTypingPayload(t *testing.T, raw []byte) TypingPayload {
 
 func TestSendErrorMessage_PersistsMessage(t *testing.T) {
 	mockStore := &mockStoreAPI{}
-	executor := &AgentExecutor{store: mockStore}
+	mockBS := &mockBroadcastServer{}
+	bh := NewBroadcastHelper(mockBS, testLogger{})
+	executor := &AgentExecutor{store: mockStore, broadcaster: bh}
 
 	payload := ExecutePayload{
 		ConversationID: "conv-1",

@@ -152,10 +152,12 @@ export const layout: RunTimeLayoutConfig = ({
     // 增加一个 loading 的状态
     childrenRender: (children) => {
       // if (initialState?.loading) return <PageLoading />;
-      const wsUrl = process.env.XYNCRA_WS_URL || `ws://localhost:8080/ws`;
+      const wsUrl = process.env.XYNCRA_WS_URL || `ws://localhost:18080/ws`;
       console.log('[Xyncra] WebSocket URL:', wsUrl);
+      const currentUserId = initialState?.currentUser?.userid || 'alice';
+      console.log('[Xyncra] User ID:', currentUserId);
       return (
-        <XyncraProvider wsUrl={wsUrl}>
+        <XyncraProvider wsUrl={wsUrl} agentID={currentUserId}>
           {children}
           <DemoFunctions />
           <FloatingAssistant />

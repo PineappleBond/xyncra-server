@@ -490,6 +490,11 @@ func NewAgentResumeHandler(
 		// 3. Delete checkpoint from Redis (D-112).
 		executor.cleanupAfterResume(ctx, payload.CheckpointID, logger)
 
+		// 4. Broadcast conversation update to notify clients that questions have been cleared.
+		// This triggers the pull-on-notification pattern: clients will fetch the latest
+		// conversation state via get_conversation RPC and see that questions are empty.
+		executor.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, time.Now())
+
 		releaseLock()
 		return nil
 	}

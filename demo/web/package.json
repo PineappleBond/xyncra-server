@@ -9,6 +9,8 @@
     "biome": "biome check --write",
     "biome:lint": "biome lint",
     "build": "max build",
+    "build:all": "npm run build -w packages/xyncra-protocol && npm run build -w packages/xyncra-client-core && npm run build -w packages/xyncra-client-cli && npm run build -w packages/xyncra-client-web && npm run build",
+    "clean": "rm -rf .turbo packages/*/.turbo .umi .umi-production src/.umi src/.umi-production packages/*/.umi packages/*/.umi-production dist packages/*/dist .turbopack packages/*/.turbopack .max 2>/dev/null || true",
     "deploy": "cross-env CI=true max build && gh-pages -d dist",
     "dev": "cross-env UMI_ENV=dev max dev",
     "i18n-remove": "node scripts/i18n-remove.js",

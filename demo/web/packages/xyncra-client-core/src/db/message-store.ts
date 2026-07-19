@@ -50,7 +50,7 @@ export class MessageStore {
    */
   async get(id: string): Promise<Message | undefined> {
     const msg = await this.db.messages.get(id);
-    if (!msg || msg.deleted_at !== null) {
+    if (!msg || msg.deleted_at != null) {
       return undefined;
     }
     return msg;
@@ -69,7 +69,7 @@ export class MessageStore {
       .where('[client_message_id+sender_id]')
       .equals([clientMessageID, senderID])
       .first();
-    if (!msg || msg.deleted_at !== null) {
+    if (!msg || msg.deleted_at != null) {
       return undefined;
     }
     return msg;
@@ -96,7 +96,7 @@ export class MessageStore {
       .toArray();
 
     // Filter out soft-deleted messages.
-    const active = msgs.filter((m) => m.deleted_at === null);
+    const active = msgs.filter((m) => m.deleted_at == null);
 
     // Sort by message_id ascending (compound index ensures this order, but
     // explicit sort guarantees correctness).
@@ -130,7 +130,7 @@ export class MessageStore {
       .toArray();
 
     // Filter out soft-deleted.
-    msgs = msgs.filter((m) => m.deleted_at === null);
+    msgs = msgs.filter((m) => m.deleted_at == null);
 
     // Apply afterMessageID filter (message_id < afterMessageID for descending order).
     if (afterMessageID > 0) {
@@ -168,7 +168,7 @@ export class MessageStore {
 
     const filtered = msgs.filter(
       (m) =>
-        m.deleted_at === null &&
+        m.deleted_at == null &&
         m.created_at.getTime() >= startMs &&
         m.created_at.getTime() <= endMs,
     );
@@ -188,7 +188,7 @@ export class MessageStore {
       .where('id')
       .equals(id)
       .modify((msg) => {
-        if (msg.deleted_at !== null) return;
+        if (msg.deleted_at != null) return;
         msg.deleted_at = new Date();
       });
     if (updated === 0) {
@@ -205,7 +205,7 @@ export class MessageStore {
       .where('id')
       .equals(id)
       .modify((msg) => {
-        if (msg.deleted_at === null) return; // Not soft-deleted — no-op but still counts
+        if (msg.deleted_at == null) return; // Not soft-deleted — no-op but still counts
         msg.deleted_at = null;
       });
     if (updated === 0) {
@@ -222,7 +222,7 @@ export class MessageStore {
       .where('conversation_id')
       .equals(convID)
       .modify((msg) => {
-        if (msg.deleted_at === null) {
+        if (msg.deleted_at == null) {
           msg.deleted_at = now;
         }
       });
@@ -238,7 +238,7 @@ export class MessageStore {
       .where('conversation_id')
       .equals(convID)
       .modify((msg) => {
-        if (msg.deleted_at !== null) {
+        if (msg.deleted_at != null) {
           msg.deleted_at = null;
           count++;
         }
@@ -263,7 +263,7 @@ export class MessageStore {
       .toArray();
 
     // Filter out soft-deleted.
-    const active = msgs.filter((m) => m.deleted_at === null);
+    const active = msgs.filter((m) => m.deleted_at == null);
 
     // Sort by message_id descending.
     active.sort((a, b) => b.message_id - a.message_id);
@@ -284,7 +284,7 @@ export class MessageStore {
       .between(lowerBound, upperBound, true, true)
       .toArray();
 
-    return msgs.filter((m) => m.deleted_at === null).length;
+    return msgs.filter((m) => m.deleted_at == null).length;
   }
 
   /**
@@ -337,7 +337,7 @@ export class MessageStore {
       .where('id')
       .equals(id)
       .modify((msg) => {
-        if (msg.deleted_at !== null) return;
+        if (msg.deleted_at != null) return;
         msg.deleted_at = new Date();
       });
     if (updated === 0) {

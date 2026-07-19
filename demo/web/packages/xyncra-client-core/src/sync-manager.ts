@@ -28,6 +28,7 @@ import type {
   Conversation as DBConversation,
   Message as DBMessage,
   NotificationLog,
+  Question,
 } from './db/models';
 import { ErrDuplicateKey, SyncError } from './errors';
 import type {
@@ -180,10 +181,17 @@ export class SyncManager {
    *   - seq === localMaxSeq+1 → normal processing: dedup → dispatch → advance seq.
    */
   async applyUpdate(update: PackageDataUpdate): Promise<void> {
+    console.log('[SyncManager] applyUpdate received:', {
+      type: update.type,
+      seq: update.seq,
+      payload: update.payload,
+    });
+
     // C7: Ephemeral updates (seq=0) bypass seq continuity, dedup, and persistence.
     if (update.seq === 0) {
       // Conversation "update" action uses pull-on-notification (D-118/D-124).
       if (update.type === 'conversation') {
+        console.log('[SyncManager] Calling handleEphemeralConversationUpdate');
         await this.handleEphemeralConversationUpdate(update);
       } else {
         await this.notifyHandler(update);
@@ -289,7 +297,7 @@ export class SyncManager {
 
       await db.transaction(
         'rw',
-        [db.notificationLogs, db.messages, db.conversations, db.syncStates],
+        [db.notificationLogs, db.messages, db.conversations, db.syncStates, db.questions, db.rpcLogs],
         async () => {
           // Capture the transaction reference once (guaranteed non-null inside callback).
           const tx = Dexie.currentTransaction as unknown as Transaction;
@@ -674,6 +682,7 @@ export class SyncManager {
 
   /**
    * Processes a "create" action for a conversation update (D-045).
+   * Saves conversation from payload, then syncs questions outside transaction.
    */
   private async handleConversationCreateTx(
     update: PackageDataUpdate,
@@ -681,7 +690,7 @@ export class SyncManager {
   ): Promise<void> {
     const payload = update.payload as {
       action: string;
-      conversation: Record<string, unknown>;
+      conversation?: Record<string, unknown>;
     };
 
     if (!payload.conversation) {
@@ -691,13 +700,6 @@ export class SyncManager {
       return;
     }
 
-    // Debug: log the raw conversation data
-    this.options.logger.debug('Received conversation create payload', {
-      raw: payload.conversation,
-      id: payload.conversation.id,
-      idType: typeof payload.conversation.id,
-    });
-
     // Transform date strings to Date objects (server sends ISO strings)
     const conv = this.transformConversationDates(payload.conversation);
 
@@ -706,6 +708,19 @@ export class SyncManager {
       string
     >;
     await convTable.put(conv);
+
+    // Sync questions outside transaction (RPC call is slow)
+    const convID = conv.id;
+    setTimeout(async () => {
+      try {
+        await this.syncQuestionsForConversation(convID);
+      } catch (error) {
+        this.options.logger.error('Failed to sync questions for new conversation', {
+          conversation_id: convID,
+          error,
+        });
+      }
+    }, 0);
   }
 
   /**
@@ -747,6 +762,7 @@ export class SyncManager {
 
   /**
    * Legacy conversation upsert (backward compat with events that omit action).
+   * Saves conversation from payload, then syncs questions outside transaction.
    */
   private async handleConversationLegacyUpsertTx(
     update: PackageDataUpdate,
@@ -767,6 +783,70 @@ export class SyncManager {
       string
     >;
     await convTable.put(conv);
+
+    // Sync questions outside transaction (RPC call is slow)
+    const convID = conv.id;
+    setTimeout(async () => {
+      try {
+        await this.syncQuestionsForConversation(convID);
+      } catch (error) {
+        this.options.logger.error('Failed to sync questions for legacy upsert', {
+          conversation_id: convID,
+          error,
+        });
+      }
+    }, 0);
+  }
+
+  /**
+   * Syncs questions for a conversation by calling get_conversation RPC.
+   * This is called outside of transactions to avoid transaction timeout issues.
+   */
+  private async syncQuestionsForConversation(convID: string): Promise<void> {
+    const result = (await this.options.rpcFn('get_conversation', {
+      conversation_id: convID,
+    })) as {
+      conversation: Record<string, unknown>;
+      questions?: Array<{
+        id: string;
+        conversation_id: string;
+        checkpoint_id: string;
+        interrupt_id: string;
+        question_text: string;
+        status: string;
+        created_at: string;
+      }>;
+    };
+
+    if (!result.conversation) {
+      this.options.logger.error(
+        `get_conversation returned nil conversation for ${convID}`,
+      );
+      return;
+    }
+
+    // Handle questions (D-125): clear stale questions and upsert new ones.
+    // When questions is defined (even if empty), sync local state to match server.
+    if (result.questions) {
+      // Clear stale questions when agent_status != asking_user (HITL ended)
+      // or when new questions are provided.
+      if (result.conversation.agent_status !== 'asking_user') {
+        await this.options.db.questionsStore.deleteByConversation(convID);
+      }
+      for (const q of result.questions) {
+        // Convert created_at from string to Date
+        const question: Question = {
+          id: q.id,
+          conversation_id: q.conversation_id,
+          checkpoint_id: q.checkpoint_id,
+          interrupt_id: q.interrupt_id,
+          question_text: q.question_text,
+          status: q.status,
+          created_at: new Date(q.created_at),
+        };
+        await this.options.db.questionsStore.upsert(question);
+      }
+    }
   }
 
   /**
@@ -807,7 +887,8 @@ export class SyncManager {
     await convTable.put(conv);
 
     // Handle questions (D-125): clear stale questions and upsert new ones.
-    if (result.questions && result.questions.length > 0) {
+    // When questions is defined (even if empty), sync local state to match server.
+    if (result.questions) {
       const qTable = tx.table('questions');
       // Clear stale questions when agent_status != asking_user (HITL ended)
       // or when new questions are provided.
@@ -904,7 +985,8 @@ export class SyncManager {
       }
 
       // Handle questions (D-125).
-      if (result.questions && result.questions.length > 0) {
+      // When questions is defined (even if empty), sync local state to match server.
+      if (result.questions) {
         if (result.conversation.agent_status !== 'asking_user') {
           await this.options.db.questionsStore.deleteByConversation(convID);
         }
@@ -920,8 +1002,44 @@ export class SyncManager {
         }
       }
 
+      // Fetch questions from store for HITL (D-125)
+      let questions: Array<{
+        id: string;
+        question_text: string;
+        checkpoint_id: string;
+        interrupt_id: string;
+        status: string;
+      }> | undefined;
+      if (result.conversation.agent_status === 'asking_user') {
+        try {
+          const storedQuestions = await this.options.db.questionsStore
+            .getByConversation(convID);
+          if (storedQuestions.length > 0) {
+            questions = storedQuestions.map((q: any) => ({
+              id: q.id,
+              question_text: q.question_text,
+              checkpoint_id: q.checkpoint_id,
+              interrupt_id: q.interrupt_id,
+              status: q.status,
+            }));
+          }
+        } catch (error) {
+          this.options.logger.error('Fetch questions failed', {
+            conversation_id: convID,
+            error,
+          });
+        }
+      }
+
+      console.log('[SyncManager Debug] Calling onConversation with:', {
+        convID: result.conversation.id,
+        agent_status: result.conversation.agent_status,
+        hasQuestions: !!questions,
+        questionsCount: questions?.length,
+      });
+
       await this.options.handler.onConversation(
-        conversationToHandler(result.conversation),
+        conversationToHandler({ ...result.conversation, questions }),
         'updated',
       );
     } catch (error) {
@@ -1217,5 +1335,10 @@ function conversationToHandler(conv: DBConversation): Conversation {
         ? conv.deleted_at.toISOString()
         : String(conv.deleted_at)
       : undefined,
+    // HITL fields (D-125)
+    agentStatus: conv.agent_status || undefined,
+    agentId: conv.agent_id || undefined,
+    checkpointId: conv.checkpoint_id || undefined,
+    questions: conv.questions,
   };
 }

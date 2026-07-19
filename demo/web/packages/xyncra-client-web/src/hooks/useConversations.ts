@@ -79,15 +79,24 @@ export function useConversations(): UseConversationsReturn {
 
   // -- Initial load + event subscriptions --
   useEffect(() => {
-    if (!client) return;
+    if (!client) {
+      console.log('[useConversations] No client yet');
+      return;
+    }
 
+    console.log('[useConversations] Starting initial load...');
     // Initial load from local DB.
     client
       .listConversations()
       .then((result) => {
+        console.log('[useConversations] Loaded conversations:', {
+          count: result.conversations.length,
+          hasMore: result.has_more,
+        });
         setConversations(result.conversations.map(dbConversationToEvent));
       })
       .catch((err: unknown) => {
+        console.error('[useConversations] Load failed:', err);
         setError(err instanceof Error ? err : new Error(String(err)));
       })
       .finally(() => {

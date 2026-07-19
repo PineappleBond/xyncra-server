@@ -58,11 +58,54 @@ export interface UseHITLReturn {
  * it for user input, then call `answer()` to resume the agent or `dismiss()`
  * to clear it.
  */
-export function useHITL(): UseHITLReturn {
+export function useHITL(conversationId?: string): UseHITLReturn {
   const { client, eventEmitter } = useXyncra();
   const [pendingQuestion, setPendingQuestion] = useState<HITLQuestion | null>(
     null,
   );
+
+  // Check for pending questions on mount and conversation change
+  useEffect(() => {
+    console.log('[useHITL] useEffect triggered:', { client: !!client, conversationId });
+    if (!client || !conversationId) {
+      console.log('[useHITL] Skipping check - no client or conversationId');
+      return;
+    }
+
+    const checkPendingQuestions = async () => {
+      console.log('[useHITL] Checking for pending questions...');
+      try {
+        const result = await client.getConversation(conversationId);
+        console.log('[useHITL] Got conversation:', {
+          id: result.conversation.id,
+          questionsCount: result.questions?.length,
+          agent_status: result.conversation.agent_status,
+        });
+        if (result.questions && result.questions.length > 0) {
+          const pendingQ = result.questions.find((q) => q.status === 'pending');
+          console.log('[useHITL] Pending question:', pendingQ);
+          if (pendingQ) {
+            console.log('[useHITL] Found pending question on load:', {
+              conversationId,
+              questionId: pendingQ.id,
+            });
+            setPendingQuestion({
+              userId: result.conversation.user_id2,
+              conversationId: result.conversation.id,
+              question: pendingQ.question_text,
+              questionId: pendingQ.id,
+              checkpointId: pendingQ.checkpoint_id,
+              interruptId: pendingQ.interrupt_id,
+            });
+          }
+        }
+      } catch (error) {
+        console.error('[useHITL] Failed to check pending questions:', error);
+      }
+    };
+
+    checkPendingQuestions();
+  }, [client, conversationId]);
 
   useEffect(() => {
     const unsub = eventEmitter.on(

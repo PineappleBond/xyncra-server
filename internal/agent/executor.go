@@ -335,8 +335,11 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 					Status:          "sent",
 					CreatedAt:       time.Now(),
 				}
-				if _, persistErr := e.store.SendMessage(ctx, msg, []string{payload.SenderID, payload.AgentID}); persistErr != nil {
+				if result, persistErr := e.store.SendMessage(ctx, msg, []string{payload.SenderID, payload.AgentID}); persistErr != nil {
 					e.logger.Error("agent executor: failed to persist partial response", "error", persistErr)
+				} else if result != nil {
+					// Broadcast the persisted partial message to both users in real-time.
+					e.broadcaster.BroadcastMessageUpdate(ctx, result.Updates)
 				}
 			}
 			// Map to sentinel errors for classifyError (D-067).
@@ -462,13 +465,17 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 			Status:          "sent",
 			CreatedAt:       time.Now(),
 		}
-		if _, err := e.store.SendMessage(ctx, msg, []string{payload.SenderID, payload.AgentID}); err != nil {
+		if result, err := e.store.SendMessage(ctx, msg, []string{payload.SenderID, payload.AgentID}); err != nil {
 			e.logger.Error("agent executor: failed to persist final message",
 				"agent_id", payload.AgentID,
 				"conversation_id", payload.ConversationID,
 				"error", err,
 			)
 			return fmt.Errorf("execute agent: persist message: %w", err)
+		} else if result != nil {
+			// 14b. Broadcast the persisted message to both users in real-time
+			// so they receive the seq-ed update without needing sync_updates.
+			e.broadcaster.BroadcastMessageUpdate(ctx, result.Updates)
 		}
 	}
 
@@ -550,7 +557,14 @@ func (e *AgentExecutor) sendErrorMessage(ctx context.Context, payload ExecutePay
 		Status:          "sent",
 		CreatedAt:       time.Now(),
 	}
-	if _, err := e.store.SendMessage(ctx, msg, []string{payload.SenderID, payload.AgentID}); err != nil {
+	if result, err := e.store.SendMessage(ctx, msg, []string{payload.SenderID, payload.AgentID}); err != nil {
 		e.logger.Error("agent executor: failed to persist error message", "error", err)
+		return
+	} else if result != nil {
+		// Broadcast the persisted error message to both users in real-time
+		// so they receive the seq-ed update without needing sync_updates.
+		e.broadcaster.BroadcastMessageUpdate(ctx, result.Updates)
 	}
+	// Broadcast conversation update so client pulls the error message.
+	e.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, time.Now())
 }

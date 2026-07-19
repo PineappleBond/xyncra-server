@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/PineappleBond/xyncra-server/internal/store/model"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
 
@@ -237,4 +238,31 @@ func (bh *BroadcastHelper) broadcastEphemeral(targetUserID, updateType string, p
 // Used by the resume handler to deliver persisted message updates in real-time.
 func (bh *BroadcastHelper) BroadcastRaw(targetUserID string, updates *protocol.PackageDataUpdates) error {
 	return bh.wsServer.BroadcastUpdates(targetUserID, updates)
+}
+
+// BroadcastMessageUpdate broadcasts persisted message updates to each user
+// with their real DB-allocated seq numbers. This is needed after the agent
+// executor persists a message via store.SendMessage — the DB records are
+// created, but without this broadcast the clients won't receive the update
+// until the next sync_updates call.
+//
+// userUpdates must come from store.SendMessageResult.Updates (each entry
+// already has the correct UserID, Seq, Payload, and CreatedAt).
+func (bh *BroadcastHelper) BroadcastMessageUpdate(ctx context.Context, userUpdates []model.UserUpdate) {
+	_ = ctx // reserved for future cancellation
+	for _, u := range userUpdates {
+		updates := &protocol.PackageDataUpdates{
+			Updates: []protocol.PackageDataUpdate{
+				{
+					Seq:       u.Seq,
+					Type:      protocol.UpdateTypeMessage,
+					Payload:   u.Payload,
+					CreatedAt: u.CreatedAt,
+				},
+			},
+		}
+		if err := bh.wsServer.BroadcastUpdates(u.UserID, updates); err != nil {
+			bh.logger.Error("broadcast: message update failed", "user_id", u.UserID, "seq", u.Seq, "error", err)
+		}
+	}
 }

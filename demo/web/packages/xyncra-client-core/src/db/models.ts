@@ -81,6 +81,15 @@ export interface Conversation {
 
   /** Soft-delete timestamp. Null means not deleted. */
   deleted_at: Date | null;
+
+  /** HITL questions (transient, not stored in DB). */
+  questions?: Array<{
+    id: string;
+    question_text: string;
+    checkpoint_id: string;
+    interrupt_id: string;
+    status: string;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
