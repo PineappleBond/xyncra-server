@@ -58,6 +58,9 @@
 | D-126 | 消息按需拉取（FetchMoreMessages） | 本地消息不足时从服务器拉取 |
 | D-127 | 手动业务级追踪，而非自动基础设施追踪 | Jaeger Operation 列表保持高信噪比 |
 | D-128 | /metrics 端点通过 WSWithExtraRoutes 暴露在同一 HTTP 端口 | 简化部署，内网模型无需独立管理端口 |
+| D-130 | Web 客户端连接状态机 | idle→connecting→syncing→connected→disconnected(+reconnecting)，2s 空库兜底显示 syncing 而非假 connected |
+| D-131 | 客户端 deviceInfo 自动填充 | Web 自动 `{platform:'web',userAgent}`，CLI 自动 `{platform:'cli',os}`，符合 D-001 开箱即用 |
+| D-132 | 客户端错误消息分层 | error:rpc 事件暴露 `{method,message,code}` 公共通道，UI 映射友好提示，不泄露内部堆栈 |
 
 ---
 

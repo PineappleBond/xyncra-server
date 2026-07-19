@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["jest"],
+    "paths": {
+      "@xyncra/protocol": ["../xyncra-protocol/src"],
+      "@xyncra/protocol/*": ["../xyncra-protocol/src/*"],
+      "@xyncra/client-core": ["../xyncra-client-core/src"],
+      "@xyncra/client-core/*": ["../xyncra-client-core/src/*"]
+    }
+  },
+  "include": ["src/**/*"],
+  "references": [
+    { "path": "../xyncra-protocol" },
+    { "path": "../xyncra-client-core" }
+  ]
+}
