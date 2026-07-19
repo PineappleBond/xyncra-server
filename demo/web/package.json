@@ -29,7 +29,9 @@
     "test:update": "jest -u",
     "tsc": "tsc --noEmit"
   },
-  "browserslist": ["defaults"],
+  "browserslist": [
+    "defaults"
+  ],
   "dependencies": {
     "@ant-design/icons": "^6.2.2",
     "@ant-design/plots": "^2.6.8",
@@ -51,6 +53,9 @@
   },
   "devDependencies": {
     "@ant-design/cli": "^6.3.7",
+    "@babel/preset-env": "^7.29.7",
+    "@babel/preset-react": "^7.29.7",
+    "@babel/preset-typescript": "^7.29.7",
     "@biomejs/biome": "^2.4.13",
     "@commitlint/cli": "^20.5.2",
     "@commitlint/config-conventional": "^20.5.0",
@@ -84,6 +89,10 @@
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3"
   },
-  "workspaces": ["packages/*"],
-  "engines": { "node": ">=20.0.0" }
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  }
 }

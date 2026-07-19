@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import React from 'react';
+const mockReact = React;
 import { ConnectionStatus } from '../../components/FloatingAssistant/ConnectionStatus';
 import type {
   ConnectionStatus as ConnectionStatusType,
@@ -11,7 +12,7 @@ import { FunctionRegistry } from '../../internal/FunctionRegistry';
 
 jest.mock('antd', () => ({
   Badge: ({ status, text }: any) =>
-    React.createElement(
+    mockReact.createElement(
       'span',
       { 'data-testid': 'badge', 'data-status': status },
       text,

@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import React from 'react';
+const mockReact = React;
 import { ConversationList } from '../../components/FloatingAssistant/ConversationList';
 import type { XyncraContextValue } from '../../context/XyncraProvider';
 import { XyncraContext } from '../../context/XyncraProvider';
@@ -21,27 +22,27 @@ jest.mock('../../hooks/useConversations', () => ({
 // Mock antd
 jest.mock('antd', () => ({
   Button: ({ children, onClick, ...props }: any) =>
-    React.createElement(
+    mockReact.createElement(
       'button',
       { type: 'button', onClick, ...props },
       children,
     ),
   Empty: ({ description }: any) =>
-    React.createElement('div', { 'data-testid': 'empty' }, description),
+    mockReact.createElement('div', { 'data-testid': 'empty' }, description),
 }));
 
 jest.mock('@ant-design/icons', () => ({
-  PlusOutlined: () => React.createElement('span', null, '+'),
+  PlusOutlined: () => mockReact.createElement('span', null, '+'),
 }));
 
 jest.mock('../../components/FloatingAssistant/ConnectionStatus', () => ({
-  ConnectionStatus: () => React.createElement('span', null, 'status'),
+  ConnectionStatus: () => mockReact.createElement('span', null, 'status'),
 }));
 
 jest.mock(
   '@ant-design/x',
   () => ({
-    Conversations: () => React.createElement('div', null, 'conversations'),
+    Conversations: () => mockReact.createElement('div', null, 'conversations'),
   }),
   { virtual: true },
 );

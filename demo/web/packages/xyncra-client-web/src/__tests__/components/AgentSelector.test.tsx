@@ -6,12 +6,16 @@ import { XyncraContext } from '../../context/XyncraProvider';
 import { TypedEventEmitter } from '../../internal/EventEmitter';
 import { FunctionRegistry } from '../../internal/FunctionRegistry';
 
+// jest.mock factory functions cannot reference out-of-scope variables, so we
+// alias React to a `mock`-prefixed name that jest permits inside factories.
+const mockReact = React;
+
 jest.mock('antd', () => ({
   Avatar: ({ icon }: any) =>
-    React.createElement('span', { 'data-testid': 'avatar' }, icon),
+    mockReact.createElement('span', { 'data-testid': 'avatar' }, icon),
   List: Object.assign(
     ({ dataSource, renderItem }: any) =>
-      React.createElement(
+      mockReact.createElement(
         'div',
         { 'data-testid': 'list' },
         dataSource.map((item: any, _i: number) => renderItem(item, _i)),
@@ -19,16 +23,16 @@ jest.mock('antd', () => ({
     {
       Item: Object.assign(
         ({ children, onClick, style }: any) =>
-          React.createElement(
+          mockReact.createElement(
             'div',
             { onClick, style, 'data-testid': 'list-item' },
             children,
           ),
         {
           Meta: ({ avatar: _avatar, title, description }: any) =>
-            React.createElement('div', null, [
-              React.createElement('span', { key: 'a' }, title),
-              React.createElement('span', { key: 'd' }, description),
+            mockReact.createElement('div', null, [
+              mockReact.createElement('span', { key: 'a' }, title),
+              mockReact.createElement('span', { key: 'd' }, description),
             ]),
         },
       ),
@@ -36,12 +40,12 @@ jest.mock('antd', () => ({
   ),
   Typography: {
     Text: ({ children, strong }: any) =>
-      React.createElement(strong ? 'strong' : 'span', null, children),
+      mockReact.createElement(strong ? 'strong' : 'span', null, children),
   },
 }));
 
 jest.mock('../../components/FloatingAssistant/ConnectionStatus', () => ({
-  ConnectionStatus: () => React.createElement('span', null, 'status'),
+  ConnectionStatus: () => mockReact.createElement('span', null, 'status'),
 }));
 
 jest.mock('../../components/FloatingAssistant/styles', () => ({
@@ -49,11 +53,14 @@ jest.mock('../../components/FloatingAssistant/styles', () => ({
 }));
 
 jest.mock('@ant-design/icons', () => ({
-  RobotOutlined: () => React.createElement('span', null, 'robot'),
+  RobotOutlined: () => mockReact.createElement('span', null, 'robot'),
 }));
 
 describe('AgentSelector', () => {
-  function renderSelector(agentID = 'test-agent') {
+  // The component ignores context.agentID and renders DEFAULT_AGENTS instead,
+  // so the injected agentID here is unused by AgentSelector (kept only to
+  // satisfy the XyncraContextValue type).
+  function renderSelector(agentID = 'test-bot') {
     const onSelect = jest.fn();
     const contextValue: XyncraContextValue = {
       client: {} as any,
@@ -83,15 +90,18 @@ describe('AgentSelector', () => {
     expect(screen.getByText('Agents')).toBeTruthy();
   });
 
-  it('should show the AI assistant agent', () => {
+  it('should show the default agents', () => {
     renderSelector();
-    expect(screen.getByText('AI 助手')).toBeTruthy();
+    expect(screen.getByText('Test Bot')).toBeTruthy();
+    expect(screen.getByText('Weather Bot')).toBeTruthy();
+    expect(screen.getByText('HITL 测试助手')).toBeTruthy();
+    expect(screen.getByText('HITL Parent')).toBeTruthy();
   });
 
   it('should call onSelect when agent is clicked', () => {
     const { onSelect } = renderSelector();
     const items = screen.getAllByTestId('list-item');
     items[0].click();
-    expect(onSelect).toHaveBeenCalledWith('test-agent');
+    expect(onSelect).toHaveBeenCalledWith('test-bot');
   });
 });

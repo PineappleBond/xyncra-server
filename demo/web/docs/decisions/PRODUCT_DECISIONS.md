@@ -20,6 +20,9 @@
 | TS-D-008 | TypeScript 版本作为 npm workspace 子包 | 与 demo/web 前端项目统一管理，Milestone 2 直接复用 |
 | TS-D-009 | 包名使用 `@xyncra/` scope | workspace 内部引用清晰，避免命名冲突 |
 | TS-D-010 | 协议类型 1:1 映射 Go protocol 包 | 不改造、不抽象；降低迁移心智负担 |
+| TS-D-011 | fs-ext 作为 flock 实现 | 必须使用 flock(2) 系统调用，与 Go 版 gofrs/flock 二进制兼容 |
+| TS-D-012 | --db-path 语义变更为 IndexedDB 数据库名称 | Go 版指向 SQLite 文件路径；TS 版改为 IndexedDB 数据库名称，保持 flag 兼容 |
+| TS-D-013 | Web Agent 超时复用 hitl:question 事件 | 维持 hitl:question 映射，不拆独立 agent:timeout；与 075 HITL 恢复链路一致 |
 
 ---
 
@@ -109,6 +112,43 @@
 - 降低迁移心智负担
 - 保持协议层的简单性和可预测性
 - Go 参考代码即为最佳文档
+
+### TS-D-011: fs-ext 作为 flock 实现
+
+**决策**：使用 `fs-ext` npm 包实现文件锁，它直接封装 `flock(2)` 系统调用。
+
+**原因**：
+
+- Go 版本使用 `github.com/gofrs/flock`（底层调用 `flock(2)`）
+- TS 版本必须与 Go 版本二进制兼容——同一把锁，两种语言都能正确检测
+- 其他 npm 锁库（`proper-lockfile` 用 mkdir 原子性，`lockfile` 用 rename 原子性）与 Go 的 flock 不兼容
+- 如果不兼容，Go 和 TS daemon 可能同时运行在同一 socket 上，导致数据损坏
+
+### TS-D-012: --db-path 语义变更
+
+**决策**：`--db-path` flag 保留，但语义从 "SQLite 文件路径" 变更为 "IndexedDB 数据库名称"。
+
+**原因**：
+
+- Go 版本使用 `--db-path` 指向 SQLite 文件（如 `~/.xyncra/{uid}/{did}/xyncra.db`）
+- TS 版本使用 IndexedDB（无文件路径概念），数据库通过名称标识
+- 保持 flag 存在以维持 CLI 兼容性
+- 默认值仍从 user_id/device_id 派生（如 `xyncra-{user_id}-{device_id}`）
+
+### TS-D-013: Web Agent 超时复用 hitl:question 事件
+
+**决策**：Web 端 `ReactUpdateHandler.onAgentTimeout` 直接将 timeout 映射为 `hitl:question` 事件，不新增独立的 `agent:timeout` 事件。
+
+**原因**：
+
+- 075 HITL 恢复链路已基于 `hitl:question` 构建（`useHITL.ts` 消费该事件驱动人工介入 UI）
+- Web 与 CLI 的 `onAgentTimeout` 语义不同：CLI 仅打印 `[agent_timeout]`，Web 将其视为需要人工介入的 HITL 场景
+- 复用现有 `hitl:question` 可避免新增事件类型、消费者与文档负担，保持一致性
+- `reason` 字段原样透传给 `hitl:question.reason`，不丢失 timeout 上下文
+
+**权衡**：
+
+- 代价是 timeout 语义被折叠进 HITL question，若未来需区分"超时"与"显式提问"则需拆事件（当前无此需求，CON-2 记录不修）
 
 ---
 

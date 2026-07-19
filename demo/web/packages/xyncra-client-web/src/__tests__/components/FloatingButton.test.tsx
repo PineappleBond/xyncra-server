@@ -1,9 +1,10 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import React from 'react';
+const mockReact = React;
 import { FloatingButton } from '../../components/FloatingAssistant/FloatingButton';
 
 jest.mock('@ant-design/icons', () => ({
-  MessageOutlined: () => React.createElement('span', null, 'icon'),
+  MessageOutlined: () => mockReact.createElement('span', null, 'icon'),
 }));
 
 describe('FloatingButton', () => {

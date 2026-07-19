@@ -77,19 +77,19 @@ describe('ReactUpdateHandler', () => {
   });
 
   describe('onConversation', () => {
-    it('should emit conversation:added event', async () => {
+    const conv: Conversation = {
+      id: 'conv-1',
+      userId1: 'user1',
+      userId2: 'user2',
+      title: 'Test',
+      createdAt: '2026-01-01T00:00:00Z',
+    };
+
+    it('should emit conversation:added event for created action', async () => {
       const callback = jest.fn();
       emitter.on('conversation:added', callback);
 
-      const conv: Conversation = {
-        id: 'conv-1',
-        userId1: 'user1',
-        userId2: 'user2',
-        title: 'Test',
-        createdAt: '2026-01-01T00:00:00Z',
-      };
-
-      await handler.onConversation(conv);
+      await handler.onConversation(conv, 'created');
 
       expect(callback).toHaveBeenCalledTimes(1);
       expect(callback).toHaveBeenCalledWith({
@@ -100,6 +100,29 @@ describe('ReactUpdateHandler', () => {
           title: 'Test',
         }),
       });
+    });
+
+    it('should emit conversation:updated event for updated action (default)', async () => {
+      const callback = jest.fn();
+      emitter.on('conversation:updated', callback);
+
+      await handler.onConversation(conv);
+      await handler.onConversation(conv, 'updated');
+
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(callback).toHaveBeenCalledWith({
+        conversation: expect.objectContaining({ id: 'conv-1' }),
+      });
+    });
+
+    it('should emit conversation:removed event for removed action', async () => {
+      const callback = jest.fn();
+      emitter.on('conversation:removed', callback);
+
+      await handler.onConversation(conv, 'removed');
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith({ conversationId: 'conv-1' });
     });
   });
 
@@ -206,6 +229,9 @@ describe('ReactUpdateHandler', () => {
         userId: 'agent1',
         conversationId: 'conv-1',
         reason: 'Need user input',
+        questionId: undefined,
+        checkpointId: undefined,
+        interruptId: undefined,
       });
     });
   });

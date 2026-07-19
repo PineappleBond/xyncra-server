@@ -116,3 +116,14 @@ globalThis.ResizeObserver = class {
   unobserve() {}
   disconnect() {}
 };
+
+// Node's TextEncoder/TextDecoder are not exposed on globalThis under jsdom.
+if (typeof globalThis.TextEncoder === 'undefined') {
+  const { TextEncoder, TextDecoder } = require('util');
+  globalThis.TextEncoder = TextEncoder;
+  globalThis.TextDecoder = TextDecoder;
+}
+
+// ---------------------------------------------------------------------------
+// End of setup
+// ---------------------------------------------------------------------------

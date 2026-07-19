@@ -67,6 +67,9 @@ export interface XyncraProviderProps {
  * Connection lifecycle status.
  *
  * - `connecting`: client.start() has been called but no data received yet.
+ * - `syncing`: handshake completed but no local data received within the 2s
+ *   empty-database fallback window (per D-130). Also covers the in-progress
+ *   sync phase before the first data event arrives.
  * - `connected`: at least one message or conversation event has been received.
  * - `disconnected`: client.start() has resolved (clean shutdown or 4001).
  */
@@ -306,8 +309,10 @@ export function XyncraProvider({
     const unsubMessage = eventEmitter.on('message:added', markConnected);
     const unsubConv = eventEmitter.on('conversation:added', markConnected);
 
-    // Fallback: if no data arrives within 2 seconds, assume connected
-    // (handles empty database case where server has nothing to send)
+    // Fallback: if no data arrives within 2 seconds, the connection has
+    // successfully handshaked but the database is empty (the server has
+    // nothing to send). Per D-130, we show 'syncing' rather than a fake
+    // 'connected' so the UI reflects "connected to server, no local data".
     connectionTimeout = setTimeout(() => {
       if (!firstDataReceived) {
         setConnectionStatus('syncing');

@@ -206,6 +206,35 @@ describe('useConversations', () => {
     expect(result.current.conversations).toHaveLength(0);
   });
 
+  it('should update read cursor on read:updated event', async () => {
+    const dbConv = createMockDBConversation({
+      id: 'conv-1',
+      userId1: 'user1',
+      userId2: 'user2',
+    });
+    mockClient.listConversations.mockResolvedValue({
+      conversations: [dbConv],
+    });
+
+    const { result } = renderHook(() => useConversations(), {
+      wrapper: createWrapper(),
+    });
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    act(() => {
+      emitter.emit('read:updated', {
+        conversationId: 'conv-1',
+        lastReadMessageId: '42',
+      });
+    });
+
+    expect(result.current.conversations[0].lastReadMessageId1).toBe('42');
+    expect(result.current.conversations[0].lastReadMessageId2).toBe('42');
+  });
+
   it('should refresh conversations', async () => {
     const dbConv1 = createMockDBConversation({ id: 'conv-1' });
     mockClient.listConversations.mockResolvedValue({

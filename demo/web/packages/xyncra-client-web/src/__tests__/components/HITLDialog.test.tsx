@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import React from 'react';
+const mockReact = React;
 import { HITLDialog } from '../../components/FloatingAssistant/HITLDialog';
 import type { XyncraContextValue } from '../../context/XyncraProvider';
 import { XyncraContext } from '../../context/XyncraProvider';
@@ -15,6 +16,7 @@ jest.mock('../../hooks/useHITL', () => ({
       userId: 'agent1',
       conversationId: 'conv-1',
       question: 'Should I proceed?',
+      questionId: 'q-abc',
     },
     answer: mockAnswer,
     dismiss: mockDismiss,
@@ -32,15 +34,15 @@ jest.mock('antd', () => ({
     cancelText,
   }: any) => {
     if (!open) return null;
-    return React.createElement('div', { 'data-testid': 'modal' }, [
-      React.createElement('h3', { key: 'title' }, title),
-      React.createElement('div', { key: 'content' }, children),
-      React.createElement(
+    return mockReact.createElement('div', { 'data-testid': 'modal' }, [
+      mockReact.createElement('h3', { key: 'title' }, title),
+      mockReact.createElement('div', { key: 'content' }, children),
+      mockReact.createElement(
         'button',
         { type: 'button', key: 'ok', onClick: onOk },
         okText || 'OK',
       ),
-      React.createElement(
+      mockReact.createElement(
         'button',
         { type: 'button', key: 'cancel', onClick: onCancel },
         cancelText || 'Cancel',
@@ -48,12 +50,12 @@ jest.mock('antd', () => ({
     ]);
   },
   Form: Object.assign(
-    ({ children }: any) => React.createElement('form', null, children),
+    ({ children }: any) => mockReact.createElement('form', null, children),
     {
       Item: ({ children, label }: any) =>
-        React.createElement('div', null, [
-          label ? React.createElement('label', { key: 'l' }, label) : null,
-          React.createElement('div', { key: 'c' }, children),
+        mockReact.createElement('div', null, [
+          label ? mockReact.createElement('label', { key: 'l' }, label) : null,
+          mockReact.createElement('div', { key: 'c' }, children),
         ]),
       useForm: () => [
         {
@@ -67,13 +69,13 @@ jest.mock('antd', () => ({
   ),
   Input: {
     TextArea: ({ placeholder }: any) =>
-      React.createElement('textarea', {
+      mockReact.createElement('textarea', {
         placeholder,
         'data-testid': 'answer-input',
       }),
   },
   Radio: {
-    Group: ({ children }: any) => React.createElement('div', null, children),
+    Group: ({ children }: any) => mockReact.createElement('div', null, children),
   },
 }));
 
@@ -119,5 +121,13 @@ describe('HITLDialog', () => {
     renderDialog();
     fireEvent.click(screen.getByText('取消'));
     expect(mockDismiss).toHaveBeenCalled();
+  });
+
+  it('should pass questionId (not userId) to answer', async () => {
+    renderDialog();
+    fireEvent.click(screen.getByText('提交'));
+    // The answer handler resolves asynchronously; wait a tick.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockAnswer).toHaveBeenCalledWith('q-abc', 'test-answer');
   });
 });

@@ -15,6 +15,7 @@ describe('useHITL', () => {
     emitter = new TypedEventEmitter<UpdateHandlerEventMap>();
     mockClient = {
       call: jest.fn().mockResolvedValue(undefined),
+      getConversation: jest.fn().mockResolvedValue({ questions: [] }),
     };
   });
 
@@ -65,9 +66,23 @@ describe('useHITL', () => {
     });
   });
 
-  it('should answer question and clear pending', async () => {
+  it('should answer question with full agent_resume contract', async () => {
     const { result } = renderHook(() => useHITL(), {
       wrapper: createWrapper(),
+    });
+
+    mockClient.getConversation = jest.fn().mockResolvedValue({
+      questions: [
+        {
+          id: 'q-1',
+          conversation_id: 'conv-1',
+          checkpoint_id: 'cp-1',
+          interrupt_id: 'intr-1',
+          question_text: 'Confirm?',
+          status: 'pending',
+          created_at: new Date(),
+        },
+      ],
     });
 
     act(() => {
@@ -83,7 +98,11 @@ describe('useHITL', () => {
     });
 
     expect(mockClient.call).toHaveBeenCalledWith('agent_resume', {
+      conversation_id: 'conv-1',
       question_id: 'q-1',
+      checkpoint_id: 'cp-1',
+      interrupt_id: 'intr-1',
+      agent_id: 'agent1',
       answer: 'Yes',
     });
     expect(result.current.pendingQuestion).toBeNull();

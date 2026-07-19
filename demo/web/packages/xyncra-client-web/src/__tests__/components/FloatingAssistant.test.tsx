@@ -1,10 +1,11 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import React from 'react';
+const mockReact = React;
 import { FloatingAssistant } from '../../components/FloatingAssistant/FloatingAssistant';
 
 jest.mock('../../components/FloatingAssistant/FloatingButton', () => ({
   FloatingButton: ({ onClick }: { onClick: () => void }) =>
-    React.createElement(
+    mockReact.createElement(
       'button',
       { type: 'button', onClick, 'data-testid': 'floating-btn' },
       'Open',
@@ -13,9 +14,9 @@ jest.mock('../../components/FloatingAssistant/FloatingButton', () => ({
 
 jest.mock('../../components/FloatingAssistant/ChatWindow', () => ({
   ChatWindow: ({ onClose }: { onClose: () => void }) =>
-    React.createElement('div', { 'data-testid': 'chat-window' }, [
-      React.createElement('span', { key: 'title' }, 'Chat Window'),
-      React.createElement(
+    mockReact.createElement('div', { 'data-testid': 'chat-window' }, [
+      mockReact.createElement('span', { key: 'title' }, 'Chat Window'),
+      mockReact.createElement(
         'button',
         { type: 'button', key: 'close', onClick: onClose },
         'Close',

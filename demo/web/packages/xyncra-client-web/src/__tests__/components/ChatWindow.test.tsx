@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import React from 'react';
+const mockReact = React;
 import { ChatWindow } from '../../components/FloatingAssistant/ChatWindow';
 import type { XyncraContextValue } from '../../context/XyncraProvider';
 import { XyncraContext } from '../../context/XyncraProvider';
@@ -9,7 +10,7 @@ import { FunctionRegistry } from '../../internal/FunctionRegistry';
 // Mock sub-components
 jest.mock('../../components/FloatingAssistant/AgentSelector', () => ({
   AgentSelector: () =>
-    React.createElement(
+    mockReact.createElement(
       'div',
       { 'data-testid': 'agent-selector' },
       'AgentSelector',
@@ -18,7 +19,7 @@ jest.mock('../../components/FloatingAssistant/AgentSelector', () => ({
 
 jest.mock('../../components/FloatingAssistant/ConversationList', () => ({
   ConversationList: () =>
-    React.createElement(
+    mockReact.createElement(
       'div',
       { 'data-testid': 'conv-list' },
       'ConversationList',
@@ -27,7 +28,7 @@ jest.mock('../../components/FloatingAssistant/ConversationList', () => ({
 
 jest.mock('../../components/FloatingAssistant/MessageArea', () => ({
   MessageArea: () =>
-    React.createElement(
+    mockReact.createElement(
       'div',
       { 'data-testid': 'message-area' },
       'MessageArea',
@@ -36,7 +37,7 @@ jest.mock('../../components/FloatingAssistant/MessageArea', () => ({
 
 jest.mock('../../components/FloatingAssistant/HITLDialog', () => ({
   HITLDialog: () =>
-    React.createElement('div', { 'data-testid': 'hitl-dialog' }, 'HITLDialog'),
+    mockReact.createElement('div', { 'data-testid': 'hitl-dialog' }, 'HITLDialog'),
 }));
 
 jest.mock('../../components/FloatingAssistant/styles', () => ({
@@ -44,7 +45,7 @@ jest.mock('../../components/FloatingAssistant/styles', () => ({
 }));
 
 jest.mock('@ant-design/x', () => ({
-  XProvider: ({ children }: any) => React.createElement('div', null, children),
+  XProvider: ({ children }: any) => mockReact.createElement('div', null, children),
 }));
 
 describe('ChatWindow', () => {

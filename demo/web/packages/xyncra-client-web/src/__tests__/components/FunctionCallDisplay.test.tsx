@@ -1,18 +1,19 @@
 import { render, screen } from '@testing-library/react';
 import React from 'react';
+const mockReact = React;
 import { FunctionCallDisplay } from '../../components/FloatingAssistant/FunctionCallDisplay';
 
 jest.mock('antd', () => ({
   Tag: ({ children, ...props }: any) =>
-    React.createElement('span', props, children),
+    mockReact.createElement('span', props, children),
   Typography: {
     Text: ({ children, ...props }: any) =>
-      React.createElement('span', props, children),
+      mockReact.createElement('span', props, children),
   },
 }));
 
 jest.mock('@ant-design/icons', () => ({
-  CodeOutlined: () => React.createElement('span', null, 'code-icon'),
+  CodeOutlined: () => mockReact.createElement('span', null, 'code-icon'),
 }));
 
 describe('FunctionCallDisplay', () => {

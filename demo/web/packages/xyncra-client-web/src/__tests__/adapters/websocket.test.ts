@@ -3,6 +3,67 @@ import {
   BrowserWebSocketFactory,
 } from '../../adapters/websocket';
 
+class MockWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
+
+  static instances: MockWebSocket[] = [];
+
+  readyState = MockWebSocket.CONNECTING;
+  url: string;
+  binaryType = '';
+  onopen: ((event: any) => void) | null = null;
+  onclose: ((event: any) => void) | null = null;
+  onmessage: ((event: any) => void) | null = null;
+  onerror: ((event: any) => void) | null = null;
+  _sendCalls: any[] = [];
+
+  constructor(url: string) {
+    this.url = url;
+    MockWebSocket.instances.push(this);
+  }
+
+  send(data: any) {
+    this._sendCalls.push(data);
+  }
+
+  close() {
+    this.readyState = MockWebSocket.CLOSED;
+  }
+
+  simulateOpen() {
+    this.readyState = MockWebSocket.OPEN;
+    if (this.onopen) {
+      this.onopen({ type: 'open' });
+    }
+  }
+
+  simulateMessage(data: any) {
+    if (this.onmessage) {
+      this.onmessage({
+        data: typeof data === 'string' ? data : JSON.stringify(data),
+      });
+    }
+  }
+
+  simulateClose(code = 1000, reason = '') {
+    this.readyState = MockWebSocket.CLOSED;
+    if (this.onclose) {
+      this.onclose({ code, reason, wasClean: code === 1000 });
+    }
+  }
+
+  simulateError() {
+    if (this.onerror) {
+      this.onerror({ type: 'error' });
+    }
+  }
+}
+
+(globalThis as any).WebSocket = MockWebSocket;
+
 describe('BrowserWebSocketAdapter', () => {
   let adapter: BrowserWebSocketAdapter;
 

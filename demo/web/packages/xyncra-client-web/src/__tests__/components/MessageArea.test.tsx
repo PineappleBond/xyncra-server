@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import React from 'react';
+const mockReact = React;
 import { MessageArea } from '../../components/FloatingAssistant/MessageArea';
 import type { XyncraContextValue } from '../../context/XyncraProvider';
 import { XyncraContext } from '../../context/XyncraProvider';
@@ -36,7 +37,7 @@ jest.mock('../../hooks/useAgentStatus', () => ({
 // Mock antd and @ant-design/x
 jest.mock('antd', () => ({
   Empty: ({ description }: any) =>
-    React.createElement('div', { 'data-testid': 'empty' }, description),
+    mockReact.createElement('div', { 'data-testid': 'empty' }, description),
 }));
 
 jest.mock(
@@ -44,21 +45,21 @@ jest.mock(
   () => ({
     Bubble: {
       List: ({ items }: any) =>
-        React.createElement(
+        mockReact.createElement(
           'div',
           { 'data-testid': 'bubble-list' },
           `${items.length} items`,
         ),
     },
     Sender: ({ onSubmit, placeholder, disabled }: any) =>
-      React.createElement('div', { 'data-testid': 'sender' }, [
-        React.createElement('input', {
+      mockReact.createElement('div', { 'data-testid': 'sender' }, [
+        mockReact.createElement('input', {
           key: 'input',
           'data-testid': 'sender-input',
           placeholder,
           disabled,
         }),
-        React.createElement(
+        mockReact.createElement(
           'button',
           {
             type: 'button',
@@ -69,7 +70,7 @@ jest.mock(
           'Send',
         ),
       ]),
-    Think: ({ title }: any) => React.createElement('span', null, title),
+    Think: ({ title }: any) => mockReact.createElement('span', null, title),
   }),
   { virtual: true },
 );

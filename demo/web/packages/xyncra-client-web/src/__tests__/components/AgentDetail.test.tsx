@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import React from 'react';
+const mockReact = React;
 import { AgentDetail } from '../../components/FloatingAssistant/AgentDetail';
 import type { XyncraContextValue } from '../../context/XyncraProvider';
 import { XyncraContext } from '../../context/XyncraProvider';
@@ -8,18 +9,18 @@ import { FunctionRegistry } from '../../internal/FunctionRegistry';
 
 jest.mock('antd', () => {
   const Descriptions = ({ children }: any) =>
-    React.createElement('div', { 'data-testid': 'descriptions' }, children);
+    mockReact.createElement('div', { 'data-testid': 'descriptions' }, children);
   (Descriptions as any).Item = ({ children, label }: any) =>
-    React.createElement('div', null, [
-      React.createElement('span', { key: 'label' }, label),
-      React.createElement('span', { key: 'value' }, children),
+    mockReact.createElement('div', null, [
+      mockReact.createElement('span', { key: 'label' }, label),
+      mockReact.createElement('span', { key: 'value' }, children),
     ]);
 
   return {
     Descriptions,
     Typography: {
       Title: ({ children, level }: any) =>
-        React.createElement(`h${level || 5}`, null, children),
+        mockReact.createElement(`h${level || 5}`, null, children),
     },
   };
 });

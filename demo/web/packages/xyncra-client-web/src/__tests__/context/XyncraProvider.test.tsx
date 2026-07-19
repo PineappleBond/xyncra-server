@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import React, { useContext } from 'react';
 import { XyncraContext, XyncraProvider } from '../../context/XyncraProvider';
 
@@ -82,7 +82,9 @@ describe('XyncraProvider', () => {
     );
     const deviceId = screen.getByTestId('value').textContent;
     expect(deviceId).toBeTruthy();
-    expect(deviceId?.startsWith('test-device-id-')).toBe(true);
+    expect(deviceId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
   });
 
   it('should expose registerFunction and unregisterFunction', () => {
@@ -109,5 +111,28 @@ describe('XyncraProvider', () => {
       ),
     );
     expect(screen.getByTestId('value').textContent).toBe('my-agent');
+  });
+
+  it('should show syncing on the 2s empty-database fallback (D-130)', () => {
+    jest.useFakeTimers();
+    try {
+      render(
+        React.createElement(
+          XyncraProvider,
+          { wsUrl: 'ws://test', deviceID: 'test-device' } as any,
+          React.createElement(ContextReader, { field: 'connectionStatus' }),
+        ),
+      );
+      // Before the 2s window, status is 'connecting'.
+      expect(screen.getByTestId('value').textContent).toBe('connecting');
+      act(() => {
+        jest.advanceTimersByTime(2000);
+      });
+      // Per D-130, an empty database falls back to 'syncing', not a fake
+      // 'connected'.
+      expect(screen.getByTestId('value').textContent).toBe('syncing');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

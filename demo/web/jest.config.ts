@@ -16,7 +16,7 @@ export default async (): Promise<any> => {
   // Base config for the main web app tests (jsdom environment)
   const baseConfig = {
     ...config,
-    testPathIgnorePatterns: ['/node_modules/', '/.worktrees/', '/packages/xyncra-client-core/', '/packages/xyncra-client-cli/'],
+    testPathIgnorePatterns: ['/node_modules/', '/.worktrees/', '/packages/xyncra-client-core/', '/packages/xyncra-client-cli/', '/dist/'],
     moduleNameMapper: {
       '\\.md$': '<rootDir>/tests/__mocks__/raw.js',
       ...(config.moduleNameMapper || {}),
@@ -26,6 +26,23 @@ export default async (): Promise<any> => {
       ...(config?.testEnvironmentOptions || {}),
       url: 'http://localhost:8000',
     },
+    // Use babel-jest instead of the umi esbuild transformer: the esbuild path
+    // crashes on same-module mixed type+value imports
+    // (`import type { XyncraContextValue }` + `import { XyncraContext }`) with
+    // "Cannot transform the imported binding". babel-jest with
+    // @babel/preset-typescript strips type-only bindings correctly.
+    transform: {
+      '^.+\\.(ts|tsx|js|jsx)$': ['babel-jest', {
+        presets: [
+          ['@babel/preset-env', { targets: { node: 'current' } }],
+          ['@babel/preset-react', { runtime: 'automatic' }],
+          ['@babel/preset-typescript', { isTSX: true, allExtensions: true, onlyRemoveTypeImports: false }],
+        ],
+      }],
+    },
+    transformIgnorePatterns: [
+      'node_modules/(?!(antd|@ant-design|rc-[^/]+|@rc-component|lodash-es|@babel/runtime)/)',
+    ],
     setupFiles: [...(config.setupFiles || []), './tests/setupTests.jsx'],
     globals: {
       ...config.globals,

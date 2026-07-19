@@ -20,6 +20,7 @@ describe('HITL Flow Integration', () => {
     emitter = new TypedEventEmitter<UpdateHandlerEventMap>();
     mockClient = {
       call: jest.fn().mockResolvedValue(undefined),
+      getConversation: jest.fn().mockResolvedValue({ questions: [] }),
     };
   });
 
@@ -78,12 +79,30 @@ describe('HITL Flow Integration', () => {
     });
 
     // User answers the question
+    mockClient.getConversation = jest.fn().mockResolvedValue({
+      questions: [
+        {
+          id: 'q-1',
+          conversation_id: 'conv-1',
+          checkpoint_id: 'cp-1',
+          interrupt_id: 'intr-1',
+          question_text: 'Should I proceed with the deployment?',
+          status: 'pending',
+          created_at: new Date(),
+        },
+      ],
+    });
+
     await act(async () => {
       await hitlResult.current.answer('q-1', 'Yes, proceed');
     });
 
     expect(mockClient.call).toHaveBeenCalledWith('agent_resume', {
+      conversation_id: 'conv-1',
       question_id: 'q-1',
+      checkpoint_id: 'cp-1',
+      interrupt_id: 'intr-1',
+      agent_id: 'agent1',
       answer: 'Yes, proceed',
     });
 
