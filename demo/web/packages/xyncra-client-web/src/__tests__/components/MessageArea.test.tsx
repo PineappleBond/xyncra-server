@@ -7,7 +7,6 @@ import { XyncraContext } from '../../context/XyncraProvider';
 import { TypedEventEmitter } from '../../internal/EventEmitter';
 import { FunctionRegistry } from '../../internal/FunctionRegistry';
 
-// Mock hooks
 const mockSend = jest.fn();
 jest.mock('../../hooks/useMessages', () => ({
   useMessages: () => ({
@@ -34,7 +33,6 @@ jest.mock('../../hooks/useAgentStatus', () => ({
   }),
 }));
 
-// Mock antd and @ant-design/x
 jest.mock('antd', () => ({
   Empty: ({ description }: any) =>
     mockReact.createElement('div', { 'data-testid': 'empty' }, description),
@@ -70,13 +68,16 @@ jest.mock(
           'Send',
         ),
       ]),
-    Think: ({ title }: any) => mockReact.createElement('span', null, title),
   }),
   { virtual: true },
 );
 
+jest.mock('@ant-design/x-markdown', () => ({
+  XMarkdown: ({ content }: any) => mockReact.createElement('span', null, content),
+}), { virtual: true });
+
 jest.mock('../../components/FloatingAssistant/styles', () => ({
-  FLOATING_ASSISTANT_STYLES: { messageArea: {} },
+  FLOATING_ASSISTANT_STYLES: { messageArea: {}, messageList: {}, emptyState: {}, senderArea: {} },
 }));
 
 describe('MessageArea', () => {

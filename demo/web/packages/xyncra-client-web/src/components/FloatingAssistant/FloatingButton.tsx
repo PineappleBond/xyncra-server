@@ -1,38 +1,31 @@
-/**
- * @packageDocumentation
- * FloatingButton — the collapsed-state circular button.
- *
- * Rendered when the chat window is closed. Clicking opens the full
- * chat window.
- *
- * @module
- */
-
-import { MessageOutlined } from '@ant-design/icons';
+import { RobotOutlined } from '@ant-design/icons';
+import { useState } from 'react';
 import { FLOATING_ASSISTANT_STYLES } from './styles';
 
 export interface FloatingButtonProps {
-  /** Called when the user clicks the floating button. */
   onClick: () => void;
+  visible: boolean;
 }
 
-/**
- * A circular, fixed-position button with a chat icon.
- */
-export function FloatingButton({
-  onClick,
-}: FloatingButtonProps): React.JSX.Element {
+export function FloatingButton({ onClick, visible }: FloatingButtonProps): React.JSX.Element {
+  const [hovered, setHovered] = useState(false);
+
+  if (!visible) {
+    return <></>;
+  }
+
   return (
-    <div
-      style={FLOATING_ASSISTANT_STYLES.floatingButton}
-      onClick={onClick}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') onClick();
+    <button
+      style={{
+        ...FLOATING_ASSISTANT_STYLES.floatingButton,
+        ...(hovered ? FLOATING_ASSISTANT_STYLES.floatingButtonHover : {}),
       }}
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      aria-label="打开 AI 助手"
     >
-      <MessageOutlined style={{ fontSize: 24 }} />
-    </div>
+      <RobotOutlined style={{ fontSize: 24 }} />
+    </button>
   );
 }

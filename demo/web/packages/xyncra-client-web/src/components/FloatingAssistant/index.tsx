@@ -35,6 +35,9 @@ export { FunctionCallDisplay } from './FunctionCallDisplay';
 export { HITLDialog } from './HITLDialog';
 export type { MessageAreaProps } from './MessageArea';
 export { MessageArea } from './MessageArea';
+export type { SidebarPanelProps } from './SidebarPanel';
+export { SidebarPanel } from './SidebarPanel';
+export { MarkdownRenderer } from './MarkdownRenderer';
 
 // Style constants (for consumers that want to customize)
 export { FLOATING_ASSISTANT_STYLES } from './styles';

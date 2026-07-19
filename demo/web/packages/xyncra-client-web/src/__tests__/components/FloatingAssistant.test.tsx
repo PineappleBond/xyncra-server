@@ -4,31 +4,27 @@ const mockReact = React;
 import { FloatingAssistant } from '../../components/FloatingAssistant/FloatingAssistant';
 
 jest.mock('../../components/FloatingAssistant/FloatingButton', () => ({
-  FloatingButton: ({ onClick }: { onClick: () => void }) =>
-    mockReact.createElement(
-      'button',
-      { type: 'button', onClick, 'data-testid': 'floating-btn' },
-      'Open',
-    ),
+  FloatingButton: ({ onClick, visible }: { onClick: () => void; visible: boolean }) =>
+    visible ? mockReact.createElement('button', { type: 'button', onClick, 'data-testid': 'floating-btn' }, 'Open') : null,
 }));
 
-jest.mock('../../components/FloatingAssistant/ChatWindow', () => ({
-  ChatWindow: ({ onClose }: { onClose: () => void }) =>
-    mockReact.createElement('div', { 'data-testid': 'chat-window' }, [
-      mockReact.createElement('span', { key: 'title' }, 'Chat Window'),
-      mockReact.createElement(
-        'button',
-        { type: 'button', key: 'close', onClick: onClose },
-        'Close',
-      ),
-    ]),
+jest.mock('../../components/FloatingAssistant/SidebarPanel', () => ({
+  SidebarPanel: ({ onClose, open }: { onClose: () => void; open: boolean }) =>
+    open ? mockReact.createElement('div', { 'data-testid': 'sidebar-panel' }, [
+      mockReact.createElement('span', { key: 'title' }, 'Sidebar'),
+      mockReact.createElement('button', { type: 'button', key: 'close', onClick: onClose }, 'Close'),
+    ]) : null,
 }));
 
 jest.mock('../../components/FloatingAssistant/styles', () => ({
   FLOATING_ASSISTANT_STYLES: {
     container: {},
-    chatWindow: {},
-    floatingButton: {},
+    sidebar: {},
+    header: {},
+    agentSelector: {},
+    conversationPanel: {},
+    messageArea: {},
+    senderArea: {},
   },
 }));
 
@@ -36,30 +32,30 @@ describe('FloatingAssistant', () => {
   it('should render the floating button initially', () => {
     render(React.createElement(FloatingAssistant));
     expect(screen.getByTestId('floating-btn')).toBeTruthy();
-    expect(screen.queryByTestId('chat-window')).toBeNull();
+    expect(screen.queryByTestId('sidebar-panel')).toBeNull();
   });
 
-  it('should open chat window on button click', () => {
+  it('should open sidebar panel on button click', () => {
     render(React.createElement(FloatingAssistant));
     fireEvent.click(screen.getByTestId('floating-btn'));
-    expect(screen.getByTestId('chat-window')).toBeTruthy();
+    expect(screen.getByTestId('sidebar-panel')).toBeTruthy();
     expect(screen.queryByTestId('floating-btn')).toBeNull();
   });
 
-  it('should close chat window when onClose is called', () => {
+  it('should close sidebar panel when onClose is called', () => {
     render(React.createElement(FloatingAssistant));
     fireEvent.click(screen.getByTestId('floating-btn'));
-    expect(screen.getByTestId('chat-window')).toBeTruthy();
+    expect(screen.getByTestId('sidebar-panel')).toBeTruthy();
     fireEvent.click(screen.getByText('Close'));
     expect(screen.getByTestId('floating-btn')).toBeTruthy();
-    expect(screen.queryByTestId('chat-window')).toBeNull();
+    expect(screen.queryByTestId('sidebar-panel')).toBeNull();
   });
 
-  it('should toggle between button and window', () => {
+  it('should toggle between button and panel', () => {
     render(React.createElement(FloatingAssistant));
     expect(screen.getByTestId('floating-btn')).toBeTruthy();
     fireEvent.click(screen.getByTestId('floating-btn'));
-    expect(screen.getByTestId('chat-window')).toBeTruthy();
+    expect(screen.getByTestId('sidebar-panel')).toBeTruthy();
     fireEvent.click(screen.getByText('Close'));
     expect(screen.getByTestId('floating-btn')).toBeTruthy();
   });

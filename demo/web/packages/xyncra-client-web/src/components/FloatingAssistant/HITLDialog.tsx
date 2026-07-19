@@ -21,12 +21,13 @@ export function HITLDialog({ conversationId }: { conversationId?: string }): Rea
   const { pendingQuestions, answerAll, dismiss, isSubmitting } = useHITL(conversationId);
   const [form] = Form.useForm();
   const [activeTab, setActiveTab] = useState<string>('0');
+  const [answers, setAnswers] = useState<Record<string, string>>({});
 
-  // Reset form when questions change
+  // Reset form when questions count changes
   useEffect(() => {
     form.resetFields();
     setActiveTab('0');
-  }, [pendingQuestions, form]);
+  }, [pendingQuestions.length]);
 
   const handleOk = useCallback(async () => {
     if (pendingQuestions.length === 0) return;
@@ -65,11 +66,10 @@ export function HITLDialog({ conversationId }: { conversationId?: string }): Rea
 
   if (pendingQuestions.length === 0) return null;
 
-  // Check if all questions are answered
-  const formValues = form.getFieldsValue();
+  // Check if all questions are answered from reactive state
   const allAnswered = pendingQuestions.every((_, index) => {
     const answerKey = `answer_${index}`;
-    return formValues[answerKey] && formValues[answerKey].trim() !== '';
+    return answers[answerKey] && answers[answerKey].trim() !== '';
   });
 
   const tabItems = pendingQuestions.map((q, index) => ({
@@ -116,7 +116,7 @@ export function HITLDialog({ conversationId }: { conversationId?: string }): Rea
       okButtonProps={{ disabled: !allAnswered || isSubmitting }}
       width={600}
     >
-      <Form form={form} layout="vertical">
+      <Form form={form} layout="vertical" onValuesChange={(_, all) => setAnswers(all)}>
         <Tabs
           activeKey={activeTab}
           onChange={setActiveTab}
