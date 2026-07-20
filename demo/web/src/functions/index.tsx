@@ -11,6 +11,7 @@ import { NavigateToFunction } from './navigateTo';
 import { ShowNotificationFunction } from './showNotification';
 import { HighlightElementFunction } from './highlightElement';
 import { GetCurrentPageFunction } from './getCurrentPage';
+import { GetPageDescriptionFunction } from './getPageDescription';
 import { GetPageStructureFunction } from './getPageStructure';
 import { GetFormDataFunction } from './getFormData';
 import { GetTableDataFunction } from './getTableData';
@@ -35,6 +36,7 @@ export function DemoFunctions() {
       <ShowNotificationFunction />
       <HighlightElementFunction />
       <GetCurrentPageFunction />
+      <GetPageDescriptionFunction />
       <GetPageStructureFunction />
       <GetFormDataFunction />
       <GetTableDataFunction />
@@ -59,6 +61,7 @@ export { NavigateToFunction } from './navigateTo';
 export { ShowNotificationFunction } from './showNotification';
 export { HighlightElementFunction } from './highlightElement';
 export { GetCurrentPageFunction } from './getCurrentPage';
+export { GetPageDescriptionFunction } from './getPageDescription';
 export { GetPageStructureFunction } from './getPageStructure';
 export { GetFormDataFunction } from './getFormData';
 export { GetTableDataFunction } from './getTableData';

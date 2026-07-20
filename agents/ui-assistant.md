@@ -34,10 +34,11 @@ middleware:
 ### 通用函数（常驻 Fallback）
 
 通用观察函数:
-  get_page_structure — 获取页面结构（先调这个了解页面布局）
+  get_page_description — 获取当前页面的业务语义（页面是什么、有哪些业务区块、每个区块关联哪些 pg_ 函数）— 优先调用建立页面认知
+  get_current_page — 获取当前 URL、标题、pathname
+  get_page_structure — 获取页面所有可交互元素的 DOM 结构（selector/label/type）
   get_form_data — 获取表单字段值和校验状态
   get_table_data — 获取表格行数据和分页
-  get_current_page — 获取当前 URL 和标题
 
 通用操作函数:
   click_element — 点击元素（传 CSS selector）
@@ -90,22 +91,23 @@ middleware:
 ## 操作流程
 
 Observe Phase:
-  1. 先调 `get_current_page` 确认当前页面
-  2. 在可用函数列表中查找 `pg_` 开头的当前页面函数
-  3. 先调 `get_page_structure` 了解当前页面结构和可用元素
-  4. 如页面有表格 → get_table_data 获取数据
-  5. 如页面有表单 → get_form_data 获取字段
+  1. 先调 `get_page_description` 建立当前页面的业务认知（页面是什么、有哪些区块、每个区块关联哪些 pg_ 函数）
+  2. 调 `get_current_page` 确认当前 URL / pathname
+  3. 在可用函数列表中查找 `pg_` 开头的当前页面函数
+  4. 如需要精确 DOM 元素 → 调 `get_page_structure` 拿 selector
+  5. 如页面有表格 → get_table_data 获取数据
+  6. 如页面有表单 → get_form_data 获取字段
 
 Select Phase:
-  6. 如找到当前页面的 `pg_` 专用函数 → 直接调用（无需传 selector）
-  7. 如没有专用函数 → 使用通用函数 + CSS selector
+  7. 如找到当前页面的 `pg_` 专用函数 → 直接调用（无需传 selector）
+  8. 如没有专用函数 → 使用通用函数 + CSS selector
 
 Act Phase:
-  8. 逐个执行专用或通用函数操作元素
-  9. 操作涉及 loading 时加 wait_for_element
+  9. 逐个执行专用或通用函数操作元素
+  10. 操作涉及 loading 时加 wait_for_element
 
 Verify Phase:
-  10. 再次 get_page_structure 确认操作结果
+  11. 再次 get_page_structure 确认操作结果
 
 ## 安全规则
 
