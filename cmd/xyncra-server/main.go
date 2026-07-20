@@ -412,6 +412,7 @@ func main() {
 	// srv (*server.WebSocketServer) satisfies ClientCaller via ServerRequest().
 	agentBuilder.SetClientFunctionProvider(funcRegistry)
 	agentBuilder.SetClientCaller(srv)
+	agentBuilder.SetLogger(srv.Logger())
 
 	// ---------------------------------------------------------------
 	// Context & signal handling

@@ -28,7 +28,7 @@ func (b *AgentBuilder) buildMiddleware(
 	// 0. DynamicToolProvider (must be first -- injects tools before other middleware sees them)
 	if config.Middleware.EnableClientTools {
 		if b.clientFunctionProvider != nil && b.clientCaller != nil {
-			dtp := NewDynamicToolProvider(b.clientFunctionProvider, b.clientCaller, config.Middleware.ClientTools, nil,
+			dtp := NewDynamicToolProvider(b.clientFunctionProvider, b.clientCaller, config.Middleware.ClientTools, b.logger,
 				b.toolRegistry, config.DynamicTools)
 			mws = append(mws, dtp)
 		} else {

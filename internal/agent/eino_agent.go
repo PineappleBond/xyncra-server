@@ -293,6 +293,7 @@ type AgentBuilder struct {
 	clientFunctionProvider ClientFunctionProvider  // Phase 6 (D-101)
 	clientCaller           ClientCaller            // Phase 6 (D-101)
 	llmLogger              *LLMLogger              // optional: dedicated LLM call logger
+	logger                 Logger                  // structured logger for middleware diagnostics
 	tracingEnabled         bool                    // when true, TracingMiddleware is appended to the middleware chain
 	tracingDebugUsers      []string                // debug user IDs for LLM content capture
 	tracingDebugDevices    []string                // debug device IDs for LLM content capture
@@ -352,6 +353,13 @@ func (b *AgentBuilder) SetClientCaller(caller ClientCaller) {
 // When nil, no LLM logging middleware is added (default).
 func (b *AgentBuilder) SetLLMLogger(logger *LLMLogger) {
 	b.llmLogger = logger
+}
+
+// SetLogger sets the structured logger used by middleware components (e.g.
+// DynamicToolProvider) for diagnostic output. When nil, middleware diagnostics
+// are silently discarded (fail-open, D-072).
+func (b *AgentBuilder) SetLogger(logger Logger) {
+	b.logger = logger
 }
 
 // SetTracingEnabled controls whether a TracingMiddleware is appended to the
