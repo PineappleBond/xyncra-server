@@ -626,6 +626,81 @@ describe('reactValueSetter', () => {
 
       document.body.removeChild(container);
     });
+
+    it('DR-08: React fiber onChange 方式直接设置值', async () => {
+      const container = document.createElement('div');
+      container.className = 'ant-picker-range';
+      document.body.appendChild(container);
+
+      // 模拟 React fiber
+      const mockOnChange = jest.fn();
+      (container as any).__reactFiber$test = {
+        memoizedProps: {
+          onChange: mockOnChange,
+        },
+        return: null,
+      };
+
+      const result = await setReactDateRangePickerValue(container, '2024-01-01', '2024-01-31');
+
+      expect(result).toBe(true);
+      expect(mockOnChange).toHaveBeenCalled();
+      // 验证传入的是 dayjs 对象数组
+      const callArgs = mockOnChange.mock.calls[0][0];
+      expect(Array.isArray(callArgs)).toBe(true);
+      expect(callArgs.length).toBe(2);
+
+      document.body.removeChild(container);
+    });
+
+    it('DR-09: React fiber 不可用时降级到键盘模拟', async () => {
+      const container = document.createElement('div');
+      container.className = 'ant-picker-range';
+      document.body.appendChild(container);
+
+      // 不添加 React fiber，会降级到键盘模拟
+      const startInput = document.createElement('input');
+      container.appendChild(startInput);
+
+      const endInput = document.createElement('input');
+      container.appendChild(endInput);
+
+      const result = await setReactDateRangePickerValue(container, '2024-01-01', '2024-01-31');
+
+      expect(result).toBe(true);
+
+      document.body.removeChild(container);
+    });
+
+    it('DR-10: React fiber onChange 抛出异常时降级', async () => {
+      const container = document.createElement('div');
+      container.className = 'ant-picker-range';
+      document.body.appendChild(container);
+
+      // 模拟 React fiber，但 onChange 抛出异常
+      const mockOnChange = jest.fn().mockImplementation(() => {
+        throw new Error('onChange failed');
+      });
+      (container as any).__reactFiber$test = {
+        memoizedProps: {
+          onChange: mockOnChange,
+        },
+        return: null,
+      };
+
+      // 添加 input 以支持降级
+      const startInput = document.createElement('input');
+      container.appendChild(startInput);
+      const endInput = document.createElement('input');
+      container.appendChild(endInput);
+
+      const result = await setReactDateRangePickerValue(container, '2024-01-01', '2024-01-31');
+
+      // 即使 onChange 失败，降级后仍应成功
+      expect(result).toBe(true);
+
+      document.body.removeChild(container);
+    });
   });
 
   describe('setReactRadioValue', () => {

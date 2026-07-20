@@ -257,10 +257,34 @@ export async function setReactSelectValue(
 }
 
 /**
+ * 从 DOM 元素向上遍历 React fiber 树，查找包含 onChange 属性的组件
+ * 用于直接访问 React 受控组件的 onChange 回调
+ *
+ * @param element - 起始 DOM 元素
+ * @returns 包含 onChange 回调和 fiber 的对象，或 null
+ */
+function findReactOnChange(element: HTMLElement): { onChange: Function; fiber: any } | null {
+  const key = Object.keys(element).find(
+    (k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'),
+  );
+  if (!key) return null;
+
+  let fiber = (element as any)[key];
+  while (fiber) {
+    if (fiber.memoizedProps && fiber.memoizedProps.onChange) {
+      return { onChange: fiber.memoizedProps.onChange, fiber };
+    }
+    fiber = fiber.return;
+  }
+  return null;
+}
+
+/**
  * 设置 Ant Design DateRangePicker 组件的值
  *
- * Ant Design DateRangePicker 有两个 input 元素，需要分别设置开始和结束日期。
- * 使用模拟用户输入的方式，避免面板弹出阻塞后续操作。
+ * Ant Design DateRangePicker 是受控组件，直接修改 input 值会触发下拉面板弹出。
+ * 本函数优先通过 React fiber 直接调用 onChange 回调，绕过 DOM 模拟，
+ * 避免面板弹出阻塞后续操作。
  *
  * @param containerEl - DateRangePicker 容器元素（通常是 .ant-picker-range）
  * @param startDate - 开始日期，格式 YYYY-MM-DD
@@ -273,6 +297,23 @@ export async function setReactDateRangePickerValue(
   endDate: string,
 ): Promise<boolean> {
   try {
+    // 方法一：通过 React fiber 直接调用 onChange（推荐，不触发下拉面板）
+    const result = findReactOnChange(containerEl);
+    if (result) {
+      try {
+        const dayjs = (await import('dayjs')).default;
+        const startDayjs = dayjs(startDate);
+        const endDayjs = dayjs(endDate);
+
+        // 直调 onChange，绕过 DOM，不触发 focus/下拉
+        result.onChange([startDayjs, endDayjs]);
+        return true;
+      } catch (e) {
+        console.warn('[reactValueSetter] React fiber onChange approach failed, falling back', e);
+      }
+    }
+
+    // 方法二：降级到键盘模拟（现有实现，作为 fallback）
     const inputs = containerEl.querySelectorAll('input');
     if (inputs.length < 2) {
       console.warn('[reactValueSetter] DateRangePicker inputs not found');
@@ -282,13 +323,7 @@ export async function setReactDateRangePickerValue(
     const startInput = inputs[0] as HTMLInputElement;
     const endInput = inputs[1] as HTMLInputElement;
 
-    // 策略：模拟用户输入日期文本，然后按回车确认
-    // 这样可以避免面板弹出，同时确保 React 状态正确更新
-
-    // 1. 设置开始日期
     await setInputValueWithKeyboard(startInput, startDate);
-
-    // 2. 等待一下，然后设置结束日期
     await new Promise((resolve) => setTimeout(resolve, 100));
     await setInputValueWithKeyboard(endInput, endDate);
 
