@@ -50,6 +50,21 @@ type AgentTimeoutPayload struct {
 	Timestamp      int64  `json:"timestamp"`
 }
 
+// FunctionCallPayload is the JSON payload for UpdateTypeFunctionCall.
+// Sent when the agent invokes a tool/function, allowing clients to display
+// function call information in the UI.
+type FunctionCallPayload struct {
+	UserID         string `json:"user_id"` // agent userID
+	ConversationID string `json:"conversation_id"`
+	Name           string `json:"name"`             // function name
+	Args           string `json:"args,omitempty"`    // JSON-encoded arguments
+	Result         string `json:"result,omitempty"`  // function result (sent after completion)
+	Error          string `json:"error,omitempty"`   // error message if call failed
+	DurationMs     int64  `json:"duration_ms,omitempty"` // execution duration
+	IsDone         bool   `json:"is_done"`           // true when function execution completes
+	Timestamp      int64  `json:"timestamp"`
+}
+
 // BroadcastHelper sends streaming and typing updates to users via WebSocket
 // (C7). All broadcasts are fire-and-forget (D-007): errors are logged but not
 // returned to the caller.
@@ -192,6 +207,30 @@ func (bh *BroadcastHelper) SendAgentTimeout(ctx context.Context, humanUserID, ag
 		return
 	}
 	bh.broadcastEphemeral(humanUserID, protocol.UpdateTypeAgentTimeout, payload)
+}
+
+// SendFunctionCall broadcasts an ephemeral function call update (Seq=0) to the
+// human user. It should be called twice per function invocation: once with
+// IsDone=false before execution (carrying name and args), and once with
+// IsDone=true after execution (carrying result or error).
+func (bh *BroadcastHelper) SendFunctionCall(ctx context.Context, humanUserID, agentUserID, conversationID, name, args, result, errStr string, durationMs int64, isDone bool) {
+	_ = ctx
+	payload, err := json.Marshal(FunctionCallPayload{
+		UserID:         agentUserID,
+		ConversationID: conversationID,
+		Name:           name,
+		Args:           args,
+		Result:         result,
+		Error:          errStr,
+		DurationMs:     durationMs,
+		IsDone:         isDone,
+		Timestamp:      time.Now().Unix(),
+	})
+	if err != nil {
+		bh.logger.Error("broadcast: marshal function_call payload failed", "error", err)
+		return
+	}
+	bh.broadcastEphemeral(humanUserID, protocol.UpdateTypeFunctionCall, payload)
 }
 
 // SendConversationUpdate broadcasts a lightweight conversation update notification

@@ -235,6 +235,10 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 	ctx, cancel := context.WithTimeout(ctx, e.totalTimeout)
 	defer cancel()
 
+	// 2b. Enrich context with broadcast metadata so that the
+	// LoggingMiddleware can emit function_call updates to clients.
+	ctx = WithBroadcastInfo(ctx, e.broadcaster, payload.SenderID, payload.AgentID, payload.ConversationID)
+
 	// 3. Look up agent config by exact match in the registry (D-054 revised).
 	config, ok := e.registry.Get(payload.AgentID)
 	if !ok {

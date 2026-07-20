@@ -14,6 +14,30 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// Context keys for function call broadcasting
+// ---------------------------------------------------------------------------
+
+// ctxKey is an unexported type for context keys to avoid collisions.
+type ctxKey int
+
+const (
+	ctxKeyBroadcastHelper         ctxKey = iota
+	ctxKeyBroadcastHumanUserID
+	ctxKeyBroadcastAgentUserID
+	ctxKeyBroadcastConversationID
+)
+
+// WithBroadcastInfo returns a context enriched with broadcast metadata so
+// that the LoggingMiddleware can emit function_call updates to clients.
+func WithBroadcastInfo(ctx context.Context, bh *BroadcastHelper, humanUserID, agentUserID, conversationID string) context.Context {
+	ctx = context.WithValue(ctx, ctxKeyBroadcastHelper, bh)
+	ctx = context.WithValue(ctx, ctxKeyBroadcastHumanUserID, humanUserID)
+	ctx = context.WithValue(ctx, ctxKeyBroadcastAgentUserID, agentUserID)
+	ctx = context.WithValue(ctx, ctxKeyBroadcastConversationID, conversationID)
+	return ctx
+}
+
+// ---------------------------------------------------------------------------
 // LLM Logger — structured JSONL logger for LLM observability
 // ---------------------------------------------------------------------------
 
@@ -271,7 +295,9 @@ func (m *LoggingMiddleware) AfterModelRewriteState(ctx context.Context, state *a
 }
 
 // WrapInvokableToolCall wraps tool execution to log "tool_call" before
-// invocation and "tool_result" after completion.
+// invocation and "tool_result" after completion. It also broadcasts
+// function_call updates to clients when broadcast metadata is available
+// in the context (set via WithBroadcastInfo).
 func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 		iter := int(atomic.LoadInt32(&m.iteration))
@@ -285,6 +311,9 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 			ToolName:  tCtx.Name,
 			ToolArgs:  truncate(argumentsInJSON, 2048),
 		})
+
+		// Broadcast function call start (best-effort).
+		m.broadcastFunctionCall(ctx, tCtx.Name, truncate(argumentsInJSON, 2048), "", "", 0, false)
 
 		start := time.Now()
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
@@ -305,6 +334,31 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 		}
 		m.logger.write(resultRec)
 
+		// Broadcast function call completion (best-effort).
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+		}
+		m.broadcastFunctionCall(ctx, tCtx.Name, truncate(argumentsInJSON, 2048), truncate(result, 4096), errStr, dur, true)
+
 		return result, err
 	}, nil
+}
+
+// broadcastFunctionCall reads broadcast metadata from the context and sends
+// a function_call ephemeral update. It is a no-op when the context does not
+// contain broadcast info (e.g. when the middleware is used outside the
+// executor). Errors are logged but never propagated (fire-and-forget).
+func (m *LoggingMiddleware) broadcastFunctionCall(ctx context.Context, name, args, result, errStr string, durationMs int64, isDone bool) {
+	bh, _ := ctx.Value(ctxKeyBroadcastHelper).(*BroadcastHelper)
+	if bh == nil {
+		return
+	}
+	humanUserID, _ := ctx.Value(ctxKeyBroadcastHumanUserID).(string)
+	agentUserID, _ := ctx.Value(ctxKeyBroadcastAgentUserID).(string)
+	conversationID, _ := ctx.Value(ctxKeyBroadcastConversationID).(string)
+	if humanUserID == "" || conversationID == "" {
+		return
+	}
+	bh.SendFunctionCall(ctx, humanUserID, agentUserID, conversationID, name, args, result, errStr, durationMs, isDone)
 }

@@ -32,6 +32,7 @@ const (
 	// conversation update pull-on-notification pattern, D-118/D-124).
 	UpdateTypeAgentStatus  = "agent_status"  // ephemeral: Seq=0, agent status (thinking/tool_calling/generating/idle/asking_user)
 	UpdateTypeAgentTimeout = "agent_timeout" // ephemeral: Seq=0, agent execution timed out
+	UpdateTypeFunctionCall = "function_call" // ephemeral: Seq=0, function call info (name, args, result)
 )
 
 // Package is the top-level message envelope for the WebSocket protocol.
