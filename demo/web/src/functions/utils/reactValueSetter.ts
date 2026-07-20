@@ -38,6 +38,57 @@ const nativeTextareaValueSetter = Object.getOwnPropertyDescriptor(
 )?.set;
 
 /**
+ * 获取 React 内部 fiber 对象
+ * 用于直接操作 React 组件状态
+ */
+function getReactFiber(element: HTMLElement): any {
+  const key = Object.keys(element).find(
+    (key) => key.startsWith('__reactFiber$') || key.startsWith('__reactInternalInstance$'),
+  );
+  return key ? (element as any)[key] : null;
+}
+
+/**
+ * 获取 React props 对象
+ */
+function getReactProps(element: HTMLElement): any {
+  const key = Object.keys(element).find(
+    (key) => key.startsWith('__reactProps$') || key.startsWith('__reactEventHandlers$'),
+  );
+  return key ? (element as any)[key] : null;
+}
+
+/**
+ * 通过 React 内部机制触发事件
+ * 这比直接派发原生事件更可靠，因为 React 有自己的事件系统
+ */
+function triggerReactEvent(element: HTMLElement, eventType: string, value: string): boolean {
+  try {
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+
+    if (!nativeInputValueSetter) {
+      return false;
+    }
+
+    const inputEl = element as HTMLInputElement;
+    nativeInputValueSetter.call(inputEl, value);
+
+    // 使用 React 的事件系统
+    const event = new Event(eventType, { bubbles: true });
+    Object.defineProperty(event, 'target', { writable: false, value: inputEl });
+    inputEl.dispatchEvent(event);
+
+    return true;
+  } catch (error) {
+    console.error('[reactValueSetter] triggerReactEvent failed:', error);
+    return false;
+  }
+}
+
+/**
  * 设置 React 受控 Input 组件的值
  *
  * 使用 nativeInputValueSetter 技术确保 React 感知到值的变化。
@@ -209,7 +260,7 @@ export async function setReactSelectValue(
  * 设置 Ant Design DateRangePicker 组件的值
  *
  * Ant Design DateRangePicker 有两个 input 元素，需要分别设置开始和结束日期。
- * 如果直接设置失败，会降级到点击打开面板并选择日期。
+ * 使用模拟用户输入的方式，避免面板弹出阻塞后续操作。
  *
  * @param containerEl - DateRangePicker 容器元素（通常是 .ant-picker-range）
  * @param startDate - 开始日期，格式 YYYY-MM-DD
@@ -231,74 +282,74 @@ export async function setReactDateRangePickerValue(
     const startInput = inputs[0] as HTMLInputElement;
     const endInput = inputs[1] as HTMLInputElement;
 
-    // 先关闭可能已经打开的面板
-    const existingPanel = document.querySelector('.ant-picker-dropdown:not(.ant-picker-dropdown-hidden)');
-    if (existingPanel) {
-      // 点击面板外部关闭它
-      document.body.click();
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    // 策略：模拟用户输入日期文本，然后按回车确认
+    // 这样可以避免面板弹出，同时确保 React 状态正确更新
 
-    // 尝试直接设置值（不 focus，避免触发面板弹出）
-    const startSuccess = setReactInputValue(startInput as unknown as HTMLElement, startDate, false);
-    const endSuccess = setReactInputValue(endInput as unknown as HTMLElement, endDate, false);
+    // 1. 设置开始日期
+    await setInputValueWithKeyboard(startInput, startDate);
 
-    if (startSuccess && endSuccess) {
-      // 设置值后立即 blur，确保面板关闭
-      startInput.blur();
-      endInput.blur();
-      return true;
-    }
-
-    // 降级：点击打开面板，然后选择日期
-    console.warn('[reactValueSetter] Direct value setting failed, falling back to panel selection');
-
-    // 点击开始日期输入框打开面板
-    startInput.click();
-
-    // 等待面板出现
-    const panel = await waitForSelector('.ant-picker-dropdown:not(.ant-picker-dropdown-hidden)', 3000);
-    if (!panel) {
-      return false;
-    }
-
-    // 解析日期并选择对应的单元格
-    const startDateObj = new Date(startDate);
-    const endDateObj = new Date(endDate);
-
-    // 选择开始日期
-    const startDay = startDateObj.getDate();
-    const startCells = panel.querySelectorAll('.ant-picker-cell');
-    for (const cell of Array.from(startCells)) {
-      const inner = cell.querySelector('.ant-picker-cell-inner');
-      if (inner && inner.textContent?.trim() === String(startDay)) {
-        (cell as HTMLElement).click();
-        break;
-      }
-    }
-
-    // 等待一下，然后选择结束日期
+    // 2. 等待一下，然后设置结束日期
     await new Promise((resolve) => setTimeout(resolve, 100));
-
-    const endDay = endDateObj.getDate();
-    for (const cell of Array.from(startCells)) {
-      const inner = cell.querySelector('.ant-picker-cell-inner');
-      if (inner && inner.textContent?.trim() === String(endDay)) {
-        (cell as HTMLElement).click();
-        break;
-      }
-    }
-
-    // 选择完成后，确保面板关闭
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    startInput.blur();
-    endInput.blur();
+    await setInputValueWithKeyboard(endInput, endDate);
 
     return true;
   } catch (error) {
     console.error('[reactValueSetter] setReactDateRangePickerValue failed:', error);
     return false;
   }
+}
+
+/**
+ * 模拟键盘输入设置 input 值
+ * 通过模拟完整的键盘事件序列，确保 React 正确处理值的变化
+ */
+async function setInputValueWithKeyboard(input: HTMLInputElement, value: string): Promise<void> {
+  // 1. Focus 输入框
+  input.focus();
+
+  // 2. 清空现有值
+  input.value = '';
+  triggerReactEvent(input, 'input', '');
+
+  // 3. 逐字符输入，模拟真实键盘输入
+  for (const char of value) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // 触发 keydown 事件
+    const keydownEvent = new KeyboardEvent('keydown', {
+      key: char,
+      code: `Key${char.toUpperCase()}`,
+      bubbles: true,
+    });
+    input.dispatchEvent(keydownEvent);
+
+    // 更新值
+    input.value += char;
+    triggerReactEvent(input, 'input', input.value);
+
+    // 触发 keyup 事件
+    const keyupEvent = new KeyboardEvent('keyup', {
+      key: char,
+      code: `Key${char.toUpperCase()}`,
+      bubbles: true,
+    });
+    input.dispatchEvent(keyupEvent);
+  }
+
+  // 4. 按回车键确认
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const enterEvent = new KeyboardEvent('keydown', {
+    key: 'Enter',
+    code: 'Enter',
+    bubbles: true,
+  });
+  input.dispatchEvent(enterEvent);
+
+  // 5. 触发 change 事件
+  triggerReactEvent(input, 'change', input.value);
+
+  // 6. Blur 输入框
+  input.blur();
 }
 
 /**
