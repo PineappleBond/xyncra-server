@@ -12,6 +12,7 @@ dayjs.extend(relativeTime);
 
 import { FloatingAssistant, XyncraProvider } from '@xyncra/client-web';
 import { DemoFunctions } from '@/functions';
+import { PageFunctions } from '@/functions/PageFunctions';
 import {
   AvatarDropdown,
   DocLink,
@@ -160,6 +161,7 @@ export const layout: RunTimeLayoutConfig = ({
         <XyncraProvider wsUrl={wsUrl} agentID={currentUserId}>
           {children}
           <DemoFunctions />
+          <PageFunctions />
           <FloatingAssistant />
           <SettingDrawer
             disableUrlParams
