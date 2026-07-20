@@ -150,6 +150,8 @@ func (h *DefaultMessageHandler) handleRequest(ctx context.Context, client *Clien
 		return
 	}
 
+	slog.Info("websocket: received request", "method", req.Method, "connID", client.ConnID(), "userID", client.UserID())
+
 	// Start handler.invoke span after we know the method name.
 	invokeCtx, invokeFinish := startHandlerInvokeSpan(ctx, req.Method)
 	defer invokeFinish(nil)

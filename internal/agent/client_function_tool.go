@@ -44,7 +44,11 @@ func newClientFunctionTool(
 // to *jsonschema.Schema via JSON roundtrip.
 func buildToolInfo(funcInfo protocol.FunctionInfo) (*schema.ToolInfo, error) {
 	params := funcInfo.Parameters
-	if params == nil {
+	if len(params) == 0 {
+		// Normalize nil and empty {} to a valid object schema. An empty
+		// schema (or missing parameters) is later converted by the LLM
+		// tool-format layer into `parameters: true`, which the OpenAI-
+		// compatible endpoint rejects with a 400 validation error.
 		params = map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},

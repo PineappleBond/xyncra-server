@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
@@ -26,11 +27,16 @@ func NewRegisterFunctionsHandler(registry server.FunctionRegistry) *registerFunc
 // calls FunctionRegistry.RegisterFunctions to replace the device's function list.
 // An empty functions list is valid and clears any previously registered functions.
 func (h *registerFunctionsHandler) HandleRequest(ctx context.Context, client *server.Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+	// 0. Log incoming request.
+	log.Printf("system.register_functions received: userID=%s deviceID=%s", client.UserID(), client.DeviceID())
+
 	// 1. Parse params.
 	var params server.RegisterFunctionsParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
+		log.Printf("system.register_functions: invalid params: %v", err)
 		return nil, protocol.NewValidationError("invalid params")
 	}
+	log.Printf("system.register_functions: parsed %d functions", len(params.Functions))
 
 	// 2. Override deviceID with the authenticated client's deviceID (D-093).
 	// The client-supplied deviceID in params is ignored; the connection's
@@ -39,8 +45,11 @@ func (h *registerFunctionsHandler) HandleRequest(ctx context.Context, client *se
 
 	// 3. Register (full replacement).
 	if err := h.registry.RegisterFunctions(ctx, client.UserID(), deviceID, &params); err != nil {
+		log.Printf("system.register_functions: registry error: %v", err)
 		return nil, registryErrorToHandlerError(err)
 	}
+
+	log.Printf("system.register_functions: registered %d functions for userID=%s deviceID=%s", len(params.Functions), client.UserID(), deviceID)
 
 	// 4. Return success.
 	return marshalResponse(map[string]any{

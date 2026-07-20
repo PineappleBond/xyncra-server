@@ -400,16 +400,23 @@ func (c *XyncraClient) connectionMonitorWithInitialConnect() {
 	}
 }
 
-// performReconnectHandshake sends system.reconnect followed by
-// system.register_functions after a (re)connect. Errors are logged but do
-// not prevent FullSync from proceeding (graceful degradation, D-072).
+// performReconnectHandshake sends system.register_functions followed by
+// system.reconnect after a (re)connect. Functions are registered FIRST so
+// the server has handlers ready before it replays pending requests from
+// the PendingStore. Errors are logged but do not prevent FullSync from
+// proceeding (graceful degradation, D-072).
 // Runs asynchronously so the reconnect handshake timeout does not block
 // FullSync.
 func (c *XyncraClient) performReconnectHandshake(ctx context.Context) {
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
-		// Step 1: system.reconnect
+		// Step 1: Re-register functions BEFORE reconnect so the server has
+		// handlers ready when it replays pending requests (fixes race condition
+		// where PendingStore replay arrives before client registers handlers).
+		c.reregisterFunctions(ctx)
+
+		// Step 2: system.reconnect
 		c.lastReqSeqMu.Lock()
 		lastSeq := c.lastReqSeq
 		c.lastReqSeqMu.Unlock()
@@ -419,9 +426,6 @@ func (c *XyncraClient) performReconnectHandshake(ctx context.Context) {
 		if err != nil {
 			c.logger.Error("system.reconnect handshake failed", "error", err)
 		}
-
-		// Step 2: re-register functions.
-		c.reregisterFunctions(ctx)
 	}()
 }
 
