@@ -1,8 +1,15 @@
 import type { FunctionInfo } from '@xyncra/protocol';
 import type { FunctionEntry } from '@xyncra/client-web';
 import { waitForSelector, waitForLoadingComplete } from '../dom-engine';
+import {
+  setReactInputValue,
+  setReactTextareaValue,
+  setReactSelectValue,
+  setReactDateRangePickerValue,
+  setReactRadioValue,
+} from './reactValueSetter';
 
-function buildFunctionEntry(
+export function buildFunctionEntry(
   info: FunctionInfo,
   handler: (params: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>,
 ): FunctionEntry {
@@ -67,11 +74,10 @@ export function createInputFunction(
       if (el.hasAttribute('disabled')) {
         return { success: false, error: '输入框已禁用' };
       }
-      const inputEl = el as HTMLInputElement;
-      inputEl.value = '';
-      inputEl.value = value;
-      inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-      inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+      const success = setReactInputValue(el as HTMLElement, value);
+      if (!success) {
+        return { success: false, error: '值设置失败，React 组件未响应' };
+      }
       return { success: true };
     },
   );
@@ -103,9 +109,10 @@ export function createSelectFunction(
       if (!el) {
         return { success: false, error: `选择器未找到: ${selector}` };
       }
-      const selectEl = el as HTMLSelectElement;
-      selectEl.value = option;
-      selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+      const success = await setReactSelectValue(el as HTMLElement, option);
+      if (!success) {
+        return { success: false, error: `选项未找到: ${option}` };
+      }
       return { success: true };
     },
   );
@@ -230,7 +237,33 @@ export function createRadioFunction(
   selector: string,
   tags: string[] = [],
 ): FunctionEntry {
-  return createClickFunction(name, description, selector, [...tags, 'type:radio']);
+  return buildFunctionEntry(
+    {
+      name,
+      description,
+      parameters: {
+        type: 'object',
+        properties: {
+          value: { type: 'string', description: '要选择的值' },
+        },
+        required: ['value'],
+      },
+      tags: [...tags, 'type:radio'],
+      timeout_ms: 10000,
+    },
+    async (params) => {
+      const value = params.value as string;
+      const el = await waitForSelector(selector, 10000);
+      if (!el) {
+        return { success: false, error: `单选按钮组未找到: ${selector}` };
+      }
+      const success = await setReactRadioValue(el as HTMLElement, value);
+      if (!success) {
+        return { success: false, error: `选项未找到: ${value}` };
+      }
+      return { success: true };
+    },
+  );
 }
 
 export function createSegmentFunction(
@@ -267,12 +300,17 @@ export function createDateRangeFunction(
       tags: [...tags, 'type:datepicker'],
       timeout_ms: 15000,
     },
-    async (_params) => {
+    async (params) => {
+      const startDate = params.startDate as string;
+      const endDate = params.endDate as string;
       const el = await waitForSelector(selector, 10000);
       if (!el) {
         return { success: false, error: `日期选择器未找到: ${selector}` };
       }
-      (el as HTMLElement).click();
+      const success = await setReactDateRangePickerValue(el as HTMLElement, startDate, endDate);
+      if (!success) {
+        return { success: false, error: '日期设置失败' };
+      }
       return { success: true };
     },
   );
@@ -313,11 +351,10 @@ export function createTextareaFunction(
       if (!el) {
         return { success: false, error: `文本框未找到: ${selector}` };
       }
-      const textareaEl = el as HTMLTextAreaElement;
-      textareaEl.value = '';
-      textareaEl.value = value;
-      textareaEl.dispatchEvent(new Event('input', { bubbles: true }));
-      textareaEl.dispatchEvent(new Event('change', { bubbles: true }));
+      const success = setReactTextareaValue(el as HTMLElement, value);
+      if (!success) {
+        return { success: false, error: '值设置失败，React 组件未响应' };
+      }
       return { success: true };
     },
   );

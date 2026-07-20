@@ -111,6 +111,7 @@ export const pageDescriptions: Record<string, Omit<PageDescription, 'route'>> = 
         name: '基础信息区',
         purpose: '填写目标标题、起止日期与描述',
         functions: [
+          'pg_basic_form_fill_all',
           'pg_basic_form_title_input',
           'pg_basic_form_date_range',
           'pg_basic_form_desc_textarea',
