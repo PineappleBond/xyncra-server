@@ -110,42 +110,44 @@ async function waitForFloatingAssistant(page: Page): Promise<void> {
 }
 
 /**
- * 等待 Agent 回复（轮询 IndexedDB，直到消息数量稳定）
+ * 等待 Agent 回复（基于 DOM 检查当前对话中的 AI 消息）
+ * 使用 DOM 而非 IndexedDB，避免历史消息干扰
  */
 async function waitForAgentReply(
   page: Page,
   timeoutMs: number = 60000
 ): Promise<any[]> {
-  const startTime = Date.now()
-  let lastCount = 0
+  // 先等待 AI 消息出现在 DOM 中
+  await page.waitForSelector('.message-ai .message-content', { timeout: timeoutMs })
+
+  // 等待回复稳定（连续 3 轮 DOM 内容不变）
+  let lastText = ''
   let stableRounds = 0
+  const startTime = Date.now()
 
   while (Date.now() - startTime < timeoutMs) {
-    const messages = await getAgentMessages(page)
+    const currentText = await page.evaluate(() => {
+      const msgs = document.querySelectorAll('.message-ai .message-content')
+      return msgs.length > 0 ? msgs[msgs.length - 1].textContent || '' : ''
+    })
 
-    if (messages.length > 0) {
-      if (messages.length === lastCount) {
-        stableRounds++
-        if (stableRounds >= 3) {
-          // 消息数量连续 3 轮稳定，认为 Agent 回复完成
-          return messages
-        }
-      } else {
-        stableRounds = 0
-        lastCount = messages.length
+    if (currentText.length > 0 && currentText === lastText) {
+      stableRounds++
+      if (stableRounds >= 3) {
+        // DOM 内容稳定，Agent 回复完成
+        break
       }
+    } else {
+      stableRounds = 0
+      lastText = currentText
     }
 
     await page.waitForTimeout(1000)
   }
 
-  // 超时但可能有部分消息
-  const finalMessages = await getAgentMessages(page)
-  if (finalMessages.length > 0) {
-    return finalMessages
-  }
-
-  throw new Error('Timeout waiting for agent reply after ' + timeoutMs + 'ms')
+  // 返回 IndexedDB 中的 agent 消息（用于数据结构验证等）
+  const messages = await getAgentMessages(page)
+  return messages
 }
 
 // ============================================================================
@@ -156,9 +158,19 @@ async function login(page: Page): Promise<void> {
   await page.goto('/login')
   await page.waitForLoadState('networkidle')
 
-  await page.waitForFunction(() => {
-    return window.XyncraTestHelpers && window.XyncraTestHelpers.login
-  }, { timeout: 10000 })
+  // 等待 XyncraTestHelpers 可用，如果不可用则重试导航
+  try {
+    await page.waitForFunction(() => {
+      return window.XyncraTestHelpers && window.XyncraTestHelpers.login
+    }, { timeout: 10000 })
+  } catch {
+    // 重试：重新导航到登录页
+    await page.goto('/login')
+    await page.waitForLoadState('networkidle')
+    await page.waitForFunction(() => {
+      return window.XyncraTestHelpers && window.XyncraTestHelpers.login
+    }, { timeout: 15000 })
+  }
 
   await page.evaluate(() => {
     window.XyncraTestHelpers.login.submit()
@@ -292,8 +304,8 @@ test.describe('UI Assistant E2E 测试 - P0 场景', () => {
   // P0-4: 表单填写
   // ========================================================================
   test('P0-4: 表单填写 - 在表单页填写标题为"测试任务"', async ({ page }) => {
-    // 先导航到表单页面
-    await page.goto(BASE_URL + '/form/index')
+    // 先导航到表单页面（hash 路由）
+    await page.goto(BASE_URL + '/#/form/index')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -318,7 +330,7 @@ test.describe('UI Assistant E2E 测试 - P0 场景', () => {
   // ========================================================================
   test('P0-5: 表单提交 - 填写后提交表单', async ({ page }) => {
     // 先导航到表单页面
-    await page.goto(BASE_URL + '/form/index')
+    await page.goto(BASE_URL + '/#/form/index')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -338,7 +350,7 @@ test.describe('UI Assistant E2E 测试 - P0 场景', () => {
   // ========================================================================
   test('P0-6: 表格搜索 - 在表格页搜索关键词"测试"', async ({ page }) => {
     // 先导航到表格页面
-    await page.goto(BASE_URL + '/table/index')
+    await page.goto(BASE_URL + '/#/table/index')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -365,7 +377,7 @@ test.describe('UI Assistant E2E 测试 - P0 场景', () => {
   // ========================================================================
   test('P0-7: 表格翻页 - 翻到第 2 页', async ({ page }) => {
     // 先导航到表格页面
-    await page.goto(BASE_URL + '/table/index')
+    await page.goto(BASE_URL + '/#/table/index')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -385,7 +397,7 @@ test.describe('UI Assistant E2E 测试 - P0 场景', () => {
   // ========================================================================
   test('P0-8: Tab 切换 - 切换到第二个 Tab', async ({ page }) => {
     // 先导航到 Tab 页面
-    await page.goto(BASE_URL + '/tabs/index')
+    await page.goto(BASE_URL + '/#/tabs/index')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -412,7 +424,7 @@ test.describe('UI Assistant E2E 测试 - P0 场景', () => {
   // ========================================================================
   test('P0-9: 日期选择 - 选择日期为 2024-01-15', async ({ page }) => {
     // 先导航到表单页面
-    await page.goto(BASE_URL + '/form/index')
+    await page.goto(BASE_URL + '/#/form/index')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -431,6 +443,7 @@ test.describe('UI Assistant E2E 测试 - P0 场景', () => {
   // P0-10: 复合操作
   // ========================================================================
   test('P0-10: 复合操作 - 跳转到表单页，填写标题，提交', async ({ page }) => {
+    test.setTimeout(120000) // 复合操作需要更长时间
     await createConversationWithUIAssistant(page)
     await sendMessage(page, '跳转到表单页，填写标题为"测试任务"，然后提交表单')
 
@@ -609,7 +622,7 @@ test.describe('UI Assistant E2E 测试 - P1 场景', () => {
   // ========================================================================
   test('P1-11: 账户设置 - 设置页表单操作', async ({ page }) => {
     // 导航到账户设置页
-    await page.goto(BASE_URL + '/account/settings')
+    await page.goto(BASE_URL + '/#/account/settings')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -629,7 +642,7 @@ test.describe('UI Assistant E2E 测试 - P1 场景', () => {
   // ========================================================================
   test('P1-12: 卡片列表 - 列表筛选和操作', async ({ page }) => {
     // 导航到卡片列表页
-    await page.goto(BASE_URL + '/list/card')
+    await page.goto(BASE_URL + '/#/list/card')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -649,7 +662,7 @@ test.describe('UI Assistant E2E 测试 - P1 场景', () => {
   // ========================================================================
   test('P1-13: 结果成功页 - 结果页操作按钮', async ({ page }) => {
     // 导航到结果成功页
-    await page.goto(BASE_URL + '/result/success')
+    await page.goto(BASE_URL + '/#/result/success')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -670,7 +683,7 @@ test.describe('UI Assistant E2E 测试 - P1 场景', () => {
   // ========================================================================
   test('P1-14: 引导页 - 引导流程', async ({ page }) => {
     // 导航到引导页
-    await page.goto(BASE_URL + '/guide')
+    await page.goto(BASE_URL + '/#/guide')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -690,7 +703,7 @@ test.describe('UI Assistant E2E 测试 - P1 场景', () => {
   // ========================================================================
   test('P1-15: 高级表单 - 复杂表单操作', async ({ page }) => {
     // 导航到高级表单页
-    await page.goto(BASE_URL + '/form/advanced')
+    await page.goto(BASE_URL + '/#/form/advanced')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -710,7 +723,7 @@ test.describe('UI Assistant E2E 测试 - P1 场景', () => {
   // ========================================================================
   test('P1-16: 分步表单 - 分步操作', async ({ page }) => {
     // 导航到分步表单页
-    await page.goto(BASE_URL + '/form/step')
+    await page.goto(BASE_URL + '/#/form/step')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -730,7 +743,7 @@ test.describe('UI Assistant E2E 测试 - P1 场景', () => {
   // ========================================================================
   test('P1-17: 搜索列表 - 搜索和 Tab 切换', async ({ page }) => {
     // 导航到搜索列表页
-    await page.goto(BASE_URL + '/list/search')
+    await page.goto(BASE_URL + '/#/list/search')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -750,7 +763,7 @@ test.describe('UI Assistant E2E 测试 - P1 场景', () => {
   // ========================================================================
   test('P1-18: 高级详情 - 详情页操作', async ({ page }) => {
     // 导航到高级详情页
-    await page.goto(BASE_URL + '/profile/advanced')
+    await page.goto(BASE_URL + '/#/profile/advanced')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -770,7 +783,7 @@ test.describe('UI Assistant E2E 测试 - P1 场景', () => {
   // ========================================================================
   test('P1-19: 个人中心 - Tab 切换和标签编辑', async ({ page }) => {
     // 导航到个人中心页
-    await page.goto(BASE_URL + '/account/center')
+    await page.goto(BASE_URL + '/#/account/center')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 
@@ -790,7 +803,7 @@ test.describe('UI Assistant E2E 测试 - P1 场景', () => {
   // ========================================================================
   test('P1-20: 分析仪表盘 - 仪表盘操作', async ({ page }) => {
     // 导航到分析仪表盘
-    await page.goto(BASE_URL + '/dashboard/analysis')
+    await page.goto(BASE_URL + '/#/dashboard/analysis')
     await page.waitForLoadState('networkidle')
     await waitForFloatingAssistant(page)
 

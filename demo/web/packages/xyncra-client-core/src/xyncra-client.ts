@@ -1122,6 +1122,11 @@ export class XyncraClient {
           } catch (syncError) {
             this.logger.error('Full sync after reconnect failed', syncError);
           }
+          // Notify UI that sync is complete after reconnection.
+          // Without this, the Vue/React plugin's connectionStatus stays at
+          // 'connecting' after a reconnect, preventing function re-registration
+          // and causing the agent to report "device offline" when calling pg_* functions.
+          this.options.onSyncComplete?.();
           reconnected = true;
         } catch (error) {
           if (this.closed || signal.aborted) return;
