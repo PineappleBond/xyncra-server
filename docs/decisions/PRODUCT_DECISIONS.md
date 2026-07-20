@@ -64,6 +64,7 @@
 | D-133 | Web Agent 超时复用 hitl:question 事件 | 维持 `hitl:question` 映射，不拆独立 `agent:timeout`，与 075 HITL 恢复链路一致 |
 | D-134 | 双层函数注册策略：页面级 + 通用级 fallback | 页面函数按需注册/注销，通用函数常驻注册 |
 | D-135 | 每设备最大函数数上调至 500 | 全量适配预期 230+ 函数，上调提供安全边际 |
+| D-136 | 测试辅助函数统一接口（Agent 和 Playwright 共用） | 测试辅助函数既是 Agent 可调用的页面函数，也是 Playwright 可直接调用的测试工具。已采用声明式注册模式 `defineTestHelpers(pageKey, helpers)` 一行代码完成组件注册、函数暴露、window 挂载、页面函数生成 |
 
 ---
 

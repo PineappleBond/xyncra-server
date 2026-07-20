@@ -424,10 +424,40 @@
 
 ---
 
+## D-136: 测试辅助函数统一接口（已实现）
+
+**决策**：采用声明式注册模式 `defineTestHelpers(pageKey, helpers)` 一行代码完成组件注册、函数暴露、window 挂载、页面函数生成。替代原有三步样板（registerComponent + useXxxFunctions + defineExpose）。
+
+**实现细节**：
+
+- `defineTestHelpers` composable 在 `<script setup>` 顶层同步调用
+- 每个 helper 声明包含 name、description、parameters（JSON Schema）、handler
+- 自动生成 `pg_<pageKey下划线化>_<helperName>` 格式的页面函数
+- 挂载到 `window.XyncraTestHelpers[pageKey][helperName]`（嵌套结构）
+- 组件访问器扩展为同时存储 proxy 和 helpers 映射，callComponentMethod 先 proxy 后 helpers
+
+**原因**：
+
+- 降低样板代码（一行替代三步）
+- 统一 Agent 和 Playwright 的调用接口
+- 消除 DOM 版 test-helpers 的脆弱选择器
+- 显式声明 meta 提高 Agent 可读性
+
+**权衡与陷阱**：
+
+- 迁移需同时改 view + 删 functions 文件，非原子，分批迁移期允许新旧并存
+- `defineExpose` 无法在 composable 内调用，helpers map 改为运行时存于 `component-accessor`
+- `window.XyncraTestHelpers` 由扁平改为嵌套，属外部行为变更
+- `getCurrentInstance` 时序约束：必须在 setup 顶层同步调用
+- 全量迁移 89 个页面组件，删除 27 个 functions 文件（保留 general.ts）
+
+---
+
 ## 版本历史
 
 | 日期       | 版本  | 变更                                                                                           |
 | ---------- | ----- | ---------------------------------------------------------------------------------------------- |
+| 2026-07-20 | v3.28 | D-136 已实现声明式注册模式 defineTestHelpers，全量迁移 89 个页面组件                              |
 | 2026-07-19 | v3.27 | D-054 更新为 Registry 精确匹配模型、D-055/D-062 去除前缀依赖描述                                |
 | 2026-07-17 | v3.26 | D-128（/metrics 端点在同一 HTTP 端口暴露，WSWithExtraRoutes）                                   |
 | 2026-07-17 | v3.25 | D-127（手动业务级追踪，移除自动埋点库）                                                         |
