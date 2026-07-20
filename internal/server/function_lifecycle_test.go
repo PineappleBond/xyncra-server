@@ -57,6 +57,7 @@ func startWSServerWithRegistry(t *testing.T) (*WebSocketServer, *MemoryFunctionR
 	srv, addr, cleanup := startWSServer(t, cs,
 		WSWithMessageHandler(handler),
 		WSWithFunctionRegistry(registry),
+		WSWithFuncCleanupGracePeriod(100*time.Millisecond),
 	)
 
 	return srv, registry, addr, cleanup

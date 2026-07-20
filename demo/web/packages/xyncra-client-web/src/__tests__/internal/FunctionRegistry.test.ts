@@ -170,6 +170,62 @@ describe('FunctionRegistry', () => {
     });
   });
 
+  describe('batchUnregister', () => {
+    it('should remove multiple functions at once', () => {
+      const info1: FunctionInfo = { name: 'fn1', description: 'First', parameters: {} };
+      const info2: FunctionInfo = { name: 'fn2', description: 'Second', parameters: {} };
+      const info3: FunctionInfo = { name: 'fn3', description: 'Third', parameters: {} };
+      registry.register(info1, jest.fn());
+      registry.register(info2, jest.fn());
+      registry.register(info3, jest.fn());
+      expect(registry.size).toBe(3);
+
+      registry.batchUnregister(['fn1', 'fn3']);
+      expect(registry.size).toBe(1);
+      expect(registry.getHandler('fn1')).toBeUndefined();
+      expect(registry.getHandler('fn2')).toBeDefined();
+      expect(registry.getHandler('fn3')).toBeUndefined();
+    });
+
+    it('should only increment version once', () => {
+      const info1: FunctionInfo = { name: 'fn1', description: 'First', parameters: {} };
+      const info2: FunctionInfo = { name: 'fn2', description: 'Second', parameters: {} };
+      registry.register(info1, jest.fn());
+      registry.register(info2, jest.fn());
+      const v = registry.getVersion();
+      registry.batchUnregister(['fn1', 'fn2']);
+      expect(registry.getVersion()).toBe(v + 1);
+    });
+
+    it('should only trigger onChange once', () => {
+      const info1: FunctionInfo = { name: 'fn1', description: 'First', parameters: {} };
+      const info2: FunctionInfo = { name: 'fn2', description: 'Second', parameters: {} };
+      registry.register(info1, jest.fn());
+      registry.register(info2, jest.fn());
+      const changeCallback = jest.fn();
+      registry.onChange(changeCallback);
+      registry.batchUnregister(['fn1', 'fn2']);
+      expect(changeCallback).toHaveBeenCalledTimes(1);
+    });
+
+    it('should be a no-op when no functions match', () => {
+      registry.register(testInfo, jest.fn());
+      const v = registry.getVersion();
+      const changeCallback = jest.fn();
+      registry.onChange(changeCallback);
+      registry.batchUnregister(['nonexistent']);
+      expect(registry.getVersion()).toBe(v);
+      expect(changeCallback).not.toHaveBeenCalled();
+    });
+
+    it('should handle empty array', () => {
+      registry.register(testInfo, jest.fn());
+      const v = registry.getVersion();
+      registry.batchUnregister([]);
+      expect(registry.getVersion()).toBe(v);
+    });
+  });
+
   describe('clear', () => {
     it('should remove all functions', () => {
       registry.register(testInfo, jest.fn());

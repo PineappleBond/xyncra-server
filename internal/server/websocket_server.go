@@ -143,6 +143,7 @@ type webSocketServerOptions struct {
 	functionRegistry       FunctionRegistry
 	pendingStore           PendingStore // Phase 4: reverse-RPC request persistence (D-103)
 	extraRoutes            []Route      // Additional HTTP routes to register on the mux
+	funcCleanupGracePeriod time.Duration // Grace period for function cleanup after disconnect
 }
 
 // WSWithAddr sets the listen address.
@@ -284,6 +285,15 @@ func WSWithExtraRoutes(routes ...Route) WebSocketServerOption {
 	}
 }
 
+// WSWithFuncCleanupGracePeriod sets the grace period before cleaning up
+// functions after a device disconnects. Defaults to 10 seconds.
+// Use a shorter value in tests to speed up test execution.
+func WSWithFuncCleanupGracePeriod(d time.Duration) WebSocketServerOption {
+	return func(o *webSocketServerOptions) {
+		o.funcCleanupGracePeriod = d
+	}
+}
+
 // --------------------------------------------------------------------------
 // WebSocketServer
 // --------------------------------------------------------------------------
@@ -362,6 +372,16 @@ type WebSocketServer struct {
 
 	// extraRoutes are additional HTTP routes registered on the server's mux.
 	extraRoutes []Route
+
+	// pendingFuncCleanup tracks deferred function cleanup timers per device.
+	// When a device disconnects, cleanup is deferred to allow reconnection.
+	// Key: "userID\x00deviceID", Value: cancel function for the timer.
+	pendingFuncCleanup map[string]func()
+
+	// funcCleanupGracePeriod is the grace period before cleaning up functions
+	// after a device disconnects. If the device reconnects within this window,
+	// the cleanup is cancelled. Defaults to 10 seconds.
+	funcCleanupGracePeriod time.Duration
 }
 
 // Ensure WebSocketServer implements Server at compile time.
@@ -444,6 +464,11 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 		nodeBroadcaster = &NoopBroadcaster{}
 	}
 
+	gracePeriod := o.funcCleanupGracePeriod
+	if gracePeriod <= 0 {
+		gracePeriod = 10 * time.Second
+	}
+
 	s := &WebSocketServer{
 		BaseServer:             base,
 		upgrader:               upgrader,
@@ -460,6 +485,8 @@ func NewWebSocketServer(opts ...WebSocketServerOption) (*WebSocketServer, error)
 		functionRegistry:       o.functionRegistry,
 		extraRoutes:            o.extraRoutes,
 		nodeID:                 uuid.New().String(),
+		pendingFuncCleanup:     make(map[string]func()),
+		funcCleanupGracePeriod: gracePeriod,
 		wsConfig: WebSocketServerConfig{
 			Path:              o.path,
 			Authenticate:      authenticate,
@@ -661,6 +688,15 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 		s.clientsByUser[userID] = userClients
 	}
 	userClients[connID] = client
+
+	// Cancel any pending function cleanup for this device. This prevents
+	// the race condition where functions are cleaned up during page
+	// navigation while the client is reconnecting.
+	if cancel, ok := s.pendingFuncCleanup[deviceKey]; ok {
+		cancel()
+		delete(s.pendingFuncCleanup, deviceKey)
+		s.logger.Info("websocket: cancelled pending function cleanup on new connection", "userID", userID, "deviceID", deviceID)
+	}
 	if s.clientsByDevice[deviceKey] == nil {
 		s.clientsByDevice[deviceKey] = make(map[string]*Client)
 	}
@@ -711,9 +747,9 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 	s.removeClient(connID, userID, deviceID)
 
 	// Clean up function registry for this device (Phase 2).
-	// Only clean up if no other connection exists for this device.
-	// This prevents a race where a replacement connection has already
-	// registered functions before the old connection's defer cleanup runs.
+	// Use deferred cleanup with a grace period to handle reconnection
+	// during page navigation. The cleanup is scheduled but can be cancelled
+	// if the device reconnects within the grace period.
 	if s.functionRegistry != nil {
 		deviceKey := userID + "\x00" + deviceID
 		s.mu.RLock()
@@ -721,11 +757,7 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 		s.mu.RUnlock()
 
 		if !hasActiveConn {
-			if removed, regErr := s.functionRegistry.OnDeviceDisconnect(cleanupCtx, userID, deviceID); regErr != nil {
-				s.logger.Error("websocket: clean function registry", "userID", userID, "deviceID", deviceID, "error", regErr)
-			} else if removed != nil {
-				s.logger.Info("websocket: cleaned functions from registry", "count", len(removed.Functions), "userID", userID, "deviceID", deviceID)
-			}
+			s.scheduleFuncCleanup(userID, deviceID)
 		}
 	}
 
@@ -769,6 +801,78 @@ func (s *WebSocketServer) removeClient(connID, userID, deviceID string) {
 			delete(s.clientsByDevice, deviceKey)
 		}
 	}
+}
+
+// cancelPendingFuncCleanup cancels any pending deferred function cleanup for
+// the given device. This is called when a new connection arrives for the same
+// device, preventing the cleanup from removing functions that the new
+// connection will re-register.
+func (s *WebSocketServer) cancelPendingFuncCleanup(userID, deviceID string) {
+	deviceKey := userID + "\x00" + deviceID
+	if cancel, ok := s.pendingFuncCleanup[deviceKey]; ok {
+		cancel()
+		delete(s.pendingFuncCleanup, deviceKey)
+		s.logger.Info("websocket: cancelled pending function cleanup", "userID", userID, "deviceID", deviceID)
+	}
+}
+
+// scheduleFuncCleanup schedules a deferred function cleanup for the given
+// device. If the device reconnects within the grace period, the cleanup is
+// cancelled by cancelPendingFuncCleanup. This prevents the race condition
+// where functions are removed during page navigation while the client is
+// reconnecting.
+func (s *WebSocketServer) scheduleFuncCleanup(userID, deviceID string) {
+	deviceKey := userID + "\x00" + deviceID
+
+	// Cancel any existing pending cleanup for this device (safety measure).
+	if cancel, ok := s.pendingFuncCleanup[deviceKey]; ok {
+		cancel()
+	}
+
+	// Create a cancellable context for this cleanup.
+	// Use context.Background() instead of the caller's context, because
+	// the caller's context (cleanupCtx from handleWebSocket) is cancelled
+	// when handleWebSocket returns, which would immediately cancel the
+	// deferred cleanup before the grace period expires.
+	cleanupCtx, cancel := context.WithCancel(context.Background())
+	s.pendingFuncCleanup[deviceKey] = cancel
+
+	go func() {
+		timer := time.NewTimer(s.funcCleanupGracePeriod)
+		defer timer.Stop()
+
+		select {
+		case <-cleanupCtx.Done():
+			// Cleanup was cancelled (device reconnected).
+			return
+		case <-timer.C:
+			// Grace period expired, proceed with cleanup.
+		}
+
+		// Check if a new connection has arrived for this device.
+		s.mu.RLock()
+		_, hasActiveConn := s.clientsByDevice[deviceKey]
+		s.mu.RUnlock()
+
+		if hasActiveConn {
+			s.logger.Info("websocket: skipping function cleanup, device reconnected", "userID", userID, "deviceID", deviceID)
+			return
+		}
+
+		// Perform the cleanup.
+		if s.functionRegistry != nil {
+			if removed, regErr := s.functionRegistry.OnDeviceDisconnect(cleanupCtx, userID, deviceID); regErr != nil {
+				s.logger.Error("websocket: clean function registry", "userID", userID, "deviceID", deviceID, "error", regErr)
+			} else if removed != nil {
+				s.logger.Info("websocket: cleaned functions from registry after grace period", "count", len(removed.Functions), "userID", userID, "deviceID", deviceID)
+			}
+		}
+
+		// Clean up the pending entry.
+		s.mu.Lock()
+		delete(s.pendingFuncCleanup, deviceKey)
+		s.mu.Unlock()
+	}()
 }
 
 // performDeviceReplacement asynchronously handles the cleanup of old

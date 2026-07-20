@@ -45,17 +45,18 @@ export interface FunctionEntry {
  * ```
  */
 export function useRegisterFunctions(functions: FunctionEntry[]): void {
-  const { registerFunction, unregisterFunction } = useXyncra();
+  const { registry } = useXyncra();
 
   useEffect(() => {
     for (const { info, handler } of functions) {
-      registerFunction(info, handler);
+      registry.register(info, handler);
     }
 
     return () => {
-      for (const { info } of functions) {
-        unregisterFunction(info.name);
-      }
+      // Use batchUnregister to avoid triggering multiple intermediate syncs.
+      // This prevents the server from receiving partially-updated function
+      // lists during page navigation.
+      registry.batchUnregister(functions.map((f) => f.info.name));
     };
     // Re-register only when the set of function names changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps

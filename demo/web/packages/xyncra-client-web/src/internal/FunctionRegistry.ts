@@ -80,6 +80,30 @@ export class FunctionRegistry {
   }
 
   /**
+   * Unregister multiple functions by name in a single batch operation.
+   *
+   * This is more efficient than calling unregister() in a loop because it
+   * only increments the version once and triggers a single change
+   * notification. Use this during component unmount to avoid intermediate
+   * states where the server receives partially-updated function lists.
+   *
+   * @param names - Array of function names to remove.
+   */
+  batchUnregister(names: string[]): void {
+    let changed = false;
+    for (const name of names) {
+      if (this.entries.has(name)) {
+        this.entries.delete(name);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.version++;
+      this.notifyChange();
+    }
+  }
+
+  /**
    * Get the handler for a function by name.
    *
    * @param name - The function name to look up.
