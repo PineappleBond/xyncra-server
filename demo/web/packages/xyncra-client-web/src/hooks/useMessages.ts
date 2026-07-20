@@ -57,6 +57,12 @@ export interface UseMessagesReturn {
   send: (content: string) => Promise<void>;
   /** Re-fetch messages from the local DB. */
   refresh: () => Promise<void>;
+  /** Fetch older messages from the server and append them. */
+  fetchMore: () => Promise<void>;
+  /** True while fetching more messages. */
+  loadingMore: boolean;
+  /** Whether there are more older messages to load. */
+  hasMore: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +80,8 @@ export function useMessages({
   const [messages, setMessages] = useState<MessageEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
 
   // -- Load messages + subscribe to events for the current conversation --
   useEffect(() => {
@@ -85,6 +93,7 @@ export function useMessages({
 
     setLoading(true);
     setError(null);
+    setHasMore(true);
 
     client
       .getMessages(conversationId)
@@ -161,5 +170,36 @@ export function useMessages({
     }
   }, [client, conversationId]);
 
-  return { messages, loading, error, send, refresh };
+  const fetchMore = useCallback(async (): Promise<void> => {
+    if (!client || !conversationId || loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      // Find the oldest message's id to use as afterMessageId.
+      // The server returns messages older than this id.
+      const oldestId = messages.length > 0 ? Number(messages[0].id) : undefined;
+      const result = await client.fetchMoreMessages(
+        conversationId,
+        oldestId,
+      );
+      const older = result.messages.map(dbMessageToEvent);
+      if (older.length === 0) {
+        setHasMore(false);
+      } else {
+        setMessages((prev) => {
+          const existingIds = new Set(prev.map((m) => m.id));
+          const deduped = older.filter((m) => !existingIds.has(m.id));
+          return [...deduped, ...prev];
+        });
+        if (!result.has_more) {
+          setHasMore(false);
+        }
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [client, conversationId, loadingMore, hasMore, messages]);
+
+  return { messages, loading, error, send, refresh, fetchMore, loadingMore, hasMore };
 }

@@ -152,6 +152,30 @@ export const FLOATING_ASSISTANT_STYLES: Record<string, CSSProperties> = {
     justifyContent: 'center',
   },
 
+  // "加载更多消息" 按钮容器
+  loadMoreTrigger: {
+    display: 'flex',
+    justifyContent: 'center',
+    padding: '4px 0',
+  },
+
+  // 时间戳 — AI 消息左对齐
+  timestampLeft: {
+    fontSize: 11,
+    color: 'var(--color-text-tertiary, #999)',
+    marginTop: 4,
+    paddingLeft: 4,
+  },
+
+  // 时间戳 — 用户消息右对齐
+  timestampRight: {
+    fontSize: 11,
+    color: 'var(--color-text-tertiary, #999)',
+    marginTop: 4,
+    paddingRight: 4,
+    textAlign: 'right' as const,
+  },
+
   // HITL dialog override z-index (需高于侧边栏)
   hitlDialog: {
     zIndex: 1100,

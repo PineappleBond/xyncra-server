@@ -833,15 +833,22 @@ export class XyncraClient {
   // ---------------------------------------------------------------------------
 
   /**
-   * Sends system.reconnect followed by system.register_functions after a
-   * (re)connect. Errors are logged but do not prevent FullSync from
-   * proceeding (graceful degradation, D-072).
+   * Sends system.register_functions followed by system.reconnect after a
+   * (re)connect. Functions are registered FIRST so the server has handlers
+   * ready before it replays pending requests from the PendingStore.
+   * Errors are logged but do not prevent FullSync from proceeding
+   * (graceful degradation, D-072).
    */
   private async performReconnectHandshake(): Promise<void> {
     const signal = this.abortController?.signal;
     if (signal?.aborted) return;
 
-    // Step 1: system.reconnect with last_seen_seq.
+    // Step 1: Re-register functions BEFORE reconnect so the server has
+    // handlers ready when it replays pending requests (fixes race condition
+    // where PendingStore replay arrives before client registers handlers).
+    await this.reregisterFunctions();
+
+    // Step 2: system.reconnect with last_seen_seq.
     try {
       await this.call('system.reconnect', {
         last_seen_seq: this.lastReqSeq,
@@ -849,9 +856,6 @@ export class XyncraClient {
     } catch (error) {
       this.logger.error('system.reconnect handshake failed', error);
     }
-
-    // Step 2: re-register functions (fail-open).
-    await this.reregisterFunctions();
   }
 
   /**
@@ -864,6 +868,12 @@ export class XyncraClient {
    */
   setFunctions(fns: FunctionInfo[]): void {
     this.options.functions = fns;
+    // Immediately register functions with the server when they change
+    // This ensures the agent can call newly registered functions without
+    // waiting for a reconnect
+    if (fns.length > 0 && !this.closed) {
+      void this.reregisterFunctions();
+    }
   }
 
   /**

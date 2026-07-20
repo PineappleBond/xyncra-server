@@ -260,6 +260,12 @@ export function XyncraProvider({
         // Initial fullSync completed. If still in 'syncing' state
         // (empty database, no data events received), transition to 'connected'.
         setConnectionStatus((prev) => (prev === 'syncing' ? 'connected' : prev));
+
+        // Immediately register local reverse-RPC handlers so the server can
+        // call client functions right away (fix for "unknown method" errors
+        // where the server already has function metadata but the client
+        // hasn't registered handlers yet — D-101).
+        syncFunctionsToClient();
       },
       deviceInfo: {
         platform: 'web',

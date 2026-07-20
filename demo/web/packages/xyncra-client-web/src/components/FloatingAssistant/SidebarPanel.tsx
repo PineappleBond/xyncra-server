@@ -9,7 +9,6 @@ import { HITLDialog } from './HITLDialog';
 import { MessageArea } from './MessageArea';
 import { FLOATING_ASSISTANT_STYLES as S } from './styles';
 import { useConversations } from '../../hooks/useConversations';
-import { getAgentName } from '../../constants/agents';
 
 export interface SidebarPanelProps {
   open: boolean;
@@ -23,8 +22,9 @@ export function SidebarPanel({ open, onClose }: SidebarPanelProps): React.JSX.El
   const [slideIn, setSlideIn] = useState(false);
   const [showAgentPanel, setShowAgentPanel] = useState(false);
   const [showConvPanel, setShowConvPanel] = useState(false);
-  const [pendingCreate, setPendingCreate] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
+
+  const { createConversationWithAgent } = useConversations();
 
   useEffect(() => {
     if (open) {
@@ -39,27 +39,33 @@ export function SidebarPanel({ open, onClose }: SidebarPanelProps): React.JSX.El
     }
   }, [open]);
 
+  // Close sidebar on Escape key
+  useEffect(() => {
+    if (!visible) return;
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    }
+
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [visible, onClose]);
+
   const handleTransitionEnd = useCallback(() => {
     if (!slideIn) {
       setVisible(false);
     }
   }, [slideIn]);
 
-  const selectedAgentName = getAgentName(selectedAgentID) ?? null;
-  const { createConversation } = useConversations();
-
-  const handleAgentSelect = useCallback((agentID: string) => {
+  const handleAgentSelect = useCallback(async (agentID: string) => {
     setSelectedAgentID(agentID);
     setSelectedConversationID(null);
     setShowAgentPanel(false);
-    if (pendingCreate) {
-      setPendingCreate(false);
-      void (async () => {
-        const conv = await createConversation(agentID, getAgentName(agentID) ?? '新会话');
-        setSelectedConversationID(conv.id);
-      })();
-    }
-  }, [pendingCreate, createConversation]);
+    const conv = await createConversationWithAgent(agentID);
+    setSelectedConversationID(conv.id);
+  }, [createConversationWithAgent]);
 
   const handleConversationSelect = useCallback((id: string) => {
     setSelectedConversationID(id);
@@ -69,14 +75,13 @@ export function SidebarPanel({ open, onClose }: SidebarPanelProps): React.JSX.El
   const handleCreateConversation = useCallback(() => {
     if (selectedAgentID) {
       void (async () => {
-        const conv = await createConversation(selectedAgentID, selectedAgentName ?? '新会话');
+        const conv = await createConversationWithAgent(selectedAgentID);
         setSelectedConversationID(conv.id);
       })();
     } else {
-      setPendingCreate(true);
       setShowAgentPanel(true);
     }
-  }, [selectedAgentID, selectedAgentName, createConversation]);
+  }, [selectedAgentID, createConversationWithAgent]);
 
   if (!visible) {
     return null;
@@ -144,7 +149,7 @@ export function SidebarPanel({ open, onClose }: SidebarPanelProps): React.JSX.El
         title="选择 Agent"
         placement="left"
         open={showAgentPanel}
-        onClose={() => { setShowAgentPanel(false); setPendingCreate(false); }}
+        onClose={() => setShowAgentPanel(false)}
         getContainer={false}
         style={{ position: 'absolute' }}
         width={280}

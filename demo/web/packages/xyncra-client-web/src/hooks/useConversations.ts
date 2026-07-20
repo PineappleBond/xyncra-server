@@ -10,6 +10,7 @@
 
 import type { Conversation as DBConversation } from '@xyncra/client-core/db/models';
 import { useCallback, useEffect, useState } from 'react';
+import { getAgentName } from '../constants/agents';
 import { safeISODate } from '../internal/dateUtils';
 import type { ConversationEvent } from '../internal/EventEmitter';
 import { useXyncra } from './useXyncra';
@@ -56,6 +57,10 @@ export interface UseConversationsReturn {
   createConversation: (
     userId: string,
     title?: string,
+  ) => Promise<ConversationEvent>;
+  /** Create a conversation with an agent (auto-generates title, returns conversation). */
+  createConversationWithAgent: (
+    agentId: string,
   ) => Promise<ConversationEvent>;
   /** Soft-delete a conversation by ID. */
   deleteConversation: (id: string) => Promise<void>;
@@ -172,6 +177,15 @@ export function useConversations(): UseConversationsReturn {
     [client],
   );
 
+  const createConversationWithAgent = useCallback(
+    async (agentId: string): Promise<ConversationEvent> => {
+      const agentName = getAgentName(agentId);
+      const title = agentName ? `与 ${agentName} 的对话` : '新会话';
+      return createConversation(agentId, title);
+    },
+    [createConversation],
+  );
+
   const deleteConversation = useCallback(
     async (id: string): Promise<void> => {
       if (!client) throw new Error('client not initialized');
@@ -200,6 +214,7 @@ export function useConversations(): UseConversationsReturn {
     loading,
     error,
     createConversation,
+    createConversationWithAgent,
     deleteConversation,
     refresh,
   };
