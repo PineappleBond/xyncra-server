@@ -2,9 +2,9 @@
 id: agent/weather-bot
 name: Weather Bot
 description: "Provides weather information for cities worldwide"
-model: qwen3.7-plus
+model: mimo-v2.5-pro
 api_key_env: DASHSCOPE_API_KEY
-base_url: "https://coding.dashscope.aliyuncs.com/v1"
+base_url: "https://token-plan-cn.xiaomimimo.com/v1"
 parameters:
   temperature: 0.7
   max_tokens: 2000

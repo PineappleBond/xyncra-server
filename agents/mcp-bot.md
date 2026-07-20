@@ -2,9 +2,9 @@
 id: agent/mcp-bot
 name: MCP Bot
 description: Agent with MCP server connections for external tools
-model: gpt-4
-api_key_env: OPENAI_API_KEY
-base_url: https://api.openai.com/v1
+model: mimo-v2.5-pro
+api_key_env: DASHSCOPE_API_KEY
+base_url: https://token-plan-cn.xiaomimimo.com/v1
 parameters:
   temperature: 0.7
   max_tokens: 4000

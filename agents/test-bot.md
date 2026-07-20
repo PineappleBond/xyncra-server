@@ -2,9 +2,9 @@
 id: agent/test-bot
 name: Test Bot
 description: "Basic conversational test agent for distributed deployment testing"
-model: qwen3.7-plus
-api_key_env: XYNCRA_TEST_LLM_API_KEY
-base_url: "https://coding.dashscope.aliyuncs.com/v1"
+model: mimo-v2.5-pro
+api_key_env: DASHSCOPE_API_KEY
+base_url: "https://token-plan-cn.xiaomimimo.com/v1"
 parameters:
   temperature: 0.7
   max_tokens: 500

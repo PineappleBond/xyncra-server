@@ -2,9 +2,9 @@
 id: agent/hitl-bot
 name: HITL 测试助手
 description: 需要用户确认的测试 Agent
-model: qwen3.7-plus
-api_key_env: XYNCRA_TEST_REAL_API_KEY
-base_url: https://coding.dashscope.aliyuncs.com/v1
+model: mimo-v2.5-pro
+api_key_env: DASHSCOPE_API_KEY
+base_url: https://token-plan-cn.xiaomimimo.com/v1
 parameters:
   temperature: 0.3
   max_tokens: 500

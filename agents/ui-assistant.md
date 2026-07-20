@@ -2,12 +2,12 @@
 id: agent/ui-assistant
 name: 前端页面助手
 description: "操作前端 UI 的助手，可调用前端 function 高亮元素、导航页面、展示通知并获取当前页面信息"
-model: qwen3.7-plus
+model: mimo-v2.5-pro
 api_key_env: DASHSCOPE_API_KEY
-base_url: "https://coding.dashscope.aliyuncs.com/v1"
+base_url: "https://token-plan-cn.xiaomimimo.com/v1"
 parameters:
   temperature: 0.5
-  max_tokens: 2000
+  max_tokens: 131072
   top_p: 0.9
 context:
   max_tokens: 8000
