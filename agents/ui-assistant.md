@@ -66,27 +66,24 @@ middleware:
 按页面注册的专用函数，命名规则：`pg_{页面id}_{元素id}`。例如登录页有 `pg_login_tab_account`、`pg_login_submit_btn`。
 
 受支持页面（注册了 pg_ 函数的页面）：
-  - user/login — 登录页（Tab切换、输入框、提交、忘记密码、第三方登录、关闭提示）
-  - user/register — 注册页（邮箱/密码/手机/验证码输入、提交、已有账户登录）
-  - form/basic-form — 基础表单（标题/日期/描述/客户/权重/公开选项/提交）
-  - table-list — 表格列表（新建/搜索/刷新/批量操作/行操作/翻页/抽屉）
-  - list/basic-list — 基础列表（Segmented筛选/搜索/编辑/删除/添加/翻页）
-  - dashboard/analysis — 分析仪表盘（销售额/访问量Tab、今日/本周/本月/本年、日期范围、渠道）
-  - account/settings — 账户设置（菜单切换、邮箱/昵称/简介/地址输入、省市区选择、头像上传）
-  - chatbot — 聊天机器人（发送消息、对话选择/删除）
-  - list/search — 搜索列表（Tab切换、搜索输入）
-  - form/step-form — 分步表单（付款/收款账户、金额、确认提交）
-  - form/advanced-form — 高级表单（仓库/任务字段、生效日期、提交）
-  - profile/advanced — 高级详情（操作按钮、Tab切换）
-  - account/center — 个人中心（Tab切换、标签编辑）
-  - list/card-list — 卡片列表（链接、新增产品）
-  - dashboard/workplace — 工作台（操作链接）
-  - result — 结果页（返回列表、查看项目、打印、催一下）
-  - exception — 异常页（Back to home）
+  - login — 登录页（Tab切换、输入框、提交）
   - welcome — 欢迎页（信息卡片）
-  - user/register-result — 注册结果（查看邮箱、返回首页）
+  - form/index — 表单页（Schema表单、提交）
+  - form/advanced — 高级表单（仓库/任务字段、生效日期、提交）
+  - form/step — 分步表单（付款/收款账户、金额、确认提交、再次转账）
+  - list/card — 卡片列表（搜索、新建产品、查看详情、刷新）
+  - list/search — 搜索列表（Tab切换、搜索输入）
+  - table/index — 表格页（搜索、刷新、新增行）
+  - tabs/index — 标签页（Tab切换）
+  - result/success — 成功结果页（返回列表、查看项目、打印）
+  - guide — 引导页（启动引导流程）
+  - account-settings — 账户设置（菜单切换、字段值设置）
+  - account/center — 个人中心（Tab切换、标签编辑）
+  - account/settings — 账户设置（同account-settings，兼容路由）
+  - profile/advanced — 高级详情（操作按钮、Tab切换）
+  - dashboard/analysis — 分析仪表盘（指标切换、时间维度筛选）
 
-纯展示页面（monitor、profile/basic、admin）使用通用 DOM 函数操作。
+纯展示页面使用通用 DOM 函数操作。
 
 ## 操作流程
 
