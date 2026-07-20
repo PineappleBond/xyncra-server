@@ -57,7 +57,7 @@ const nativeTextareaValueSetter = Object.getOwnPropertyDescriptor(
  * }
  * ```
  */
-export function setReactInputValue(el: HTMLElement, value: string): boolean {
+export function setReactInputValue(el: HTMLElement, value: string, shouldFocus: boolean = true): boolean {
   try {
     if (!nativeInputValueSetter) {
       console.warn('[reactValueSetter] HTMLInputElement.prototype.value setter not found');
@@ -69,8 +69,10 @@ export function setReactInputValue(el: HTMLElement, value: string): boolean {
       return false;
     }
 
-    // Focus 元素，某些组件依赖 focus 状态
-    inputEl.focus();
+    // Focus 元素，某些组件依赖 focus 状态（可通过参数控制）
+    if (shouldFocus) {
+      inputEl.focus();
+    }
 
     // 先设为空串，再设为目标值，确保 React 感知变化
     nativeInputValueSetter.call(inputEl, '');
@@ -229,11 +231,22 @@ export async function setReactDateRangePickerValue(
     const startInput = inputs[0] as HTMLInputElement;
     const endInput = inputs[1] as HTMLInputElement;
 
-    // 尝试直接设置值
-    const startSuccess = setReactInputValue(startInput as unknown as HTMLElement, startDate);
-    const endSuccess = setReactInputValue(endInput as unknown as HTMLElement, endDate);
+    // 先关闭可能已经打开的面板
+    const existingPanel = document.querySelector('.ant-picker-dropdown:not(.ant-picker-dropdown-hidden)');
+    if (existingPanel) {
+      // 点击面板外部关闭它
+      document.body.click();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    // 尝试直接设置值（不 focus，避免触发面板弹出）
+    const startSuccess = setReactInputValue(startInput as unknown as HTMLElement, startDate, false);
+    const endSuccess = setReactInputValue(endInput as unknown as HTMLElement, endDate, false);
 
     if (startSuccess && endSuccess) {
+      // 设置值后立即 blur，确保面板关闭
+      startInput.blur();
+      endInput.blur();
       return true;
     }
 
@@ -275,6 +288,11 @@ export async function setReactDateRangePickerValue(
         break;
       }
     }
+
+    // 选择完成后，确保面板关闭
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    startInput.blur();
+    endInput.blur();
 
     return true;
   } catch (error) {

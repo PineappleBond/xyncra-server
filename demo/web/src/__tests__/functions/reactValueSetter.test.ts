@@ -174,6 +174,30 @@ describe('reactValueSetter', () => {
 
       document.body.removeChild(input);
     });
+
+    it('IN-11: shouldFocus 参数为 false 时不调用 focus', () => {
+      const input = document.createElement('input');
+      document.body.appendChild(input);
+      const focusSpy = jest.spyOn(input, 'focus');
+
+      setReactInputValue(input, 'test', false);
+
+      expect(focusSpy).not.toHaveBeenCalled();
+
+      document.body.removeChild(input);
+    });
+
+    it('IN-12: shouldFocus 参数为 true 时调用 focus', () => {
+      const input = document.createElement('input');
+      document.body.appendChild(input);
+      const focusSpy = jest.spyOn(input, 'focus');
+
+      setReactInputValue(input, 'test', true);
+
+      expect(focusSpy).toHaveBeenCalled();
+
+      document.body.removeChild(input);
+    });
   });
 
   describe('setReactTextareaValue', () => {
