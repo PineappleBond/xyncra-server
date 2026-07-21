@@ -306,28 +306,48 @@ Handler 构造时启动后台 goroutine，每 5 分钟执行一次清理：
 
 ## 与 Agent 执行的关系
 
-`stream_text` 主要由 Agent 执行器使用：
+`stream_text` RPC handler 供客户端直接调用，用于客户端自定义的流式文本场景。Agent 执行器**不使用** `stream_text` handler，而是通过 `BroadcastHelper.SendStreamUpdate` 直接调用 `WebSocketServer.BroadcastUpdates`，绕过 RPC handler 的 rate limiting 和会话成员校验。
+
+两条路径对比：
+
+| 维度 | `stream_text` RPC handler | Agent `BroadcastHelper` |
+| --- | --- | --- |
+| 调用方 | 客户端（直接 RPC） | Agent 执行器（内部调用） |
+| Rate limiting | 50ms/user/conv | 无（50ms 节流在 StreamBridge 层） |
+| 成员校验 | 校验调用者是会话成员 | 无（Agent 已在 task_handler 中校验） |
+| 广播路径 | broadcastFn (BroadcastUpdates) | BroadcastHelper.SendStreamUpdate (BroadcastUpdates) |
+| 持久化 | 不持久化 (Seq=0) | 不持久化 (Seq=0)，最终消息通过 store.SendMessage 持久化 |
+
+Agent 的流式输出路径：
 
 ```mermaid
 sequenceDiagram
     participant MQ as Message Queue
     participant Agent as Agent Executor
-    participant Handler as StreamTextHandler
+    participant Bridge as StreamBridge
+    participant BH as BroadcastHelper
+    participant WS as WebSocket Server
     participant C as 客户端
 
     MQ->>Agent: TypeAgentProcess 任务
     Agent->>Agent: 执行 LLM 流式请求
 
     loop 每个流式 chunk
-        Agent->>Handler: stream_text (累积文本)
-        Handler->>C: 广播给所有成员
+        Agent->>Bridge: Eino AsyncIterator
+        Bridge->>Bridge: 50ms 节流
+        Bridge-->>Agent: StreamChunk (累积文本)
+        Agent->>BH: SendStreamUpdate (累积文本, isDone=false)
+        BH->>WS: BroadcastUpdates
+        WS->>C: 推送给所有成员
     end
 
-    Agent->>Handler: stream_text (is_done=true)
-    Handler->>C: 广播完成信号
+    Agent->>BH: SendStreamUpdate (最终文本, isDone=true)
+    BH->>WS: BroadcastUpdates
+    WS->>C: 广播完成信号
 
     Agent->>Agent: 持久化最终消息
-    Agent->>C: 通过 MQ 广播持久化消息
+    Agent->>BH: BroadcastMessageUpdate
+    BH->>WS: BroadcastUpdates (带 DB seq)
 ```
 
 ---
