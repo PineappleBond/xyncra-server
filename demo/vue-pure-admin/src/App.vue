@@ -3,7 +3,7 @@
     <router-view />
     <ReDialog />
     <ReDrawer />
-    <FloatingAssistant />
+    <FloatingAssistant v-if="!isLoginPage" />
   </el-config-provider>
 </template>
 
@@ -36,6 +36,7 @@ export default defineComponent({
     const { $storage } = useGlobal<GlobalPropertiesApi>();
     const watermarkEnable = computed(() => $storage.configure?.watermark);
     const watermarkText = computed(() => $storage.configure?.watermarkText);
+    const isLoginPage = computed(() => route.name === "Login");
     const currentLocale = computed(() => {
       return $storage.locale?.locale === "zh"
         ? { ...zhCn, ...plusZhCn }
@@ -63,7 +64,8 @@ export default defineComponent({
     );
 
     return {
-      currentLocale
+      currentLocale,
+      isLoginPage
     };
   },
   beforeCreate() {

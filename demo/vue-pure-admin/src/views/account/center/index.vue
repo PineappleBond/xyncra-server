@@ -30,11 +30,11 @@ const onAddTag = () => {
 defineTestHelpers('account-center', {
   switchTab: {
     name: 'switchTab',
-    description: '切换个人中心 Tab',
+    description: '切换个人中心 Tab。tab 参数必须传英文 key：articles=文章, applications=应用, projects=项目',
     parameters: {
       type: 'object',
       properties: {
-        tab: { type: 'string', description: 'Tab 名称（articles/applications/projects）' }
+        tab: { type: 'string', description: 'Tab key（articles=文章, applications=应用, projects=项目）' }
       },
       required: ['tab']
     },
@@ -84,7 +84,7 @@ defineTestHelpers('account-center', {
       <h3 class="mt-2">用户名</h3>
       <p class="text-gray-500">这是一段个人简介</p>
     </div>
-    <div class="mb-4">
+    <div class="mb-4" data-testid="user-tags">
       <span class="mr-2">标签：</span>
       <el-tag v-for="tag in tags" :key="tag" class="mr-2 mb-2">{{ tag }}</el-tag>
       <el-input

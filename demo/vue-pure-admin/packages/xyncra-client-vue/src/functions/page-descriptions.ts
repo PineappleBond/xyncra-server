@@ -201,13 +201,13 @@ const pageDescriptions: Record<string, Omit<PageDescription, 'route'>> = {
     regions: [
       {
         name: '内容切换区',
-        purpose: '切换文章/应用/项目 Tab',
-        functions: ['pg_account_center_tab'],
+        purpose: '切换文章/应用/项目 Tab（tab 参数传 articles/applications/projects）',
+        functions: ['pg_account_center_switchTab'],
       },
       {
         name: '标签区',
-        purpose: '查看与添加个人标签',
-        functions: ['pg_account_center_tag_input'],
+        purpose: '查看与添加个人标签（addTag 直接添加标签，setTagInput 仅设置输入框值）',
+        functions: ['pg_account_center_addTag', 'pg_account_center_setTagInput'],
       },
     ],
   },
