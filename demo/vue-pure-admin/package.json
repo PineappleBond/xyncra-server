@@ -19,9 +19,7 @@
     "lint:stylelint": "stylelint --cache --fix \"**/*.{html,vue,css,scss}\" --cache-location node_modules/.cache/stylelint/",
     "lint": "pnpm lint:eslint && pnpm lint:prettier && pnpm lint:stylelint",
     "prepare": "husky",
-    "preinstall": "npx only-allow pnpm",
-    "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "preinstall": "npx only-allow pnpm"
   },
   "keywords": [
     "vue-pure-admin",
