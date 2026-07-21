@@ -201,8 +201,8 @@ flowchart TD
 | **非发送者删除** | 返回 `PermissionDeniedError` (only the sender can delete this message) |
 | **重复删除** | GORM 软删除插件在 `Get()` 查询时自动排除 `deleted_at` 非空的记录，因此重复删除请求在步骤 3（获取消息）即返回 `NotFoundError`。store 层 `Delete()` 的 `RowsAffected=0` 检查是防御性后备，正常路径不会触及 |
 | **UserUpdate 创建失败** | 日志记录但不影响主流程，消息已软删除 |
-| **MQ 广播失败** | 日志记录但不影响数据完整性，客户端可通过 `sync_updates` 拉取 |
-| **GetLatestSeq 失败** | 跳过该成员的 UserUpdate 创建，记录错误日志 |
+| **MQ 广播失败** | 日志记录但不影响数据完整性，客户端可通过 `sync_updates` 拉取。若所有成员的 UserUpdate 创建均失败（如 `GetLatestSeq` 全部失败），则 recipients 为空，不会发起 MQ 广播 |
+| **GetLatestSeq 失败** | 跳过该成员的 UserUpdate 创建和 MQ 广播（`continue` 跳过整个成员循环体，该成员不进入 `updates` 和 `recipients` 切片），记录错误日志 |
 
 ---
 

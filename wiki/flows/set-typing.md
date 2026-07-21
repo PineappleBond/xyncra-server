@@ -42,7 +42,7 @@ sequenceDiagram
     participant WS as WebSocket Server
     participant H as SetTypingHandler
     participant S as Store
-    participant B as BroadcastHelper
+    participant B as BroadcastUpdates
 
     C->>WS: set_typing {conversation_id, is_typing}
     WS->>H: HandleRequest(ctx, client, req)
@@ -209,9 +209,9 @@ flowchart TD
 
 ### Redis 操作
 
-| 操作 | 用途 | 场景 |
-|------|------|------|
-| PUBLISH | `xyncra:broadcast:{userID}` | 仅多节点部署，通过 `RedisNodeBroadcaster.Publish` |
+| 操作    | 用途                             | 场景                                                                                                   |
+| ------- | -------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| PUBLISH | `{keyPrefix}:broadcast:{userID}` | 仅多节点部署，通过 `RedisNodeBroadcaster.Publish`；`keyPrefix` 可配置，默认 `xyncra`                   |
 
 Handler 自身不直接操作 Redis。Redis 操作发生在 `broadcastFn` 的跨节点路径中。
 
@@ -234,6 +234,7 @@ Handler 自身不直接操作 Redis。Redis 操作发生在 `broadcastFn` 的跨
 - **Key**：`userID:conversationID`
 - **超限行为**：静默返回 OK（不是错误），不广播
 - **实现**：`sync.Map` 存储每个 key 的 `typingRateLimiter`，记录 `lastTime` 和 `lastAccess`；`allow()` 每次调用（包括被限流时）都更新 `lastAccess`，防止条目被 cleanup 提前清理
+- **线程安全**：`typingRateLimiter` 内部使用 `sync.Mutex` 保护 `lastTime` 和 `lastAccess`，`sync.Map` 本身并发安全，因此 `setTypingHandler` 可安全用于并发请求
 - **清理**：后台 goroutine 每 5 分钟清理 10 分钟未访问的条目
 
 ### 3. Broadcast to All Members
@@ -244,8 +245,9 @@ Handler 自身不直接操作 Redis。Redis 操作发生在 `broadcastFn` 的跨
 
 `broadcastFn`（即 `WebSocketServer.BroadcastUpdates`）的投递路径：
 
-1. **本地广播**：遍历 `clientsByUser[userID]`，通过 WebSocket 直接推送给本节点的在线连接
-2. **跨节点广播**：通过 `nodeBroadcaster.Publish` 发布到 Redis Pub/Sub，其他节点订阅后推送给各自本地连接（D-018）
+1. **创建广播 span**：通过 `startBroadcastSpan(context.Background(), userID)` 创建 OpenTelemetry span，用于可观测性追踪
+2. **本地广播**：遍历 `clientsByUser[userID]`，通过 WebSocket 直接推送给本节点的在线连接
+3. **跨节点广播**：通过 `nodeBroadcaster.Publish` 发布到 Redis Pub/Sub，其他节点订阅后推送给各自本地连接（D-018）
 
 Pub/Sub 发布失败仅记录日志，不影响返回值（fire-and-forget，D-007）。
 

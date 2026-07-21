@@ -61,7 +61,7 @@ last_updated: 2026-07-21
  | 4 | 存储层事务 | [storage.md](storage.md) | SendMessage 原子事务、seq 分配 |
  | 5 | CLI 与 IPC | [cli-ipc.md](cli-ipc.md) | 命令行客户端 + Unix Socket IPC |
  | 6 | CLI 可观测性 | [cli-observability.md](cli-observability.md) | LLM 日志、Prometheus 指标、OpenTelemetry |
- | 7 | 协议层 | [websocket.md](websocket.md) | 3 层信封: Package → Data → Payload |
+ | 7 | WebSocket 协议概览 | [websocket.md](websocket.md) | WebSocket 连接生命周期高层流程图（详见 websocket-connection.md） |
 
 ## 整体架构图
 
@@ -192,6 +192,7 @@ graph TB
 | [Reload Agents](reload-agents.md) | `reload-agents.md` | Agent 配置热重载 |
 | [Background Cleanup](background-cleanup.md) | `background-cleanup.md` | 后台清理任务（UserUpdate/HITL/缓存） |
 | [Client Registration](client-registration.md) | `client-registration.md` | 客户端注册与函数管理（连接注册/函数注册/动态工具注入） |
+| [Function Registry](function-registry.md) | `function-registry.md` | 函数注册与动态工具详细流程（system.register_functions RPC） |
 | [Message Queue](message-queue.md) | `message-queue.md` | 消息队列业务流程（入队/消费/重试/优雅关闭） |
 | [Agent Execution](agent-execution.md) | `agent-execution.md` | Agent 执行引擎与 LLM 交互（MQ 消费/LLM 调用/流式输出） |
 | [CLI Observability](cli-observability.md) | `cli-observability.md` | CLI 操作与可观测性（LLM 日志/Prometheus 指标/OpenTelemetry） |

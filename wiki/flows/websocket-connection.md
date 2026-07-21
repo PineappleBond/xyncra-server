@@ -37,7 +37,8 @@ sequenceDiagram
     end
 
     HTTP->>HTTP: upgrader.Upgrade(w, r)
-    HTTP->>HTTP: startConnectionSpan(ctx, userID, deviceID, connID)
+    HTTP->>HTTP: startConnectionSpan(r.Context(), userID, deviceID, connID)
+    HTTP->>HTTP: defer connFinish(nil) [所有退出路径均关闭 span]
     HTTP->>HTTP: NewClient(conn, ..., WithContext(connCtx))
     HTTP->>WS: 原子操作 (单次锁获取):<br/>1. 从 clientsByDevice 删除旧引用<br/>2. 注册新连接到 clients<br/>3. 注册新连接到 clientsByUser<br/>4. cancelPendingFuncCleanup<br/>5. 注册新连接到 clientsByDevice
 
@@ -104,6 +105,17 @@ sequenceDiagram
 - 触发条件: 所有 WebSocket 升级请求
 - 处理逻辑: upgrader.CheckOrigin 始终返回 true（D-004: CORS 由反向代理处理）
 - 最终结果: 不做来源校验，依赖外部反向代理进行安全过滤
+
+### 关键常量
+
+| 常量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `defaultConnectionTTL` | 30 分钟 | ConnectionInfo 未指定 TTL 时的默认值 |
+| `defaultPongWait` | 60 秒 | 未收到 Pong 的断连超时 |
+| `defaultPingPeriod` | 54 秒 | 服务端 Ping 发送间隔 (`pongWait * 9 / 10`) |
+| `defaultWriteWait` | 10 秒 | 写入截止时间 |
+| `defaultSendBufSize` | 256 | 每客户端发送缓冲区容量 |
+| `defaultMaxMessageSize` | 64 KiB | 客户端发来消息的最大字节数 |
 
 ### 涉及文件
 
@@ -245,9 +257,8 @@ sequenceDiagram
     DMH->>HH: HandleRequest(ctx, client, req)
     HH->>HH: 解析可选 device_info (仅记录日志)
     HH->>CS: Refresh(connID)
-    CS->>CS: GET infoKey 读取 ConnectionInfo JSON (获取 TTL 配置和 UserID)
-    CS->>CS: Lua: EXISTS infoKey → PEXPIRE infoKey (连接 TTL)
-    CS->>CS: Lua: PTTL userKey → PEXPIRE userKey (MAX 语义)
+    CS->>CS: Round-trip 1: GET infoKey 读取 ConnectionInfo JSON (获取 TTL 配置和 UserID)
+    CS->>CS: Round-trip 2: Lua 脚本原子执行:<br/>EXISTS infoKey → 不存在返回 0<br/>PEXPIRE infoKey (连接 TTL)<br/>PTTL userKey → PEXPIRE userKey (仅当新 TTL > 当前 TTL)
     CS-->>HH: 成功 / ErrConnectionNotFound
     HH-->>Client: Response: {status: ok} / {status: connection expired}
 ```
@@ -518,9 +529,15 @@ sequenceDiagram
 
 #### 6. 重放失败日志标签
 
-- 触发条件: 任何重放失败（sendFunc 错误、超时、非零 Code）
-- 处理逻辑: 代码中日志标签为 "replay timeout"，实际涵盖所有失败类型
+- 触发条件: 任何重放失败（sendFunc 错误、超时、resp==nil、非零 Code）
+- 处理逻辑: 代码中日志标签为 "replay timeout"，实际涵盖所有失败类型（`err != nil || resp == nil || resp.Code != 0`）
 - 最终结果: 日志标签具有误导性但不影响功能
+
+#### 7. PendingStore 为 nil 但有待处理请求
+
+- 触发条件: PendingStore 未配置（nil），但之前有超时的反向 RPC 请求（未持久化）
+- 处理逻辑: reconnectHandler 直接返回零计数，不尝试重放
+- 最终结果: 超时的反向 RPC 请求永久丢失，客户端需通过 `sync_updates` 补偿数据
 
 ### 涉及文件
 
@@ -532,6 +549,8 @@ sequenceDiagram
 ---
 
 ## 场景 7: 跨节点广播 (Redis Pub/Sub)
+
+> **权威来源**: 跨节点广播的完整流程（含边缘场景、设计决策、广播器生命周期）详见 [broadcasting.md](./broadcasting.md) 第 1、5 节。本节仅提供 WebSocket 连接管理视角的概览。
 
 ### 主流程
 
@@ -563,8 +582,14 @@ sequenceDiagram
 #### 1. Redis Pub/Sub 发布失败
 
 - 触发条件: Redis 不可达或网络分区
-- 处理逻辑: 记录错误日志，不返回错误给调用方（fire-and-forget 策略）
-- 最终结果: 其他节点收不到更新，但本地节点已投递，数据已持久化
+- 处理逻辑: 记录错误日志，`BroadcastUpdates` 仍返回 nil（fire-and-forget 策略，D-007）
+- 最终结果: 其他节点收不到更新，但本地节点已投递，数据已持久化，客户端可通过 `sync_updates` 补偿
+
+#### 1b. updates 参数为 nil
+
+- 触发条件: 调用方传入 nil updates
+- 处理逻辑: `BroadcastUpdates` 开头检查 `updates == nil`，直接返回 error（`"websocket: updates is nil"`），不执行本地广播和跨节点发布
+- 最终结果: 这是 `BroadcastUpdates` 唯一返回非 nil error 的路径
 
 #### 2. 收到自身节点发出的消息
 
@@ -608,12 +633,12 @@ sequenceDiagram
 
     Client->>RP: 关闭连接 / 发送 CloseFrame
     RP->>RP: ReadMessage 返回错误
-    RP->>RP: Close() [defer]
+    RP->>RP: defer Close(): cancel context + conn.Close()
     WP->>WP: ctx.Done() 触发
-    WP->>Client: 发送 CloseFrame
-    WP->>WP: 退出
+    WP->>Client: 尝试发送 CloseFrame (WriteDeadline=10s)
+    WP->>WP: defer conn.Close() 退出
 
-    Note over RP,WP: 两个协程退出后 done channel 关闭
+    Note over RP,WP: 两个协程退出后 WaitGroup 完成，done channel 关闭<br/>Run() 从 select 解除阻塞返回<br/>handleWebSocket 继续执行 cleanup
 
     WS->>CS: Remove(connID) [5s 超时]
     WS->>WS: removeClient(connID, userID, deviceID)
@@ -648,7 +673,7 @@ sequenceDiagram
 #### 3. FunctionRegistry 延迟清理与重连竞态
 
 - 触发条件: 设备断开后在宽限期 (默认 10s) 内重连
-- 处理逻辑: 新连接注册时调用 `cancelPendingFuncCleanup` 取消待执行的清理协程
+- 处理逻辑: 新连接注册时调用 `cancelPendingFuncCleanup` 取消待执行的清理协程；若取消失败（宽限期已过），清理协程在执行前再次检查 `hasActiveConn`，发现新连接已注册则跳过清理（双重保险）
 - 最终结果: 功能注册不会被误删，新连接可正常注册函数
 
 #### 4. FunctionRegistry 清理失败
@@ -688,7 +713,7 @@ sequenceDiagram
     WS->>BS: GracefulStop(ctx)
     BS->>BS: Stop() -> cancel context
 
-    Note over WS: Start() 中 <-ctx.Done() 解除阻塞
+    Note over WS: Start() 内部流程（ctx 取消后）
 
     WS->>HTTP: Shutdown(5s timeout)
     Note over HTTP: 停止接受新连接
@@ -713,7 +738,8 @@ sequenceDiagram
         Note over WS: 强制继续关闭
     end
 
-    Note over WS: Start() 返回
+    Note over WS: Start() 返回（所有 cleanup 已完成）
+
     BS->>BS: 等待 done channel 关闭
     BS-->>WS: GracefulStop 返回
 ```
@@ -892,18 +918,26 @@ flowchart TD
 
 ## 场景 13: Redis 连接存储的 TTL 与自动过期
 
+### Redis 存储常量
+
+| 常量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `defaultConnectionTTL` | 30 分钟 | ConnectionInfo 未指定 TTL 时的默认值 |
+| `maxListByUserLimit` | 1000 | ListByUser 单次返回的最大连接数 |
+| `removeByUserBatchSize` | 100 | RemoveByUser 每批 UNLINK 的 key 数量 |
+
 ### 主流程
 
 ```mermaid
 flowchart TD
-    A[连接注册 Add] --> B["Lua 原子执行:<br/>GET infoKey 检查存在 + SCARD 检查限制<br/>SET infoKey JSON PX ttl<br/>SADD userKey connID<br/>PEXPIRE userKey MAX语义"]
+    A[连接注册 Add] --> B["Lua 原子执行 (luaAdd, 1 round-trip):<br/>GET infoKey 读取旧数据（检查存在 + 获取旧 UserID）<br/>新连接: SCARD 检查 MaxConnectionsPerUser 限制<br/>UserID 变更: SREM 旧 userKey + SCARD 新 userKey 检查限制<br/>SET infoKey JSON PX ttl<br/>SADD userKey connID<br/>PTTL userKey → PEXPIRE userKey (MAX 语义)"]
 
-    E[连接刷新 Refresh] --> F[GET infoKey 读取 ConnectionInfo JSON]
-    F --> G["Lua 原子执行:<br/>EXISTS infoKey<br/>PEXPIRE infoKey (连接 TTL)<br/>PTTL userKey → PEXPIRE userKey (MAX 语义)"]
+    E[连接刷新 Refresh] --> F["Round-trip 1: GET infoKey 读取 ConnectionInfo JSON (获取 TTL 和 UserID)"]
+    F --> G["Round-trip 2: Lua luaRefresh 原子执行:<br/>EXISTS infoKey → 不存在返回 0<br/>PEXPIRE infoKey (连接 TTL)<br/>PTTL userKey → PEXPIRE userKey (仅当新 TTL > 当前 TTL)"]
 
-    R[连接删除 Remove] --> S[Get(connID) 获取 userID]
-    S --> T["Lua luaRemove:<br/>DEL infoKey + SREM userKey connID"]
-    T --> U["Lua luaCleanupEmptySet:<br/>SCARD userKey == 0 则 DEL"]
+    R[连接删除 Remove] --> S["Round-trip 1: Get(connID) 获取 userID"]
+    S --> T["Round-trip 2: Lua luaRemove:<br/>DEL infoKey + SREM userKey connID"]
+    T --> U["Round-trip 3: Lua luaCleanupEmptySet:<br/>SCARD userKey == 0 则 DEL"]
 
     I[Redis 自动过期] --> J[infoKey TTL 到期自动删除]
     J --> K[userKey 中残留过期 connID]
@@ -928,8 +962,8 @@ flowchart TD
 #### 3. 用户 ID 变更时的索引清理
 
 - 触发条件: 用相同 connID 覆盖写入但 UserID 不同
-- 处理逻辑: Lua 脚本中原子 SREM 旧 userKey，SADD 新 userKey
-- 最终结果: 旧用户的连接集被正确清理
+- 处理逻辑: luaAdd 脚本中先 GET infoKey 读取旧数据解析 oldUserID，若 `oldUserID != newUserID` 则原子 SREM 旧 userKey，并对新 userKey 执行 SCARD 检查 MaxConnectionsPerUser 限制（连接尚未加入新 userKey，所以用 `>= maxConns` 判断）
+- 最终结果: 旧用户的连接集被正确清理，新用户的连接限制被正确检查
 
 #### 4. Remove 操作的非原子性
 

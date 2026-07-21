@@ -46,6 +46,7 @@ sequenceDiagram
     participant R as AgentRegistry
     participant FS as 文件系统
 
+    C->>C: NewCLIContext（解析 user-id/device-id，失败则返回错误）
     C->>D: reload_agents {}（IPC，socket 超时 5s，context 超时 10s）
     D->>WS: xc.Call(ctx, "reload_agents", nil)（WebSocket 转发）
     WS->>H: HandleRequest(ctx, client, req)
@@ -93,7 +94,8 @@ sequenceDiagram
 
 **CLI 侧（IPC 调用）**：
 
-- **CLI 入口**：`runReloadAgents()` 解析 CLIContext，创建 `IPCClient`（socket 超时 5s），设置 context 超时 10s，通过 Unix 域套接字发送 `reload_agents` IPC 请求
+- **CLI 入口**：`runReloadAgents()` 先调用 `NewCLIContext(cmd)` 解析 user-id/device-id（flag > env var > default），然后创建 `IPCClient`（socket 超时 5s），设置 context 超时 10s，通过 Unix 域套接字发送 `reload_agents` IPC 请求
+  - 上下文解析失败（缺少 user-id 或 device-id）：返回 `reload-agents: context: {field} is required (set via --{field} flag or XYNCRA_{FIELD} env var)`
   - 守护进程未运行：IPC 连接失败，输出 `Error: daemon not running.` 到 stderr，提示启动命令，`os.Exit(2)`（D-036/D-042）
   - 服务端返回错误：`resp.Error` 非 nil，返回 `reload-agents: {message}`
   - 结果反序列化失败：返回 `reload-agents: unmarshal result: {error}`
@@ -244,6 +246,7 @@ flowchart TD
 
 | 场景 | 处理方式 |
 | ---- | ---- |
+| 缺少 user-id 或 device-id | 返回 `reload-agents: context: {field} is required (set via --{field} flag or XYNCRA_{FIELD} env var)` |
 | 守护进程未运行（IPC 连接失败） | 输出 `Error: daemon not running.` 到 stderr，提示启动命令，`os.Exit(2)` |
 | IPC socket 连接超时（5s） | 返回 `ipc client dial: ...` 错误 |
 | context 超时（10s） | 请求被取消，返回 context deadline exceeded |

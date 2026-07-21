@@ -51,13 +51,14 @@ sequenceDiagram
     Note over Exec: 1. 注入 CallerDevice 到 context
     Note over Exec: 2. 获取信号量 (Semaphore)
     Note over Exec: 3. 设置总超时 (默认120s)
-    Note over Exec: 4. 注入 BroadcastInfo 到 context (用于函数调用广播)
-    Exec->>Reg: Get(agentID) 精确匹配
+    Note over Exec: 4. 注入 BroadcastInfo 到 context (用于流式/typing/函数调用等广播)
+    Note over Exec: 5. Get(agentID) 精确匹配
+    Exec->>Reg: Get(agentID)
     Reg-->>Exec: AgentConfig
 
     Exec->>BC: SendTyping(typing=true)
 
-    Note over Exec: 5. 启动 typing 超时 goroutine (60s)
+    Note over Exec: 6. 启动 typing 超时 goroutine (60s)
 
     Exec->>Store: GetContext(conversationID, config)
     Note over Store: sync.Map 缓存 (30s TTL)，命中则直接返回
@@ -552,8 +553,8 @@ sequenceDiagram
 #### 9. 流式输出错误时无部分文本持久化
 
 - 触发条件: resume handler 流式输出中 chunk.Err 非 nil
-- 处理逻辑: 广播 partialText(isDone=true) 关闭流，发送错误消息给用户，清理幂等 key，释放锁。**不持久化部分文本到 DB**（与 task_handler 的初始执行路径不同）
-- 最终结果: 用户通过 WebSocket 看到了部分流式文本，但该文本不会作为消息记录在 DB 中
+- 处理逻辑: 广播 partialText(isDone=true) 关闭流，若 isTransientError(chunk.Err) 则发送错误消息给用户并删除 processingKey 允许立即重试，否则不发送错误消息。释放锁。**不持久化部分文本到 DB**（与 task_handler 的初始执行路径不同）
+- 最终结果: 用户通过 WebSocket 看到了部分流式文本，但该文本不会作为消息记录在 DB 中。非瞬态错误时用户看不到错误提示，会话可能停留在 asking_user 状态（需等待 HITL 超时清理兜底）
 
 ### 涉及文件
 - `resume_handler.go`: 恢复处理主逻辑，cleanupAfterResumeFailure

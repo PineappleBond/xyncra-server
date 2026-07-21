@@ -2,6 +2,8 @@
 
 > 客户端函数的注册、发现、注入、远程调用的完整生命周期。
 
+**相关文档**: 场景 5-7 的反向 RPC 详细机制见 [reverse-rpc.md](./reverse-rpc.md)，场景 6 的重连重放流程见 [reconnection.md](./reconnection.md)，场景 9 的热重载 CLI 流程见 [reload-agents.md](./reload-agents.md)。本文聚焦于函数注册生命周期和动态工具注入，反向 RPC 和重连仅从函数注册视角概述。
+
 ## 场景 1: 客户端函数注册
 
 ### 主流程
@@ -169,10 +171,16 @@ sequenceDiagram
 - 处理逻辑: `scheduleFuncCleanup` 启动一个带有 grace period 的定时器。如果设备在 grace period 内重连，`cancelPendingFuncCleanup` 取消清理。只有 grace period 超时且无活跃连接时，才调用 `OnDeviceDisconnect`
 - 最终结果: 避免页面导航期间（短暂断开后立即重连）函数被误删
 
+#### 5. scheduleFuncCleanup 实现细节
+
+- **使用 `context.Background()`**: 定时器使用 `context.Background()` 而非调用方的 context，因为调用方 context（handleWebSocket 的 cleanupCtx）在 handleWebSocket 返回时会被取消，会导致 grace period 立即失效
+- **安全取消**: 创建新的 cleanup 前，先取消同一设备已有的 pending cleanup（防止重复调度）
+- **双重检查**: grace period 超时后，再次检查 `clientsByDevice` 确认无活跃连接，才执行清理。这防止了 grace period 期间新连接注册但 cancelPendingFuncCleanup 未被调用的极端竞态
+
 ### 涉及文件
 
 - `internal/server/function_registry.go`: OnDeviceDisconnect 实现
-- `internal/server/websocket_server.go`: scheduleFuncCleanup、cancelPendingFuncCleanup、removeClient
+- `internal/server/websocket_server.go`: scheduleFuncCleanup、cancelPendingFuncCleanup、removeClient、performDeviceReplacement
 - `internal/server/function_lifecycle_test.go`: 断开清理、设备替换、多设备隔离测试
 
 ---
@@ -248,6 +256,12 @@ sequenceDiagram
 - 处理逻辑: buildToolInfo 将其规范化为 `{"type":"object","properties":{}}`
 - 最终结果: 避免 LLM 层将空 schema 转为 `parameters: true` 导致 400 错误
 
+#### 7. 动态工具注册表创建失败
+
+- 触发条件: `toolRegistry.Create(ctx, dynamicTools, nil)` 返回错误（工具工厂函数失败或工具名未注册）
+- 处理逻辑: 记录错误日志，跳过动态工具注入，不阻塞 Agent 执行
+- 最终结果: Agent 继续运行，仅缺少失败的动态工具。与客户端函数的 fail-open 行为一致
+
 ### 涉及文件
 
 - `internal/agent/dynamic_tool_provider.go`: BeforeAgent 中间件、applyFilters 过滤逻辑
@@ -311,6 +325,12 @@ sequenceDiagram
 - 处理逻辑: select-default 模式，写不进去就跳过
 - 最终结果: 不阻塞 DispatchResponse 的调用方
 
+#### 5. 请求序列化失败
+
+- 触发条件: `json.Marshal(req)` 失败（PackageDataRequest 包含不可序列化的字段）
+- 处理逻辑: 立即返回 `marshal request` 错误，pending 记录被 defer 清理
+- 最终结果: 请求不会发送到客户端，直接报错
+
 ### 涉及文件
 
 - `internal/server/reverse_rpc.go`: ServerRequest、DispatchResponse、persistAsync
@@ -334,9 +354,10 @@ flowchart TD
     G[设备重连] --> H[reconnect handler]
     H --> I[PendingStore.List 获取待重播请求]
     I --> J[过滤: Seq > last_seen_seq AND RetryCount < MaxRetries]
-    J --> K[按 Seq 升序逐个重播]
-    K --> L[ReplayRequest: 新 reqID, 保留原 IdempotencyKey]
-    L --> M{响应到达?}
+    J --> K[立即返回 replayed/total 计数]
+    K --> L[每个请求启动独立 goroutine 并发重播]
+    L --> M2[ReplayRequest: 新 reqID, 保留原 IdempotencyKey, context.Background() 10s 超时]
+    M2 --> M{响应到达?}
     M -->|成功| N[PendingStore.Remove 移除]
     M -->|超时| O{RetryCount < MaxRetries?}
     O -->|是| P[Update RetryCount, 等下次重连]
@@ -374,6 +395,24 @@ flowchart TD
 - 触发条件: 单设备 pending 请求超过 MaxPendingPerDevice（默认 50）
 - 处理逻辑: Redis RPush + LTrim 保留最新的 N 条，旧的被丢弃
 - 最终结果: 防止单设备无限堆积
+
+#### 6. 重播立即返回
+
+- 触发条件: reconnect handler 收到 system.reconnect 请求
+- 处理逻辑: 过滤后立即返回 `{status:"ok", replayed:N, total:M}`，每个待重播请求在独立 goroutine 中异步执行
+- 最终结果: 客户端不阻塞等待重播完成，replayed 计数不代表完成确认
+
+#### 7. 重播使用 context.Background()
+
+- 触发条件: replayOne 执行重放
+- 处理逻辑: 使用 `context.Background()` 而非 handler 的 context，确保客户端断连不会取消正在进行的重放
+- 最终结果: 重放请求有独立的 10 秒超时，不受 handler 生命周期影响
+
+#### 8. 重放失败判定
+
+- 触发条件: `err != nil || resp == nil || resp.Code != 0`
+- 处理逻辑: 三种情况均视为失败（发送错误、超时、客户端返回非零 Code），递增 RetryCount
+- 最终结果: 非 Code == 0 的响应也会触发重试，而非仅超时
 
 ### 涉及文件
 
@@ -429,6 +468,12 @@ sequenceDiagram
 - 触发条件: executeClientFunction 收到 Code < 0 的响应
 - 处理逻辑: 使用 `agenttools.SoftFailure` 包装，返回内容而非 Go error
 - 最终结果: LLM 看到错误原因并可自行决定重试或通知用户
+
+#### 4. 不调用 p.cancel()
+
+- 触发条件: CancelDeviceWithReason 向 respCh 写入合成响应后
+- 处理逻辑: **不调用** `p.cancel()`。ServerRequest 的 `select` 有两个分支（respCh 和 ctx.Done()），如果同时触发，Go 的 select 会随机选择。调用 cancel() 会导致 ctx.Done() 触发，与 respCh 写入竞争
+- 最终结果: 不调用 cancel() 保证 ServerRequest 一定通过 respCh 收到合成响应，返回有意义的错误信息而非 context.Canceled
 
 ### 涉及文件
 
@@ -505,18 +550,17 @@ sequenceDiagram
 
     Admin->>Handler: reload_agents 请求
     Handler->>Registry: Reload()
-    Registry->>Registry: 读取当前 dir
+    Registry->>Registry: RLock 读取 dir, 释放锁
     Registry->>Registry: Load(dir)
-    Registry->>Registry: 清空现有 agents map
+    Registry->>Registry: Lock, 清空现有 agents map, 更新 dir
     Registry->>Registry: 扫描 dir 下所有 .md 文件
     loop 每个 .md 文件
         Registry->>Registry: ReadFile
-        Registry->>Registry: ParseFrontMatter (解析 YAML front matter)
-        Registry->>Registry: Validate (ID/Name/Model/APIKeyEnv)
-        alt ID 重复
-            Registry->>Registry: 跳过, 记录日志
-        else 解析失败
-            Registry->>Registry: 跳过, 记录日志
+        Registry->>Registry: ParseFrontMatter (解析 YAML + Validate + 提取 SystemPrompt)
+        alt 校验失败 (缺少必填字段/MCP 配置错误)
+            Registry->>Registry: 跳过, 记录 Info 日志
+        else ID 重复
+            Registry->>Registry: 跳过, 记录 Info 日志
         else 正常
             Registry->>Registry: 注册到 agents map
         end

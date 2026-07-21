@@ -101,10 +101,10 @@ sequenceDiagram
     WS->>WS: client.Run() 阻塞运行
     Note over WS: 读写泵开始工作
 
-    Note over CS: 异步执行重连握手（不阻塞 FullSync）
-    CS->>WS: system.register_functions (异步)
-    CS->>WS: system.reconnect (异步, 携带 last_seen_seq)
-    CS->>CS: syncMgr.FullSync (同步, 分页拉取增量更新)
+    Note over CS: 顺序执行重连握手（完成后再执行 FullSync）
+    CS->>WS: system.register_functions (顺序, fail-open, 10s 超时)
+    CS->>WS: system.reconnect (顺序, fail-open, 携带 last_seen_seq)
+    CS->>CS: syncMgr.FullSync (分页拉取增量更新)
 
     Note over WS: 连接断开时
     WS->>CM: ConnectionStore.Remove()
@@ -149,6 +149,9 @@ sequenceDiagram
    - 注意：`ConnectionStore.Remove` 不在此处调用，由旧连接自身的 `handleWebSocket` 在 `client.Run()` 返回后执行
 
 8. **存储连接信息**
+   - 构建 `ConnectionInfo`（包含 connID、userID、deviceID、Protocol="websocket"、IPAddress、Status="active"）
+   - `extractIP(r)` 从 HTTP 请求中提取客户端 IP（优先 `X-Forwarded-For`）
+   - 如果配置了 `connectionInfoEnricher`，从 HTTP 请求填充额外字段
    - 在 `ConnectionStore`（Redis 或内存）中注册 `ConnectionInfo`
 
 9. **运行连接**
@@ -159,11 +162,10 @@ sequenceDiagram
      - 函数注册表清理
 
 10. **客户端侧握手与同步**
-    - 连接后启动异步 `performReconnectHandshake` 协程：
-      - 先发送 `system.register_functions`（确保服务端在 PendingStore 重放前有 handler）
-      - 再发送 `system.reconnect`（携带 `last_seen_seq`）
-    - 握手异步执行，不阻塞后续步骤
-    - 同步执行 `syncMgr.FullSync`（分页拉取增量更新，从本地 `localMaxSeq` 开始）
+    - 连接后顺序执行 `performReconnectHandshake`（被 await，完成后再继续）：
+      - 先发送 `system.register_functions`（确保服务端在 PendingStore 重放前有 handler；10 秒超时，fail-open）
+      - 再发送 `system.reconnect`（携带 `last_seen_seq`；fail-open）
+    - 握手完成后执行 `syncMgr.FullSync`（分页拉取增量更新，从本地 `localMaxSeq` 开始）
 
 ### 边缘场景
 
@@ -175,7 +177,7 @@ sequenceDiagram
 | 设备替换竞态 | 新连接注册时调用 `cancelPendingFuncCleanup`；旧连接断开时 `hasActiveConn` 为 true 跳过清理 | 双重保护：主动取消 + 被动检查 |
 | 清理期间 Redis 不可达 | 5 秒有界上下文防止无限阻塞 | 最终一致性保证 |
 | `4001` 关闭帧 | 旧客户端收到关闭码 4001 | D-111：触发优雅退出而非重连 |
-| 服务器 GracefulStop | `closeAllClients()` 运行 | 所有连接被清理 |
+| 服务器 GracefulStop | `closeAllClients()` 运行：`CancelAll()` 取消所有挂起的反向 RPC，然后关闭所有客户端连接 | 客户端断开后触发各自的 defer 清理（`scheduleFuncCleanup` 延迟执行，进程退出前可能未完成） |
 | 客户端不使用服务器分配的 `deviceID` | 客户端和服务器的 `deviceID` 可能不匹配 | 依赖客户端正确使用服务器返回的 deviceID |
 
 ---
@@ -339,6 +341,7 @@ sequenceDiagram
 5. **延迟清理函数注册**
    - 如果 `functionRegistry != nil` 且 `!hasActiveConn`（该设备无其他连接）：
      - 调用 `scheduleFuncCleanup(userID, deviceID)` 启动 grace period 定时器（默认 10 秒）
+     - 注意：使用 `context.Background()` 而非调用者的 context，因为 `handleWebSocket` 返回时会取消其 context，这会立即取消延迟清理
      - 如果设备在 grace period 内重连，`cancelPendingFuncCleanup` 取消清理，函数注册保留
      - 如果 grace period 超时，goroutine 再次检查 `hasActiveConn`（竞态防护）
      - 如果仍无活跃连接，调用 `OnDeviceDisconnect(ctx, userID, deviceID)`
@@ -360,10 +363,11 @@ sequenceDiagram
 | `functionRegistry` 为 nil | 整个函数清理块被跳过 | D-063：nil-safe 设计 |
 | `reverseRPC` 为 nil | `CancelDeviceWithReason` 调用被跳过 | D-063：nil-safe 设计 |
 | 设备替换时 `ConnectionStore.Remove` | `performDeviceReplacement` 不调用 `ConnectionStore.Remove`，由旧连接自身的 `handleWebSocket` 在 `client.Run()` 返回后执行 | 避免冗余 Redis 调用 |
-| 服务器关闭 | `closeAllClients()` 关闭所有连接 | 不触发逐设备的函数清理（批量清理路径） |
+| 服务器关闭 | `closeAllClients()` 关闭所有连接；每个客户端的 `handleWebSocket` defer 清理会触发 `scheduleFuncCleanup` | 函数清理被延迟（grace period），进程退出前可能未完成；`context.Background()` 保证清理不依赖已取消的服务器 context |
 | 同一设备的多个连接 | 最后一次断开触发 `scheduleFuncCleanup` | D-095 替换逻辑后不应发生，但防御性处理 |
 | Grace period 内设备重连 | `cancelPendingFuncCleanup` 取消定时器，函数保留 | 避免页面导航期间（短暂断开后立即重连）函数被误删 |
 | Grace period 超时（默认 10s） | `OnDeviceDisconnect` 执行实际清理 | 双重检查 `hasActiveConn` 防止竞态 |
+| `scheduleFuncCleanup` 使用 `context.Background()` | 延迟清理不依赖调用者 context | 防止 `handleWebSocket` 返回时 context 取消导致清理立即失效 |
 
 ---
 

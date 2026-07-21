@@ -663,6 +663,12 @@ flowchart TD
 - 处理逻辑: defer recover 捕获，记录日志，继续处理下一个会话
 - 最终结果: 其他会话不受影响
 
+##### 4. SendMessage 持久化超时消息失败
+
+- 触发条件: `dataStore.SendMessage` 返回 error（DB 连接断开等）
+- 处理逻辑: 记录错误日志，继续执行后续步骤（BroadcastAgentTimeout + SendConversationUpdate）
+- 最终结果: 用户看不到超时提示文本，但仍会收到 agent_timeout 临时通知和会话更新拉取通知。会话状态已重置为 idle
+
 ### 涉及文件
 
 - `internal/cleanup/cleanup.go`: UserUpdateCleaner 定时清理循环

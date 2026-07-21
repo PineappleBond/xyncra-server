@@ -194,6 +194,8 @@ sequenceDiagram
 
 ## 2. 增量同步流程 (sync_updates)
 
+> **详细流程**：完整的 `sync_updates` 业务流程（参数校验、gap filling、分页、边缘场景等）详见 [sync-updates.md](sync-updates.md)。本节仅概述与重连场景相关的要点。
+
 ### 概述
 
 客户端使用 `sync_updates` 在重连后或长轮询中增量拉取事件流（消息、输入指示器、会话更新等）。服务端返回连续序列的更新，当实际数据缺失时用合成占位条目填充间隙。
@@ -466,32 +468,61 @@ sequenceDiagram
     Consumer->>QS: 读取已回答的 Questions
     QS-->>Consumer: {interruptID -> answer}
 
+    Consumer->>Consumer: 设置总超时上下文
+    Consumer->>C: 发送输入指示器（typing）
+
     Consumer->>Agent: ResumeWithParams(ctx, checkpointID, targets)
 
     alt checkpoint 过期/未找到
         Agent-->>Consumer: 错误
+        Consumer->>Consumer: clearTyping()
+        Consumer->>Consumer: cleanupAfterResumeFailure（清除状态+删除问题+删除checkpoint）
         Consumer->>C: 发送等待过久错误
-    else 瞬态错误
+        Consumer->>Consumer: 清理幂等性 key（删除 processing, 标记 processed）
+        Note over Consumer: 若 isTransientError 也匹配，会额外发送临时不可用错误并删除 processing key
+    else 瞬态错误（非 checkpoint 过期）
         Agent-->>Consumer: 错误
+        Consumer->>Consumer: clearTyping()
         Consumer->>C: 发送临时不可用错误
-        Consumer->>Consumer: 删除 processing key
+        Consumer->>Consumer: 删除 processing key（允许重试）
     else 成功
         loop 流式输出
             Agent-->>Consumer: chunk
-            Consumer->>C: 广播流更新
+            alt chunk.Err != nil
+                Consumer->>C: 发送部分响应（is_done=true）
+                Consumer->>Consumer: clearTyping()
+                alt isTransientError
+                    Consumer->>C: 发送临时不可用错误
+                    Consumer->>Consumer: 删除 processing key
+                end
+            else 正常 chunk
+                alt 首个 token
+                    Consumer->>Consumer: clearTyping()
+                end
+                Consumer->>C: 广播流更新
+            end
         end
 
         alt 重新中断（多轮 HITL）
             Agent-->>Consumer: 新问题
+            Consumer->>QS: 更新会话状态为 asking_user
             Consumer->>QS: 持久化新 Question
             Consumer->>C: 广播会话更新
+            Consumer->>Consumer: 删除 processing key
         else 正常完成
-            Consumer->>C: 发送最终流更新
+            Consumer->>C: 发送最终流更新（is_done=true）
             Consumer->>Consumer: 持久化消息
+            Consumer->>C: 广播消息更新
         end
+        Consumer->>Consumer: 标记 processed key（24h TTL）
+        Consumer->>Consumer: 删除 processing key
+        Consumer->>Consumer: 清除会话 agent 状态
+        Consumer->>Consumer: 删除 Questions
+        Consumer->>Consumer: 删除 checkpoint
+        Consumer->>C: 广播会话更新
     end
 
-    Consumer->>Consumer: 清理（非致命）
+    Note over Consumer: 错误路径的清理由各分支自行处理（cleanupAfterResumeFailure 或幂等性 key 清理）
 ```
 
 ### 详细步骤
@@ -559,8 +590,9 @@ sequenceDiagram
     - 失败则清理并发送错误消息
 
 17. **准备执行**
-    - 设置总超时上下文
-    - 发送输入指示器
+    - 设置总超时上下文（`executor.totalTimeout`）
+    - 发送输入指示器（`SendTyping(true)`），使用 `sync.Once` 包装清除函数确保只清除一次
+    - 首个 token 到达或错误发生时清除输入指示器（`SendTyping(false)`）
 
 18. **读取已回答问题**
     - 从 DB 读取已回答的 Questions 构建 targets 映射：`{interruptID -> answer}`
@@ -570,9 +602,9 @@ sequenceDiagram
     - 调用 `builtAgent.Runner.ResumeWithParams(ctx, checkpointID, &adk.ResumeParams{Targets: targets})`
 
 20. **处理执行结果**
-    - **checkpoint 过期/未找到**：清理并发送等待过久错误
-    - **瞬态错误**：发送临时不可用错误，删除 processing key 允许重试
-    - **桥接流**：消费 agent 迭代器的 chunk，广播流更新给用户，首个 token 时清除输入指示器
+    - **checkpoint 过期/未找到**：调用 `cleanupAfterResumeFailure`（清除 agent 状态、删除 Questions、删除 checkpoint），发送等待过久错误给用户，清理幂等性 key（删除 processing、标记 processed 24h）。注意：若该错误同时被 `isTransientError` 匹配，会再执行瞬态错误分支
+    - **瞬态错误（非 checkpoint 过期）**：发送临时不可用错误给用户，删除 processing key 允许用户手动重试（不自动重试，因为用户已投入交互成本）
+    - **桥接流**：消费 agent 迭代器的 chunk，广播流更新给用户，首个 token 时清除输入指示器。若 chunk 包含错误：发送部分响应（`is_done=true`），清除输入指示器，若为瞬态错误则发送错误消息并删除 processing key
 
 21. **检查是否重新中断**
     - 若 agent 再次暂停并产生新问题：
@@ -587,13 +619,14 @@ sequenceDiagram
     - 持久化消息到 DB
     - 广播消息更新给接收者
 
-23. **清理**（全部非致命）
+23. **清理**（正常完成路径，全部非致命）
     - 标记 processed key（24 小时 TTL）
     - 删除 processing key
     - 清除会话 agent 状态（重置为 idle）
     - 删除该 checkpoint 的 Questions
     - 删除 Redis 中的 checkpoint
     - 广播会话更新通知客户端
+    - **错误路径清理**：checkpoint 过期和 agent 配置/构建失败时调用 `cleanupAfterResumeFailure`，执行相同的状态清除、问题删除和 checkpoint 删除操作；瞬态错误路径仅删除 processing key 允许用户重试，不执行完整清理
 
 ### 边缘场景
 
@@ -601,15 +634,15 @@ sequenceDiagram
 |------|----------|------|
 | **重复 agent_resume 调用** | 两阶段幂等（processed + processing key）防止双重恢复，processing key 的 130 秒 TTL 作为执行期间的短期守卫 | 无重复执行 |
 | **多设备冲突** | 两个设备回答同一问题，`UpdateAnswer` 使用 `WHERE status=pending`，先写入者胜出，后写入者收到 409 | 后写入者需重新确认 |
-| **Checkpoint 过期（Redis TTL 24 小时）** | `ResumeWithParams` 失败返回 not found，Handler 发送等待过久错误并清理 | 用户需重新发起对话 |
+| **Checkpoint 过期（Redis TTL 24 小时）** | `ResumeWithParams` 失败返回 not found，Handler 调用 `cleanupAfterResumeFailure`（清除 agent 状态、删除 Questions、删除 checkpoint）并发送等待过久错误，清理幂等性 key | 用户需重新发起对话 |
+| **Checkpoint 过期 + isTransientError** | 若 checkpoint not found 错误同时被 `isTransientError` 匹配（两个 `if` 分支非互斥），会先发送等待过久错误再发送临时不可用错误，用户收到两条错误消息 | 用户收到冗余错误消息，但功能不受影响 |
 | **暂停与恢复之间 agent 配置被删除** | Handler 发送 "Agent config does not exist" 错误，清理 Questions 和 checkpoint | 用户需等待配置恢复 |
 | **锁竞争** | 初始 HITL 执行的锁仍被持有时（预期情况），恢复不持有锁继续执行；锁 TTL 过期则获取新锁；130 秒锁 TTL 故意长于执行超时以防止过早释放 | 无锁冲突 |
 | **多轮 HITL（重新中断）** | agent 恢复后可能再次暂停产生新问题，不释放锁（D-084），删除 processing key 允许后续恢复，持久化新 Question | 支持多轮交互 |
-| **流式传输期间的瞬态错误** | 与 task_handler 返回错误供 Asynq 自动重试不同，HITL 恢复通知用户并删除 processing key 让用户手动重试 | 用户已投入交互成本，需手动重试 |
+| **流式响应中途出错** | chunk 包含错误时，发送已累积的部分文本作为 `is_done=true` 的流更新，清除输入指示器。若为瞬态错误则额外发送错误消息并删除 processing key 允许用户手动重试。与 task_handler 返回错误供 Asynq 自动重试不同，HITL 恢复通知用户让用户决定是否重试 | 用户看到部分结果，可手动重试 |
 | **QuestionStore 为 nil** | Handler 记录日志并返回 nil（D-063 nil-safe），不尝试恢复 | 功能降级 |
 | **锁获取失败（Redis 错误）** | fail-open 无锁继续，存在并发执行风险但通过幂等性缓解 | 风险可控 |
-| **流式响应中途出错** | 部分文本作为 `is_done=true` 的流更新发送，用户看到部分响应 | 用户可感知部分结果 |
-| **清理失败** | 所有清理操作（清除状态、删除问题、删除 checkpoint）均为非致命，错误记录日志但不影响恢复结果或返回值（始终返回 nil 给 MQ，D-073） | 无影响 |
+| **清理失败** | 正常完成路径和 `cleanupAfterResumeFailure` 的所有清理操作（标记 processed、删除 processing、清除状态、删除问题、删除 checkpoint）均为非致命，错误记录日志但不影响返回值（始终返回 nil 给 MQ，D-073） | 无影响 |
 
 ---
 
@@ -672,10 +705,10 @@ sequenceDiagram
 
 | 场景 | 处理方式 | 影响 |
 |------|----------|------|
-| **连接已过期/被驱逐** | 返回 `connection expired`（NotFound），客户端必须重新建立连接并可能需要调用 `system.reconnect` 恢复待处理请求 | 客户端需重连 |
+| **连接已过期/被驱逐** | 返回 `connection expired`（NotFound），heartbeatLoop 仅记录日志，不主动重连；连接断开后由 connectionMonitor 检测并触发重连（详见 [heartbeat 流程](heartbeat.md)） | connectionMonitor 负责重连 |
 | **畸形参数** | 故意忽略，心跳不能因坏参数失败，其唯一目的是 TTL 续期 | 无影响 |
-| **心跳间隔大于连接 TTL** | 客户端心跳间隔超过服务端连接 TTL 时，连接会在心跳之间过期，客户端下次心跳收到 `connection expired` 后必须重连。客户端默认心跳间隔 30 秒（`defaultHeartbeatInterval`），建议间隔 < TTL/2 | 需合理配置间隔 |
-| **ConnectionStore.Refresh 与 TTL 过期的竞态** | 连接在 Refresh 调用前刚好过期时，Refresh 返回 `ErrConnectionNotFound`，客户端必须重连 | 同上 |
+| **心跳间隔大于连接 TTL** | 客户端心跳间隔超过服务端连接 TTL 时，连接会在心跳之间过期，客户端下次心跳收到 `connection expired` 后 heartbeatLoop 仅记录日志；连接断开后由 connectionMonitor 检测并重连。客户端默认心跳间隔 30 秒（`defaultHeartbeatInterval`），建议间隔 < TTL/2 | 需合理配置间隔 |
+| **ConnectionStore.Refresh 与 TTL 过期的竞态** | 连接在 Refresh 调用前刚好过期时，Refresh 返回 `ErrConnectionNotFound`，heartbeatLoop 记录日志，connectionMonitor 负责重连 | connectionMonitor 负责重连 |
 | **高频心跳** | 每次调用都是 Redis 操作（Refresh），过度心跳产生 Redis 负载，该 Handler 中未见服务端限流 | 需客户端合理控制频率 |
 | **同一用户的多连接** | 心跳基于 connID 而非 userID，每个连接独立拥有自己的 TTL | 无影响 |
 
@@ -811,7 +844,7 @@ graph TB
 | 机制 | 超时 | 重试 |
 |------|------|------|
 | 重连重放 | 10 秒/请求 | MaxRetries=3 |
-| 客户端 RPC 超时 | 自适应（RTTTracker: SRTT * 1.5，夹紧到 [min, max]），冷启动使用默认值 | 由 ResponseRetryQueue 在重连后重试 |
+| 客户端 RPC 超时 | 自适应（RTTTracker: SRTT * 1.5，夹紧到 [min, max]），冷启动使用默认值 | 由 RetryManager 入队重试（连接错误、超时均触发） |
 | 客户端重连退避 | base * 2^(attempt-1)，上限 max，+/-25% 抖动 | 无限重试直到连接成功或上下文取消 |
 | Agent 恢复锁 | 130 秒 TTL | 无自动重试 |
 | Checkpoint 保留 | 24 小时 TTL | 无 |

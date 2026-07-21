@@ -77,9 +77,9 @@ sequenceDiagram
 
 1. **解析参数**：提取 `after_seq` 和 `limit`
 2. **规范化 limit**：
-   - 默认值：100
-   - 上限：500
-   - 下限：1（<=0 时设为 100）
+   - 默认值：100（`limit <= 0` 或未指定时）
+   - 上限：500（`limit > 500` 时截断）
+   - 无显式下限（`limit = 1` 可正常通过）
 3. **获取 latestSeq**：查询用户的最新序列号
 4. **早期返回**：如果没有新更新（`latestSeq <= afterSeq`），返回空结果
 5. **计算范围**：`expectedEnd = min(afterSeq + limit, latestSeq)`
@@ -223,7 +223,7 @@ hasMore := params.AfterSeq + uint32(limit) < latestSeq
 
 ### 间接依赖：数据清理
 
-`CleanupExpiredBefore` 会硬删除 30 天前的 `user_updates` 记录。这会导致序列号间隙，是 gap filling 存在的主要原因之一。清理后客户端拉取到的 gap 更新数量会增加。
+`UserUpdateCleaner` 后台任务每 1 小时（`DefaultInterval`）调用 `CleanupExpired`，硬删除 30 天前的 `user_updates` 记录（`DefaultCleanupRetention`）。这会导致序列号间隙，是 gap filling 存在的主要原因之一。清理后客户端拉取到的 gap 更新数量会增加。
 
 > **注意**：`sync_updates` 本身不执行清理操作，但清理产生的间隙会影响返回结果。
 
@@ -251,9 +251,9 @@ hasMore := params.AfterSeq + uint32(limit) < latestSeq
 
 限制单次拉取数量：
 
-- **默认值**：100（平衡网络开销和响应时间）
-- **上限**：500（防止过大的响应）
-- **下限**：1（至少返回 1 条）
+- **默认值**：100（`limit <= 0` 或未指定时，平衡网络开销和响应时间）
+- **上限**：500（`limit > 500` 时截断，防止过大的响应）
+- **有效最小值**：1（`limit = 1` 可正常通过，无显式下限检查）
 
 ### 4. LatestSeq 返回
 
@@ -285,14 +285,14 @@ flowchart TD
 
 ### 增量拉取（Debounced Pull）
 
-间隙触发的增量拉取使用防抖合并：
+间隙触发的增量拉取使用防抖合并（500ms 合并窗口）：
 
 ```mermaid
 flowchart TD
     A[检测到 seq gap] --> B[scheduleDebouncedPull]
     B --> C{已有 pending timer?}
     C -->|是| D[合并, 不重复触发]
-    C -->|否| E[启动 debounce timer]
+    C -->|否| E[启动 debounce timer 500ms]
     E --> F[debouncedPull 执行]
     F --> G[发送 sync_updates]
     G --> H[ApplyUpdates]
@@ -311,7 +311,7 @@ flowchart TD
     B -->|否| E[读取 localMaxSeq]
     E --> F{seq 连续性检查}
     F -->|seq <= localMaxSeq| G[跳过, 已处理]
-    F -->|seq > localMaxSeq+1| H[返回 errSeqGap]
+    F -->|seq > localMaxSeq+1| H[触发 debounced pull]
     F -->|seq == localMaxSeq+1| I[原子事务]
     I --> J[1. 写入 NotificationLog 去重]
     J --> K[2. 按类型分发 DB 写入]
@@ -329,7 +329,7 @@ flowchart TD
 | 2 | `dispatchUpdateTx` | 按类型执行 DB 写入（message/conversation/mark_read 等） |
 | 3 | `SyncStates.SetLocalMaxSeqTx` | 推进本地序列号 |
 | 去重 | `ErrDuplicateKey` 跳过 | 重复 update 跳过 dispatch，仅推进 seq，然后返回 nil 继续处理下一条 |
-| 并发保护 | `applyMu` 互斥锁 | 串行化 `ApplyUpdates` 调用（H-3） |
+| 并发保护 | `applyMu` 互斥锁（Go）/ `applyChain` Promise 链（TS） | 串行化单条 update 处理，保证事务隔离 |
 
 ### 错误处理
 
@@ -338,12 +338,14 @@ flowchart TD
     A[发送 sync_updates] --> B{响应成功?}
     B -->|是| C[ApplyUpdates]
     B -->|否| D[记录错误, 返回]
-    C --> E{errSeqGap?}
-    E -->|是| F[scheduleDebouncedPull]
+    C --> E{检测到 gap?}
+    E -->|是| F[scheduleDebouncedPull 500ms]
     E -->|否| G{其他错误?}
     G -->|是| H[返回 SyncError]
     G -->|否| I[成功]
-    F --> J[5s 后单次重试]
+    F --> J{debouncedPull 成功?}
+    J -->|否| K[5s 后单次重试]
+    J -->|是| L[完成]
 ```
 
 ---

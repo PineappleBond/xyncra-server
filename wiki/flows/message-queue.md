@@ -93,6 +93,7 @@ flowchart TD
 | **Redis 不可用** | `b.client.EnqueueContext` 返回错误。由于是 fire-and-forget，调用方以 Info 级别记录日志，消息已持久化到数据库（下次 pull 时通过 `sync_updates` 投递） |
 | **重复 TaskID** | 如果使用 `WithTaskID` 且同 ID 任务已存在（pending 状态），Asynq 会拒绝。`send_message` 通常不设置显式 TaskID |
 | **Trace Context 注入失败** | 如果 context 中没有 Span，`InjectTraceContext` 返回空 map；代码通过设置 metadata 为 nil 来省略 JSON 字段 |
+| **目标用户不存在** | `create_conversation` 不验证目标 `user_id` 是否存在于系统中——可以与不存在的用户创建会话。这是已知的简化设计（无 auth，内部部署），后续可通过用户注册表校验扩展 |
 | **Agent 任务入队** | `send_message` 在检测到对方是已注册 Agent 时，额外入队 `TypeAgentProcess` 任务（`WithMaxRetry(20)`，fire-and-forget）。`agent_resume` 在所有 HITL 问题回答完毕后入队 `TypeAgentResume` 任务（默认重试次数，**同步入队**——失败直接返回错误给客户端）。详见 [mq-async.md](./mq-async.md) |
 
 ---
@@ -263,8 +264,9 @@ flowchart LR
 |------|------|
 | 1 | WebSocket 发送失败时，响应入队到 `ResponseRetryQueue` |
 | 2 | `Drain(now)` 返回所有 `nextRetry <= now` 且未超过 `maxRetry` 的条目 |
-| 3 | 失败条目通过 `EnqueueWithBackoff` 重新入队，使用指数退避：`baseDelay * 2^attempts`（`baseDelay = 1 秒`），上限 16 秒（`maxBackoff`） |
-| 4 | 队列满时（`maxSize`），最旧的条目被丢弃 |
+| 3 | 调用方（`client.go` 的重试循环）在调用 `EnqueueWithBackoff` 前检查 `entry.attempts < entry.maxRetry`，超过则丢弃 |
+| 4 | 失败条目通过 `EnqueueWithBackoff` 重新入队，使用指数退避：`baseDelay * 2^attempts`（`baseDelay = 1 秒`），上限 16 秒（`maxBackoff`）。注意：此队列不使用随机抖动 |
+| 5 | 队列满时（`maxSize`），最旧的条目被丢弃 |
 
 #### 数据库持久化重试（客户端）
 
@@ -272,8 +274,9 @@ flowchart LR
 |------|------|
 | 1 | `RetryTask` 以 `status = 'pending'` 和 `NextRetry` 时间戳持久化 |
 | 2 | `ListPending(ctx, limit)` 查询 `status = 'pending' AND next_retry <= now`，按最早重试时间排序 |
-| 3 | 处理后，`Update` 保存新的尝试次数和下次重试时间，或 `MarkFailed` 设置 `status = 'failed'` |
-| 4 | 提供持久化重试能力，可在进程重启后继续执行 |
+| 3 | 下次重试时间通过 `backoffDelay` 计算：`baseDelay * 2^(attempt-1)`，上限 16 秒，并附加 +/-25% 随机抖动以避免惊群效应 |
+| 4 | 处理后，`Update` 保存新的尝试次数和下次重试时间，或 `MarkFailed` 设置 `status = 'failed'` |
+| 5 | 提供持久化重试能力，可在进程重启后继续执行 |
 
 ### 边缘场景
 
@@ -286,6 +289,7 @@ flowchart LR
 | **QueueStore 过期任务** | 如果 worker 在 `ListPending` 和 `Update`/`MarkFailed` 之间崩溃，任务将在下一次轮询周期被重新拾取（至少一次投递） |
 | **ResponseRetryQueue 溢出** | 队列超过 `maxSize` 时，最旧的条目被静默丢弃（Info 级别日志）。这是一个有损缓冲区 |
 | **退避上限** | 客户端重试退避上限为 16 秒（`maxBackoff`）。Asynq 的退避由库内部管理 |
+| **退避抖动** | 数据库持久化重试（`retryManager`）使用 `backoffDelay` 函数，附加 +/-25% 随机抖动以避免惊群效应。WebSocket 投递重试（`ResponseRetryQueue`）不使用抖动 |
 
 ---
 

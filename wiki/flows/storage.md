@@ -209,7 +209,7 @@ flowchart TD
 
     subgraph SearchByTitle
         SB1[LIKE 查询] --> SB2[escapeLikePattern 转义特殊字符]
-        SB2 --> SB3[limit 范围控制 0~101]
+        SB2 --> SB3[limit 范围 1~101 默认 20]
     end
 ```
 
@@ -533,7 +533,7 @@ flowchart TD
 |------|------|
 | 连接断开 | PingContext 失败，返回 classifyError 后的错误 |
 | Schema 损坏 | Ping 成功但 SELECT 1 失败，捕获查询路径问题 |
-| 与 Ping 的区别 | Ping 仅验证连接存活；HealthCheck 额外验证查询路径可用 |
+| 与 Ping 的区别 | Ping 已同时验证连接存活和查询路径（PingContext + SELECT 1）；HealthCheck 冗余执行 SELECT 1 作为额外保障 |
 | 客户端 Ping | `ClientDB.Ping` 同时执行 `PingContext` 和 `SELECT 1`，等同于服务端 HealthCheck 的双重验证 |
 
 ---
@@ -978,6 +978,7 @@ erDiagram
 | InterruptID | 有 | 有 | |
 | QuestionText | 有 | 有 | |
 | Status | 有 | 有 | 默认 pending |
+| CreatedAt | 有 | 有 | |
 | Answer | 有 | 无 | 仅服务端 |
 | AnsweredBy | 有 | 无 | 仅服务端 |
 | AnsweredDeviceID | 有 | 无 | 仅服务端 |

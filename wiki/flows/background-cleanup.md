@@ -174,6 +174,7 @@ sequenceDiagram
 | checkpointStore 为 nil | 跳过 checkpoint 清理（nil-safe） |
 | broadcaster 为 nil | 跳过广播通知（nil-safe） |
 | 发送超时消息失败 | 记录错误日志，不影响其他清理步骤 |
+| ClearAgentStatus 失败 | 记录错误日志，继续执行后续步骤；`cleanupUpdatedAt` 为零值，`SendConversationUpdate` 广播零时间戳 |
 | 批量处理上限 | 每次最多处理 100 条（BatchSize 可配置），剩余下次处理 |
 | AgentID 与 UserID1 相同 | humanUserID 回退为 UserID2 |
 
@@ -383,6 +384,7 @@ sequenceDiagram
 | 数据库不可达 | 记录错误日志，下次重试 |
 | 无过期记录 | 事务正常提交，无副作用 |
 | 部分删除失败 | 事务回滚，两个表保持一致 |
+| 清理 panic | **无 recovery**，`startLogCleanup` 无 `defer recover()`，goroutine 终止，日志不再被自动清理直到进程重启 |
 
 ---
 

@@ -29,9 +29,10 @@ sequenceDiagram
 
     par 本地广播
         WS->>WS: 创建 broadcast span
-        WS->>WS: broadcastLocal — mu.RLock
-        WS->>WS: clientsByUser[userID] 取出本地 Client 列表
-        loop 每个本地 Client
+        WS->>WS: broadcastLocal
+        WS->>WS: mu.RLock — 复制 clientsByUser[userID] 切片
+        WS->>WS: mu.RUnlock
+        loop 每个本地 Client（锁外遍历）
             WS->>Client: SendPackage(PackageTypeUpdates)
         end
     and 跨节点发布
@@ -59,21 +60,22 @@ sequenceDiagram
 
 1. **AgentExecutor 调用 BroadcastHelper**：调用 `SendStreamUpdate(ctx, ...)` / `SendTyping(ctx, ...)` / `BroadcastMessageUpdate(ctx, ...)` 等方法（所有 BroadcastHelper 方法均接受 `context.Context` 作为第一个参数，当前保留用于未来取消支持），BroadcastHelper 将 payload 序列化为 `protocol.PackageDataUpdates`，调用 `wsServer.BroadcastUpdates(userID, updates)`。
 
-2. **本地广播**：`WebSocketServer.BroadcastUpdates`（不接受 caller context，内部使用 `context.Background()` 作为 broadcast span 的 parent context）创建 broadcast span，调用 `broadcastLocal`，在 `mu.RLock` 下从 `clientsByUser[userID]` 取出所有本地 Client，逐个调用 `client.SendPackage` 发送 `PackageTypeUpdates` 包。
+2. **本地广播**：`WebSocketServer.BroadcastUpdates`（不接受 caller context，内部使用 `context.Background()` 作为 broadcast span 的 parent context）创建 broadcast span，调用 `broadcastLocal`。`broadcastLocal` 在 `mu.RLock` 下从 `clientsByUser[userID]` 复制一份 Client 引用切片后立即释放读锁，然后在锁外遍历切片逐个调用 `client.SendPackage` 发送 `PackageTypeUpdates` 包（复制后释放锁避免持锁期间 Send 阻塞影响其他并发操作）。
 
-3. **跨节点发布**：调用 `nodeBroadcaster.Publish(ctx, userID, updates, s.nodeID)`，`s.nodeID` 是每个 WebSocketServer 实例启动时生成的 UUID。
+3. **跨节点发布**：调用 `nodeBroadcaster.Publish(ctx, userID, updates, s.nodeID)`，`s.nodeID` 是每个 WebSocketServer 实例启动时生成的 UUID。若 `userID` 为空，`Publish` 返回错误（`"server: broadcast publish: user ID is required"`），`BroadcastUpdates` 将此 error 仅记录日志（fire-and-forget）。
 
 4. **Redis 发布**：`RedisNodeBroadcaster.Publish` 构造 `broadcastMessage{SourceNodeID, Updates}`，JSON 序列化后 `PUBLISH` 到 Redis channel `{keyPrefix}:broadcast:{userID}`（`keyPrefix` 默认 `"xyncra"`，通过 `NewRedisNodeBroadcaster` 第二个参数配置）。
 
-5. **远端订阅接收**：远端节点的 `RedisNodeBroadcaster.Subscribe` 通过 `PSubscribe('{keyPrefix}:broadcast:*')` 订阅所有用户频道（默认 `xyncra:broadcast:*`），收到消息后从 channel 名提取 userID，反序列化 `broadcastMessage`。
+5. **远端订阅接收**：远端节点的 `RedisNodeBroadcaster.Subscribe` 通过 `PSubscribe('{keyPrefix}:broadcast:*')` 订阅所有用户频道（默认 `xyncra:broadcast:*`），收到消息后从 channel 名提取 userID，反序列化 `broadcastMessage`。`Subscribe` 有 `defer ps.Close()` 确保返回时自动关闭 PubSub 连接。
 
-6. **远端本地投递**：远端节点 `WebSocketServer.handleRemoteBroadcast` 处理远程消息——检查 `sourceNodeID == s.nodeID` 则跳过（避免本地重复投递），否则调用 `broadcastLocal` 将更新推送给本节点上该用户的所有 WebSocket 连接。
+6. **远端本地投递**：远端节点 `WebSocketServer.handleRemoteBroadcast` 处理远程消息——检查 `sourceNodeID == s.nodeID` 则跳过（避免本地重复投递），否则以 `context.Background()` 作为 context 调用 `broadcastLocal` 将更新推送给本节点上该用户的所有 WebSocket 连接。
 
 ### 边缘场景
 
 | 场景 | 行为 |
 |------|------|
 | **updates 参数为 nil** | `BroadcastUpdates` 开头检查 `updates == nil`，若为 nil 直接返回 error（`"websocket: updates is nil"`），不执行本地广播和跨节点发布。这是唯一 `BroadcastUpdates` 返回非 nil error 的路径。 |
+| **userID 为空字符串** | `RedisNodeBroadcaster.Publish` 开头检查 `userID == ""`，若为空返回 error（`"server: broadcast publish: user ID is required"`）。`BroadcastUpdates` 中此 error 仅记录日志，不传播给调用方（fire-and-forget）。 |
 | **Redis Pub/Sub 发布失败** | `BroadcastUpdates` 调用 `nodeBroadcaster.Publish` 后若返回 error，仅 `logger.Error` 记录，`BroadcastUpdates` 仍返回 nil，符合 fire-and-forget 策略 (D-007)。数据已持久化，客户端可通过 `sync_updates` 拉取。 |
 | **Redis 连接断开 / 网络分区** | `Subscribe` 的 `PSubscribe` 底层 channel 会关闭（`ok==false`），`Subscribe` 返回 nil。因为 `Subscribe` 在独立 goroutine 中运行且仅记录日志，不会导致节点崩溃。节点失去 Pub/Sub 能力但本地广播仍正常。 |
 | **消息体畸形（JSON 反序列化失败）** | `Subscribe` 循环中反序列化失败直接 `continue` 跳过该消息，不中断订阅循环。 |
@@ -114,6 +116,7 @@ sequenceDiagram
         Client->>WS: 心跳消息
         alt 仅续期
             WS->>Store: Refresh(connID)
+            Store->>Redis: GET info key 读取 ConnectionInfo JSON
             Store->>Redis: luaRefresh 原子重置 info key + user set TTL
         else 续期 + 更新元数据
             WS->>Store: Patch(connID, updater)
@@ -131,11 +134,18 @@ sequenceDiagram
     Note over Client,Redis: 连接断开阶段
     Client-->>WS: 连接断开 (Run() 返回)
     WS->>Store: Remove(ctx, connID)
+    Store->>Redis: Get(connID) 查找 userID
     Store->>Store: luaRemove Lua 脚本（原子操作）
     Store->>Redis: DEL info key
     Store->>Redis: SREM user set 移除 connID
     Store->>Store: luaCleanupEmptySet
     Store->>Redis: 清理空 user set 防止孤儿 key
+
+    Note over OtherNode,Redis: 批量清理阶段
+    OtherNode->>Store: RemoveByUser(userID)
+    Store->>Redis: SMembers 读取所有 connID
+    Store->>Redis: UNLINK 批量删除 info key（每批 100 个）
+    Store->>Redis: UNLINK 删除 user set
 ```
 
 ### 详细步骤
@@ -151,6 +161,14 @@ sequenceDiagram
 5. **连接断开移除**：`client.Run()` 返回后（客户端断开）调用 `ConnectionStore().Remove(cleanupCtx, connID)`。`Remove` 先通过 `Get` 查找 userID，再调用 `luaRemove` 原子删除 info key 并 `SREM` user set（Get 和 Lua 之间存在短暂窗口，若 info key 在此期间过期，SREM 仍会执行但移除的是已过期条目，属于安全的 no-op），随后调用 `luaCleanupEmptySet` 清理空 user set 防止孤儿 key。
 
 6. **设备替换时异步清理旧连接**：同一 `(userID, deviceID)` 新连接到来时先在内存 map 中替换，然后异步 goroutine `performDeviceReplacement` 发送 4001 close frame 给旧连接、Close 旧 client、`removeClient` 清理本地索引。旧连接的 `ConnectionStore.Remove` 由其自身的 `handleWebSocket` defer 完成。
+
+7. **更新连接元数据**：`Update(connID, metadata)` 执行非原子 read-modify-write——先 `Get` 读取当前 `ConnectionInfo`，替换 `Metadata` 字段后通过 `luaUpdate` 写回（`luaUpdate` 仅检查 key 是否存在，不做 CAS）。并发 `Update` 调用可能互相覆盖。需原子语义时应使用 `Patch`。
+
+8. **检查连接是否存在**：`Exists(connID)` 通过 `Redis EXISTS` 命令检查 info key 是否存在，返回 bool。
+
+9. **批量删除用户所有连接**：`RemoveByUser(userID)` 先通过 `SMembers` 读取 user set 中所有 connID，构建 info key 列表后通过 `UNLINK`（异步删除，不阻塞 Redis）每批 100 个删除 info key，最后 `UNLINK` 删除 user set 本身。
+
+10. **全局连接计数**：`CountAll()` 使用 `SCAN` 命令遍历所有 `{keyPrefix}xyncra:conn:info:*` key 进行近似计数，适用于监控和诊断。
 
 ### 边缘场景
 
@@ -170,38 +188,45 @@ sequenceDiagram
 
 ### 概述
 
-当服务端通过 ReverseRPC 向客户端发起请求（如 tool_call）但目标设备离线时，请求被持久化到 `RedisPendingStore`。设备重新上线后可拉取待处理请求。每个设备有独立的 Redis List，带容量上限和 TTL。
+当服务端通过 ReverseRPC 向客户端发起请求（如 tool_call）但请求超时（`DeadlineExceeded`）时，请求被异步持久化到 `RedisPendingStore`。设备重新上线后通过 `system.reconnect` RPC 拉取并重放待处理请求。每个设备有独立的 Redis List，带容量上限和 TTL。
+
+> **注意**：若设备离线（`sendToDevice` 返回 `ErrDeviceOffline`），`ServerRequest` 直接返回错误，不进入 pending 逻辑。仅当请求已发送但超时未收到响应时才持久化。
 
 ### 流程图
 
 ```mermaid
 flowchart TD
     A[ReverseRPC.ServerRequest] --> B{sendToDevice 结果}
-    B -->|成功| C[请求直接发送到设备]
-    B -->|ErrDeviceOffline| D[进入 pending 逻辑]
+    B -->|ErrDeviceOffline| C[直接返回错误，不持久化]
+    B -->|成功| D[等待客户端响应]
+    D -->|收到响应| E[返回结果]
+    D -->|DeadlineExceeded| F{PendingStore 已配置?}
+    F -->|否| G[返回超时错误]
+    F -->|是| H[persistAsync: 异步保存]
 
-    D --> E[RedisPendingStore.Save]
-    E --> F[Pipeline: RPush 到 Redis List]
-    F --> G[LTrim 保留最后 MaxPendingPerDevice 条]
-    G --> H[Expire 设置 RequestTTL]
+    H --> I[RedisPendingStore.Save]
+    I --> J[Pipeline: RPush 到 Redis List]
+    J --> K[LTrim 保留最后 MaxPendingPerDevice 条]
+    K --> L[Expire 设置 RequestTTL]
 
-    I[设备重新上线] --> J[RedisPendingStore.List]
-    J --> K[LRange 读取所有条目]
-    K --> L[逐条 JSON 反序列化]
-    L --> M[返回 PendingRequest 列表]
+    M[设备重连 system.reconnect] --> N[RedisPendingStore.List]
+    N --> O[LRange 读取所有条目]
+    O --> P[逐条 JSON 反序列化]
+    P --> Q[过滤 Seq > last_seen_seq 且 RetryCount < MaxRetries]
+    Q --> R[逐条重放 ReplayRequest]
 
-    N[请求处理完成] --> O[RedisPendingStore.Remove]
-    O --> P[LRange 读取全部]
-    P --> Q[过滤掉目标 requestID]
-    Q --> R[Del + RPush 重写整个 List]
+    S[请求处理完成] --> T[RedisPendingStore.Remove]
+    T --> U[LRange 读取全部]
+    U --> V[过滤掉目标 requestID]
+    V --> W[Del + RPush 重写整个 List]
 
-    S[设备断开 / 重新注册] --> T[RemoveByDevice]
-    T --> U[DEL 整个 key]
+    X[设备断开 / 重新注册] --> Y[RemoveByDevice]
+    Y --> Z[DEL 整个 key]
 ```
 
 ### 详细步骤
 
-1. **请求进入 pending**：`ReverseRPC.ServerRequest` 通过 `sendFunc` 发送请求到指定 `(userID, deviceID)`，若设备离线（`sendToDevice` 返回 `ErrDeviceOffline`），请求进入 pending 逻辑。
+1. **请求超时进入 pending**：`ReverseRPC.ServerRequest` 通过 `sendFunc` 发送请求到指定 `(userID, deviceID)`。若发送成功但等待响应超时（`DeadlineExceeded`）且 `PendingStore` 已配置，`persistAsync` 在独立 goroutine 中异步调用 `PendingStore.Save` 持久化请求。若设备离线（`sendToDevice` 返回 `ErrDeviceOffline`），`ServerRequest` 直接返回错误，不持久化。
 
 2. **持久化待处理请求**：`RedisPendingStore.Save` 将 `PendingRequest` JSON 序列化，通过 Pipeline 执行 `RPush` 追加到 Redis List key `pending:{userID}\x00{deviceID}`，`LTrim` 保留最后 `MaxPendingPerDevice` 条（淘汰最旧），`Expire` 设置 `RequestTTL`。
 
@@ -219,6 +244,8 @@ flowchart TD
 
 | 场景 | 行为 |
 |------|------|
+| **设备离线（ErrDeviceOffline）** | `ServerRequest` 直接返回错误，不进入 pending 持久化逻辑。仅当请求已发送到设备但超时未响应（`DeadlineExceeded`）时才持久化。 |
+| **上下文取消（非超时）** | 父 context 被取消时 `ServerRequest` 返回 `ctx.Err()`，不持久化。仅 `DeadlineExceeded` 触发持久化。 |
 | **Remove/Update 在 Del 和 RPush 之间进程崩溃** | 这不是真正事务，崩溃可能导致条目丢失。采用 fail-open 语义 (D-103)，丢几条待处理请求可接受，因为客户端会重新发起。 |
 | **List 中存在损坏的 JSON 条目** | `List` 和 `Remove/Update` 中反序列化失败的条目被 skip（`continue`），不影响其他正常条目。 |
 | **MaxPendingPerDevice 超限** | `Save` 使用 `LTrim` 保留最后 N 条，最旧的请求被静默丢弃，不返回错误。 |
@@ -295,7 +322,7 @@ flowchart TD
 
 4. **BroadcastMessageUpdate**：广播持久化消息。`store.SendMessage` 返回的 `UserUpdate` 列表每条带真实 DB seq 号，BroadcastHelper 逐条构造 `PackageDataUpdate{Seq: realSeq, Type:UpdateTypeMessage}` 广播。这些有真实 seq，客户端会纳入 sync state。
 
-5. **SendConversationUpdate**：广播对话变更通知，构造轻量通知 `{conversation_id, action:'update', updated_at}`。采用 pull-on-notification 模式，客户端收到通知后通过 `get_conversation` RPC 拉取完整状态。
+5. **SendConversationUpdate**：广播对话变更通知，构造轻量通知 `{conversation_id, action:'update', updated_at}`。`updatedAt` 参数（`time.Time`）非零时序列化为 Unix 秒写入 `updated_at` 字段，客户端可据此检测过期通知 (D-124)。采用 pull-on-notification 模式，客户端收到通知后通过 `get_conversation` RPC 拉取完整状态。
 
 6. **SendAgentTimeout**：广播 Agent 超时通知，构造 `AgentTimeoutPayload{UserID: agentUserID, Reason}`，通过 `broadcastEphemeral` 发送给 `humanUserID`。
 
@@ -350,10 +377,10 @@ stateDiagram-v2
 
     state "关闭流程" as Shutdown {
         Starting --> GracefulStop: WebSocketServer.GracefulStop()
-        GracefulStop --> CheckPs: 检查 b.ps != nil
+        GracefulStop --> LockAndNil: 加锁取出 b.ps 并置 nil
+        LockAndNil --> CheckPs: ps != nil?
         CheckPs --> ClosePs: ps.Close()
-        CheckPs --> SkipClose: b.ps == nil 直接返回（幂等）
-        ClosePs --> SetNil: b.ps = nil
+        CheckPs --> SkipClose: ps == nil 直接返回（幂等）
     }
 ```
 
@@ -365,7 +392,7 @@ stateDiagram-v2
 
 3. **RedisNodeBroadcaster.Subscribe**：建立 `PSubscribe` 并保存引用——调用 `client.PSubscribe(ctx, pattern)` 将返回的 `*redis.PubSub` 保存到 `b.ps`（加锁），然后进入 select 循环读取 `ps.Channel()`。
 
-4. **关闭 Broadcaster**：`WebSocketServer.GracefulStop` 调用 `nodeBroadcaster.Close()`。`RedisNodeBroadcaster.Close` 加锁取出 `ps` 引用并置 nil（防止重复 close），然后调用 `ps.Close()`。
+4. **关闭 Broadcaster**：`WebSocketServer.GracefulStop` 调用 `nodeBroadcaster.Close()`。`RedisNodeBroadcaster.Close` 加锁读取 `b.ps` 到本地变量并立即将 `b.ps` 置 nil（防止重复 close），解锁后若 ps 非 nil 则调用 `ps.Close()`。
 
 5. **NoopBroadcaster 单节点模式**：`Publish` 直接返回 nil，`Subscribe` 阻塞在 `<-ctx.Done()`，`Close` 返回 nil，零开销。
 
@@ -386,7 +413,20 @@ stateDiagram-v2
 | 编号 | 决策 | 涉及流程 |
 |------|------|----------|
 | D-007 | Fire-and-forget 广播策略，失败不阻塞 Agent 执行 | 跨节点消息广播、Agent 事件广播 |
+| D-010 | 被动续期策略，user SET TTL 采用 MAX 语义对齐 | 连接状态同步 |
+| D-018 | 跨节点广播使用 Redis Pub/Sub | 跨节点消息广播、广播器生命周期 |
 | D-063 | AgentRegistry nil-safe，nil 时 isAgent 始终 false | Agent 事件广播 |
 | D-103 | Fail-open 语义，pending 请求允许少量丢失 | 待处理请求存储 |
+| D-124 | ConversationUpdate 携带 updatedAt 供客户端检测过期通知 | Agent 事件广播 |
 | R3-001 | Lua 脚本原子操作避免 TOCTOU 竞争 | 连接状态同步 |
 | C7 | StreamUpdate 同时广播给 human 和 agent | Agent 事件广播 |
+
+---
+
+## 相关文档
+
+- [WebSocket 连接管理](websocket-connection.md) — 连接建立、断开、设备替换、跨节点广播概览
+- [Heartbeat 业务流程](heartbeat.md) — 应用层心跳与 ConnectionStore TTL 刷新
+- [反向 RPC](reverse-rpc.md) — ServerRequest、PendingStore、重放流程
+- [断线重连](reconnection.md) — system.reconnect 与待处理请求重放
+- [业务流程索引](index.md)

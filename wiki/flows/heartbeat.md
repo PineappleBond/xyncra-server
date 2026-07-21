@@ -198,6 +198,9 @@ Lua 脚本中 `PTTL userKey` 的返回值有三种情况：
 | i/o timeout | `ErrRedisTimeout` | `InternalError` |
 | connection refused | `ErrRedisConnectionFailed` | `InternalError` |
 | connection reset | `ErrRedisConnectionFailed` | `InternalError` |
+| broken pipe | `ErrRedisConnectionFailed` | `InternalError` |
+| no such host | `ErrRedisConnectionFailed` | `InternalError` |
+| dial tcp | `ErrRedisConnectionFailed` | `InternalError` |
 | 其他错误 | 原样返回 | `InternalError` |
 
 ### 10. 客户端关闭后的 heartbeat
@@ -207,7 +210,7 @@ Lua 脚本中 `PTTL userKey` 的返回值有三种情况：
 1. `Stop()` 取消 context
 2. `Call` 中的 `select` 检测到 `ctx.Done()`，返回 `TimeoutError`
 3. heartbeatLoop 在下一个 ticker 周期检测到 `ctx.Done()` 并退出
-4. `Call` 同时会将失败的 heartbeat 入队到 retry manager（best-effort），但客户端关闭后 retry manager 也会停止
+4. `Call` 在 `ctx.Done()` 和超时路径中会将失败的 heartbeat 入队到 retry manager（best-effort），但客户端关闭后 retry manager 也会停止；注意：服务端返回的错误（如 `connection expired`）不会触发入队重试，仅连接错误和超时会
 
 ---
 

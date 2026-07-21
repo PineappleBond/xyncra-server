@@ -68,7 +68,7 @@ sequenceDiagram
         WS-->>C: 错误响应
     end
 
-    H->>H: 检查 Rate Limiter (50ms/20s)
+    H->>H: 检查 Rate Limiter (50ms 1次, 20/s)
 
     alt Rate-limited
         H-->>WS: 返回 OK (静默)

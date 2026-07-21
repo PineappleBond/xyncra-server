@@ -326,10 +326,14 @@ flowchart TD
     D -->|失败/缺失| F[忽略 继续]
     E --> G[ConnectionStore.Refresh]
     F --> G
-    G --> H{Redis 操作}
-    H -->|成功| I[返回 status: ok]
-    H -->|连接已过期| J[返回 connection expired]
-    H -->|Redis 不可达| K[返回内部错误]
+    G --> G1[GET infoKey 读取 ConnectionInfo JSON]
+    G1 -->|redis.Nil| J[返回 connection expired]
+    G1 -->|JSON 反序列化失败| K1[返回内部错误]
+    G1 -->|成功| G2[Lua 脚本原子执行]
+    G2 -->|返回 1| I[返回 status: ok]
+    G2 -->|返回 0 key 过期| J
+    G1 -->|Redis 不可达| K[返回内部错误]
+    G2 -->|Redis 不可达| K
 ```
 
 ### 详细步骤
@@ -338,17 +342,25 @@ flowchart TD
 2. `DefaultMessageHandler` 路由到 `heartbeatHandler`
 3. 解析可选的 `device_info` 参数（仅记录日志）
 4. 调用 `ConnectionStore.Refresh(connID)` 重置 TTL
-5. `Refresh` 使用 Lua 脚本原子操作（`luaRefresh`）：
-   - 检查 info key 是否存在，若不存在返回 0（触发 `ErrConnectionNotFound`）
-   - 重置 info key 的 TTL（PEXPIRE）
-   - 重置 user SET 的 TTL（MAX 语义：仅当新 TTL 大于当前剩余 TTL 时才刷新）
+5. `Refresh` 内部执行两步操作（共 2 次 Redis round-trip）：
+   - **GET infoKey**：读取连接 info key 的 JSON 数据，获取 TTL 配置和 UserID
+     - 若 key 不存在（`redis.Nil`），立即返回 `ErrConnectionNotFound`
+     - 若 JSON 反序列化失败（数据损坏），立即返回错误
+   - **Lua 脚本**（`luaRefresh`，原子执行）：
+     - `EXISTS infoKey`：再次检查连接是否存在（防止 GET 与 Lua 之间 key 被淘汰），不存在则返回 0
+     - `PEXPIRE infoKey`：重置连接 info key 的 TTL（毫秒精度）
+     - `PTTL userKey`：读取 user SET key 的当前剩余 TTL
+     - `PEXPIRE userKey`：仅当新 TTL 大于当前 TTL 时才更新（MAX 语义）
+   - 若 Lua 返回 0：连接在 GET 与 Lua 之间过期，返回 `ErrConnectionNotFound`
 6. 返回 `PackageDataResponse{ID, Code: ResponseCodeOK, Msg: "ok", Data: {"status": "ok"}}` 响应
 
 ### 边缘场景
 
 | 场景 | 处理方式 |
 |------|----------|
-| 连接已过期/被清除（Lua 脚本 info key 不存在，返回 0） | 返回 `NotFoundError("connection expired")`，客户端应重新连接 |
+| 连接已过期/被清除（GET 时 info key 不存在，`redis.Nil`） | 返回 `NotFoundError("connection expired")`，客户端应重新连接 |
+| 连接在 GET 与 Lua 之间过期（Lua `EXISTS` 返回 0） | 返回 `NotFoundError("connection expired")` |
+| info key 数据损坏（JSON 反序列化失败） | 返回 `InternalError` |
 | Redis 不可达（连接失败或超时） | 返回 `InternalError`，由 `classifyRedisError` 分类（`ErrRedisConnectionFailed` 或 `ErrRedisTimeout`） |
 | `device_info` 解析失败 | 忽略，不影响心跳处理（宽容解析） |
 | 心跳参数缺失 | 有效心跳，无参数也正常处理 |

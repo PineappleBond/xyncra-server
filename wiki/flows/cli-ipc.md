@@ -183,7 +183,7 @@ flowchart TD
     D -->|是| F["打开 SQLite (WAL mode,<br>busy_timeout=5000ms, cache_size=-8000,<br>synchronous=NORMAL, foreign_keys=ON)"]
     F --> G["创建 IPCServer"]
     G --> H["创建 cliUpdateHandler<br>(推送事件输出到 stdout)"]
-    H --> I["创建 cliLogger<br>(结构化日志写入 stderr,<br>XYNCRA_DEBUG=1 启用 Debug 级别)"]
+    H --> I["创建 cliLogger<br>(结构化日志写入 stderr,<br>XYNCRA_DEBUG=1|true 启用 Debug 级别)"]
     I --> J["构建 client options:<br>server URL, userID, deviceID,<br>DB, updateHandler, logger,<br>--device-info, functions"]
     J --> K["创建 XyncraClient"]
     K --> L["注册内置反向 RPC handlers<br>(ping, get_device_info, get_time)"]
@@ -196,7 +196,7 @@ flowchart TD
     R -->|SIGINT/SIGTERM| S["context 取消"]
     R -->|设备替换 D-111| T["xc.Done() 触发"]
     T --> S
-    S --> U["清理流程:<br>unlock → close DB →<br>stop IPC → remove socket"]
+    S --> U["清理流程:<br>cancel context → xc.Stop →<br>stop IPC + remove socket →<br>close DB → unlock"]
 ```
 
 ### Update Handler 回调

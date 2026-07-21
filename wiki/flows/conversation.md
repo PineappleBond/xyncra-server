@@ -349,6 +349,7 @@ flowchart TD
 | 软删除会话 SQL 失败 | 事务回滚，返回 `InternalError` |
 | 软删除消息 SQL 失败 | 事务回滚，返回 `InternalError` |
 | `GetLatestSeq` 失败（单个成员） | 跳过该成员的 UserUpdate，其他成员不受影响 |
+| 并发 seq 竞争（TOCTOU） | `GetLatestSeq` 在事务外调用，并发操作可能分配相同 seq，实践中因并发删除同一会话的概率极低，可接受 |
 | `UserUpdate` 批量创建失败 | 仅记录日志，会话已成功删除，MQ 广播仍会执行 |
 | MQ 广播失败 | 仅记录日志，更新已持久化 |
 
@@ -434,6 +435,7 @@ flowchart TD
 | 恢复消息 SQL 失败 | 事务回滚，返回 `InternalError` |
 | 重算元数据失败 | 事务回滚，返回 `InternalError` |
 | `GetLatestSeq` 失败（单个成员） | 跳过该成员的 UserUpdate，其他成员不受影响 |
+| 并发 seq 竞争（TOCTOU） | `GetLatestSeq` 在事务外调用，并发操作可能分配相同 seq，实践中因并发恢复同一会话的概率极低，可接受 |
 | 恢复后无消息 | `LastProcessedMessageID` 和 `LastMessageAt` 保持原值 |
 | 之前已单独删除的消息 | 不受影响（通过精确时间戳匹配区分） |
 | `UserUpdate` 创建失败 | 仅记录日志 |
@@ -463,8 +465,10 @@ flowchart TD
 - 创建、删除、恢复操作均通过 MQ 向相关用户的在线设备推送通知
 - 采用 fire-and-forget 模式：MQ 失败仅记录日志，不影响主业务流程
 - 已持久化的 UserUpdate 记录可通过 `sync_updates` 接口补偿拉取
+- 创建操作传递请求 `ctx` 给 `broker.Enqueue`；删除和恢复操作使用 `context.Background()`（因为 UserUpdate 创建和 MQ 广播在主事务提交后执行，请求上下文可能已取消）
 
 ### 事务一致性
 
-- 删除和恢复操作在单个事务中执行，确保会话与消息状态一致
-- 创建操作中为双方分配 seq 的操作也在事务中完成
+- 删除和恢复操作在单个事务中执行，确保会话与消息状态一致（会话删除/恢复 + 消息级联操作）
+- 创建操作中 seq 分配和 `UserUpdate` 创建在同一个事务中完成（`store.Transaction`），防止并发操作导致 seq 冲突
+- 删除和恢复操作的 `GetLatestSeq` + `UserUpdate` 创建在主事务**之外**执行（事务提交后），存在理论上的 seq TOCTOU 风险（实践中因并发删除/恢复同一会话的概率极低，可接受）

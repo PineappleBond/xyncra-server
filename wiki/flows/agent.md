@@ -95,8 +95,8 @@ flowchart TD
 | **LLM 限流 (429)** | 映射为 `ErrLLMRateLimited`，同上 |
 | **HTTP 500/502/503** | 映射为 `ErrLLMTimeout` (transient) |
 | **流式中途错误** | 广播 `is_done=true` + 已累积的部分文本，持久化部分消息 |
-| **持久化失败** | 流式中途错误时部分文本持久化为 fail-open；最终消息持久化失败时返回错误，触发 `ExecuteWithErrorMessage` 发送通用错误消息给用户 |
-| **API Key 缺失** | 返回 `ErrAPIKeyMissing`，发送"配置有误"消息 |
+| **持久化失败** | 流式中途错误时部分文本持久化为 fail-open；最终消息持久化失败时返回错误，触发 `ExecuteWithErrorMessage` 发送通用错误消息给用户，并广播 `conversation_update` 通知客户端拉取最新状态 |
+| **API Key 缺失** | 返回 `ErrAPIKeyMissing`，发送"配置有误"消息，并广播 `conversation_update` |
 | **MCP 服务不可用** | 跳过该 MCP server 的工具 (fail-open)，不阻断构建 |
 | **context 超时** | 总超时 120s 后所有操作被取消 |
 
@@ -139,15 +139,18 @@ flowchart TD
         R --> S[从 DB 读取已回答 Questions]
         S --> T[构建 targets map]
         T --> U[AgentBuilder.Build 重新构建 Agent]
-        U --> V[Runner.ResumeWithParams 恢复执行]
-        V --> W[桥接流式输出, 广播结果]
+        U --> V[发送 typing 指示]
+        V --> V1[Runner.ResumeWithParams 恢复执行]
+        V1 --> W[桥接流式输出, 广播结果]
         W --> X[持久化最终消息]
-        X --> Y[清理状态]
+        X --> X1[标记 processed (24h) + 删除 processing key]
+        X1 --> X2[广播 conversation_update]
+        X2 --> X3[释放会话锁]
+        X3 --> Y[清理状态]
         Y --> Y1[ClearAgentStatus]
         Y1 --> Y2[Delete Questions]
         Y2 --> Y3[Delete Redis checkpoint]
-        Y3 --> Z[广播 conversation_update]
-        Z --> AA[释放会话锁]
+        Y3 --> Z[广播 conversation_update 通知客户端清理完成]
     end
 
     L -.->|等待用户回答| M
@@ -613,20 +616,21 @@ flowchart TD
 
     G -->|构建失败| G1[cleanupAfterResumeFailure]
     G1 --> G2[发送错误消息 + 清理幂等 key]
-    G -->|构建成功| H[Runner.ResumeWithParams 恢复执行]
+    G -->|构建成功| G0[发送 typing 指示]
+    G0 --> H[Runner.ResumeWithParams 恢复执行]
 
     H --> I[桥接流式输出]
     I --> J[广播结果]
     J --> K[持久化最终消息]
 
-    K --> L[清理状态]
+    K --> M[标记 processed (24h) + 删除 processing key]
+    M --> M1[广播 conversation_update]
+    M1 --> N[释放会话锁]
+
+    N --> L[清理状态]
     L --> L1[ClearAgentStatus]
     L1 --> L2[Delete Questions]
     L2 --> L3[Delete Redis checkpoint]
-
-    L3 --> M[标记 processed (24h) + 删除 processing key]
-    M --> M1[广播 conversation_update]
-    M1 --> N[释放会话锁]
 
     H -->|再次 interrupt| O[重新进入 asking_user 状态]
     O --> O1[不释放锁]
@@ -650,7 +654,7 @@ flowchart TD
 | **成功 resume 后** | 执行完整清理：ClearAgentStatus + Delete Questions + Delete Redis checkpoint |
 | **checkpoint 过期/丢失** | 调用 `cleanupAfterResumeFailure`，发送超时提示消息 |
 | **并发 resume** | 幂等检查确保同一 checkpoint 只 resume 一次 |
-| **questionStore 为 nil** | 记录错误日志，释放锁（若拥有），直接返回 nil 给 MQ。不执行清理操作，不发送错误消息 |
+| **questionStore 为 nil** | 记录错误日志，释放锁（若拥有），直接返回 nil 给 MQ。不执行清理操作（ClearAgentStatus / Delete Questions / Delete checkpoint），不发送错误消息给用户。与 `GetByCheckpoint` 失败不同，此路径不调用 `cleanupAfterResumeFailure` |
 | **Agent 未注册或 Build 失败** | 调用 `cleanupAfterResumeFailure`（清状态/删问题/删 checkpoint），发送错误消息，清理幂等 key，释放锁 |
 | **GetByCheckpoint 失败** | 调用 `cleanupAfterResumeFailure`，发送错误消息，清理幂等 key，释放锁 |
 
@@ -699,6 +703,7 @@ graph LR
 |----------|------|----------|
 | `ErrLLMTimeout` | Transient | MQ 重试 + 用户提示"暂时无法回复" |
 | `ErrLLMRateLimited` | Transient | MQ 重试 + 用户提示"暂时无法回复" |
+| HTTP 429 | Transient | 字符串匹配 "rate" 或 "429"，映射为 `ErrLLMRateLimited`，MQ 重试 |
 | HTTP 500/502/503 | Transient | 映射为 `ErrLLMTimeout`，MQ 重试 |
 | `ErrAgentNotFound` | Permanent | 发送友好错误消息（默认"处理遇到问题"），标记 processed |
 | `ErrAPIKeyMissing` | Permanent | 发送"配置有误"消息，标记 processed |
