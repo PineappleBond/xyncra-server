@@ -34,7 +34,7 @@
 ```mermaid
 flowchart TD
     A["NewRootCommand() 创建根命令"] --> B["注册 5 个全局标志<br>--user-id, --device-id, --server, --db-path, --log-dir"]
-    B --> C["注册 19 个子命令"]
+    B --> C["注册 19 个顶级命令<br>(draft 含 3 个子命令, logs 含 5 个子命令)"]
     C --> D["cobra 路由到对应 RunE 函数"]
     D --> E["NewCLIContext(cmd) 解析配置"]
     E --> F{"配置优先级:<br>flag > env > default"}
@@ -295,12 +295,12 @@ flowchart TD
 ```mermaid
 flowchart TD
     subgraph 创建会话
-        CA["create-conversation"] --> CB["IPC 调用 create_conversation<br>参数: user_id2, title"]
+        CA["create-conversation<br>--peer-id (必填), --title (可选)"] --> CB["IPC 调用 create_conversation<br>参数: user_id2, title"]
         CB --> CC{"IPC 成功?"}
         CC -->|是| CD["Upsert 到本地 DB"]
-        CC -->|否| CE["standaloneRPC 降级"]
+        CC -->|否| CE["standaloneRPC 降级<br>参数: user_id, title"]
         CE --> CF["Upsert 到本地 DB"]
-        CD --> CG{"会话已存在?"}
+        CD --> CG{"Duplicate 标志?<br>(服务端返回)"}
         CF --> CG
         CG -->|是| CH["返回 Duplicate=true<br>(find-or-create 语义)"]
         CG -->|否| CI["返回新建会话"]
@@ -352,7 +352,7 @@ flowchart TD
 |------|------|
 | 列出会话时无同步数据 | 输出 `'No conversations found. Run xyncra-client listen first to sync data.'` |
 | create-conversation 使用 `--peer-id` 而非 `--user-id` | 避免与全局 `--user-id` 标志冲突。IPC 路径发送 `user_id2`，standalone 路径发送 `user_id`（两种参数名服务器均接受） |
-| standalone 模式下恢复会话且本地记录缺失 | 仅记录警告；下次守护进程同步后会话会出现 |
+| standalone 模式下恢复会话且本地记录缺失 | 仅记录警告（无法从服务器回填）；下次守护进程同步后会话会出现。IPC 路径会主动调用 `xc.Call('get_conversation')` 从服务器获取并 upsert |
 | get-conversation 查询已删除会话 | `store.ErrNotFound` 返回用户友好错误 |
 | 分页 | `--offset` 和 `--limit` 标志，使用 `limit+1` 技巧检测 hasMore |
 
@@ -463,7 +463,8 @@ flowchart TD
 ```mermaid
 flowchart TD
     A["runKill()"] --> B["解析 CLIContext"]
-    B --> C["readLockInfo(LockPath)"]
+    B --> B2["解析标志:<br>--force (默认 false)<br>--timeout (默认 5s)"]
+    B2 --> C["readLockInfo(LockPath)"]
     C --> D{"锁文件存在?"}
     D -->|否| E["输出 'No running daemon found.'<br>exit 0"]
     D -->|是| F["读取 LockInfo<br>(PID, StartedAt, DeviceID)"]
@@ -645,7 +646,7 @@ IPC 专属命令，用于在 HITL（Human-In-The-Loop）中断后恢复暂停的
 flowchart TD
     A["runAgentResume()"] --> B["解析 CLIContext"]
     B --> C["读取标志:<br>--conversation-id (必填)<br>--checkpoint-id (必填)<br>--interrupt-id (可选)<br>--answer (必填)<br>--agent-id (必填,<br>如 agent/my-bot)"]
-    C --> D["创建 IPCClient<br>超时 5s"]
+    C --> D["创建 IPCClient<br>超时 5s, context 超时 10s"]
     D --> E["IPC 调用 agent_resume<br>携带所有参数"]
     E --> F{"IPC 成功?"}
     F -->|否| G["输出守护进程未运行错误<br>exit 2"]

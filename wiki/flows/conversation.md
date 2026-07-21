@@ -390,7 +390,10 @@ flowchart TD
     E -- 查询出错 --> E2[返回 InternalError]
     F -- 否 --> F1[返回 PermissionDeniedError]
     F -- 是 --> G{会话是否已删除?}
-    G -- 否 --> G1[幂等: 返回当前会话, restored_message_count=0]
+    G -- 否 --> G2[幂等: 调用 Get 获取当前会话]
+    G2 --> G3{Get 是否成功?}
+    G3 -- 否 --> G4[返回 InternalError]
+    G3 -- 是 --> G1[返回当前会话, restored_message_count=0]
     G -- 是 --> H[开启事务]
     H --> I[恢复会话: 清除 deleted_at]
     I --> J[精确恢复消息: 匹配会话的 deleted_at 时间戳]
@@ -409,6 +412,7 @@ flowchart TD
     style E2 fill:#f44336,color:#fff
     style F1 fill:#f44336,color:#fff
     style G1 fill:#2196F3,color:#fff
+    style G4 fill:#f44336,color:#fff
     style N fill:#FFC107,color:#000
     style P3 fill:#f44336,color:#fff
     style Q fill:#4CAF50,color:#fff
@@ -428,7 +432,7 @@ flowchart TD
 | `conversation_id` 为空 | 返回 `ValidationError('missing required field: conversation_id')` |
 | 会话完全不存在 | 返回 `NotFoundError('conversation not found')`（`GetUnscoped` 也查不到） |
 | `GetUnscoped` 查询出错（非 `ErrNotFound`） | 返回 `InternalError` |
-| 会话未被删除 | 幂等返回当前状态，`restored_message_count = 0` |
+| 会话未被删除（幂等路径） | 调用 `Get()` 获取当前状态，若 `Get()` 失败则返回 `InternalError`；成功则返回当前会话，`restored_message_count = 0` |
 | 调用者非成员 | 返回 `PermissionDeniedError('user is not a member of the conversation')` |
 | `RowsAffected == 0`（并发恢复竞争） | `ErrNotFound` -> `NotFoundError` |
 | 恢复会话 SQL 失败 | 事务回滚，返回 `InternalError` |

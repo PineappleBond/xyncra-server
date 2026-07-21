@@ -103,7 +103,7 @@ sequenceDiagram
 7. **广播**：遍历所有会话成员，调用 `broadcastFn`（即 `WebSocketServer.BroadcastUpdates`）
    - **本地广播**：推送到该成员在本节点的所有在线 WebSocket 连接
    - **跨节点广播**：通过 `NodeBroadcaster.Publish` 发布到 Redis Pub/Sub 频道 `{keyPrefix}:broadcast:{userID}`（默认 `xyncra:broadcast:{userID}`，前缀可配置），包含 `sourceNodeID` 以避免发送节点重复接收
-   - `BroadcastUpdates` 始终返回 nil（内部 fire-and-forget），handler 层的 error 分支实际不会触发
+   - `BroadcastUpdates` 在 `updates` 非 nil 时始终返回 nil（内部 fire-and-forget），handler 层的 error 分支实际不会触发（handler 总是传入非 nil 的 `updates`）
 8. **返回成功**：返回 `{status: ok}`
 
 ---
@@ -189,7 +189,7 @@ flowchart TD
 |------|----------|
 | 跨节点 Pub/Sub 发布失败 | `BroadcastUpdates` 内部记录 Error 日志，函数仍返回 nil（fire-and-forget） |
 | 单个本地连接发送失败 | `broadcastLocal` 内部记录 Error 日志（per-connection），不影响其他连接 |
-| `broadcastFn` 返回 error | Handler 记录 Info 日志，继续处理其他成员（当前 `BroadcastUpdates` 始终返回 nil，此路径实际上不会触发） |
+| `broadcastFn` 返回 error | Handler 记录 Info 日志，继续处理其他成员（当前 handler 总是传入非 nil `updates`，`BroadcastUpdates` 在此条件下始终返回 nil，此路径实际上不会触发） |
 | 所有成员都离线 | 所有广播为空操作，但不影响返回值（ephemeral 消息对离线用户静默丢弃） |
 
 ### 6. Payload 序列化失败
@@ -326,11 +326,15 @@ Handler 构造时启动后台 goroutine，每 5 分钟执行一次清理：
 | 维度 | `stream_text` RPC handler | Agent `BroadcastHelper` |
 | --- | --- | --- |
 | 调用方 | 客户端（直接 RPC） | Agent 执行器（内部调用） |
-| Rate limiting | 50ms/user/conv | 无（50ms 节流在 StreamBridge 层） |
+| Rate limiting | 50ms/user/conv | 无（50ms ticker 节流在 StreamBridge 层，基于时间窗口而非 per-user） |
 | 成员校验 | 校验调用者是会话成员 | 无（Agent 已在 task_handler 中校验） |
 | 广播路径 | broadcastFn (BroadcastUpdates) | BroadcastHelper.SendStreamUpdate (BroadcastUpdates) |
 | Payload 字段 | `streamingBroadcastPayload`（无 `is_agent`） | `StreamingPayload`（含 `is_agent: bool`，标识是否为 Agent 发送） |
-| 持久化 | 不持久化 (Seq=0) | 不持久化 (Seq=0)，最终消息通过 store.SendMessage 持久化 |
+| 广播目标 | 所有会话成员 | humanUserID + agentUserID（两个用户） |
+| 持久化 | 不持久化 (Seq=0) | 不持久化 (Seq=0)，最终消息通过 store.SendMessage 持久化，再通过 BroadcastMessageUpdate 广播 |
+| 错误处理 | 无（broadcastFn fire-and-forget） | 流式错误时发送 is_done=true 并持久化部分内容 |
+| HITL 支持 | 无 | 检测 HITL 中断，持久化 Question，更新会话状态 |
+| typing 指示器 | 无 | 开始时发送 typing=true，首个 token 后发送 typing=false |
 
 Agent 的流式输出路径：
 
@@ -342,26 +346,49 @@ sequenceDiagram
     participant BH as BroadcastHelper
     participant WS as WebSocket Server
     participant C as 客户端
+    participant DB as Database
 
     MQ->>Agent: TypeAgentProcess 任务
-    Agent->>Agent: 执行 LLM 流式请求
+    Agent->>Agent: Semaphore 获取 + 设置总超时
+    Agent->>Agent: 加载会话上下文 + 构建 Agent
+    Agent->>C: SendTyping (isTyping=true)
+    Agent->>Agent: 执行 LLM 流式请求 (BridgeWithInterrupt)
 
     loop 每个流式 chunk
         Agent->>Bridge: Eino AsyncIterator
-        Bridge->>Bridge: 50ms 节流
-        Bridge-->>Agent: StreamChunk (累积文本)
+        Bridge->>Bridge: 50ms ticker 节流（累积文本缓冲）
+        Bridge-->>Agent: StreamChunk (累积文本快照)
+        Agent->>C: 首个 token 时清除 typing 指示器
         Agent->>BH: SendStreamUpdate (累积文本, isDone=false)
-        BH->>WS: BroadcastUpdates
-        WS->>C: 推送给所有成员
+        BH->>WS: BroadcastUpdates (humanUserID + agentUserID)
+        WS->>C: 推送给所有在线连接
     end
 
     Agent->>BH: SendStreamUpdate (最终文本, isDone=true)
     BH->>WS: BroadcastUpdates
     WS->>C: 广播完成信号
 
-    Agent->>Agent: 持久化最终消息
-    Agent->>BH: BroadcastMessageUpdate
-    BH->>WS: BroadcastUpdates (带 DB seq)
+    Agent->>DB: store.SendMessage (持久化最终消息)
+    Agent->>BH: BroadcastMessageUpdate (带 DB seq)
+    BH->>WS: BroadcastUpdates (持久化消息更新)
+
+    alt 流式错误 (chunk.Err)
+        Agent->>BH: SendStreamUpdate (部分内容, isDone=true)
+        opt 有部分内容
+            Agent->>DB: store.SendMessage (持久化部分内容)
+            Agent->>BH: BroadcastMessageUpdate
+        end
+        Agent-->>MQ: 返回错误（分类为 timeout/rate-limited/其他）
+    end
+
+    alt HITL 中断 (Agent 需要用户输入)
+        Agent->>DB: 更新会话 AgentStatus 为 asking_user
+        Agent->>DB: 创建 Question 记录
+        Agent->>BH: SendStreamUpdate (当前文本, isDone=true)
+        Agent->>BH: SendConversationUpdate (pull 通知)
+        Agent->>BH: SendAgentStatus (asking_user)
+        Agent-->>MQ: 返回 ErrHITLInterrupted
+    end
 ```
 
 ---

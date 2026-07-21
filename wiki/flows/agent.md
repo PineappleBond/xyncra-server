@@ -144,13 +144,12 @@ flowchart TD
         V1 --> W[桥接流式输出, 广播结果]
         W --> X[持久化最终消息]
         X --> X1[标记 processed (24h) + 删除 processing key]
-        X1 --> X2[广播 conversation_update]
-        X2 --> X3[释放会话锁]
-        X3 --> Y[清理状态]
+        X1 --> Y[清理状态]
         Y --> Y1[ClearAgentStatus]
         Y1 --> Y2[Delete Questions]
         Y2 --> Y3[Delete Redis checkpoint]
         Y3 --> Z[广播 conversation_update 通知客户端清理完成]
+        Z --> X3[释放会话锁]
     end
 
     L -.->|等待用户回答| M
@@ -167,10 +166,10 @@ flowchart TD
 |------|----------|
 | **checkpoint 过期/丢失** | 调用 `cleanupAfterResumeFailure`，发送"等待时间过长"消息 |
 | **re-interrupt (多轮HITL)** | resume 后再次 interrupt，重新进入 `asking_user` 状态，不释放锁，删除 processing key 允许后续 resume |
-| **resume 永久失败** | 清理状态 + 删除 checkpoint + 删除 questions + 发送错误消息 |
+| **resume 永久失败** | 调用 `cleanupAfterResumeFailure`（清状态 + 删 checkpoint + 删 questions）+ 发送错误消息 + 清理幂等 key + 释放锁 |
 | **resume transient 失败** | 不自动 MQ 重试，而是通知用户自行决定是否重试 |
 | **并发 resume** | 幂等检查确保同一 checkpoint 只 resume 一次 |
-| **questionStore 为 nil** | 初始中断时 Question 创建被跳过 (nil-safe)；resume 时中止恢复流程并释放锁（非 nil-safe，需配置 questionStore） |
+| **questionStore 为 nil** | 初始中断时 Question 创建被跳过 (nil-safe)；resume 时记录错误日志，释放锁（若拥有），直接返回 nil 给 MQ。不执行清理操作（ClearAgentStatus / Delete Questions / Delete checkpoint），不发送错误消息给用户。与 `GetByCheckpoint` 失败不同，此路径不调用 `cleanupAfterResumeFailure` |
 | **多设备并发回答同一问题** | QuestionStore.UpdateAnswer 使用 `WHERE status='pending'` 幂等更新，后到者返回 409 |
 | **多个 Question 需要依次回答** | 每次 RPC 只回答一个 Question，返回 "partial" 状态；全部回答完毕后入队 MQ 任务 |
 
@@ -198,7 +197,8 @@ flowchart TD
     J --> K[DeleteByCheckpoint 软删除 Questions]
     K --> L[删除 Redis checkpoint]
     L --> M[发送超时提示消息]
-    M --> N[广播 agent_timeout + conversation_update]
+    M --> N[广播 agent_timeout]
+    N --> N1[广播 conversation_update 通知客户端刷新状态]
 
     style A fill:#4CAF50,color:#fff
     style G fill:#FF9800,color:#fff
@@ -379,6 +379,17 @@ flowchart TD
 | **客户端返回业务错误** | SoftFailure 返回错误码和消息 |
 | **空参数 schema** | 自动补全为 `{"type":"object","properties":{}}`，防止 LLM 格式层产生非法 schema |
 
+### 中间件链顺序
+
+`AgentBuilder.Build` 在构建 Agent 时按固定顺序组装中间件链（`middleware.go`）。每个中间件初始化失败时跳过（fail-open）：
+
+1. **DynamicToolProvider** — 必须最先执行，注入客户端函数和注册表工具
+2. **PatchToolCalls** — 修补工具调用格式
+3. **Summarization** — 上下文超长时自动摘要（默认阈值 160k tokens）
+4. **ToolReduction** — 工具结果过长时截断（默认 50k chars）
+5. **LoggingMiddleware** — 必须最后，记录所有 LLM 请求/响应/工具调用
+6. **TracingMiddleware** — 仅在 tracing 启用时添加，生成 OpenTelemetry span
+
 ---
 
 ## 7. Agent 配置注册流程
@@ -440,29 +451,34 @@ flowchart TD
     C2 --> C3[推送给 agentUser]
 
     B -->|输入状态| D[SendTyping]
+    D --> D1[仅推送给 humanUser]
 
     B -->|Agent 状态| E[SendAgentStatus]
     E --> E1[thinking / tool_calling / generating / idle / asking_user]
+    E1 --> E2[仅推送给 humanUser]
 
     B -->|超时通知| F[SendAgentTimeout]
+    F --> F1[仅推送给 humanUser]
 
     B -->|函数调用| F2[SendFunctionCall]
     F2 --> F3[两次调用: IsDone=false 前 / IsDone=true 后]
-    F3 --> F4[推送给 humanUser]
+    F3 --> F4[仅推送给 humanUser]
 
     B -->|会话更新| G[SendConversationUpdate]
     G --> G1[pull notification pattern]
+    G1 --> G2[仅推送给 humanUser]
 
     B -->|持久化消息| H[BroadcastMessageUpdate]
     H --> H1[带 DB 分配的 Seq]
+    H1 --> H2[逐用户推送]
 
     C3 --> I[WebSocket 发送]
-    D --> I
-    E1 --> I
-    F --> I
+    D1 --> I
+    E2 --> I
+    F1 --> I
     F4 --> I
-    G1 --> I
-    H1 --> I
+    G2 --> I
+    H2 --> I
 
     I -->|失败| J[日志记录, 不返回错误]
     I -->|成功| K[发送完成]
@@ -624,13 +640,12 @@ flowchart TD
     J --> K[持久化最终消息]
 
     K --> M[标记 processed (24h) + 删除 processing key]
-    M --> M1[广播 conversation_update]
-    M1 --> N[释放会话锁]
-
-    N --> L[清理状态]
+    M --> L[清理状态]
     L --> L1[ClearAgentStatus]
     L1 --> L2[Delete Questions]
     L2 --> L3[Delete Redis checkpoint]
+    L3 --> M1[广播 conversation_update 通知客户端清理完成]
+    M1 --> N[释放会话锁]
 
     H -->|再次 interrupt| O[重新进入 asking_user 状态]
     O --> O1[不释放锁]
@@ -651,7 +666,7 @@ flowchart TD
 |------|----------|
 | **Resume 路径的 transient 错误** | 不自动 MQ 重试，而是发送"服务暂时不可用"消息通知用户，同时删除 processing key 允许立即重试。用户已投入交互成本，应自行决定是否重试 |
 | **Eino 的 resume 路径** | 会用原 checkpointID 保存 re-interrupt 的 checkpoint |
-| **成功 resume 后** | 执行完整清理：ClearAgentStatus + Delete Questions + Delete Redis checkpoint |
+| **成功 resume 后** | 执行完整清理：ClearAgentStatus + Delete Questions + Delete Redis checkpoint + 广播 conversation_update 通知客户端清理完成 |
 | **checkpoint 过期/丢失** | 调用 `cleanupAfterResumeFailure`，发送超时提示消息 |
 | **并发 resume** | 幂等检查确保同一 checkpoint 只 resume 一次 |
 | **questionStore 为 nil** | 记录错误日志，释放锁（若拥有），直接返回 nil 给 MQ。不执行清理操作（ClearAgentStatus / Delete Questions / Delete checkpoint），不发送错误消息给用户。与 `GetByCheckpoint` 失败不同，此路径不调用 `cleanupAfterResumeFailure` |

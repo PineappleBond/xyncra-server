@@ -72,8 +72,8 @@ flowchart TD
 | 2 | 构建 `sendMessageTaskPayload`，包含 `[]sendMessageRecipient` 列表，每个接收方有 UserID 和对应的 Updates |
 | 3 | 将 payload 序列化为 `json.RawMessage` |
 | 4 | 创建 `mq.Task`，设置 `Type = mq.TypeSendMessage` |
-| 5 | 调用 `startBrokerEnqueueSpan(ctx, taskType)` 创建 OpenTelemetry `handler.broker.enqueue` Span 用于分布式追踪 |
-| 6 | 调用 `broker.Enqueue(ctx, task)` 进入 `AsynqBroker.Enqueue` |
+| 5 | （仅 `send_message`）调用 `startBrokerEnqueueSpan(ctx, taskType)` 创建 OpenTelemetry `handler.broker.enqueue` Span 用于分布式追踪。其他生产者（`delete_message`、`mark_as_read`、`create_conversation`、`delete_conversation`、`restore_conversation`、`agent_resume`）直接调用 `broker.Enqueue`，不创建此 Span |
+| 6 | 调用 `broker.Enqueue(ctx, task)` 进入 `AsynqBroker.Enqueue`。注意：`delete_message`、`mark_as_read`、`delete_conversation`、`restore_conversation` 使用 `context.Background()` 而非请求 context，因此 W3C Trace Context 不会传播到这些入队操作；`send_message` 和 `create_conversation` 传播请求 context |
 | 7 | Enqueue 检查 broker 未关闭（`b.closed`），验证 task 非空且有 Type |
 | 8 | 通过优先级链解析选项：`With...` option > Task field > broker 级默认值（默认重试次数 `DefaultRetryCount = 3`）。实现上先设置 broker 默认值（`defaultEnqueueOptions`，`maxRetry = -1` 哨兵值），再由 `applyTaskDefaults` 仅在当前值仍为默认时覆盖 Task 字段，最后应用 `With...` 函数选项。由于 `With...` 选项在 `applyTaskDefaults` 之后执行，它们始终覆盖 Task 字段 |
 | 9 | 通过 `tracing.InjectTraceContext(ctx)` 注入 W3C Trace Context 到 `task.Metadata` |
@@ -81,6 +81,10 @@ flowchart TD
 | 11 | 调用 `buildAsynqOptions` 将解析后的选项转换为 `asynq.Option`（Queue, MaxRetry, Timeout, TaskID, Retention, ProcessIn, Deadline, Unique/UniqueTTL） |
 | 12 | 调用 `b.client.EnqueueContext(ctx, asynqTask, aOpts...)` 写入 Redis |
 | 13 | 成功时返回 Asynq 分配的 Task ID；失败时由调用方记录日志，但不传播到客户端响应 |
+
+### 队列使用说明
+
+所有当前生产者均使用 `QueueDefault`（weight=3）。`QueueCritical` 和 `QueueLow` 已定义权重但尚未被生产者使用，留作未来扩展。`buildAsynqOptions` 会将 `enqueueOptions` 中的所有字段转换为 `asynq.Option`（Queue, MaxRetry, Timeout, TaskID, Retention, ProcessIn, Deadline, Unique/UniqueTTL）。注意 `Deadline` 字段仅在 `buildAsynqOptions` 中处理，不在 `applyTaskDefaults` 中从 Task 字段复制。
 
 ### 边缘场景
 
@@ -349,7 +353,7 @@ flowchart TD
 | **Start 前调用 Close** | Close 设置 `b.closed = true` 并取消 context（无 cancel func 则为空操作）。Client 和 inspector 被关闭。后续 Start 会失败，因为底层 Asynq 组件已关闭 |
 | **重复 Close** | 由于 `sync.Once` 安全。仅第一次调用执行清理 |
 | **关闭期间 Enqueue** | `Enqueue` 中 `b.mu` 锁仅保护 `b.closed` 检查，释放锁后到调用 `b.client.EnqueueContext` 之间存在竞态窗口。如果 Close 在此窗口内设置 `b.closed = true` 并关闭底层 client，入队可能返回连接错误。由于是 fire-and-forget，调用方仅记录日志 |
-| **无 Stop/Close 的 Start** | Start 在 `<-ctx.Done()` 上永久阻塞。调用方必须取消 context 或调用 Stop |
+| **无 Stop/Close 的 Start** | Start 在 `<-ctx.Done()` 上永久阻塞。调用方必须取消 context 或调用 Stop/Close，否则 goroutine 泄漏 |
 | **部分构造的资源泄漏** | `NewAsynqBroker` 文档说明：如果 client 成功但 server/inspector 构造失败，client 不会被关闭。这是可接受的，因为这些构造函数不执行网络 I/O |
 
 ---
@@ -403,12 +407,14 @@ flowchart TD
 | 任务类型 | 说明 | 处理器 | 状态 |
 |---------|------|--------|------|
 | `mq:send_message` | 广播实时 Updates 给接收方在线设备 | `NewSendMessageTaskHandler` | 已实现 |
-| `mq:agent_process` | Agent AI 处理（LLM 调用 + 流式输出 + 持久化） | `NewAgentTaskHandler` | 已实现 |
+| `mq:agent_process` | Agent AI 处理（LLM 调用 + 流式输出 + 持久化） | `NewAgentTaskHandler`（`internal/agent/task_handler.go`） | 已实现 |
 | `mq:agent_resume` | HITL 恢复后继续 Agent 执行 | `NewAgentResumeHandler`（`internal/agent/resume_handler.go`） | 已实现 |
-| `mq:sync_updates` | 更新 fan-out | — | 未注册 handler |
-| `mq:push_notification` | 推送通知 | — | 未注册 handler |
-| `mq:presence_broadcast` | 在线状态广播 | — | 未注册 handler |
-| `mq:conversation_sync` | 会话同步 | — | 未注册 handler |
+| `mq:sync_updates` | 更新 fan-out（预留） | — | 未注册 handler |
+| `mq:push_notification` | 推送通知（预留） | — | 未注册 handler |
+| `mq:presence_broadcast` | 在线状态广播（预留） | — | 未注册 handler |
+| `mq:conversation_sync` | 会话同步（预留） | — | 未注册 handler |
+
+> Agent 处理器的详细业务逻辑（锁获取、幂等检测、LLM 调用、HITL 中断等）详见 [mq-async.md](./mq-async.md) 场景 2 和场景 3。
 
 ### 步骤详解
 
@@ -454,9 +460,9 @@ graph LR
 
 | 队列 | 权重 | 用途 |
 |------|------|------|
-| `critical` | 6 | 时间敏感任务（如实时消息广播） |
-| `default` | 3 | 标准优先级任务 |
-| `low` | 1 | 后台任务（如 Agent 处理） |
+| `critical` | 6 | 时间敏感任务（预留，当前未使用） |
+| `default` | 3 | 标准优先级任务（所有当前业务任务均使用此队列） |
+| `low` | 1 | 后台任务（预留，当前未使用） |
 
 ---
 

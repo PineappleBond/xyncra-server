@@ -96,6 +96,7 @@ sequenceDiagram
 
 - **CLI 入口**：`runReloadAgents()` 先调用 `NewCLIContext(cmd)` 解析 user-id/device-id（flag > env var > default），然后创建 `IPCClient`（socket 超时 5s），设置 context 超时 10s，通过 Unix 域套接字发送 `reload_agents` IPC 请求
   - 上下文解析失败（缺少 user-id 或 device-id）：返回 `reload-agents: context: {field} is required (set via --{field} flag or XYNCRA_{FIELD} env var)`
+  - 用户目录创建失败（`ensureUserDir` 错误，如 `os.UserHomeDir` 或 `os.MkdirAll` 失败）：返回 `reload-agents: context: ensureUserDir: {error}`
   - 守护进程未运行：IPC 连接失败，输出 `Error: daemon not running.` 到 stderr，提示启动命令，`os.Exit(2)`（D-036/D-042）
   - 服务端返回错误：`resp.Error` 非 nil，返回 `reload-agents: {message}`
   - 结果反序列化失败：返回 `reload-agents: unmarshal result: {error}`
@@ -237,8 +238,8 @@ flowchart TD
 
 | 场景 | 处理方式 |
 | ---- | ---- |
-| `NewRegistry()` 后直接调用 `Reload()` | `dir` 为空字符串，`Load("")` 尝试读取空路径，`os.ReadDir` 返回错误（非 `IsNotExist`） |
-| 结果 | `Load()` 返回 `fmt.Errorf("read agents dir: %w", err)`，handler 包装为 `reload agents from "": read agents dir: ...` |
+| `NewRegistry()` 后直接调用 `Reload()` | `dir` 为空字符串，`Load("")` 尝试读取空路径，`os.ReadDir("")` 返回 `IsNotExist` 错误 |
+| 结果 | `Load()` 返回 nil（与目录不存在行为一致），handler 报告 `{count: 0}`，不报错 |
 
 **注意**：此场景仅在直接调用 `Reload()` 时发生。通过 handler 调用时，nil registry 检查会先拦截（返回 `{count: 0}`），不会到达 `Reload()`。
 
@@ -247,6 +248,7 @@ flowchart TD
 | 场景 | 处理方式 |
 | ---- | ---- |
 | 缺少 user-id 或 device-id | 返回 `reload-agents: context: {field} is required (set via --{field} flag or XYNCRA_{FIELD} env var)` |
+| 用户目录创建失败（`os.UserHomeDir` 或 `os.MkdirAll` 失败） | 返回 `reload-agents: context: ensureUserDir: {error}` |
 | 守护进程未运行（IPC 连接失败） | 输出 `Error: daemon not running.` 到 stderr，提示启动命令，`os.Exit(2)` |
 | IPC socket 连接超时（5s） | 返回 `ipc client dial: ...` 错误 |
 | context 超时（10s） | 请求被取消，返回 context deadline exceeded |

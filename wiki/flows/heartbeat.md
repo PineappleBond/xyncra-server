@@ -207,10 +207,11 @@ Lua 脚本中 `PTTL userKey` 的返回值有三种情况：
 
 客户端 `heartbeatLoop` 在 `ctx.Done()` 时退出。如果客户端在 heartbeat RPC 进行中调用 `Stop()`：
 
-1. `Stop()` 取消 context
-2. `Call` 中的 `select` 检测到 `ctx.Done()`，返回 `TimeoutError`
-3. heartbeatLoop 在下一个 ticker 周期检测到 `ctx.Done()` 并退出
-4. `Call` 在 `ctx.Done()` 和超时路径中会将失败的 heartbeat 入队到 retry manager（best-effort），但客户端关闭后 retry manager 也会停止；注意：服务端返回的错误（如 `connection expired`）不会触发入队重试，仅连接错误和超时会
+1. `Stop()` 设置 `closed = true` 并取消 context
+2. 若 `Call` 尚未进入 `select`：`Call` 检测到 `c.closed` 后立即返回 `ConnectionError("client is closed")`，不写入 RPCLog，不入队重试
+3. 若 `Call` 已在 `select` 中等待：`ctx.Done()` 分支触发，返回 `TimeoutError`，写入 RPCLog（best-effort），并将 heartbeat 入队到 retry manager（best-effort）
+4. heartbeatLoop 在下一个 ticker 周期检测到 `ctx.Done()` 并退出
+5. 客户端关闭后 retry manager 也会停止，因此入队的重试不会被执行；注意：服务端返回的错误（如 `connection expired`）不会触发入队重试，仅连接错误和超时会
 
 ---
 
@@ -239,10 +240,10 @@ Lua 脚本中 `PTTL userKey` 的返回值有三种情况：
 
 | 操作 | 存储 | 说明 |
 | --- | --- | --- |
-| RPCLogs.Save | IndexedDB（客户端） | heartbeat RPC 发送前写入初始记录（status=0，in-flight） |
-| RPCLogs.Update | IndexedDB（客户端） | heartbeat RPC 完成后更新记录（写入 duration、status code） |
+| RPCLogs.Save | IndexedDB（客户端） | heartbeat RPC 发送成功后写入初始记录（status=0，in-flight）；若 `SendPackage` 失败（连接错误），不创建 RPCLog 条目 |
+| RPCLogs.Update | IndexedDB（客户端） | heartbeat RPC 完成后更新记录（写入 duration、status code）；若 `SendPackage` 失败，不执行 Update |
 
-> 注：这些写入是 best-effort 的，失败不影响 heartbeat 流程。Go 客户端通过 `c.db.RPCLogs.Save/Update` 执行；TypeScript 客户端使用 IndexedDB 存储。
+> 注：这些写入是 best-effort 的，失败不影响 heartbeat 流程。Go 客户端通过 `c.db.RPCLogs.Save/Update` 执行；TypeScript 客户端使用 IndexedDB 存储。`RPCLogs.Save` 在 `SendPackage` 成功之后执行，因此连接错误时不会产生任何 RPCLog 条目。
 
 ### Redis 操作
 

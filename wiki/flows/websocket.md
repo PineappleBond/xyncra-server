@@ -2,6 +2,8 @@
 
 本文档描述 Xyncra WebSocket 服务的完整连接生命周期，包括连接建立、消息收发、心跳保活、广播分发及优雅关闭等核心流程。
 
+> **注意**: `websocket-connection.md` 提供相同流程的详细 sequence diagram 和更全面的边缘场景分析。两文档内容有重叠，以 `websocket-connection.md` 为权威来源。本文档提供 flowchart 视图的高层概览。
+
 ---
 
 ## 目录
@@ -64,7 +66,7 @@ flowchart TD
 11. 若存在旧连接，异步启动 `performDeviceReplacement` 协程（发送 4001 close frame 给旧连接）
 12. 调用 `extractIP` 提取客户端 IP（优先 `X-Forwarded-For`），构建 `ConnectionInfo`
 13. 若配置了 `connectionInfoEnricher`，调用它从 HTTP 请求填充额外字段
-14. 调用 `ConnectionStore.Add` 注册到 Redis（Lua 脚本原子操作）。若失败，关闭连接、移除本地索引并返回
+14. 调用 `ConnectionStore.Add` 注册到 Redis（`luaAdd` Lua 脚本原子操作：GET infoKey 读取旧数据检查存在 + 获取旧 UserID，新连接检查 `MaxConnectionsPerUser` 限制，UserID 变更时 SREM 旧 userKey + 检查新用户限制，SET infoKey JSON PX ttl，SADD userKey connID，PTTL userKey 对齐 TTL）。若失败，关闭连接、移除本地索引并返回
 15. 调用 `client.Run()` 阻塞等待客户端断开
 
 ### 边缘场景
@@ -213,15 +215,17 @@ flowchart TD
     D --> E{channel 满?}
     E -->|是| F[返回 ErrSendBufferFull]
     E -->|否| G[writePump select 循环]
-    G --> H{select 三路分支}
-    H -->|send channel 有消息| I[设置写入截止时间 10s]
+    G --> H{select 分支}
+    H -->|send channel 有消息 ok=true| I[设置写入截止时间 10s]
     I --> J[conn.NextWriter + Write + Close]
     J --> G
+    H -->|send channel 已关闭 ok=false| M2[发送 close frame]
+    M2 --> N[writePump 退出]
     H -->|ticker.C 到期| K[设置写入截止时间 10s]
     K --> L[发送 Ping 消息]
     L --> G
     H -->|ctx.Done 取消| M[发送 close frame]
-    M --> N[writePump 退出]
+    M --> N
 ```
 
 ### 详细步骤
@@ -229,8 +233,9 @@ flowchart TD
 1. 调用 `client.Send(msg)` 或 `client.SendPackage(pkg)`
 2. 检查 `closed` 状态（`mu.Lock` 保护），若已关闭返回 `ErrClientClosed`
 3. 将消息放入带缓冲的 send channel（默认容量 256，`defaultSendBufSize = 256`），channel 满时返回 `ErrSendBufferFull`
-4. `writePump` 运行 select 循环，三路分支：
-   - **send channel**：读取消息，设置写入截止时间（默认 10s），调用 `conn.NextWriter` 获取写入器，写入内容并关闭写入器
+4. `writePump` 运行 select 循环，四路分支：
+   - **send channel（消息到达）**：读取消息，设置写入截止时间（默认 10s），调用 `conn.NextWriter` 获取写入器，写入内容并关闭写入器
+   - **send channel（已关闭）**：`ok` 为 false 时发送 close frame 后退出（防御性路径，正常流程中 channel 不会关闭）
    - **ticker.C**：发送 Ping 消息（默认 54s 间隔 = `pongWait * 9 / 10`）
    - **ctx.Done**：发送 close frame 后退出
 5. send channel 设计为不关闭：避免与并发 `Send` 产生 send-on-closed-channel panic
@@ -293,7 +298,7 @@ flowchart TD
 4. `writePump` 检测到 context 取消，发送 close frame 后退出
 5. `Run()` 中的 WaitGroup 等待两个 pump 退出，关闭 done channel
 6. `handleWebSocket` 从 `client.Run()` 返回
-7. 使用 5s 超时 context 调用 `ConnectionStore.Remove` 清理 Redis
+7. 使用 5s 超时 context 调用 `ConnectionStore.Remove` 清理 Redis（`luaRemove` Lua 脚本原子删除 infoKey + SREM userKey connID，随后 `luaCleanupEmptySet` 原子清理空 SET 防止孤儿 key）
 8. 调用 `removeClient` 从 `clients`、`clientsByUser`、`clientsByDevice` 中移除
 9. 检查设备是否还有其他连接，若无则调用 `scheduleFuncCleanup` 延迟清理 `FunctionRegistry`（宽限期默认 10s，期间重连则取消清理）
 10. 检查设备是否还有其他连接，若无则调用 `reverseRPC.CancelDeviceWithReason`
@@ -346,13 +351,19 @@ flowchart TD
    - **GET infoKey**：读取连接 info key 的 JSON 数据，获取 TTL 配置和 UserID
      - 若 key 不存在（`redis.Nil`），立即返回 `ErrConnectionNotFound`
      - 若 JSON 反序列化失败（数据损坏），立即返回错误
-   - **Lua 脚本**（`luaRefresh`，原子执行）：
+   - **Lua 脚本**（`luaRefresh`，原子执行，1 次 round-trip）：
      - `EXISTS infoKey`：再次检查连接是否存在（防止 GET 与 Lua 之间 key 被淘汰），不存在则返回 0
      - `PEXPIRE infoKey`：重置连接 info key 的 TTL（毫秒精度）
      - `PTTL userKey`：读取 user SET key 的当前剩余 TTL
      - `PEXPIRE userKey`：仅当新 TTL 大于当前 TTL 时才更新（MAX 语义）
    - 若 Lua 返回 0：连接在 GET 与 Lua 之间过期，返回 `ErrConnectionNotFound`
 6. 返回 `PackageDataResponse{ID, Code: ResponseCodeOK, Msg: "ok", Data: {"status": "ok"}}` 响应
+
+### OpenTelemetry
+
+| Span                    | 属性   | 说明                                                              |
+| ----------------------- | ------ | ----------------------------------------------------------------- |
+| `redis.connection.refresh` | `connID` | Redis 实现的 Refresh 操作会创建 OpenTelemetry span，记录连接 ID 和操作结果 |
 
 ### 边缘场景
 
@@ -398,9 +409,10 @@ flowchart TD
 
 1. 调用 `BroadcastUpdates(userID, updates)`
 2. 创建 `handler.broadcast` 追踪 span
-3. 本地广播：`broadcastLocal` 通过 `clientsByUser[userID]` O(1) 查找用户连接 map，遍历 O(k) 发送到 k 个连接
+3. 本地广播：`broadcastLocal` 在 `mu.RLock` 下从 `clientsByUser[userID]` 复制一份 Client 引用切片后立即释放读锁，然后在锁外遍历逐个调用 `client.SendPackage` 发送（避免持锁期间 Send 阻塞影响其他并发操作）
 4. 遍历调用 `client.SendPackage` 发送
 5. 跨节点广播：`nodeBroadcaster.Publish` 发布到 Redis Pub/Sub，携带 `sourceNodeID`
+6. 远程消息接收：`handleRemoteBroadcast` 被 `NodeBroadcaster.Subscribe` 回调调用，检查 `sourceNodeID == s.nodeID` 则跳过（避免本地重复投递），否则以 `context.Background()` 调用 `broadcastLocal` 将更新推送给本节点上该用户的所有连接
 
 ### 边缘场景
 
@@ -411,6 +423,8 @@ flowchart TD
 | 本地发送部分失败 | 记录错误，继续发送其他连接 |
 | Pub/Sub 发布失败 | 记录错误，不返回错误（fire-and-forget 策略） |
 | 远程消息来源是本机 | 跳过（避免重复投递） |
+| `sendToUser` 部分连接发送失败 | 只要至少一个连接发送成功即返回 nil（用于 ReverseRPC 路由） |
+| `sendToDevice` 目标设备离线 | 返回 `ErrDeviceOffline`，不进入 pending 持久化逻辑 |
 
 ---
 
@@ -465,7 +479,7 @@ flowchart TD
 #### 关闭流程 (Start 内部)
 
 1. context 取消后，`httpServer.Shutdown`（5s 超时）停止接受新连接
-2. 调用 `closeAllClients`：内部先调用 `reverseRPC.CancelAll()`，再关闭所有客户端并等待 5s
+2. 调用 `closeAllClients`：内部先调用 `reverseRPC.CancelAll()`，收集所有 client 引用，在单次锁获取中原子重置所有索引（`clients`、`clientsByUser`、`clientsByDevice`），再逐个 `Close()` 所有客户端并等待 5s
 3. 检查 HTTP 服务器的意外错误（非 `http.ErrServerClosed`），若存在则返回
 4. `Start()` 返回
 

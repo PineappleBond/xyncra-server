@@ -185,7 +185,8 @@ sequenceDiagram
 | **重放后 PendingStore Remove/Update 错误** | 记录日志但非致命，下次重连时可能再次重放 | 最终一致 |
 | **PendingStore 请求 TTL 过期** | `RedisPendingStore` 为每个设备列表设置 `RequestTTL`（Redis Expire）。设备长时间离线时，PendingStore 中的请求可能在重连前被 Redis 自动过期清理 | 客户端永远不会收到已过期的反向 RPC 请求，但可通过 `sync_updates` 最终同步数据 |
 | **PendingStore 超出 MaxPendingPerDevice** | `RedisPendingStore.Save` 使用 `RPush` + `LTrim` 限制每个设备的列表长度（`MaxPendingPerDevice`），超出时最旧的条目被丢弃 | 最旧的反向 RPC 请求可能丢失，客户端需依赖 `sync_updates` 补偿 |
-| **RedisPendingStore 非原子 Remove** | 读-过滤-重写管道非事务性，Del 和 RPush 之间的崩溃可能丢失条目 | 按 fail-open 语义记录为可接受 |
+| **RedisPendingStore 非原子 Remove/Update** | Remove 和 Update 均采用读-过滤-重写管道（LRange + Del + RPush），非事务性，Del 和 RPush 之间的崩溃可能丢失条目 | 按 fail-open 语义记录为可接受 |
+| **RedisPendingStore 非原子 Save** | Save 使用 RPush + LTrim + Expire 管道，非事务性，但单个命令各自原子，丢失风险较低 | 按 fail-open 语义记录为可接受 |
 | **设备替换（4001 Close Frame）** | 服务端对同一设备的新连接发送 4001 关闭帧，客户端设置 `replaced=true` 并取消上下文，不尝试重连，daemon 优雅退出（D-111） | 被替换的设备实例终止 |
 | **reconnect 与 FullSync 的顺序** | 客户端在 reconnect handshake 完成后总是执行 FullSync，即使 reconnect 失败也会执行；两者运行在异步 goroutine 中，不阻塞彼此 | 确保数据最终一致 |
 | **函数注册先于重放** | 客户端先发送 `system.register_functions` 再发送 `system.reconnect`，确保服务端在重放请求前已有对应的 handler | 避免重放请求因无 handler 而失败 |
@@ -635,7 +636,7 @@ sequenceDiagram
 | **重复 agent_resume 调用** | 两阶段幂等（processed + processing key）防止双重恢复，processing key 的 130 秒 TTL 作为执行期间的短期守卫 | 无重复执行 |
 | **多设备冲突** | 两个设备回答同一问题，`UpdateAnswer` 使用 `WHERE status=pending`，先写入者胜出，后写入者收到 409 | 后写入者需重新确认 |
 | **Checkpoint 过期（Redis TTL 24 小时）** | `ResumeWithParams` 失败返回 not found，Handler 调用 `cleanupAfterResumeFailure`（清除 agent 状态、删除 Questions、删除 checkpoint）并发送等待过久错误，清理幂等性 key | 用户需重新发起对话 |
-| **Checkpoint 过期 + isTransientError** | 若 checkpoint not found 错误同时被 `isTransientError` 匹配（两个 `if` 分支非互斥），会先发送等待过久错误再发送临时不可用错误，用户收到两条错误消息 | 用户收到冗余错误消息，但功能不受影响 |
+| **Checkpoint 过期 + isTransientError** | 代码中两个 `if` 分支非互斥，理论上若 checkpoint not found 错误同时被 `isTransientError` 匹配会发送两条错误消息。但实际中 `isTransientError` 仅匹配 `ErrLLMTimeout` 和 `ErrLLMRateLimited`，不会匹配 `ErrCheckpointNotFound`，因此该场景在正常情况下不会发生 | 理论上的代码路径问题，实际不影响 |
 | **暂停与恢复之间 agent 配置被删除** | Handler 发送 "Agent config does not exist" 错误，清理 Questions 和 checkpoint | 用户需等待配置恢复 |
 | **锁竞争** | 初始 HITL 执行的锁仍被持有时（预期情况），恢复不持有锁继续执行；锁 TTL 过期则获取新锁；130 秒锁 TTL 故意长于执行超时以防止过早释放 | 无锁冲突 |
 | **多轮 HITL（重新中断）** | agent 恢复后可能再次暂停产生新问题，不释放锁（D-084），删除 processing key 允许后续恢复，持久化新 Question | 支持多轮交互 |
@@ -695,6 +696,8 @@ sequenceDiagram
 
 4. **续期连接 TTL**
    - 调用 `ConnectionStore.Refresh(ctx, connID)` 重置连接 TTL
+   - `RedisConnectionStore.Refresh` 先 GET 连接信息获取 UserID，再通过原子 Lua 脚本（`luaRefresh`）同时重置 info key 和 user SET 的 TTL（D-010 MAX 语义）
+   - 默认连接 TTL 为 30 分钟（`defaultConnectionTTL`）
 
 5. **返回结果**
    - 成功则返回 `{status:ok}`
@@ -801,7 +804,7 @@ graph TB
 | 操作 | 说明 |
 |------|------|
 | **Add** | 注册新连接，设置 TTL，添加到 per-user 集合 |
-| **Refresh(ctx, connID)** | 重置连接 TTL，即心跳调用的接口 |
+| **Refresh(ctx, connID)** | 重置连接 TTL（info key + user SET），使用原子 Lua 脚本（`luaRefresh`），即心跳调用的接口 |
 | **ListByUser(ctx, userID, limit)** | 使服务端能查找用户的所有连接用于消息路由 |
 | **Remove** | 清理连接信息和 per-user 集合条目 |
 | **CountByUser** | 为近似值（Redis SCARD 可能包含已过期但未清理的条目） |
@@ -811,7 +814,8 @@ graph TB
 | 场景 | 处理方式 | 影响 |
 |------|----------|------|
 | **孤立的 user-set 条目** | 连接的 info key 在 Redis 中过期但 user-set 条目未清理时，`CountByUser` 返回膨胀的计数，`ListByUser` 通过检查每个条目的活跃性处理此问题 | 统计可能不准确 |
-| **并发 Update 调用** | 非原子的读-修改-写，并发调用者的元数据更改可能被静默覆盖 | 数据可能丢失 |
+| **并发 Update/Patch 调用** | `Update` 使用原子 Lua 脚本写入 Redis，但 `Patch` 在 Go 层执行读-修改-写，并发调用者的元数据更改可能被静默覆盖 | 数据可能丢失 |
+| **默认连接 TTL** | `RedisConnectionStore` 默认 TTL 为 30 分钟（`defaultConnectionTTL`），连接在最后一次 Refresh 后 30 分钟无心跳即过期驱逐 | 需确保心跳间隔 < 15 分钟 |
 | **超过 MaxConnectionsPerUser** | Add 返回 `ErrMaxConnectionsExceeded`，客户端在释放一个连接前无法建立新连接 | 需客户端管理连接数 |
 
 ---
@@ -848,7 +852,7 @@ graph TB
 | 客户端重连退避 | base * 2^(attempt-1)，上限 max，+/-25% 抖动 | 无限重试直到连接成功或上下文取消 |
 | Agent 恢复锁 | 130 秒 TTL | 无自动重试 |
 | Checkpoint 保留 | 24 小时 TTL | 无 |
-| 连接 TTL | 可配置 | 心跳续期 |
+| 连接 TTL | 30 分钟（默认，可配置） | 心跳续期（Refresh 重置 info key + user SET TTL） |
 
 ---
 

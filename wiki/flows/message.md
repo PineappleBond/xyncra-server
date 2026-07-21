@@ -76,7 +76,7 @@ flowchart TD
 
 | 场景 | 处理方式 |
 |------|----------|
-| **幂等性** | `client_message_id + sender_id` 有唯一索引，重复插入触发 `ErrDuplicateKey`，handler 通过 `GetByClientMessageID` 查找已存在的消息并返回 `duplicate=true`，避免 TOCTOU 竞态。若 `GetByClientMessageID` 查找也失败（极端竞态），则回退返回 `InternalError` |
+| **幂等性** | `client_message_id + sender_id` 有唯一索引，重复插入触发 `ErrDuplicateKey`，handler 通过 `GetByClientMessageID` 查找已存在的消息并返回 `duplicate=true`，避免 TOCTOU 竞态。若 `GetByClientMessageID` 查找也失败（如消息被并发删除的极端竞态），则将原始 `ErrDuplicateKey` 包装为 `InternalError` 返回（注意：此时返回的是 `InternalError` 而非 `ErrDuplicateKey`） |
 | **空 content** | 允许发送空内容消息，由 Agent 层返回用户友好的错误 |
 | **会话不存在** | 返回 `NotFoundError` |
 | **非成员发送** | 返回 `PermissionDeniedError` |
@@ -136,7 +136,7 @@ flowchart TD
 |------|----------|
 | **会话不存在** | 返回 `NotFoundError` |
 | **非成员访问** | 返回 `PermissionDeniedError` |
-| **limit 非法值** | <=0 或 >200 时重置为 50 |
+| **limit 非法值** | handler 层 <=0 或 >200 时重置为 50；store 层独立校验 <=0 或 >201 时重置为 50（允许 handler 传入 limit+1 探测值） |
 | **after_message_id = 0** | 从第一条消息开始获取 |
 | **无消息** | 返回空数组而非 null |
 | **软删除消息** | GORM 软删除插件自动排除 `deleted_at` 非空的记录 |
@@ -341,6 +341,8 @@ flowchart TD
 
 ## MQ 消息推送 (mq_send_message)
 
+> 本文档描述 `TypeSendMessage` 消费端的基本流程。完整的 MQ 异步任务系统（包括 `TypeAgentProcess`、`TypeAgentResume`、其他 `TypeSendMessage` 生产者、Broker 生命周期等）见 [mq-async.md](mq-async.md)。
+
 ### 概述
 
 MQ 消费端任务处理器。当 broker 出队一个 `TypeSendMessage` 任务时，将实时更新推送给每个目标用户的活跃 WebSocket 连接。这是消息发送、删除、已读标记等操作的实时推送通道。
@@ -387,6 +389,8 @@ flowchart TD
 ---
 
 ## 消息存储事务 (message_store_send_message_transaction)
+
+> 本文档描述事务的业务流程。完整的存储层架构（包括数据库初始化、错误分类、可观测性、客户端存储等）见 [storage.md](storage.md)。
 
 ### 概述
 
@@ -503,6 +507,7 @@ MQ 推送采用 fire-and-forget 模式，推送失败不影响主流程。客户
 
 - [存储层业务流程](storage.md)
 - [WebSocket 连接管理](websocket.md)
-- [消息队列业务流程](message-queue.md)
+- [消息队列业务流程](mq-async.md)
+- [消息队列内部机制](message-queue.md)
 - [同步更新](sync-updates.md)
 - [业务流程索引](index.md)

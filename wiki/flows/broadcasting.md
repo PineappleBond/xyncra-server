@@ -105,8 +105,11 @@ sequenceDiagram
     WS->>WS: 构造 ConnectionInfo{ID, UserID, DeviceID, Protocol, IPAddress, Status='active'}
     WS->>Store: Add(ctx, connInfo)
     Store->>Store: luaAdd Lua 脚本（原子操作）
-    Store->>Redis: GET info key 检查是否存在
-    Store->>Redis: SCARD user set 检查 MaxConnectionsPerUser
+    Store->>Redis: GET info key 读取旧数据提取 oldUserID
+    alt 旧连接存在且 oldUserID != newUserID
+        Store->>Redis: SREM 旧 user set 移除 connID
+    end
+    Store->>Redis: SCARD 新 user set 检查 MaxConnectionsPerUser
     Store->>Redis: SET info key (带 TTL)
     Store->>Redis: SADD user set 添加 connID
     Store->>Redis: 对齐 user set 的 TTL (MAX 语义)
@@ -152,7 +155,7 @@ sequenceDiagram
 
 1. **新连接注册**：`WebSocketServer` HTTP Upgrade 成功后构造 `ConnectionInfo{ID, UserID, DeviceID, Protocol, IPAddress, Status='active'}`，调用 `ConnectionStore().Add(ctx, connInfo)`。
 
-2. **原子写入 Redis**：`RedisConnectionStore.Add` 通过 Lua 脚本 `luaAdd` 原子执行——`GET` info key 检查是否已存在，若新连接则检查 `SCARD` user set 是否超过 `MaxConnectionsPerUser`，`SET` info key（带 TTL），`SADD` user set 添加 connID，对齐 user set 的 TTL（MAX 语义）。
+2. **原子写入 Redis**：`RedisConnectionStore.Add` 通过 Lua 脚本 `luaAdd` 原子执行——`GET` info key 读取旧数据并提取 `oldUserID`，若旧连接存在且 `oldUserID != newUserID` 则先 `SREM` 旧 user set 移除 connID，然后检查 `SCARD` 新 user set 是否超过 `MaxConnectionsPerUser`，`SET` info key（带 TTL），`SADD` user set 添加 connID，对齐 user set 的 TTL（MAX 语义）。
 
 3. **连接信息查询（跨节点可见）**：任何节点可通过 `Get(connID)` 读取 info key，或 `ListByUser(userID)` 使用 `SScan` 增量遍历 user set 并通过 `MGet` 批量读取 info key（非逐个 GET），同时惰性清理已过期的孤儿条目。`CountByUser` 使用 `SCARD` 近似计数（可能包含已过期但尚未清理的条目）。
 
@@ -168,7 +171,7 @@ sequenceDiagram
 
 9. **批量删除用户所有连接**：`RemoveByUser(userID)` 先通过 `SMembers` 读取 user set 中所有 connID，构建 info key 列表后通过 `UNLINK`（异步删除，不阻塞 Redis）每批 100 个删除 info key，最后 `UNLINK` 删除 user set 本身。
 
-10. **全局连接计数**：`CountAll()` 使用 `SCAN` 命令遍历所有 `{keyPrefix}xyncra:conn:info:*` key 进行近似计数，适用于监控和诊断。
+10. **全局连接计数**：`CountAll()` 使用 `SCAN` 命令遍历所有 `{keyPrefix}xyncra:conn:info:*` key（`keyPrefix` 默认为空，即 `xyncra:conn:info:*`）进行近似计数，适用于监控和诊断。
 
 ### 边缘场景
 
@@ -341,7 +344,61 @@ flowchart TD
 
 ---
 
-## 5. 广播器生命周期 (node_broadcaster_lifecycle)
+## 5. MQ 异步广播路径 (mq_broadcast_path)
+
+### 概述
+
+除直接调用 `BroadcastUpdates` 外，`send_message` handler 通过 MQ broker 异步广播消息更新。消息持久化后，handler 将 `PackageDataUpdates` 封装为 `TypeSendMessage` MQ task 入队（fire-and-forget），broker 出队后调用 `NewSendMessageTaskHandler` 逐个 recipient 调用 `broadcastFn`（即 `WebSocketServer.BroadcastUpdates`）广播。
+
+### 流程图
+
+```mermaid
+sequenceDiagram
+    participant Client as 客户端
+    participant Handler as sendMessageHandler
+    participant Store as Store (DB)
+    participant Broker as MQ Broker
+    participant TaskHandler as SendMessageTaskHandler
+    participant WS as WebSocketServer
+    participant Redis as Redis Pub/Sub
+
+    Client->>Handler: send_message RPC
+    Handler->>Store: SendMessage(msg, members) 原子持久化
+    Store-->>Handler: SendMessageResult{Message, Updates[]}
+
+    Handler->>Handler: 构建 sendMessageTaskPayload{Recipients[]}
+    Handler->>Broker: Enqueue(TypeSendMessage, payload)
+    Handler-->>Client: 返回 sendMessageResponse
+
+    Broker->>TaskHandler: 出队调用
+    loop 每个 Recipient
+        TaskHandler->>WS: BroadcastUpdates(userID, updates)
+        WS->>WS: broadcastLocal (本地)
+        WS->>Redis: Publish (跨节点)
+    end
+```
+
+### 详细步骤
+
+1. **消息持久化**：`sendMessageHandler.HandleRequest` 调用 `store.SendMessage(msg, members)` 原子持久化消息并分配 per-user seq，返回 `SendMessageResult{Message, Updates[]}`。
+
+2. **构建 MQ task**：handler 将 `Updates` 按 recipient 分组为 `sendMessageTaskPayload{Recipients[]}`，每个 recipient 包含 `UserID` 和 `Updates`（带真实 DB seq）。JSON 序列化后入队 `mq.Task{Type: TypeSendMessage}`。
+
+3. **MQ 出队广播**：`NewSendMessageTaskHandler` 出队后遍历 `Recipients`，对每个 recipient 调用 `broadcastFn(userID, updates)` 即 `WebSocketServer.BroadcastUpdates`，触发本地广播和跨节点发布。
+
+4. **错误处理**：broadcast 失败仅 `logger.Error` 记录，继续处理下一个 recipient（fire-and-forget, D-007）。数据已持久化，客户端可通过 `sync_updates` 拉取。
+
+### 边缘场景
+
+| 场景 | 行为 |
+|------|------|
+| **MQ 入队失败** | `logger.Info` 记录，不阻塞 `send_message` 响应返回。数据已持久化。 |
+| **MQ payload 反序列化失败** | `logger.Error` 记录，return nil 不重试（数据已持久化，重试无意义）。 |
+| **部分 recipient 广播失败** | 失败的 recipient 仅记录日志，继续处理剩余 recipient。 |
+
+---
+
+## 6. 广播器生命周期 (node_broadcaster_lifecycle)
 
 ### 概述
 
@@ -372,7 +429,7 @@ stateDiagram-v2
         ReadLoop --> HandleMessage: 收到消息
         HandleMessage --> ReadLoop: 继续读取
         ReadLoop --> ChannelClosed: channel 关闭（连接断开）
-        ChannelClosed --> [*]: Subscribe 返回 nil
+        ChannelClosed --> [*]: Subscribe 返回 nil（channel 关闭）或 ctx.Err()（context 取消）
     }
 
     state "关闭流程" as Shutdown {
@@ -412,7 +469,7 @@ stateDiagram-v2
 
 | 编号 | 决策 | 涉及流程 |
 |------|------|----------|
-| D-007 | Fire-and-forget 广播策略，失败不阻塞 Agent 执行 | 跨节点消息广播、Agent 事件广播 |
+| D-007 | Fire-and-forget 广播策略，失败不阻塞 Agent 执行 | 跨节点消息广播、Agent 事件广播、MQ 异步广播路径 |
 | D-010 | 被动续期策略，user SET TTL 采用 MAX 语义对齐 | 连接状态同步 |
 | D-018 | 跨节点广播使用 Redis Pub/Sub | 跨节点消息广播、广播器生命周期 |
 | D-063 | AgentRegistry nil-safe，nil 时 isAgent 始终 false | Agent 事件广播 |
@@ -429,4 +486,5 @@ stateDiagram-v2
 - [Heartbeat 业务流程](heartbeat.md) — 应用层心跳与 ConnectionStore TTL 刷新
 - [反向 RPC](reverse-rpc.md) — ServerRequest、PendingStore、重放流程
 - [断线重连](reconnection.md) — system.reconnect 与待处理请求重放
+- [消息队列](message-queue.md) — MQ broker 与异步任务处理
 - [业务流程索引](index.md)

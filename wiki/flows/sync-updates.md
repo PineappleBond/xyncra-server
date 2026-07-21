@@ -282,6 +282,8 @@ flowchart TD
 ```
 
 > **注意**：每页拉取后重新读取 `localMaxSeq`（而非使用 last update seq），因为 `ApplyUpdates` 会推进 `localMaxSeq`。
+>
+> **取消支持**：Go 通过 `ctx.Err()` 在每页循环开始时检查 context 取消；TS 接受可选 `AbortSignal` 参数，循环中检查 `abortSignal.aborted`，取消时抛出 `SyncError('FullSync aborted')`。
 
 ### 增量拉取（Debounced Pull）
 
@@ -294,12 +296,16 @@ flowchart TD
     C -->|是| D[合并, 不重复触发]
     C -->|否| E[启动 debounce timer 500ms]
     E --> F[debouncedPull 执行]
-    F --> G[发送 sync_updates]
+    F --> G[Go: 发送 sync_updates RPC / TS: 调用 fullSync]
     G --> H[ApplyUpdates]
     H --> I{has_more?}
     I -->|是| B
-    I -->|否| J[完成]
+    I -->|否| J[保存 latestSeq, 完成]
 ```
+
+> **Go 与 TS 实现差异**：Go 的 `debouncedPull` 直接读取 `localMaxSeq` 并发送 `sync_updates` RPC；TS 的 `debouncedPull` 调用 `fullSync()`（分页循环）。两者效果等价。
+>
+> **Go 独有细节**：`debouncedPull` 入口检查 `sm.ctx == nil`（context 未初始化时直接返回）。拉取成功后调用 `db.SyncStates.SetLatestSeq` 保存服务端返回的 `latestSeq`。失败时通过 `time.AfterFunc(5s, ...)` 安排单次重试，重试前检查 `pullPending` 避免重复。
 
 ### ApplyUpdate 处理流程
 
@@ -328,7 +334,7 @@ flowchart TD
 | 1 | `NotificationLogs.SaveTx` | 写入去重记录（Seq uniqueIndex） |
 | 2 | `dispatchUpdateTx` | 按类型执行 DB 写入（message/conversation/mark_read 等） |
 | 3 | `SyncStates.SetLocalMaxSeqTx` | 推进本地序列号 |
-| 去重 | `ErrDuplicateKey` 跳过 | 重复 update 跳过 dispatch，仅推进 seq，然后返回 nil 继续处理下一条 |
+| 去重 | `ErrDuplicateKey` 跳过 | Go：跳过 dispatch，推进 seq 后返回 nil 继续下一条；TS：推进 seq 后从事务回调返回（跳过后续 dispatch 和 seq 推进，因为已在此处推进） |
 | 并发保护 | `applyMu` 互斥锁（Go）/ `applyChain` Promise 链（TS） | 串行化单条 update 处理，保证事务隔离 |
 
 ### 错误处理

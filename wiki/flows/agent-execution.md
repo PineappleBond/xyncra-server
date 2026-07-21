@@ -107,11 +107,20 @@ sequenceDiagram
 
     Exec->>BC: SendTyping(typing=false) [defer]
 
-    TH->>Idem: MarkProcessed("agent:processed:{msgID}", 24h)
-    TH->>Idem: DeleteKey("agent:processing:{msgID}")
+    alt 执行成功 或 永久错误 (非 ErrHITLInterrupted, 非 transient)
+        TH->>Idem: MarkProcessed("agent:processed:{msgID}", 24h)
+        TH->>Idem: DeleteKey("agent:processing:{msgID}")
+    else 瞬态错误 (ErrLLMTimeout/ErrLLMRateLimited)
+        Note over TH: processing key 不删除，130s 后自然过期
+    end
     TH->>Lock: Release
     TH->>Exec: InvalidateContextCache
-    TH-->>MQ: return nil
+
+    alt 瞬态错误
+        TH-->>MQ: return error (Asynq 指数退避重试)
+    else 永久错误或成功
+        TH-->>MQ: return nil
+    end
 ```
 
 ### 边缘场景
@@ -163,12 +172,13 @@ sequenceDiagram
 
 ### 涉及文件
 - `executor.go`: 核心执行流水线，编排 Build/Run/Broadcast/Persist
-- `task_handler.go`: MQ 任务处理入口，幂等检查，会话锁管理
+- `task_handler.go`: MQ 任务处理入口，幂等检查，会话锁管理，isTransientError
 - `db_context_manager.go`: ContextManager 实现，sync.Map 缓存 + token 裁剪
 - `eino_agent.go`: LLM Provider 工厂，Agent 构建器
 - `stream_bridge.go`: 流式输出桥接，HITL 中断检测
 - `broadcast.go`: WebSocket 广播（流式/typing/状态/消息）
 - `semaphore.go`: 并发信号量
+- `monitoring.go`: LLMMetrics 接口，Build 阶段指标记录
 - `errors.go`: 哨兵错误定义
 
 ---
@@ -362,6 +372,7 @@ sequenceDiagram
 - `internal/handler/agent_resume.go`: RPC Handler，参数校验，答案持久化，MQ 入队
 - `internal/store/question.go`: QuestionStore 操作
 - `internal/store/conversation.go`: ConversationStore.Get
+- `internal/mq/mq.go`: Broker.Enqueue (TypeAgentResume 入队)
 
 ---
 
@@ -471,15 +482,20 @@ sequenceDiagram
     alt 检测到再次中断 (multi-turn HITL)
         Bridge-->>RH: interruptCh <- InterruptInfo
         RH->>Store: UpdateAgentStatus("asking_user")
-        alt UpdateAgentStatus/Create 失败
+        alt UpdateAgentStatus 失败
             Store-->>RH: error
-            RH->>Lock: Release (若拥有)
+            RH->>RH: releaseLock() (显式调用)
             RH-->>MQ: return error（非 ErrHITLInterrupted，永久错误）
         end
         RH->>QS: Create(Question)
+        alt Create 失败
+            QS-->>RH: error
+            RH->>RH: releaseLock() (显式调用)
+            RH-->>MQ: return error（非 ErrHITLInterrupted，永久错误）
+        end
         RH->>BC: SendConversationUpdate
         RH->>BC: SendAgentStatus("asking_user")
-        Note over RH: 不释放会话锁
+        Note over RH: 成功路径不释放会话锁（lock 保持到下一次 resume）
         RH->>Idem: DeleteKey(processingKey)
         RH-->>MQ: return nil
     end
@@ -535,8 +551,9 @@ sequenceDiagram
 
 #### 6. Multi-turn HITL (恢复后再次中断)
 - 触发条件: Resume 后 agent 再次触发 HITL 中断
-- 处理逻辑: resume handler 在内部直接处理 re-interrupt——更新会话状态为 asking_user，持久化新 Question，广播 conversation update 和 agent status，删除 processingKey 允许后续 resume，然后 return nil 给 MQ（不释放锁）
-- 注意: resume handler 对 re-interrupt 返回 nil（不是 error），task_handler 不介入。re-interrupt 路径在 releaseLock 之前直接 return，因此无论 weOwnLock 是否为 true，锁都不会被释放（defer releaseLock 不会被执行到）
+- 处理逻辑: resume handler 在内部直接处理 re-interrupt——更新会话状态为 asking_user，持久化新 Question，广播 conversation update 和 agent status，删除 processingKey 允许后续 resume，然后 return nil 给 MQ
+- 锁策略: 成功路径不释放锁（return nil 在 defer releaseLock 之前执行，defer 不会被触发），锁保持到下一次 resume。但若 UpdateAgentStatus 或 Create Question 失败，代码显式调用 releaseLock() 后返回 error 给 MQ
+- 注意: resume handler 对 re-interrupt 成功时返回 nil（不是 error），task_handler 不介入
 - 最终结果: 同一 checkpoint 可多次 resume 和中断，实现多轮人机交互
 
 #### 7. cleanupAfterResumeFailure 的非致命错误
@@ -547,8 +564,8 @@ sequenceDiagram
 #### 8. Re-interrupt 时 UpdateAgentStatus 或 Create Question 失败
 
 - 触发条件: multi-turn HITL re-interrupt 路径中 UpdateAgentStatus 或 questionStore.Create 返回 error
-- 处理逻辑: releaseLock() 后返回普通 error（非 ErrHITLInterrupted）给 MQ。task_handler 将其视为永久错误，标记 processed 并释放锁
-- 最终结果: 用户看不到错误提示（无 sendErrorMessage），会话可能停留在中间状态，需要等待 HITL 超时清理兜底
+- 处理逻辑: 代码显式调用 releaseLock() 后返回普通 error（非 ErrHITLInterrupted）给 MQ。task_handler 将其视为永久错误，标记 processed 并释放锁（若 task_handler 持有锁）
+- 最终结果: 用户看不到错误提示（无 sendErrorMessage），会话可能停留在中间状态（UpdateAgentStatus 失败时未标记 asking_user，Create 失败时已标记 asking_user 但无 Question），需要等待 HITL 超时清理兜底
 
 #### 9. 流式输出错误时无部分文本持久化
 

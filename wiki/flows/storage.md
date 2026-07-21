@@ -90,7 +90,7 @@ flowchart TD
     A --> C[创建 MessageStore]
     A --> D[创建 UserUpdateStore]
     A --> E[创建 QuestionStore]
-    B --> F[编译时断言: var _ StoreAPI = *Store nil]
+    B --> F[编译时断言: var _ StoreAPI = (*Store)(nil)]
     C --> F
     D --> F
     E --> F
@@ -790,8 +790,8 @@ flowchart TD
 |------|------|
 | Save | UPSERT：按 ConversationID 唯一索引，存在则更新 content + updated_at |
 | GetByConversation | 按 conversation_id 查询，不存在返回 ErrNotFound |
-| Delete | 按主键删除 |
-| DeleteByConversation | 按 conversation_id 删除 |
+| Delete | 按主键删除，不存在返回 ErrNotFound |
+| DeleteByConversation | 按 conversation_id 删除，不存在返回 ErrNotFound |
 | List | 按 updated_at DESC 返回所有草稿 |
 
 #### NotificationLogStore
@@ -815,8 +815,8 @@ flowchart TD
 | Save | 插入重试任务 |
 | ListPending | 查询 status=pending 且 next_retry <= now，按 next_retry ASC |
 | Update | 保存任务变更（attempt, next_retry, last_error 等） |
-| MarkFailed | 设置 status=failed，不再出现在 ListPending 中 |
-| Delete | 按主键删除 |
+| MarkFailed | 设置 status=failed，不再出现在 ListPending 中，不存在返回 ErrNotFound |
+| Delete | 按主键删除，不存在返回 ErrNotFound |
 | Count | 按 status 统计数量 |
 
 #### RPCLogStore
@@ -825,7 +825,7 @@ flowchart TD
 |------|------|
 | Save | 插入 RPC 日志 |
 | Update | 更新已有记录（如收到响应后） |
-| List | 按 StartTime/EndTime/Method/StatusCode/ConversationID 过滤 |
+| List | 按 StartTime/EndTime/Method/StatusCode/StatusCodeLessThan/ConversationID 过滤 |
 | GetByRequestID | 按 request_id 查询，不存在返回 ErrNotFound |
 | Aggregate | 按 method 聚合统计（count, success, error_count, avg_ms） |
 | AggregateByInterval | 按时间间隔（1m/5m/15m/1h/1d）+ method 聚合 |

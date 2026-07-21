@@ -43,8 +43,10 @@ sequenceDiagram
     HTTP->>WS: 原子操作 (单次锁获取):<br/>1. 从 clientsByDevice 删除旧引用<br/>2. 注册新连接到 clients<br/>3. 注册新连接到 clientsByUser<br/>4. cancelPendingFuncCleanup<br/>5. 注册新连接到 clientsByDevice
 
     alt 存在旧连接
-        HTTP->>WS: performDeviceReplacement(oldClients) [异步]
+        HTTP->>WS: performDeviceReplacement(oldClients) [异步 goroutine]
     end
+
+    Note over HTTP: 以下步骤在原子锁释放后、client.Run() 之前执行
 
     HTTP->>HTTP: extractIP(r) [优先 X-Forwarded-For]
     HTTP->>HTTP: 构建 ConnectionInfo (ID, UserID, DeviceID, Protocol, IPAddress, Status)
@@ -85,7 +87,7 @@ sequenceDiagram
 #### 4. ConnectionStore.Add 失败
 
 - 触发条件: Redis 不可达或达到 MaxConnectionsPerUser 限制
-- 处理逻辑: 关闭已创建的 Client，从本地索引中移除，返回
+- 处理逻辑: 关闭已创建的 Client，从本地索引中移除，defer connFinish(nil) 关闭连接生命周期 span，返回
 - 最终结果: WebSocket 连接已升级但被关闭，客户端断开
 
 #### 5. 超过每用户最大连接数
@@ -589,7 +591,7 @@ sequenceDiagram
 
 - 触发条件: 调用方传入 nil updates
 - 处理逻辑: `BroadcastUpdates` 开头检查 `updates == nil`，直接返回 error（`"websocket: updates is nil"`），不执行本地广播和跨节点发布
-- 最终结果: 这是 `BroadcastUpdates` 唯一返回非 nil error 的路径
+- 最终结果: 这是 `BroadcastUpdates` 唯一返回非 nil error 的路径；其他所有路径（包括 Pub/Sub 发布失败）均返回 nil（fire-and-forget）
 
 #### 2. 收到自身节点发出的消息
 
@@ -713,23 +715,23 @@ sequenceDiagram
     WS->>BS: GracefulStop(ctx)
     BS->>BS: Stop() -> cancel context
 
-    Note over WS: Start() 内部流程（ctx 取消后）
+    Note over WS: Start() 内部流程（BaseServer.Start 返回后）
 
     WS->>HTTP: Shutdown(5s timeout)
     Note over HTTP: 停止接受新连接
 
     WS->>WS: closeAllClients()
-    WS->>RR: CancelAll() [在 closeAllClients 内部]
+    Note over WS: closeAllClients 内部流程：
+    WS->>RR: 1. CancelAll()
     Note over RR: 取消所有待处理 RPC，发送 "reverse rpc cancelled"
-    WS->>WS: 收集所有 client 引用
-    WS->>WS: 原子重置所有索引 (clients/clientsByUser/clientsByDevice)
-    Note over WS: 单次锁获取完成，避免锁分离
+    WS->>WS: 2. 收集所有 client 引用 + 原子重置所有索引
+    Note over WS: 单次锁获取完成 (clients/clientsByUser/clientsByDevice)
 
     loop 每个客户端
-        WS->>Clients: Close() -> cancel context
+        WS->>Clients: 3. Close() -> cancel context
     end
 
-    WS->>Clients: 等待所有 Done() 或 5s 超时
+    WS->>Clients: 4. 等待所有 Done() 或 5s 超时
 
     alt 所有客户端优雅退出
         Note over WS: 正常完成
@@ -763,6 +765,12 @@ sequenceDiagram
 - 触发条件: Redis Pub/Sub 关闭错误
 - 处理逻辑: 记录错误日志，继续关闭流程
 - 最终结果: Pub/Sub 资源可能泄露，但服务正常关闭
+
+#### 4. GracefulStop 整体超时
+
+- 触发条件: 传入的 ctx 在 Start() 返回前过期
+- 处理逻辑: BaseServer.GracefulStop 的 select 检测到 ctx.Done()，返回超时错误
+- 最终结果: GracefulStop 提前返回，但 Start() 内部的关闭流程（httpServer.Shutdown、closeAllClients）仍在后台继续执行直到完成
 
 ### 涉及文件
 

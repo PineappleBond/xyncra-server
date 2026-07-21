@@ -546,6 +546,8 @@ CancelAll 采用"快照语义"：在加锁瞬间取出当前所有 pending，解
 
 ## 7. 持久化重放流程
 
+> **相关文档**：完整的重连重放流程（包括客户端握手顺序、FullSync 协调、边缘场景等）详见 [reconnection.md](reconnection.md#1-重连流程-reconnect)。本节聚焦于 ReplayRequest 的内部机制和 PendingStore 操作细节。
+
 **流程名称**：ReplayRequest_PersistenceReplay
 
 **描述**：设备重连后，客户端发送 `system.reconnect` RPC 请求（携带 `last_seen_seq`），服务端从 PendingStore 取出之前超时持久化的请求，按 `last_seen_seq` 过滤后异步重放。重放使用新的 replayID 进行响应路由，但保留原始 IdempotencyKey 供客户端去重。重放结果（成功/失败/超限丢弃）会反馈到 PendingStore。
@@ -657,10 +659,41 @@ sequenceDiagram
 1. 客户端调用 `sendResponse` 发送响应包
 2. 若 `sendPackage` 失败，响应被入队到 `ResponseRetryQueue`
 3. 后台 `responseRetryLoop` 每秒检查队列，尝试重新发送
-4. 使用指数退避策略，避免在网络不稳定时频繁重试
+4. 使用指数退避策略：`nextRetry = now + 1s * 2^attempts`，上限 16 秒
 5. 超过 `maxRetry` 次数后丢弃响应，记录错误日志
+6. 队列满时（达到 `maxSize`），丢弃最旧的条目（FIFO 淘汰）
+
+**参数说明**：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `maxSize` | 可配置 | 队列最大容量，满时丢弃最旧条目 |
+| `maxRetry` | 可配置 | 每个条目的最大重试次数 |
+| 基础延迟 | 1 秒 | 指数退避的基础间隔 |
+| 最大退避 | 16 秒 | 指数退避的上限 |
+
+**退避算法**：`delay = min(1s * 2^attempts, 16s)`。首次重试在 1 秒后，第 2 次 2 秒，第 3 次 4 秒，第 4 次 8 秒，第 5 次及以后均为 16 秒。
 
 这确保了即使在短暂的网络中断期间，客户端的响应也不会丢失。服务端的 ReplayRequest 会因为超时而将请求标记为失败，下次重连时会再次重放。
+
+### 客户端幂等去重机制 (IdempotencyCache)
+
+重放请求保留原始 `IdempotencyKey`（等于原始 `reqID`），客户端通过 `IdempotencyCache`（LRU 缓存）进行去重，防止同一请求被重复处理。
+
+**处理流程**：
+
+1. 客户端收到服务端请求时，检查 `req.IdempotencyKey` 是否非空且已存在于 `IdempotencyCache` 中
+2. **缓存命中**：直接返回缓存的响应（`Code: 0, Msg: "duplicate (idempotency cache hit)"`），不执行实际 handler
+3. **缓存未命中**：执行正常 handler 处理，处理成功后将 `IdempotencyKey` 写入缓存
+4. 若发送缓存的响应失败，响应被入队到 `ResponseRetryQueue` 进行重试
+
+**关键保证**：
+
+- 同一原始请求的多次重放（不同 `replayID`，相同 `IdempotencyKey`）只会被客户端实际执行一次
+- 缓存命中时仍会返回成功响应（`Code: 0`），服务端会将其视为重放成功并从 PendingStore 删除
+- 这是重放幂等性的客户端侧保障，与服务端的 `RetryCount` / `MaxRetries` 机制互补
+
+**序列号跟踪**：客户端同时通过 `handleIncomingRequest` 跟踪收到的最高序列号（`lastReqSeq`），仅当 `req.Seq > 0` 且大于当前值时更新。该值在 `system.reconnect` 时作为 `last_seen_seq` 发送给服务端，用于过滤已处理的请求。
 
 ---
 
@@ -756,6 +789,8 @@ sequenceDiagram
 ---
 
 ## 9. 设备生命周期与 CancelDevice 时序
+
+> **相关文档**：完整的设备重连生命周期（包括客户端重连协调、FullSync、指数退避等）详见 [reconnection.md](reconnection.md)。本节仅聚焦于 CancelDevice 在设备生命周期中的调用时机和时序保证。
 
 **流程名称**：DeviceReconnect_CancelDeviceTiming
 

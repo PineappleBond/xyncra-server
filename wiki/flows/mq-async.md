@@ -158,20 +158,25 @@ sequenceDiagram
     BC->>WS: BroadcastUpdates
     Exec->>Store: SendMessage (持久化 Agent 回复)
     Exec->>BC: BroadcastMessageUpdate
-    alt 执行成功 或 永久失败
-        Worker->>Idem: MarkProcessed (processedKey, 24h)
-        Worker->>Idem: DeleteKey (processingKey)
-    else 瞬态错误 (LLM 超时/限流)
+    alt 非 HITL 中断 (正常/永久/瞬态错误)
+        Worker->>Idem: MarkProcessed (processedKey, 24h) [仅非瞬态]
+        Worker->>Idem: DeleteKey (processingKey) [仅非瞬态]
+        Worker->>Lock: Release (仅当 lockHeld=true)
+        Worker->>Exec: InvalidateContextCache
+        alt 瞬态错误
+            Worker-->>Broker: return error (触发 Asynq 重试)
+        else 其他
+            Worker-->>Broker: return nil
+        end
+    else HITL 中断
         Note over Worker: 不标记 processedKey，不删除 processingKey (130s 自然过期)
-    end
-    Worker->>Lock: Release (仅当 lockHeld=true)
-    Worker->>Exec: InvalidateContextCache
-    alt 瞬态错误
-        Worker-->>Broker: return error (触发 Asynq 重试)
-    else 其他
-        Worker-->>Broker: return nil
+        Note over Worker: 不释放会话锁 (D-084: 有意持有锁)
+        Note over Worker: 不调用 InvalidateContextCache
+        Worker-->>Broker: return nil (跳过)
     end
 ```
+
+> **注意**: HITL 中断是提前返回路径——不执行 idempotency 标记、不释放锁、不调用 InvalidateContextCache。这是因为后续 resume 流程需要接管这些资源。对比：正常完成和永久失败都执行 idempotency 标记和锁释放。
 
 ### 边缘场景
 
@@ -289,32 +294,87 @@ sequenceDiagram
         Worker->>Idem: MarkProcessed (processingKey, 130s)
     end
     Worker->>Lock: Acquire(conversationID, 130s)
-    Note over Worker: HITL 初始锁可能仍持有，acquired=false 是预期行为
+    Note over Worker: HITL 初始锁可能仍持有，acquired=false 是预期行为 (weOwnLock=false)
     Worker->>Exec: registry.Get(agentID)
+    alt Agent 不存在
+        Worker->>Exec: cleanupAfterResumeFailure + sendErrorMessage
+        Worker->>Idem: MarkProcessed (processedKey, 24h) + DeleteKey (processingKey)
+        Worker->>Lock: Release (仅当 weOwnLock=true)
+        Worker-->>Broker: return nil (永久错误，不重试)
+    end
     Worker->>Worker: ContextWithCallerDevice(ctx, userID, deviceID) (D-102)
     Worker->>Exec: agentBuilder.Build(ctx, config)
+    alt Build 失败
+        Worker->>Exec: cleanupAfterResumeFailure + sendErrorMessage
+        Worker->>Idem: MarkProcessed (processedKey, 24h) + DeleteKey (processingKey)
+        Worker->>Lock: Release (仅当 weOwnLock=true)
+        Worker-->>Broker: return nil
+    end
     Worker->>QStore: GetByCheckpoint(checkpointID)
+    alt 查询失败
+        Worker->>Exec: cleanupAfterResumeFailure + sendErrorMessage
+        Worker->>Idem: MarkProcessed + DeleteKey
+        Worker->>Lock: Release (仅当 weOwnLock=true)
+        Worker-->>Broker: return nil
+    end
     QStore-->>Worker: answered questions
     Worker->>Worker: 构建 targets map (interruptID -> answer)
     Worker->>BC: SendTyping(true)
     Worker->>Agent: ResumeWithParams(checkpointID, targets)
+    alt Checkpoint 过期/不存在
+        Worker->>Exec: cleanupAfterResumeFailure + sendErrorMessage
+        Worker->>Idem: MarkProcessed (processedKey, 24h) + DeleteKey (processingKey)
+        Worker->>Lock: Release (仅当 weOwnLock=true)
+        Worker-->>Broker: return nil
+    else LLM 瞬态错误 (ResumeWithParams 阶段)
+        Worker->>BC: SendTyping(false)
+        Worker->>Exec: sendErrorMessage("服务暂时不可用")
+        Worker->>Idem: DeleteKey (processingKey) [允许用户重试]
+        Worker->>Lock: Release (仅当 weOwnLock=true)
+        Worker-->>Broker: return nil (不触发 Asynq 重试)
+    end
     loop 流式输出
         Agent-->>Worker: StreamChunk (content)
         Worker->>BC: SendStreamUpdate
         BC->>WS: BroadcastUpdates
     end
+    alt 流式输出中瞬态错误
+        Worker->>BC: SendStreamUpdate (partialText, isDone=true)
+        Worker->>BC: SendTyping(false)
+        Worker->>Exec: sendErrorMessage("服务暂时不可用")
+        Worker->>Idem: DeleteKey (processingKey)
+        Worker->>Lock: Release (仅当 weOwnLock=true)
+        Worker-->>Broker: return nil
+    end
     Worker->>BC: SendTyping(false)
     Worker->>BC: SendStreamUpdate (isDone=true)
-    Worker->>Store: SendMessage (持久化 Agent 回复)
-    loop 每个 recipient
-        Worker->>BC: BroadcastRaw(userID, updates) [返回 error]
+    alt 多轮 HITL (Agent 再次中断)
+        Worker->>Store: UpdateAgentStatus(asking_user)
+        alt UpdateAgentStatus 失败
+            Worker->>Lock: Release (仅当 weOwnLock=true)
+            Worker-->>Broker: return error (触发 Asynq 重试)
+        end
+        Worker->>QStore: Create(Question)
+        alt Create 失败
+            Worker->>Lock: Release (仅当 weOwnLock=true)
+            Worker-->>Broker: return error (触发 Asynq 重试)
+        end
+        Worker->>BC: SendConversationUpdate + SendAgentStatus(asking_user)
+        Note over Worker: 不释放锁 (D-084)
+        Worker->>Idem: DeleteKey (processingKey) [允许后续 resume]
+        Worker-->>Broker: return nil
+    else 正常完成
+        Worker->>Store: SendMessage (持久化 Agent 回复)
+        loop 每个 recipient
+            Worker->>BC: BroadcastRaw(userID, updates) [返回 error]
+        end
+        Worker->>Idem: MarkProcessed (processedKey, 24h)
+        Worker->>Idem: DeleteKey (processingKey)
+        Worker->>Exec: ClearAgentStatus + DeleteQuestions + DeleteCheckpoint
+        Worker->>BC: SendConversationUpdate (pull notification)
+        Worker->>Lock: Release (仅当 weOwnLock=true)
+        Worker-->>Broker: return nil
     end
-    Worker->>Idem: MarkProcessed (processedKey, 24h)
-    Worker->>Idem: DeleteKey (processingKey)
-    Worker->>Exec: ClearAgentStatus + DeleteQuestions + DeleteCheckpoint
-    Worker->>BC: SendConversationUpdate (pull notification)
-    Worker->>Lock: Release (仅当 weOwnLock=true)
-    Worker-->>Broker: return nil
 ```
 
 ### 边缘场景
@@ -327,8 +387,8 @@ sequenceDiagram
 
 #### 2. 多轮 HITL (Resume 后再次中断)
 
-- 触发条件: Agent resume 后又返回新的 interrupt
-- 处理逻辑: 更新会话状态为 asking_user，持久化新 Question 到 DB，广播 conversation update（pull notification），广播 agent status（"asking_user"），不释放锁（D-084），删除 `agent:resume:processing:{checkpointID}` 允许后续 resume
+- 触发条件: Agent resume 后又返回新的 interrupt（`interruptCh` 收到非 nil 值）
+- 处理逻辑: 流式输出阶段已完成（isDone 广播已发送、打字指示器已清除），然后更新会话状态为 asking_user，持久化新 Question 到 DB，广播 conversation update（pull notification），广播 agent status（"asking_user"），不释放锁（D-084），删除 `agent:resume:processing:{checkpointID}` 允许后续 resume
 - 最终结果: Agent 再次暂停等待用户回答，可循环多轮
 
 ##### UpdateAgentStatus 失败
@@ -346,8 +406,14 @@ sequenceDiagram
 #### 3. Resume 期间 LLM 瞬态错误
 
 - 触发条件: ResumeWithParams 或流式输出中出现 `ErrLLMTimeout` / `ErrLLMRateLimited`
-- 处理逻辑: 不自动重试（与 task_handler 不同，HITL resume 不返回 error 给 Asynq），直接通过 `sendErrorMessage` 通知用户 "服务暂时不可用"，删除 `agent:resume:processing:{checkpointID}` 允许用户手动重新触发 resume
+- 处理逻辑: 不自动重试（与 task_handler 不同，HITL resume 不返回 error 给 Asynq），直接通过 `sendErrorMessage` 通知用户 "服务暂时不可用"，删除 `agent:resume:processing:{checkpointID}` 允许用户手动重新触发 resume，释放锁（仅当 weOwnLock=true）
 - 最终结果: 用户看到"服务暂时不可用，请稍后重试"。设计原因：用户已投入交互成本，应由用户决定是否重试
+
+##### 流式输出中的瞬态错误
+
+- 触发条件: ResumeWithParams 成功，但在流式输出过程中 chunk.Err 为 `ErrLLMTimeout` / `ErrLLMRateLimited`
+- 处理逻辑: 广播 `SendStreamUpdate(partialText, isDone=true)` 让客户端退出流式状态，清除打字指示器，通过 `sendErrorMessage` 通知用户，删除 `agent:resume:processing:{checkpointID}`，释放锁（仅当 weOwnLock=true），return nil
+- 最终结果: 客户端收到部分文本 + 错误消息，可手动重新触发 resume
 
 #### 4. Agent 配置不存在
 

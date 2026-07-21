@@ -171,13 +171,16 @@ sequenceDiagram
 
 | 场景 | 处理方式 | 设计决策 |
 |------|---------|---------|
+| 认证失败（`authenticate` 返回错误） | 返回 HTTP 401 "authentication failed" | 连接不建立 |
+| 认证成功但 `userID` 为空 | 返回 HTTP 401 "missing user id" | 连接不建立 |
 | 查询参数中无 `device_id` | 服务器自动生成 UUID v4 | D-094：确保每个连接有唯一标识 |
-| `device_id` 超过 255 个字符 | 返回 400 Bad Request | 防止存储溢出 |
-| `ConnectionStore.Add` 失败 | 客户端立即被关闭，不执行函数清理 | 连接未完全建立，避免清理不一致状态 |
+| `device_id` 超过 255 个字符 | 返回 HTTP 400 "device_id too long" | 防止存储溢出 |
+| WebSocket 升级失败 | 记录错误并返回，不注册连接 | `upgrader.Upgrade` 失败时直接退出 |
+| `ConnectionStore.Add` 失败 | 客户端立即被关闭（`client.Close()`），调用 `removeClient` 清理本地映射，不执行函数清理 | 连接未完全建立，避免清理不一致状态 |
 | 设备替换竞态 | 新连接注册时调用 `cancelPendingFuncCleanup`；旧连接断开时 `hasActiveConn` 为 true 跳过清理 | 双重保护：主动取消 + 被动检查 |
 | 清理期间 Redis 不可达 | 5 秒有界上下文防止无限阻塞 | 最终一致性保证 |
 | `4001` 关闭帧 | 旧客户端收到关闭码 4001 | D-111：触发优雅退出而非重连 |
-| 服务器 GracefulStop | `closeAllClients()` 运行：`CancelAll()` 取消所有挂起的反向 RPC，然后关闭所有客户端连接 | 客户端断开后触发各自的 defer 清理（`scheduleFuncCleanup` 延迟执行，进程退出前可能未完成） |
+| 服务器 GracefulStop | `closeAllClients()` 运行：(1) `CancelAll()` 取消所有挂起的反向 RPC；(2) 在单次锁获取中重置所有客户端索引映射；(3) 对每个客户端调用 `Close()`；(4) 等待最多 5 秒让所有 writePump 排空 | 客户端断开后触发各自的 defer 清理（`scheduleFuncCleanup` 延迟执行，进程退出前可能未完成） |
 | 客户端不使用服务器分配的 `deviceID` | 客户端和服务器的 `deviceID` 可能不匹配 | 依赖客户端正确使用服务器返回的 deviceID |
 
 ---
@@ -341,12 +344,14 @@ sequenceDiagram
 5. **延迟清理函数注册**
    - 如果 `functionRegistry != nil` 且 `!hasActiveConn`（该设备无其他连接）：
      - 调用 `scheduleFuncCleanup(userID, deviceID)` 启动 grace period 定时器（默认 10 秒）
+     - `scheduleFuncCleanup` 内部首先取消该设备已有的待处理清理（安全措施），然后创建新的 `context.Background()` 可取消 context
      - 注意：使用 `context.Background()` 而非调用者的 context，因为 `handleWebSocket` 返回时会取消其 context，这会立即取消延迟清理
      - 如果设备在 grace period 内重连，`cancelPendingFuncCleanup` 取消清理，函数注册保留
      - 如果 grace period 超时，goroutine 再次检查 `hasActiveConn`（竞态防护）
      - 如果仍无活跃连接，调用 `OnDeviceDisconnect(ctx, userID, deviceID)`
      - 从 `devices[userID][deviceID]` 中移除设备条目
      - 如果该用户不再有设备，清理用户级映射条目以防止内存泄漏
+     - 清理完成后从 `pendingFuncCleanup` 映射中删除该条目
 
 6. **取消挂起请求**（独立于函数清理）
    - 如果 `reverseRPC != nil` 且 `!hasActiveConn`：
@@ -368,6 +373,7 @@ sequenceDiagram
 | Grace period 内设备重连 | `cancelPendingFuncCleanup` 取消定时器，函数保留 | 避免页面导航期间（短暂断开后立即重连）函数被误删 |
 | Grace period 超时（默认 10s） | `OnDeviceDisconnect` 执行实际清理 | 双重检查 `hasActiveConn` 防止竞态 |
 | `scheduleFuncCleanup` 使用 `context.Background()` | 延迟清理不依赖调用者 context | 防止 `handleWebSocket` 返回时 context 取消导致清理立即失效 |
+| `scheduleFuncCleanup` 对同一设备重复调用 | 首先取消已有的待处理清理，再创建新的清理定时器 | 安全措施，防止并发断开场景下的重复清理 |
 
 ---
 
@@ -535,7 +541,9 @@ sequenceDiagram
 
 5. **创建工具实例**
    - 对每个过滤后的函数：`newClientFunctionTool(fn, caller, userID, deviceID, timeout)`
+   - `buildToolInfo` 从 `FunctionInfo` 构建 `schema.ToolInfo`；如果 `Parameters` 为空，自动规范化为有效的 object schema（防止 OpenAI 兼容端点返回 400）
    - 创建一个 `InvokableTool`，当被代理调用时，向客户端设备发送 `ServerRequest`（反向 RPC）
+   - `executeClientFunction` 支持每个函数的 `TimeoutMs` 覆盖默认超时；错误通过 `formatClientToolError` 映射为 LLM 友好消息（超时 → "request timed out"，设备离线 → "device is offline"，其他 → "unable to reach the device"），作为 soft failure 返回而非 Go error，让 LLM 可以自行重试或通知用户
 
 6. **注入静态工具**
    - 如果 `toolRegistry` 和 `dynamicTools` 已配置：`toolRegistry.Create(ctx, dynamicTools, nil)`
@@ -559,8 +567,13 @@ sequenceDiagram
 | 所有函数被过滤掉 | 不注入客户端工具 | 无副作用 |
 | `toolRegistry` 为 nil 或 `dynamicTools` 为空 | 跳过基于注册表的工具注入 | 无副作用 |
 | 默认调用超时 | 如果 `config.CallTimeout` 未设置或 <= 0，则为 30 秒 | 合理的默认值 |
+| 函数级 `TimeoutMs` 覆盖 | 如果 `FunctionInfo.TimeoutMs > 0`，使用函数级超时而非默认超时 | 支持不同函数的差异化超时 |
+| `FunctionInfo.Parameters` 为空 | `buildToolInfo` 自动规范化为 `{type: "object", properties: {}}` | 防止 OpenAI 兼容端点将空 schema 转为 `parameters: true` 导致 400 错误 |
 | `runCtx.Tools` 为 nil | 分配新切片 | 注入无论初始状态如何都能工作 |
 | Eino 框架 0->非零工具转换 | 运行时从注册表解析的动态工具触发图重建 | Eino 架构要求 |
+| 客户端函数调用超时 | `formatClientToolError` 返回 "request timed out" 作为 soft failure | LLM 可自行决定重试或通知用户 |
+| 客户端设备离线 | `formatClientToolError` 返回 "device is offline" 作为 soft failure | LLM 可自行决定通知用户 |
+| 客户端返回业务错误（`resp.Code < 0`） | 返回 "client returned error (code N): msg" 作为 soft failure | LLM 可看到具体错误原因并适配 |
 
 ---
 

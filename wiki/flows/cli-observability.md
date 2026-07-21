@@ -21,9 +21,10 @@ flowchart TD
     G -->|否| I[ensureUserDir 创建用户目录]
     I --> J[分发到 19 个子命令]
     J --> J1["查询命令 (6): list/get-conversations, get/search-messages, draft, logs"]
-    J --> J2["变更命令 (7): send, create/delete/restore-conversation, delete-message, mark-as-read, sync-updates"]
-    J --> J3["IPC-only 命令 (5): set-typing, stream-text, agent-resume, reload-agents, kill"]
+    J --> J2["变更命令 (6): send, create/delete/restore-conversation, delete-message, mark-as-read"]
+    J --> J3["IPC-only 命令 (5): set-typing, stream-text, agent-resume, reload-agents, sync-updates"]
     J --> J4["守护进程: listen"]
+    J --> J5["进程管理: kill (锁文件 + OS 信号)"]
 ```
 
 ### 全局 Flag 与环境变量
@@ -731,6 +732,7 @@ flowchart TD
 - `internal/tracing/tracing.go`: InitTracer 初始化、version/hostname 辅助函数
 - `internal/tracing/config.go`: TracingConfig 与 DefaultTracingConfig、Apply 函数选项
 - `internal/tracing/middleware.go`: DebugSampler 采样策略、WithDebug/IsDebugContext context 工具
+- `internal/tracing/mq_propagation.go`: MapCarrier、InjectTraceContext/ExtractTraceContext 用于消息队列的 W3C Trace Context 跨服务传播
 
 ---
 
@@ -774,15 +776,15 @@ flowchart TD
 | BeforeModelRewriteState | `request` | messages (截断), tools |
 | AfterModelRewriteState | `response` | output, token_usage (input/output/total), duration_ms |
 | WrapInvokableToolCall 入口 | `tool_call` | tool_name, tool_args (截断 2048) |
-| WrapInvokableToolCall 出口 | `tool_result` | tool_name, tool_result (截断 4096), duration_ms, error |
+| WrapInvokableToolCall 出口 | `tool_result` | tool_name, tool_result (截断 2048), duration_ms, error |
 | AfterAgent | `agent_end` | output (最后一条消息) |
 
 ### 边缘场景
 
 #### 1. 内容截断
 
-- 触发条件: 消息内容超过 4096 字符或工具参数/结果超过 2048/4096 字符
-- 处理逻辑: truncate 函数截断并附加 "...[truncated]"
+- 触发条件: 消息内容超过 4096 字符或工具参数/结果超过 2048 字符
+- 处理逻辑: truncate 函数截断并附加 "...[truncated]"（ASCII 省略号）
 - 最终结果: 日志记录保持可管理大小
 
 #### 2. 并发安全

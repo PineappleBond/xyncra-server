@@ -19,16 +19,21 @@ sequenceDiagram
     WS->>WS: 建立连接, 存入 ConnectionStore
     Client->>WS: system.register_functions 请求
     WS->>Handler: HandleRequest(ctx, client, req)
-    Handler->>Handler: 解析 RegisterFunctionsParams
-    Handler->>Handler: 使用连接的 deviceID 覆盖客户端提供的 deviceID
-    Handler->>Registry: RegisterFunctions(ctx, userID, deviceID, params)
-    Registry->>Registry: 校验函数数量 <= MaxFunctionsPerDevice
-    Registry->>Registry: 校验每个函数名 (非空, 长度, 无重复)
-    Registry->>Registry: 深拷贝 Functions 和 DeviceInfo
-    Registry->>Registry: 写入 map[userID][deviceID] = DeviceFunctions
-    Registry-->>Handler: nil (成功)
-    Handler-->>WS: {"status":"ok", "count": N, "device_id": "..."}
-    WS-->>Client: 响应包
+    Handler->>Handler: 解析 RegisterFunctionsParams (JSON Unmarshal)
+    alt JSON 解析失败
+        Handler-->>WS: ValidationError("invalid params")
+        WS-->>Client: 校验错误响应
+    else 解析成功
+        Handler->>Handler: 使用连接的 deviceID 覆盖客户端提供的 deviceID
+        Handler->>Registry: RegisterFunctions(ctx, userID, deviceID, params)
+        Registry->>Registry: 校验函数数量 <= MaxFunctionsPerDevice
+        Registry->>Registry: 校验每个函数名 (非空, 长度, 无重复)
+        Registry->>Registry: 深拷贝 Functions 和 DeviceInfo
+        Registry->>Registry: 写入 map[userID][deviceID] = DeviceFunctions
+        Registry-->>Handler: nil (成功)
+        Handler-->>WS: {"status":"ok", "count": N, "device_id": "..."}
+        WS-->>Client: 响应包
+    end
 ```
 
 ### 边缘场景
@@ -57,7 +62,13 @@ sequenceDiagram
 - 处理逻辑: 在遍历校验前先检查 `len(params.Functions) > max`，返回 `ErrMaxFunctionsPerDevice`
 - 最终结果: 客户端收到校验错误
 
-#### 5. deviceID 覆盖
+#### 5. JSON 参数解析失败
+
+- 触发条件: `req.Params` 无法反序列化为 `RegisterFunctionsParams`（格式错误、类型不匹配等）
+- 处理逻辑: `json.Unmarshal` 返回错误，Handler 直接返回 `protocol.NewValidationError("invalid params")`
+- 最终结果: 客户端收到校验错误，不进入注册逻辑
+
+#### 6. deviceID 覆盖
 
 - 触发条件: 客户端在 params 中提供了一个 deviceID
 - 处理逻辑: Handler 忽略客户端提供的 deviceID，强制使用连接建立时认证的 `client.DeviceID()`
@@ -140,7 +151,7 @@ sequenceDiagram
         end
     end
 
-    alt !hasActiveConn
+    alt reverseRPC != nil 且设备无其他活跃连接 (!hasActiveConn)
         WS->>RPC: CancelDeviceWithReason(userID, deviceID, "device disconnected")
     end
 ```
@@ -232,6 +243,12 @@ sequenceDiagram
 - 处理逻辑: 记录错误日志，跳过客户端函数注入，不阻塞 Agent 执行
 - 最终结果: Agent 继续运行，只是没有客户端工具
 
+#### 2b. 设备未注册函数 (正常情况)
+
+- 触发条件: `GetFunctions` 返回 `(nil, nil)`——设备从未调用过 `system.register_functions`
+- 处理逻辑: 不是错误，`applyFilters(nil)` 返回空列表，`len(funcs) > 0` 为 false，跳过工具创建
+- 最终结果: Agent 正常运行，无客户端工具注入（也不产生日志）
+
 #### 3. 单个工具创建失败 (fail-open per function)
 
 - 触发条件: `buildToolInfo` 失败（JSON Marshal 参数、JSON Schema 解析、或其他构建错误）
@@ -258,9 +275,9 @@ sequenceDiagram
 
 #### 7. 动态工具注册表创建失败
 
-- 触发条件: `toolRegistry.Create(ctx, dynamicTools, nil)` 返回错误（工具工厂函数失败或工具名未注册）
-- 处理逻辑: 记录错误日志，跳过动态工具注入，不阻塞 Agent 执行
-- 最终结果: Agent 继续运行，仅缺少失败的动态工具。与客户端函数的 fail-open 行为一致
+- 触发条件: `toolRegistry.Create(ctx, dynamicTools, nil)` 返回错误（部分工具工厂函数失败）
+- 处理逻辑: `Create` 是 fail-open 的——未注册的工具名被跳过并记录警告，工厂函数出错的工具被跳过并记录错误，但**已成功创建的工具仍被返回**。`BeforeAgent` 记录错误日志后，仍会注入已成功创建的工具（`len(staticTools) > 0` 检查）
+- 最终结果: Agent 继续运行，部分动态工具可用。与客户端函数的逐个 fail-open 行为一致
 
 ### 涉及文件
 
@@ -287,7 +304,7 @@ sequenceDiagram
     RPC->>RPC: 分配 seq (per-device 单调递增)
     RPC->>RPC: 创建 pending 记录 (respCh, cancel)
     RPC->>RPC: 注册到 pending map
-    RPC->>RPC: 构造 PackageDataRequest (含 IdempotencyKey)
+    RPC->>RPC: 构造 PackageDataRequest (含 IdempotencyKey, Seq)
     RPC->>WS: sendFunc(userID, deviceID, pkg)
     WS->>Client: WebSocket 发送请求包
     Client->>Client: 处理请求
@@ -395,6 +412,12 @@ flowchart TD
 - 触发条件: 单设备 pending 请求超过 MaxPendingPerDevice（默认 50）
 - 处理逻辑: Redis RPush + LTrim 保留最新的 N 条，旧的被丢弃
 - 最终结果: 防止单设备无限堆积
+
+#### 5b. PendingStore TTL 过期
+
+- 触发条件: pending 请求在 Redis 中存在超过 RequestTTL（默认 24h）
+- 处理逻辑: 每次 Save/Remove/Update 操作都会刷新 key 的 Expire 时间。超时后 Redis 自动删除整个 list
+- 最终结果: 长期未重连的设备的 pending 请求自动过期清理，避免 Redis 内存泄漏
 
 #### 6. 重播立即返回
 
