@@ -140,7 +140,6 @@ flowchart TD
         GB2[查询 user_id2 方向] --> GB3
         GB3 --> GB4[按 LastMessageAt DESC 排序]
         GB4 --> GB5[应用 offset/limit 分页]
-        GB5 --> GB6[limit+1 探测 has_more]
     end
 
     subgraph GetUnscoped

@@ -684,7 +684,7 @@ sequenceDiagram
 
 1. 客户端收到服务端请求时，检查 `req.IdempotencyKey` 是否非空且已存在于 `IdempotencyCache` 中
 2. **缓存命中**：直接返回缓存的响应（`Code: 0, Msg: "duplicate (idempotency cache hit)"`），不执行实际 handler
-3. **缓存未命中**：执行正常 handler 处理，处理成功后将 `IdempotencyKey` 写入缓存
+3. **缓存未命中**：执行正常 handler 处理，处理完成后将 `IdempotencyKey` 写入缓存（无论 handler 成功或失败均记录，防止同一请求被重复执行）
 4. 若发送缓存的响应失败，响应被入队到 `ResponseRetryQueue` 进行重试
 
 **关键保证**：

@@ -267,9 +267,9 @@ flowchart LR
 | 步骤 | 说明 |
 |------|------|
 | 1 | WebSocket 发送失败时，响应入队到 `ResponseRetryQueue` |
-| 2 | `Drain(now)` 返回所有 `nextRetry <= now` 且未超过 `maxRetry` 的条目 |
+| 2 | `Drain(now)` 返回所有 `nextRetry <= now` 且未超过 `maxRetry` 的条目；超过 `maxRetry` 的条目被静默丢弃 |
 | 3 | 调用方（`client.go` 的重试循环）在调用 `EnqueueWithBackoff` 前检查 `entry.attempts < entry.maxRetry`，超过则丢弃 |
-| 4 | 失败条目通过 `EnqueueWithBackoff` 重新入队，使用指数退避：`baseDelay * 2^attempts`（`baseDelay = 1 秒`），上限 16 秒（`maxBackoff`）。注意：此队列不使用随机抖动 |
+| 4 | 失败条目通过 `EnqueueWithBackoff` 重新入队，使用指数退避：`baseDelay * 2^(attempts-1)`（`baseDelay = 1 秒`，调用方在入队前递增 attempts，因此首次重试时 attempts=1，延迟=1s），上限 16 秒（`maxBackoff`）。注意：此队列不使用随机抖动 |
 | 5 | 队列满时（`maxSize`），最旧的条目被丢弃 |
 
 #### 数据库持久化重试（客户端）
@@ -278,9 +278,11 @@ flowchart LR
 |------|------|
 | 1 | `RetryTask` 以 `status = 'pending'` 和 `NextRetry` 时间戳持久化 |
 | 2 | `ListPending(ctx, limit)` 查询 `status = 'pending' AND next_retry <= now`，按最早重试时间排序 |
-| 3 | 下次重试时间通过 `backoffDelay` 计算：`baseDelay * 2^(attempt-1)`，上限 16 秒，并附加 +/-25% 随机抖动以避免惊群效应 |
+| 3 | 下次重试时间通过 `backoffDelay` 计算：`baseDelay * 2^(attempt-1)`（attempt 从 1 开始，首次重试延迟 = `baseDelay`），上限 16 秒，并附加 +/-25% 随机抖动以避免惊群效应 |
 | 4 | 处理后，`Update` 保存新的尝试次数和下次重试时间，或 `MarkFailed` 设置 `status = 'failed'` |
 | 5 | 提供持久化重试能力，可在进程重启后继续执行 |
+
+> **退避公式差异**：`ResponseRetryQueue`（WebSocket 投递重试）使用 `baseDelay * 2^attempts`（首次重试延迟 = `2 * baseDelay`），无抖动。`retryManager`（数据库持久化重试）使用 `backoffDelay` 函数：`baseDelay * 2^(attempt-1)`（首次重试延迟 = `baseDelay`），带 +/-25% 随机抖动。两者上限均为 16 秒。
 
 ### 边缘场景
 
@@ -354,6 +356,7 @@ flowchart TD
 | **重复 Close** | 由于 `sync.Once` 安全。仅第一次调用执行清理 |
 | **关闭期间 Enqueue** | `Enqueue` 中 `b.mu` 锁仅保护 `b.closed` 检查，释放锁后到调用 `b.client.EnqueueContext` 之间存在竞态窗口。如果 Close 在此窗口内设置 `b.closed = true` 并关闭底层 client，入队可能返回连接错误。由于是 fire-and-forget，调用方仅记录日志 |
 | **无 Stop/Close 的 Start** | Start 在 `<-ctx.Done()` 上永久阻塞。调用方必须取消 context 或调用 Stop/Close，否则 goroutine 泄漏 |
+| **Close 无超时机制** | `Close()` 内部等待 `<-done` 时没有超时——如果 Asynq 正在处理的任务挂起，`Close` 将无限期阻塞。调用方通过外层 context 控制超时（如 `GracefulStop(ctx)` 使用 `context.WithTimeout`），但 `Close()` 本身不提供此保护 |
 | **部分构造的资源泄漏** | `NewAsynqBroker` 文档说明：如果 client 成功但 server/inspector 构造失败，client 不会被关闭。这是可接受的，因为这些构造函数不执行网络 I/O |
 
 ---

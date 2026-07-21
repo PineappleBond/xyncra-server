@@ -156,8 +156,15 @@ sequenceDiagram
     Exec->>LLM: 调用 LLM
     Exec->>BC: SendTyping + SendStreamUpdate
     BC->>WS: BroadcastUpdates
-    Exec->>Store: SendMessage (持久化 Agent 回复)
-    Exec->>BC: BroadcastMessageUpdate
+    alt 流式输出中 LLM 错误 (部分响应)
+        Exec->>BC: SendStreamUpdate(partialText, isDone=true)
+        Exec->>Store: SendMessage (持久化已接收的部分文本)
+        Exec->>BC: BroadcastMessageUpdate (广播部分消息)
+        Exec->>Exec: 映射为哨兵错误 (ErrLLMTimeout/ErrLLMRateLimited)
+    else 正常完成
+        Exec->>Store: SendMessage (持久化 Agent 回复)
+        Exec->>BC: BroadcastMessageUpdate
+    end
     alt 非 HITL 中断 (正常/永久/瞬态错误)
         Worker->>Idem: MarkProcessed (processedKey, 24h) [仅非瞬态]
         Worker->>Idem: DeleteKey (processingKey) [仅非瞬态]
@@ -203,6 +210,12 @@ sequenceDiagram
 - 触发条件: LLM 请求超时 (`ErrLLMTimeout`) 或被限流 (`ErrLLMRateLimited`)
 - 处理逻辑: 不标记 `agent:processed:{messageID}`，不删除 `agent:processing:{messageID}`（130s 后自然过期），return error 给 Asynq 触发重试
 - 最终结果: Asynq 指数退避重试，最多 20 次。区分依据：`isTransientError()` 仅匹配 `ErrLLMTimeout` 和 `ErrLLMRateLimited`
+
+##### 流式输出中的部分响应持久化
+
+- 触发条件: LLM 在流式输出过程中返回错误（`chunk.Err != nil`），此时 `fullResponse` 中已有部分文本
+- 处理逻辑: 广播 `SendStreamUpdate(partialText, isDone=true)` 让客户端退出流式状态，将已接收的部分文本通过 `store.SendMessage` 持久化为消息（senderID=agent），并通过 `BroadcastMessageUpdate` 广播给双方用户，然后将错误映射为哨兵错误（`ErrLLMTimeout` / `ErrLLMRateLimited`）返回给调用方
+- 最终结果: 用户看到部分回复文本（已持久化），Asynq 根据哨兵错误类型决定重试
 
 #### 5. Agent 执行永久失败
 

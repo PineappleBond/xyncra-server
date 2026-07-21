@@ -76,10 +76,13 @@ flowchart TD
 
 | 场景 | 处理方式 |
 |------|----------|
+| **参数解析失败** | JSON unmarshal 失败返回 `ValidationError("invalid params")` |
+| **会话查询非 NotFound 错误** | `ConversationStore.Get()` 返回非 `ErrNotFound` 的错误时，包装为 `InternalError` 返回 |
 | **幂等性** | `client_message_id + sender_id` 有唯一索引，重复插入触发 `ErrDuplicateKey`，handler 通过 `GetByClientMessageID` 查找已存在的消息并返回 `duplicate=true`，避免 TOCTOU 竞态。若 `GetByClientMessageID` 查找也失败（如消息被并发删除的极端竞态），则将原始 `ErrDuplicateKey` 包装为 `InternalError` 返回（注意：此时返回的是 `InternalError` 而非 `ErrDuplicateKey`） |
 | **空 content** | 允许发送空内容消息，由 Agent 层返回用户友好的错误 |
 | **会话不存在** | 返回 `NotFoundError` |
 | **非成员发送** | 返回 `PermissionDeniedError` |
+| **MQ payload 序列化失败** | 日志记录但不入队，消息已持久化，客户端可通过 `sync_updates` 拉取 |
 | **MQ 入队失败** | 日志记录但不影响主流程，消息已持久化，客户端可通过 `sync_updates` 拉取 |
 | **Agent MQ 入队失败** | 同上，fire-and-forget 模式 |
 | **Agent 触发仅限 1-on-1** | `peerUserID` 仅支持双人会话（`UserID1`/`UserID2`），群聊场景下 `peerID` 为空，不会触发 Agent。此外 `agentRegistry` 必须非 nil 才会进入 Agent 检测逻辑 |
@@ -134,8 +137,11 @@ flowchart TD
 
 | 场景 | 处理方式 |
 |------|----------|
+| **参数解析失败** | JSON unmarshal 失败返回 `ValidationError("invalid params")` |
+| **会话查询非 NotFound 错误** | `ConversationStore.Get()` 返回非 `ErrNotFound` 的错误时，包装为 `InternalError` 返回 |
 | **会话不存在** | 返回 `NotFoundError` |
 | **非成员访问** | 返回 `PermissionDeniedError` |
+| **消息列表查询失败** | `MessageStore.ListByConversation()` 返回错误时，包装为 `InternalError` 返回 |
 | **limit 非法值** | handler 层 <=0 或 >200 时重置为 50；store 层独立校验 <=0 或 >201 时重置为 50（允许 handler 传入 limit+1 探测值） |
 | **after_message_id = 0** | 从第一条消息开始获取 |
 | **无消息** | 返回空数组而非 null |
@@ -195,7 +201,10 @@ flowchart TD
 
 | 场景 | 处理方式 |
 |------|----------|
+| **参数解析失败** | JSON unmarshal 失败返回 `ValidationError("invalid params")` |
+| **消息查询非 NotFound 错误** | `MessageStore.Get()` 返回非 `ErrNotFound` 的错误时，包装为 `InternalError` 返回 |
 | **消息不存在** | 返回 `NotFoundError` |
+| **会话查询非 NotFound 错误** | `ConversationStore.Get()` 返回非 `ErrNotFound` 的错误时，包装为 `InternalError` 返回 |
 | **会话不存在** | 返回 `NotFoundError` |
 | **非成员操作** | 返回 `PermissionDeniedError` |
 | **非发送者删除** | 返回 `PermissionDeniedError` (only the sender can delete this message) |
@@ -260,10 +269,13 @@ flowchart TD
 
 | 场景 | 处理方式 |
 |------|----------|
+| **参数解析失败** | JSON unmarshal 失败返回 `ValidationError("invalid params")` |
 | **空 query** | handler 层校验 `query` 为空时直接返回 `ValidationError`；store 层也有防御性检查（空 query 直接返回空数组不执行查询），正常路径不会触及 |
 | **LIKE 通配符注入** | 使用 `escapeLikePattern` 对用户输入中的 `%`、`_`、pipe 字符进行转义，配合 SQL `ESCAPE` 子句 |
+| **会话查询非 NotFound 错误** | `ConversationStore.Get()` 返回非 `ErrNotFound` 的错误时，包装为 `InternalError` 返回 |
 | **会话不存在** | 返回 `NotFoundError` |
 | **非成员访问** | 返回 `PermissionDeniedError` |
+| **消息搜索查询失败** | `MessageStore.SearchByConversation()` 返回错误时，包装为 `InternalError` 返回 |
 | **limit 非法值** | handler 层 <=0 或 >200 时重置为 50；store 层独立校验 <=0 或 >201 时重置为 50（防御性编程） |
 | **无匹配结果** | 返回空数组 |
 | **after_message_id = 0** | 不附加游标条件，从最新消息开始 |
@@ -315,10 +327,10 @@ flowchart TD
    - 若 `params.MessageID > 0`，使用该值
    - 若为 0，使用 `conversation.LastProcessedMessageID` (标记全部已读)
 6. **钳位处理**：若 `messageID > LastProcessedMessageID`，设为 `LastProcessedMessageID`
-7. **更新已读游标**：调用 `ConversationStore.UpdateLastRead`，MAX 语义由 store 层 SQL `CASE WHEN` 表达式保证（`CASE WHEN 当前值 > 新值 THEN 当前值 ELSE 新值 END`，兼容 SQLite/PostgreSQL/MySQL）
-8. **重新读取会话**：获取实际游标值 (可能与请求值不同，因 MAX 语义)
+7. **更新已读游标**：调用 `ConversationStore.UpdateLastRead`。store 层内部先 GET 会话以确定用户是 `UserID1` 还是 `UserID2`，然后选择对应的 `last_read_message_id` 列。MAX 语义由 SQL `CASE WHEN` 表达式保证（`CASE WHEN 当前值 > 新值 THEN 当前值 ELSE 新值 END`，兼容 SQLite/PostgreSQL/MySQL）
+8. **重新读取会话**（handler 层）：`UpdateLastRead` 返回后，handler 重新调用 `ConversationStore.Get()` 获取实际游标值 (可能与请求值不同，因 MAX 语义)
 9. **计算未读数**：通过实际游标计算未读消息数 (`CountUnread`)
-10. **创建 UserUpdate**：为调用者创建 `UpdateTypeMarkRead` 类型的 UserUpdate
+10. **创建 UserUpdate**：为调用者创建 `UpdateTypeMarkRead` 类型的 UserUpdate。先调用 `GetLatestSeq` 获取当前最大 seq，若失败则跳过整个步骤 10 和 11
 11. **MQ 广播**：广播已读更新给调用者的其他设备 (fire-and-forget)
 12. **返回结果**：返回 `{status, unread_count, last_read_message_id}`
 

@@ -165,7 +165,7 @@ flowchart TD
 | 场景 | 处理方式 |
 |------|----------|
 | **checkpoint 过期/丢失** | 调用 `cleanupAfterResumeFailure`，发送"等待时间过长"消息 |
-| **re-interrupt (多轮HITL)** | resume 后再次 interrupt，重新进入 `asking_user` 状态，不释放锁，删除 processing key 允许后续 resume |
+| **re-interrupt (多轮HITL)** | resume 后再次 interrupt，重新进入 `asking_user` 状态，不释放锁，删除 processing key 允许后续 resume。不执行 cleanup 操作（ClearAgentStatus / Delete Questions / Delete checkpoint）——cleanup 仅在成功完成（无 re-interrupt）时执行 |
 | **resume 永久失败** | 调用 `cleanupAfterResumeFailure`（清状态 + 删 checkpoint + 删 questions）+ 发送错误消息 + 清理幂等 key + 释放锁 |
 | **resume transient 失败** | 不自动 MQ 重试，而是通知用户自行决定是否重试 |
 | **并发 resume** | 幂等检查确保同一 checkpoint 只 resume 一次 |

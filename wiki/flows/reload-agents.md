@@ -241,7 +241,7 @@ flowchart TD
 | `NewRegistry()` 后直接调用 `Reload()` | `dir` 为空字符串，`Load("")` 尝试读取空路径，`os.ReadDir("")` 返回 `IsNotExist` 错误 |
 | 结果 | `Load()` 返回 nil（与目录不存在行为一致），handler 报告 `{count: 0}`，不报错 |
 
-**注意**：此场景仅在直接调用 `Reload()` 时发生。通过 handler 调用时，nil registry 检查会先拦截（返回 `{count: 0}`），不会到达 `Reload()`。
+**注意**：通过 handler 调用时，nil registry 检查仅拦截 registry 指针本身为 nil 的情况（即 `NewReloadAgentsHandler(nil)`）。若 registry 非 nil 但 `dir` 为空（如 `NewRegistry()` 后直接调用 `Reload()`），nil 检查不会拦截，仍会到达 `Reload()` 并走上述 `os.ReadDir("")` → `IsNotExist` 路径。
 
 ### 8. CLI 侧错误处理
 

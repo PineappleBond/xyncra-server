@@ -776,14 +776,14 @@ flowchart TD
 | BeforeModelRewriteState | `request` | messages (截断), tools |
 | AfterModelRewriteState | `response` | output, token_usage (input/output/total), duration_ms |
 | WrapInvokableToolCall 入口 | `tool_call` | tool_name, tool_args (截断 2048) |
-| WrapInvokableToolCall 出口 | `tool_result` | tool_name, tool_result (截断 2048), duration_ms, error |
+| WrapInvokableToolCall 出口 | `tool_result` | tool_name, tool_result (截断 4096), duration_ms, error |
 | AfterAgent | `agent_end` | output (最后一条消息) |
 
 ### 边缘场景
 
 #### 1. 内容截断
 
-- 触发条件: 消息内容超过 4096 字符或工具参数/结果超过 2048 字符
+- 触发条件: 消息内容超过 4096 字符、工具参数超过 2048 字符、或工具结果超过 4096 字符
 - 处理逻辑: truncate 函数截断并附加 "...[truncated]"（ASCII 省略号）
 - 最终结果: 日志记录保持可管理大小
 

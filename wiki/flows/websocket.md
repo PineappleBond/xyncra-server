@@ -2,7 +2,7 @@
 
 本文档描述 Xyncra WebSocket 服务的完整连接生命周期，包括连接建立、消息收发、心跳保活、广播分发及优雅关闭等核心流程。
 
-> **注意**: `websocket-connection.md` 提供相同流程的详细 sequence diagram 和更全面的边缘场景分析。两文档内容有重叠，以 `websocket-connection.md` 为权威来源。本文档提供 flowchart 视图的高层概览。
+> **注意**: `websocket-connection.md` 提供相同流程的详细 sequence diagram 和更全面的边缘场景分析。两文档内容有重叠，以 `websocket-connection.md` 为权威来源。本文档提供 flowchart 视图的高层概览。心跳（第 6 节）和广播（第 7 节）的完整流程分别见 `heartbeat.md` 和 `broadcasting.md`。
 
 ---
 

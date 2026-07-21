@@ -449,6 +449,7 @@ sequenceDiagram
     QS-->>RH: questions[]
     RH->>RH: 构建 targets map (仅 status=answered 且 interruptID 非空)
 
+    Note over RH: 设置总超时 context.WithTimeout(totalTimeout)
     RH->>Runner: ResumeWithParams(checkpointID, params)
     alt ResumeWithParams 失败 (checkpoint 过期)
         Runner-->>RH: ErrCheckpointNotFound / "not found"
@@ -463,10 +464,12 @@ sequenceDiagram
         RH->>Idem: DeleteKey(processingKey)
         RH->>Lock: Release (若拥有)
         RH-->>MQ: return nil
-    else ResumeWithParams 失败 (其他错误)
+    else ResumeWithParams 失败 (其他非瞬态错误)
         Runner-->>RH: error
+        Note over RH: 不调用 cleanupAfterResumeFailure，不发送错误消息
+        Note over RH: 不清理幂等 key（processingKey 130s 后自然过期）
         RH->>Lock: Release (若拥有)
-        RH-->>MQ: return nil (无清理、无错误消息)
+        RH-->>MQ: return nil
     end
 
     RH->>Bridge: BridgeWithInterrupt(iter, chunkCh, interruptCh)
@@ -480,8 +483,8 @@ sequenceDiagram
     end
 
     alt 检测到再次中断 (multi-turn HITL)
-        Bridge-->>RH: interruptCh <- InterruptInfo
-        RH->>Store: UpdateAgentStatus("asking_user")
+        Note over RH: 复用原始 checkpointID（Eino 保存 re-interrupt checkpoint 到原 ID）
+        RH->>Store: UpdateAgentStatus(convID, "asking_user", agentID, checkpointID)
         alt UpdateAgentStatus 失败
             Store-->>RH: error
             RH->>RH: releaseLock() (显式调用)

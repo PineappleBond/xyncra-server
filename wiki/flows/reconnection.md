@@ -538,6 +538,7 @@ sequenceDiagram
 
 3. **推断 checkpoint_id**
    - 若未提供，从 `conv.CheckpointID` 获取
+   - 若 `conv.CheckpointID` 也为空，返回 ValidationError 给客户端
 
 4. **查询待处理问题**
    - 调用 `QuestionStore.GetPendingByCheckpoint(ctx, checkpointID)`
@@ -641,7 +642,8 @@ sequenceDiagram
 | **锁竞争** | 初始 HITL 执行的锁仍被持有时（预期情况），恢复不持有锁继续执行；锁 TTL 过期则获取新锁；130 秒锁 TTL 故意长于执行超时以防止过早释放 | 无锁冲突 |
 | **多轮 HITL（重新中断）** | agent 恢复后可能再次暂停产生新问题，不释放锁（D-084），删除 processing key 允许后续恢复，持久化新 Question | 支持多轮交互 |
 | **流式响应中途出错** | chunk 包含错误时，发送已累积的部分文本作为 `is_done=true` 的流更新，清除输入指示器。若为瞬态错误则额外发送错误消息并删除 processing key 允许用户手动重试。与 task_handler 返回错误供 Asynq 自动重试不同，HITL 恢复通知用户让用户决定是否重试 | 用户看到部分结果，可手动重试 |
-| **QuestionStore 为 nil** | Handler 记录日志并返回 nil（D-063 nil-safe），不尝试恢复 | 功能降级 |
+| **CheckpointID 推断失败** | 客户端未提供 `checkpoint_id` 且 `conv.CheckpointID` 为空时，Handler 返回 ValidationError("checkpoint_id is required and cannot be inferred from conversation") | 客户端收到错误响应 |
+| **QuestionStore 为 nil** | Handler 返回 InternalError 给客户端，不尝试恢复 | 功能降级 |
 | **锁获取失败（Redis 错误）** | fail-open 无锁继续，存在并发执行风险但通过幂等性缓解 | 风险可控 |
 | **清理失败** | 正常完成路径和 `cleanupAfterResumeFailure` 的所有清理操作（标记 processed、删除 processing、清除状态、删除问题、删除 checkpoint）均为非致命，错误记录日志但不影响返回值（始终返回 nil 给 MQ，D-073） | 无影响 |
 
@@ -696,7 +698,7 @@ sequenceDiagram
 
 4. **续期连接 TTL**
    - 调用 `ConnectionStore.Refresh(ctx, connID)` 重置连接 TTL
-   - `RedisConnectionStore.Refresh` 先 GET 连接信息获取 UserID，再通过原子 Lua 脚本（`luaRefresh`）同时重置 info key 和 user SET 的 TTL（D-010 MAX 语义）
+   - `RedisConnectionStore.Refresh` 采用两阶段模式：(1) GET infoKey 读取连接 JSON 获取 UserID 和 TTL 配置，若 key 不存在返回 `ErrConnectionNotFound`；(2) 通过原子 Lua 脚本（`luaRefresh`）同时重置 info key 和 user SET 的 TTL（D-010 MAX 语义）。GET 与 Lua 之间存在短暂竞态窗口（key 可能在 GET 后过期），Lua 脚本的 EXISTS 检查可捕获此情况
    - 默认连接 TTL 为 30 分钟（`defaultConnectionTTL`）
 
 5. **返回结果**

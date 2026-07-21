@@ -172,6 +172,8 @@ flowchart TD
 
 如果客户端心跳间隔超过服务端连接 TTL，连接会在心跳之间过期。下次心跳时 `Refresh` 返回 `ErrConnectionNotFound`，客户端收到 `connection expired` 错误。此时 connectionMonitor 需要重新建立连接。
 
+**注意**：服务端返回 `connection expired` 错误时不会主动关闭 WebSocket 连接。connectionMonitor 仅在检测到 WebSocket 断开时才触发重连。如果服务端仅返回错误但保持 WebSocket 连接打开，客户端会处于降级状态：心跳持续失败，但 connectionMonitor 不会触发重连。当前实现中，服务端在连接过期后不会主动关闭 WebSocket，因此客户端依赖后续的 WebSocket 超时或 pong 失败来触发重连。
+
 **建议**：心跳间隔 < TTL / 2（默认 TTL 30 分钟时，30 秒间隔安全裕量充足）。
 
 ### 7. 同一用户的多连接

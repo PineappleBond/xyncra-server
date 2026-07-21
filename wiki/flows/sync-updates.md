@@ -312,18 +312,28 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[收到单个 update] --> B{Seq == 0?}
-    B -->|是| C[跳过 seq 连续性检查和持久化]
-    C --> D[直接通知 handler]
-    B -->|否| E[读取 localMaxSeq]
-    E --> F{seq 连续性检查}
-    F -->|seq <= localMaxSeq| G[跳过, 已处理]
-    F -->|seq > localMaxSeq+1| H[触发 debounced pull]
-    F -->|seq == localMaxSeq+1| I[原子事务]
-    I --> J[1. 写入 NotificationLog 去重]
-    J --> K[2. 按类型分发 DB 写入]
-    K --> L[3. 推进 localMaxSeq]
-    L --> M[事务提交后通知 handler]
+    B -->|是| C{Type == conversation?}
+    C -->|是| D[handleEphemeralConversationUpdate]
+    D --> D1{Action == update?}
+    D1 -->|否| E[直接通知 handler]
+    D1 -->|是| D2{D-124: updated_at 比较}
+    D2 -->|本地已是最新| D3[通知 handler 本地数据]
+    D2 -->|本地过期或缺失| D4[RPC get_conversation]
+    D4 --> D5[upsert 到本地 DB + Questions D-125]
+    D5 --> E
+    C -->|否| E
+    B -->|否| F[读取 localMaxSeq]
+    F --> G{seq 连续性检查}
+    G -->|seq <= localMaxSeq| H[跳过, 已处理]
+    G -->|seq > localMaxSeq+1| I[触发 debounced pull]
+    G -->|seq == localMaxSeq+1| J[原子事务]
+    J --> K[1. 写入 NotificationLog 去重]
+    K --> L[2. 按类型分发 DB 写入]
+    L --> M[3. 推进 localMaxSeq]
+    M --> N[事务提交后通知 handler]
 ```
+
+> **Ephemeral Conversation Update (D-118/D-124)**：当 Seq=0 的 conversation "update" 事件到达时，客户端不直接通知 handler，而是执行 pull-on-notification 模式：比较 payload 的 `updated_at` 与本地 conversation 的 `UpdatedAt`，仅当本地缓存过期时才发起 `get_conversation` RPC 拉取最新数据。这避免了不必要的网络请求。
 
 ### 客户端 DB 事务保证
 
