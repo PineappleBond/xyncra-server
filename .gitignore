@@ -54,9 +54,6 @@ demo/web/src/**/*.js
 demo/web/config/**/*.js
 demo/web/cloudflare-worker/src/**/*.js
 
-# 外部引入的 Vue 项目模板
-demo/vue-pure-admin/
-
 # 测试覆盖率
 **/coverage/
 
