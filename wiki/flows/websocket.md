@@ -46,24 +46,26 @@ flowchart TD
     P --> Q{ConnectionStore.Add}
     Q -->|成功| R[client.Run 阻塞等待断开]
     Q -->|失败 MaxConnExceeded| S[关闭连接 移除本地索引]
-    Q -->|失败 Redis不可达| R
+    Q -->|失败 Redis不可达| S
 ```
 
 ### 详细步骤
 
 1. 客户端发送 HTTP 请求到 `/ws` 路径，携带 `user_id` 和 `device_id` 查询参数
-2. `handleWebSocket` 调用 `authenticate` 函数提取并验证 `user_id`（默认从 query 参数提取）
+2. `handleWebSocket` 调用 `authenticate` 函数提取并验证 `user_id`（默认从 query 参数提取），失败返回 HTTP 401
 3. 提取 `device_id`，若缺失则自动生成 UUID v4
-4. 检查 `device_id` 长度是否超过 255 字符
+4. 检查 `device_id` 长度是否超过 255 字符，过长返回 HTTP 400
 5. 查询 `clientsByDevice` 索引，捕获同设备的旧连接
-6. 若存在旧连接且 ReverseRPC 已配置，调用 `CancelDevice` 取消待处理的反向 RPC 请求
-7. 调用 `upgrader.Upgrade` 将 HTTP 连接升级为 WebSocket
-8. 生成唯一 `connID`（UUID v4）
-9. 创建 `Client` 实例，注入连接上下文和配置选项
-10. 原子性更新三个本地索引：`clients`、`clientsByUser`、`clientsByDevice`
-11. 异步执行设备替换（发送 4001 close frame 给旧连接）
-12. 构建 `ConnectionInfo` 并调用 `ConnectionStore.Add` 注册到 Redis
-13. 调用 `client.Run()` 阻塞等待客户端断开
+6. 若存在旧连接且 ReverseRPC 已配置，调用 `CancelDevice` 取消待处理的反向 RPC 请求（在 Upgrade 之前执行，避免取消新连接的请求）
+7. 调用 `upgrader.Upgrade` 将 HTTP 连接升级为 WebSocket（`CheckOrigin` 始终返回 true，CORS 由反向代理处理）
+8. 创建 `ws.connection` 追踪 span（覆盖整个连接生命周期）
+9. 生成唯一 `connID`（UUID v4），创建 `Client` 实例，注入连接上下文（`WithContext(connCtx)`）
+10. 原子性更新三个本地索引：`clients`、`clientsByUser`、`clientsByDevice`，同时从 `clientsByDevice` 移除旧连接引用并调用 `cancelPendingFuncCleanup` 取消待执行的函数清理
+11. 若存在旧连接，异步启动 `performDeviceReplacement` 协程（发送 4001 close frame 给旧连接）
+12. 调用 `extractIP` 提取客户端 IP（优先 `X-Forwarded-For`），构建 `ConnectionInfo`
+13. 若配置了 `connectionInfoEnricher`，调用它从 HTTP 请求填充额外字段
+14. 调用 `ConnectionStore.Add` 注册到 Redis（Lua 脚本原子操作）。若失败，关闭连接、移除本地索引并返回
+15. 调用 `client.Run()` 阻塞等待客户端断开
 
 ### 边缘场景
 
@@ -71,11 +73,12 @@ flowchart TD
 |------|----------|
 | `device_id` 缺失 | 自动生成 UUID，记录日志 |
 | `device_id` 过长（>255 字符） | 返回 HTTP 400 |
-| 认证失败（`user_id` 缺失） | 返回 HTTP 401 |
+| 认证失败（`user_id` 缺失或 authenticate 返回错误） | 返回 HTTP 401 |
 | 同设备重复连接 | 触发设备替换流程，旧连接收到 4001 close frame |
-| `ConnectionStore.Add` 失败（如 MaxConnectionsExceeded） | 关闭连接，移除本地索引 |
-| Redis 不可达 | 连接仍可建立但仅限本地使用 |
-| MaxConnectionsPerUser 超限 | Lua 脚本原子检查，返回 -1 |
+| `ConnectionStore.Add` 失败（如 MaxConnectionsExceeded） | 关闭连接，移除本地索引，连接不建立 |
+| Redis 不可达导致 `ConnectionStore.Add` 失败 | 同上：关闭连接，移除本地索引，连接不建立 |
+| MaxConnectionsPerUser 超限 | Lua 脚本原子检查（避免 TOCTOU 竞争），返回 -1，`Add` 返回 `ErrMaxConnectionsExceeded` |
+| Upgrade 失败但 `CancelDevice` 已执行 | 直接返回，旧连接的待处理 RPC 被不必要取消但旧连接本身不受影响 |
 
 ---
 
@@ -106,14 +109,15 @@ flowchart TD
 ### 详细步骤
 
 1. 在 Upgrade 前捕获 `clientsByDevice[deviceKey]` 中的所有旧连接
-2. 调用 `reverseRPC.CancelDevice` 取消旧设备的待处理请求
+2. 调用 `reverseRPC.CancelDevice` 取消旧设备的待处理请求（在 Upgrade 之前执行，避免取消新连接到达后注册的请求）
 3. 执行 WebSocket Upgrade
-4. 原子性地从 `clientsByDevice` 中移除旧连接 ID，添加新连接 ID
-5. 异步启动 `performDeviceReplacement` 协程：发送 4001 close frame 给旧连接
-6. 等待 10ms 确保 TCP 发送缓冲区刷新
+4. 原子性地从 `clientsByDevice` 中移除旧连接 ID，添加新连接 ID；同时调用 `cancelPendingFuncCleanup` 取消待执行的函数清理
+5. 异步启动 `performDeviceReplacement` 协程（不跟踪 WaitGroup，best-effort）：发送 4001 close frame 给旧连接（WriteControl 超时 5s）
+6. 等待 10ms 确保 TCP 发送缓冲区刷新（防止 FIN 先于 close frame 到达客户端）
 7. 调用 `oldClient.Close()` 关闭旧连接
 8. 等待旧连接的 goroutine 退出（超时 500ms）
 9. 调用 `removeClient` 清理旧连接的本地索引
+10. `ConnectionStore.Remove` 由旧连接自身的 `handleWebSocket` defer 完成，`performDeviceReplacement` 中不重复调用
 
 ### 边缘场景
 
@@ -123,6 +127,7 @@ flowchart TD
 | 旧连接 goroutine 未在 500ms 内退出 | 超时后继续 |
 | 旧连接的 `handleWebSocket` defer 中的 `ConnectionStore.Remove` 仍会执行 | 最终一致性保证 |
 | 新旧连接的 `connID` 不同 | `removeClient` 不会误删新连接 |
+| `performDeviceReplacement` 协程未在优雅关闭期间完成 | 设计决策：best-effort，本地 map 是路由的 source of truth |
 
 ---
 
@@ -161,15 +166,20 @@ flowchart TD
 ### 详细步骤
 
 1. `readPump` 循环调用 `conn.ReadMessage()` 读取消息
-2. 设置读取限制（默认 64KiB）和读取截止时间
-3. 调用 `unmarshalPackage` 解码为 `protocol.Package`
-4. 启动 `ws.message.receive` 追踪 span
-5. 调用 `MessageHandler.HandleMessage` 分发：
-   - `PackageTypeRequest`：解析 `PackageDataRequest`，查找注册的 `MethodHandler`，执行并返回响应
-   - `PackageTypeResponse`：转发给 `ReverseRPC.DispatchResponse`
+2. 设置读取限制（默认 64KiB）和读取截止时间（`pongWait` 默认 60s），注册 Pong handler 刷新截止时间
+3. 调用 `unmarshalPackage` 解码为 `protocol.Package`，解码失败则记录错误并跳过
+4. 从 PackageData 中提取 method 名称（best-effort，用于 span 属性）
+5. 启动 `ws.message.receive` 追踪 span
+6. 调用 `MessageHandler.HandleMessage` 分发：
+   - `PackageTypeRequest`：解析 `PackageDataRequest`，启动 `handler.invoke` span，查找注册的 `MethodHandler`，执行并返回响应
+   - `PackageTypeResponse`：解码后转发给 `ReverseRPC.DispatchResponse`
    - `PackageTypeUpdates`：记录日志（预留）
-6. 对于 Request 类型，执行 `handleRequest`：查找 method 对应的 handler，未找到则使用 fallback handler
-7. 执行 handler，返回成功或错误响应
+   - 未知类型：记录警告日志
+7. 对于 Request 类型，执行 `handleRequest`：查找 method 对应的 handler，未找到则使用 fallback handler；若均未配置，返回 unknown method 错误
+8. 执行 handler，根据返回类型构建响应：
+   - 成功：返回 `ResponseCodeOK` 响应
+   - `HandlerError`：返回带自定义错误码的响应
+   - 普通 `error`：返回 `ResponseCodeError` 通用错误响应
 
 ### 边缘场景
 
@@ -177,9 +187,12 @@ flowchart TD
 |------|----------|
 | 消息超过 maxMessageSize | WebSocket 库返回错误，连接关闭 |
 | 消息解码失败 | 记录错误，跳过该消息继续读取 |
-| 未知 method | 返回 unknown method 错误响应 |
-| Handler 执行错误 | 区分 `HandlerError`（带错误码）和普通 `error` |
-| Pong 超时（默认 60s） | 读取截止时间到期，连接关闭 |
+| Request 数据解析失败（无效 JSON） | 发送 `ResponseCodeError` "invalid request data" 响应 |
+| 未知 method 且无 fallback handler | 返回 unknown method 错误响应 |
+| Handler 执行错误 | 区分 `HandlerError`（带自定义错误码）和普通 `error`（通用错误码） |
+| Pong 超时（默认 60s） | 读取截止时间到期，ReadMessage 返回错误，readPump 退出 |
+| 意外关闭（非正常断开） | 记录 Error 级别日志；正常断开记录 Debug 级别 |
+| Response 无匹配的 pending 请求 | `DispatchResponse` 静默忽略（超时后的迟到响应） |
 
 ---
 
@@ -196,36 +209,38 @@ flowchart TD
     B -->|否| D[放入 send channel]
     D --> E{channel 满?}
     E -->|是| F[返回 ErrSendBufferFull]
-    E -->|否| G[writePump 读取 channel]
-    G --> H[设置写入截止时间 10s]
-    H --> I[conn.NextWriter]
-    I --> J[写入消息内容]
-    J --> K[关闭写入器]
-    K --> L{到达 Ping 间隔?}
-    L -->|是| M[发送 Ping 消息]
-    L -->|否| G
-    M --> G
+    E -->|否| G[writePump select 循环]
+    G --> H{select 三路分支}
+    H -->|send channel 有消息| I[设置写入截止时间 10s]
+    I --> J[conn.NextWriter + Write + Close]
+    J --> G
+    H -->|ticker.C 到期| K[设置写入截止时间 10s]
+    K --> L[发送 Ping 消息]
+    L --> G
+    H -->|ctx.Done 取消| M[发送 close frame]
+    M --> N[writePump 退出]
 ```
 
 ### 详细步骤
 
 1. 调用 `client.Send(msg)` 或 `client.SendPackage(pkg)`
-2. 检查 `closed` 状态，若已关闭返回 `ErrClientClosed`
-3. 将消息放入带缓冲的 send channel（默认容量 256，`defaultSendBufSize = 256`）
-4. `writePump` 从 channel 读取消息
-5. 设置写入截止时间（默认 10s，`defaultWriteWait = 10s`）
-6. 调用 `conn.NextWriter` 获取写入器
-7. 写入消息内容并关闭写入器
-8. 定期发送 Ping 消息（默认 54s 间隔）
+2. 检查 `closed` 状态（`mu.Lock` 保护），若已关闭返回 `ErrClientClosed`
+3. 将消息放入带缓冲的 send channel（默认容量 256，`defaultSendBufSize = 256`），channel 满时返回 `ErrSendBufferFull`
+4. `writePump` 运行 select 循环，三路分支：
+   - **send channel**：读取消息，设置写入截止时间（默认 10s），调用 `conn.NextWriter` 获取写入器，写入内容并关闭写入器
+   - **ticker.C**：发送 Ping 消息（默认 54s 间隔 = `pongWait * 9 / 10`）
+   - **ctx.Done**：发送 close frame 后退出
+5. send channel 设计为不关闭：避免与并发 `Send` 产生 send-on-closed-channel panic
 
 ### 边缘场景
 
 | 场景 | 处理方式 |
 |------|----------|
 | send channel 满 | 返回 `ErrSendBufferFull`，消息丢弃 |
-| 写入超时 | `writePump` 退出，触发连接关闭 |
-| 连接已关闭但 channel 未清空 | 消息被 `writePump` 丢弃 |
-| `Close()` 和 `writePump` 并发写入 | 通过 context 取消协调，`writePump` 发送 close frame 后退出 |
+| 写入超时（NextWriter/Write 失败） | `writePump` 退出，defer 关闭底层连接 |
+| 连接已关闭但 channel 未清空 | `writePump` 通过 ctx 取消退出，不读取残留消息 |
+| `Close()` 和 `writePump` 并发写入 | 通过 context 取消协调，`writePump` 在 ctx.Done 分支发送 close frame 后退出 |
+| send channel 关闭 | 设计决策：send channel 永不关闭，`writePump` 仅通过 ctx 退出 |
 
 ---
 
@@ -324,7 +339,7 @@ flowchart TD
 
 | 场景 | 处理方式 |
 |------|----------|
-| 连接已过期/被清除 | 返回 connection expired 错误，客户端应重新连接 |
+| 连接已过期/被清除 | 返回 `NotFoundError("connection expired")`，客户端应重新连接 |
 | Redis 不可达 | 返回内部错误 |
 | `device_info` 解析失败 | 忽略，不影响心跳处理（宽容解析） |
 | 心跳参数缺失 | 有效心跳，无参数也正常处理 |
@@ -344,7 +359,7 @@ flowchart TD
     B -->|否| D[创建追踪 span]
     D --> E[本地广播]
     D --> F[跨节点广播]
-    E --> G[clientsByUser O1 查找]
+    E --> G[clientsByUser O1 map 查找]
     G --> H{用户有本地连接?}
     H -->|否| I[跳过]
     H -->|是| J[遍历 client.SendPackage]
@@ -362,7 +377,7 @@ flowchart TD
 
 1. 调用 `BroadcastUpdates(userID, updates)`
 2. 创建 `handler.broadcast` 追踪 span
-3. 本地广播：`broadcastLocal` 通过 `clientsByUser[userID]` O(1) 查找用户所有连接
+3. 本地广播：`broadcastLocal` 通过 `clientsByUser[userID]` O(1) 查找用户连接 map，遍历 O(k) 发送到 k 个连接
 4. 遍历调用 `client.SendPackage` 发送
 5. 跨节点广播：`nodeBroadcaster.Publish` 发布到 Redis Pub/Sub，携带 `sourceNodeID`
 
@@ -419,18 +434,19 @@ flowchart TD
 
 #### 启动流程 (Start)
 
-1. `NewWebSocketServer` 创建服务器实例，配置依赖注入
-2. `Start(ctx)` 启动服务器：创建 HTTP mux，注册 `/ws` 和 `/health` 路由
+1. `NewWebSocketServer` 创建服务器实例，配置依赖注入（连接存储、认证函数、消息处理器、NodeBroadcaster、FunctionRegistry 等）
+2. `Start(ctx)` 启动服务器：创建 HTTP mux，注册 `/ws`、`/health` 路由及额外路由（`extraRoutes`，如 `/metrics`）
 3. 绑定 TCP 监听器
-4. 启动 HTTP 服务器协程
-5. 启动 Pub/Sub 订阅协程
+4. 启动 HTTP 服务器协程（`httpServer.Serve`），错误通过 channel 传递
+5. 启动 Pub/Sub 订阅协程（`nodeBroadcaster.Subscribe`，阻塞直到 ctx 取消）
 6. 调用 `BaseServer.Start` 阻塞等待 context 取消
 
 #### 关闭流程 (Start 内部)
 
 1. context 取消后，`httpServer.Shutdown`（5s 超时）停止接受新连接
 2. 调用 `closeAllClients`：内部先调用 `reverseRPC.CancelAll()`，再关闭所有客户端并等待 5s
-3. `Start()` 返回
+3. 检查 HTTP 服务器的意外错误（非 `http.ErrServerClosed`），若存在则返回
+4. `Start()` 返回
 
 #### 关闭流程 (GracefulStop)
 

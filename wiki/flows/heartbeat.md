@@ -28,7 +28,7 @@
 ### 关键特性
 
 - **Passive renewal**：仅刷新 TTL，不更新元数据
-- **Optional device info**：可携带设备信息用于可观测性
+- **Optional device info**：handler 支持接收设备信息用于可观测性，但当前 Go 和 TypeScript 客户端均不发送（Go 发送 `nil`，TS 发送 `null`）
 - **Best-effort params**：参数解析失败不影响 heartbeat
 - **Connection expiry detection**：连接过期时返回错误
 - **No rate limiting**：heartbeat 不做频率限制，依赖客户端自律
@@ -54,11 +54,12 @@ sequenceDiagram
     end
 
     H->>CS: Refresh(ctx, connID)
-    CS->>CS: 1. GET infoKey → 读取连接 JSON
-    CS->>CS: 2. Lua: EXISTS infoKey
-    CS->>CS: 3. Lua: PEXPIRE infoKey (连接 TTL)
-    CS->>CS: 4. Lua: PTTL userKey
-    CS->>CS: 5. Lua: PEXPIRE userKey (MAX 语义)
+    CS->>CS: 1. GET infoKey → 读取连接 JSON（获取 TTL 配置和 UserID）
+    CS->>CS: 2. Lua 脚本（原子执行）:
+    Note over CS: EXISTS infoKey（不存在则返回 0）
+    Note over CS: PEXPIRE infoKey（重置连接 TTL）
+    Note over CS: PTTL userKey（读取当前 TTL）
+    Note over CS: PEXPIRE userKey（仅当新 TTL > 当前 TTL）
 
     alt 连接不存在
         CS-->>H: ErrConnectionNotFound
@@ -133,7 +134,7 @@ flowchart TD
 | Redis 不可达或超时 | 返回 `InternalError`（含分类后的错误：`ErrRedisTimeout` 或 `ErrRedisConnectionFailed`） |
 | info key 数据损坏（JSON 反序列化失败） | 返回 `InternalError` |
 
-**客户端行为**：收到 `connection expired` 错误后，客户端应重新建立 WebSocket 连接。
+**客户端行为**：收到 `connection expired` 错误后，heartbeatLoop 仅记录日志，不主动重连。连接断开后由 connectionMonitor 检测并触发重连。
 
 ### 3. 并发 Refresh
 
@@ -157,6 +158,16 @@ flowchart TD
 ### 5. 用户 SET TTL MAX 语义
 
 当多个连接属于同一用户时，user SET key 的 TTL 采用 MAX 语义：仅当新 TTL > 当前 TTL 时才更新。这避免了短 TTL 连接的心跳意外缩短长 TTL 连接的 user SET 有效期。
+
+### 6. 心跳间隔大于连接 TTL
+
+如果客户端心跳间隔超过服务端连接 TTL，连接会在心跳之间过期。下次心跳时 `Refresh` 返回 `ErrConnectionNotFound`，客户端收到 `connection expired` 错误。此时 connectionMonitor 需要重新建立连接。
+
+**建议**：心跳间隔 < TTL / 2（默认 TTL 30 分钟时，30 秒间隔安全裕量充足）。
+
+### 7. 同一用户的多连接
+
+心跳基于 connID 而非 userID，每个连接独立拥有自己的 TTL。多个连接的心跳互不影响，user SET key 的 TTL 采用 MAX 语义（见场景 5）。
 
 ---
 
@@ -228,9 +239,10 @@ flowchart TD
 ### 3. Connection Expiry Detection
 
 当连接已过期时返回错误：
-- 客户端可以立即感知连接状态
+
+- 客户端可以立即感知连接状态（错误被记录到日志）
 - 避免客户端继续向无效连接发送消息
-- 触发客户端重连逻辑
+- 连接断开后由 connectionMonitor 检测并触发重连
 
 ### 4. Device Info 仅记录不持久化
 
@@ -272,22 +284,16 @@ heartbeat 不做服务端频率限制：
 
 ### 错误处理
 
+heartbeatLoop 采用 **best-effort** 策略：所有错误仅记录日志，不中断心跳循环，不区分错误类型。
+
 ```mermaid
 flowchart TD
     A[发送 heartbeat] --> B{响应成功?}
     B -->|是| C[继续正常心跳]
-    B -->|否| D{错误类型?}
-    D -->|connection expired| E[重新建立连接]
-    D -->|网络错误| F[重试]
-    D -->|其他错误| G[记录日志, 继续心跳]
+    B -->|否| D[记录日志, 继续心跳]
 ```
 
-### 防抖
-
-客户端应实现防抖逻辑：
-- 用户活跃时自动发送 heartbeat
-- 用户长时间不活跃时降低频率
-- 避免不必要的网络开销
+**重连由 connectionMonitor 处理**：连接断开时 heartbeatLoop 继续运行（RPC 调用因 WebSocket 关闭而失败），connectionMonitor 检测到断开后执行重连，重连成功后 heartbeat 自动恢复。收到 `connection expired` 错误时，客户端不主动重连——connectionMonitor 会在下一次断开检测时触发重连逻辑。
 
 ---
 

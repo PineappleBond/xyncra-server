@@ -93,7 +93,7 @@ sequenceDiagram
     participant BG as 后台 Goroutine
     participant CS as ConversationStore
     participant QS as QuestionStore
-    participant CP as CheckPointStore
+    participant CP as checkpointStore
     participant Lock as Redis (SETNX)
     participant DS as DataStore (SendMessage)
     participant BC as BroadcastHelper

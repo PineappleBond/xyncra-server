@@ -1,6 +1,9 @@
 # CLI 操作 & 可观测性
 
 > CLI 命令行工具的操作流程，以及日志、指标、链路追踪、性能分析的采集链路。
+>
+> CLI 子命令的详细 IPC/standalone 双通道机制、IPC 协议细节、进程锁、日志管理、草稿管理等请参阅 [CLI 与 IPC 通信](cli-ipc.md)。
+> 客户端日志清理（RPCLog/NotificationLog）的详细流程请参阅 [后台清理](background-cleanup.md#客户端日志清理)。
 
 ## 场景 1: CLI 应用入口与命令分发
 
@@ -9,16 +12,27 @@
 ```mermaid
 flowchart TD
     A[用户执行 xyncra-client 命令] --> B[NewRootCommand 创建 cobra 根命令]
-    B --> C[解析全局持久化 Flag]
+    B --> C[注册 5 个全局持久化 Flag]
     C --> D{Flag 解析优先级}
-    D --> E[flag 值 > 环境变量 > 默认值]
+    D --> E["flag 值 > 环境变量 > 默认值"]
     E --> F[NewCLIContext 构建 CLI 上下文]
     F --> G{user-id / device-id 是否为空?}
     G -->|是| H[返回错误退出]
     G -->|否| I[ensureUserDir 创建用户目录]
-    I --> J[分发到子命令]
-    J --> K[listen / send / conversations / messages / logs / kill 等]
+    I --> J[分发到 19 个子命令]
 ```
+
+### 全局 Flag 与环境变量
+
+| Flag | 环境变量 | 默认值 | 说明 |
+|------|----------|--------|------|
+| `--user-id` / `-u` | `XYNCRA_USER_ID` | 无（必填） | 用户 ID |
+| `--device-id` | `XYNCRA_DEVICE_ID` | 无（必填） | 设备 ID |
+| `--server` / `-s` | `XYNCRA_SERVER` | `ws://localhost:8080/ws` | 服务端 WebSocket URL |
+| `--db-path` | `XYNCRA_DB_PATH` | `$USER_DIR/xyncra.db` | 本地 SQLite 数据库路径 |
+| `--log-dir` | `XYNCRA_LOG_DIR` | `$USER_DIR/logs/` | 日志目录 |
+
+其中 `USER_DIR` = `~/.xyncra/{user_id}/{device_id}/`。
 
 ### 边缘场景
 
@@ -26,7 +40,7 @@ flowchart TD
 
 - 触发条件: user-id 或 device-id 未通过 flag 或环境变量提供
 - 处理逻辑: resolveStringFlag 按 flag > env > default 优先级解析，若最终为空则返回 error
-- 最终结果: 命令不执行，输出 "context: user-id is required" 错误信息
+- 最终结果: user-id 缺失时输出 "context: user-id is required (set via --user-id flag or XYNCRA_USER_ID env var)"，device-id 缺失时类似
 
 #### 2. 用户目录创建失败
 
@@ -37,59 +51,38 @@ flowchart TD
 ### 涉及文件
 
 - `internal/cli/app.go`: CLI 根命令定义、全局 Flag 声明、CLIContext 构建、子命令注册
-- `internal/cli/paths.go`: 用户目录管理、路径计算
+- `internal/cli/paths.go`: 用户目录管理、路径计算、defaultDeviceID（测试辅助）
 
 ---
 
 ## 场景 2: 会话管理 (创建/删除/恢复/列表/详情)
 
-### 主流程
+> 详细流程参阅 [CLI 与 IPC 通信 - 会话管理](cli-ipc.md#5-会话管理)。
+
+### 概览
+
+所有变更操作（create/delete/restore）采用 **IPC 优先 -> standalone WebSocket 降级** 的双通道模式。查询操作（list/get）直接读取本地 SQLite。
 
 ```mermaid
-sequenceDiagram
-    participant User as 用户
-    participant CLI as CLI 命令
-    participant IPC as IPC Client
-    participant Daemon as Listen Daemon
-    participant WS as WebSocket
-    participant Server as Xyncra Server
-    participant DB as 本地 SQLite
-
-    User->>CLI: xyncra-client create-conversation --peer-id=xxx
-    CLI->>CLI: NewCLIContext 解析参数
-    CLI->>IPC: 尝试 IPC 调用 create_conversation
-    alt IPC 成功
-        IPC-->>CLI: 返回 ConversationResult
-        CLI->>CLI: printCreateConversationResult
-    else IPC 失败
-        CLI->>WS: standaloneRPC 建立 WebSocket 连接
-        WS->>Server: 发送 create_conversation RPC
-        Server-->>WS: 返回结果
-        WS-->>CLI: 返回 ConversationResult
-        CLI->>DB: 本地同步 Upsert Conversation
-        CLI->>CLI: printCreateConversationResult
-    end
+flowchart TD
+    A[会话变更命令] --> B[IPC 调用]
+    B --> C{IPC 成功?}
+    C -->|是| D[结果输出]
+    C -->|否| E[standaloneRPC 降级]
+    E --> F{standalone 成功?}
+    F -->|是| G[本地 DB 同步 + 结果输出]
+    F -->|否| H[输出双错误信息]
 ```
 
 ### 边缘场景
 
-#### 1. 两种传输模式均失败
-
-- 触发条件: IPC 连接失败（daemon 未运行）且 WebSocket 连接也失败
-- 处理逻辑: 分别捕获 ipcErr 和 wsErr，输出双错误原因
-- 最终结果: 输出 "Error: Cannot create conversation." + 两个 Cause + Hint
-
-#### 2. Standalone 模式本地同步失败
-
-- 触发条件: WebSocket RPC 成功但本地 SQLite 写入失败
-- 处理逻辑: 输出 stderr warning 但不影响主流程
-- 最终结果: 操作成功（服务端已持久化），本地 DB 稍有延迟
-
-#### 3. list-conversations 本地无数据
-
-- 触发条件: 本地 DB 中无会话记录（首次使用或未同步）
-- 处理逻辑: 检测 convs 长度为 0
-- 最终结果: 输出 "No conversations found. Run 'xyncra-client listen' first to sync data."
+| 场景 | 行为 |
+|------|------|
+| IPC 和 standalone 均失败 | 输出两个错误原因 + Hint: 启动 daemon |
+| standalone 模式本地同步失败 | stderr warning，不影响主流程 |
+| list-conversations 本地无数据 | 输出 "No conversations found. Run 'xyncra-client listen' first to sync data." |
+| restore 本地记录缺失（IPC handler） | 降级为 `xc.Call('get_conversation')` 从服务器获取并 upsert |
+| get-conversation 会话不存在 | 返回用户友好错误 |
 
 ### 涉及文件
 
@@ -100,47 +93,51 @@ sequenceDiagram
 
 ## 场景 3: 消息发送
 
-### 主流程
+> 详细流程参阅 [CLI 与 IPC 通信 - 发送消息](cli-ipc.md#4-发送消息-send)。
+
+### 概览
 
 ```mermaid
 flowchart TD
-    A[xyncra-client send --conversation-id=xxx --content=hello] --> B[解析参数]
-    B --> C{content flag 是否设置?}
-    C -->|否| D[返回错误: --content is required]
+    A[xyncra-client send] --> B[解析参数: conversation-id, content, reply-to, client-msg-id]
+    B --> C{参数合法?}
+    C -->|否| D[返回参数错误]
     C -->|是| E[尝试 IPC 发送]
     E --> F{IPC 成功?}
-    F -->|是| G[clearDraft 清除草稿]
-    G --> H[printSendResult 输出结果]
-    F -->|否| I[standaloneRPC 直连服务端]
-    I --> J{standalone 成功?}
-    J -->|是| K[clearDraft 清除草稿]
-    K --> L[本地同步: Messages.Create + UpdateLastMessage]
-    L --> H
-    J -->|否| M[输出双错误信息]
+    F -->|是| G[clearDraft + printSendResult]
+    F -->|否| H[standaloneRPC 直连服务端]
+    H --> I{standalone 成功?}
+    I -->|是| J[clearDraft + 本地 DB 同步 + printSendResult]
+    I -->|否| K[输出双错误信息]
 ```
+
+### 关键参数
+
+- `--conversation-id` / `-c`: 必填，会话 ID
+- `--content` / `-m`: 必填（必须显式提供，但允许空字符串），消息内容
+- `--reply-to`: 可选，回复目标消息 ID
+- `--client-msg-id`: 可选，客户端消息 ID（幂等键），为空时自动生成 UUID v4
 
 ### 边缘场景
 
-#### 1. clientMsgID 幂等性
-
-- 触发条件: 相同 clientMsgID 重复发送
-- 处理逻辑: 服务端检测 Duplicate，返回 Duplicate=true
-- 最终结果: 消息不会重复创建，CLI 输出 "Duplicate: true"
-
-#### 2. 草稿清理失败
-
-- 触发条件: send 成功但 clearDraft 操作失败
-- 处理逻辑: clearDraft 仅输出 stderr warning，不影响发送结果
-- 最终结果: 消息发送成功，草稿可能残留
+| 场景 | 行为 |
+|------|------|
+| content 未显式提供 | 返回 "send: --content is required"（即使空字符串也需要显式 `--content=""`） |
+| 重复 clientMsgID | 服务端检测 Duplicate，返回 Duplicate=true |
+| 草稿清理失败 | stderr warning，不影响发送结果 |
+| standalone 模式本地 DB 同步 | Messages.Create + UpdateLastMessage；失败仅 warning |
+| 整体超时 | context 超时 15 秒 |
 
 ### 涉及文件
 
-- `internal/cli/send.go`: send 命令定义、IPC/standalone 双通道发送
+- `internal/cli/send.go`: send 命令定义、IPC/standalone 双通道发送、clearDraft
 - `internal/cli/listen.go`: registerIPCHandlers 中注册 send_message
 
 ---
 
 ## 场景 4: Listen Daemon 生命周期管理
+
+> 详细流程参阅 [CLI 与 IPC 通信 - 守护进程模式](cli-ipc.md#3-守护进程模式-listen)。
 
 ### 主流程
 
@@ -149,22 +146,23 @@ sequenceDiagram
     participant User as 用户
     participant CLI as runListen
     participant Lock as 文件锁
-    participant DB as SQLite
+    participant DB as SQLite (WAL mode)
     participant IPC as IPC Server
     participant Client as XyncraClient
     participant Server as 远端服务器
 
-    User->>CLI: xyncra-client listen --user-id=xxx
+    User->>CLI: xyncra-client listen
     CLI->>Lock: acquireLock 获取进程锁
     Lock-->>CLI: 返回 unlock 函数
     CLI->>DB: store.New 打开本地数据库
     CLI->>IPC: NewIPCServer 创建 IPC 服务
     CLI->>CLI: newCLIUpdateHandler + newCLILogger
     CLI->>Client: client.New 构建 XyncraClient
-    CLI->>Client: registerBuiltinHandlers 注册内置函数
-    CLI->>IPC: registerIPCHandlers 注册 IPC 方法
+    CLI->>Client: registerBuiltinHandlers 注册内置函数 (ping, get_device_info, get_time)
+    CLI->>IPC: registerIPCHandlers 注册 11 个 IPC 方法
     CLI->>IPC: ipcServer.Start 启动 IPC 监听
     CLI->>CLI: signal.NotifyContext 注册 SIGINT/SIGTERM
+    CLI->>CLI: go watcher goroutine 监听 xc.Done()
     CLI->>CLI: go startLogCleanup 启动日志清理协程
     CLI->>Client: xc.Start 阻塞运行
 
@@ -177,35 +175,27 @@ sequenceDiagram
     CLI->>CLI: 清理 socket/lock 文件
 ```
 
+### Listen 命令可选 Flag
+
+| Flag | 说明 |
+|------|------|
+| `--device-info` | JSON 格式的设备元数据，用于函数注册 (D-115) |
+
 ### 边缘场景
 
-#### 1. 进程锁被占用 (活进程)
-
-- 触发条件: 另一个 listen 进程正在运行
-- 处理逻辑: acquireLock 检测到锁持有者 PID 存活
-- 最终结果: 输出 "listen already running (PID: xxx)"，exit code 2
-
-#### 2. 进程锁陈旧 (死进程)
-
-- 触发条件: 锁文件存在但持有进程已死
-- 处理逻辑: isProcessAlive 返回 false，删除陈旧锁文件后重试
-- 最终结果: 成功获取锁，继续启动
-
-#### 3. 设备替换退出 (4001)
-
-- 触发条件: 同一 user/device 被另一客户端替换
-- 处理逻辑: XyncraClient 内部检测到 4001，主动 Stop()，xc.Done() channel 关闭
-- 最终结果: cancel() 触发，defer 链清理 socket/lock，进程正常退出
-
-#### 4. 自动日志清理
-
-- 触发条件: 每 1 小时 tick
-- 处理逻辑: runCleanup 在事务中删除 7 天前的 RPCLog 和 NotificationLog
-- 最终结果: 清理失败仅记录日志，不终止 daemon
+| 场景 | 行为 |
+|------|------|
+| 进程锁被占用 (活进程) | 输出 "listen already running (PID: xxx)"，exit code 2 |
+| 进程锁陈旧 (死进程) | isProcessAlive 返回 false，删除陈旧锁文件后重试 |
+| 设备替换退出 (4001) | XyncraClient 内部检测到 4001，主动 Stop()，xc.Done() channel 关闭，watcher goroutine 取消 signal context，进程正常退出 |
+| parseDeviceInfo('') | 返回 nil |
+| parseDeviceInfo('invalid') | 返回空 map（fail-open） |
+| 测试环境变量 | XYNCRA_TEST_RECONNECT_BASE_DELAY / XYNCRA_TEST_RECONNECT_MAX_DELAY 可覆盖重连延迟 |
+| 自动日志清理 | 每 1 小时 tick，runCleanup 在事务中删除 7 天前的 RPCLog 和 NotificationLog；失败仅记录日志 |
 
 ### 涉及文件
 
-- `internal/cli/listen.go`: runListen 主流程、cliUpdateHandler 事件处理
+- `internal/cli/listen.go`: runListen 主流程、cliUpdateHandler 事件处理、registerIPCHandlers、startLogCleanup、runCleanup
 - `internal/cli/lock.go`: acquireLock/readLockInfo/writeLockInfo/isProcessAlive
 - `internal/cli/ipc.go`: IPCServer 生命周期
 
@@ -213,56 +203,41 @@ sequenceDiagram
 
 ## 场景 5: IPC 进程间通信
 
-### 主流程
+> 详细流程参阅 [CLI 与 IPC 通信 - IPC 通信机制](cli-ipc.md#2-ipc-通信机制)。
 
-```mermaid
-sequenceDiagram
-    participant CLI as CLI 子命令
-    participant Client as IPCClient
-    participant Socket as Unix Socket
-    participant Server as IPCServer
-    participant Handler as 方法处理器
+### 概览
 
-    CLI->>Client: NewIPCClient(socketPath, timeout)
-    CLI->>Client: Call(ctx, method, params)
-    Client->>Socket: net.DialTimeout 建立连接
-    Client->>Client: NewIPCRequest 构造 JSON-RPC 请求
-    Client->>Socket: Write JSON + 换行符
-    Socket->>Server: acceptLoop 接受连接
-    Server->>Server: handleConn 读取请求
-    Server->>Server: dispatch 解析 JSON-RPC
-    Server->>Handler: handler(ctx, req)
-    Handler-->>Server: 返回 IPCResponse
-    Server->>Socket: Write JSON + 换行符
-    Socket->>Client: 读取响应
-    Client-->>CLI: 返回 IPCResponse
-```
+IPC 使用 Unix 域套接字 + 换行分隔的 JSON-RPC 2.0 协议。守护进程运行 IPCServer；CLI 子命令使用 IPCClient。
+
+### 协议细节
+
+| 项目 | 值 |
+|------|-----|
+| 传输 | Unix domain socket |
+| 编码 | 换行分隔 JSON |
+| 扫描缓冲区 | bufio.Scanner，64KB 初始缓冲，1MB 最大行长度 |
+| 连接超时 | net.DialTimeout 5 秒 |
+| Socket 权限 | chmod 0600 |
+| Socket 残留处理 | Start 时先 os.Remove 旧 socket |
+
+### 错误码
+
+| 错误码 | 含义 |
+|--------|------|
+| -32700 | JSON 解析错误 |
+| -32600 | 无效的 JSONRPC 版本 |
+| -32601 | 未知方法 |
+| -32000 | 通用服务器错误（handler 返回 generic error） |
+| 自定义 | `*client.ClientError` 中提取的 .Code 和 .Message |
 
 ### 边缘场景
 
-#### 1. 连接超时
-
-- 触发条件: net.DialTimeout 超过 5 秒
-- 处理逻辑: 返回 "ipc client dial: ..." 错误
-- 最终结果: CLI 命令回退到 standalone 模式或报错
-
-#### 2. JSON-RPC 协议错误
-
-- 触发条件: 请求 JSON 解析失败或版本不是 "2.0"
-- 处理逻辑: dispatch 返回 Parse error (-32700) 或 Invalid Request (-32600)
-- 最终结果: 客户端收到错误响应
-
-#### 3. 方法不存在
-
-- 触发条件: 请求的 method 未注册
-- 处理逻辑: dispatch 返回 Method not found (-32601)
-- 最终结果: 客户端收到 -32601 错误码
-
-#### 4. Socket 文件残留
-
-- 触发条件: 上次异常退出未清理 socket 文件
-- 处理逻辑: IPCServer.Start 先 os.Remove 旧 socket
-- 最终结果: 创建新 socket，chmod 0600
+| 场景 | 行为 |
+|------|------|
+| acceptLoop 瞬态错误 | 休眠 100ms 后继续 |
+| Socket 文件残留 | Start 先 os.Remove；若失败且非 ErrNotExist 则返回错误 |
+| Stop() | 取消 context、关闭 listener、调用 wg.Wait() 排空进行中的连接 |
+| IPC 客户端读取超时 | SetReadDeadline 导致 scanner.Scan() 失败，返回错误 |
 
 ### 涉及文件
 
@@ -272,7 +247,9 @@ sequenceDiagram
 
 ## 场景 6: 终止 Daemon 进程 (kill)
 
-### 主流程
+> 详细流程参阅 [CLI 与 IPC 通信 - 终止守护进程](cli-ipc.md#8-终止守护进程-kill)。
+
+### 概览
 
 ```mermaid
 flowchart TD
@@ -282,37 +259,25 @@ flowchart TD
     C -->|是| E[readLockInfo 解析 PID]
     E --> F{进程存活?}
     F -->|否| G[清理残留文件]
-    G --> H[退出]
-    F -->|是| I{--force?}
-    I -->|否| J[发送 SIGTERM]
-    I -->|是| K[发送 SIGKILL]
-    J --> L[轮询等待进程退出]
-    L --> M{超时?}
-    M -->|否| N[清理文件]
-    M -->|是| O[输出超时错误, exit 3]
-    K --> N
-    N --> P[输出 "Daemon terminated"]
+    F -->|是| H{--force?}
+    H -->|否| I[发送 SIGTERM]
+    H -->|是| J[发送 SIGKILL]
+    I --> K[每 200ms 轮询等待进程退出]
+    K --> L{超时?}
+    L -->|否| M[清理文件]
+    L -->|是| N[输出超时错误, exit 3]
+    J --> M
+    M --> O[输出 "Daemon terminated"]
 ```
 
 ### 边缘场景
 
-#### 1. 进程已停止
-
-- 触发条件: 锁文件不存在
-- 处理逻辑: 输出信息并以 exit 0 退出（非错误）
-- 最终结果: 静默退出
-
-#### 2. 陈旧锁文件
-
-- 触发条件: 锁文件存在但进程已死
-- 处理逻辑: isProcessAlive 返回 false，执行 cleanupDaemonFiles
-- 最终结果: 清理 lock 和 socket 文件
-
-#### 3. SIGTERM 超时
-
-- 触发条件: 进程未在 timeout（默认 5 秒）内退出
-- 处理逻辑: 返回 errKillTimeout
-- 最终结果: 输出提示 "Use --force to force kill"，exit code 3
+| 场景 | 行为 |
+|------|------|
+| 进程已停止（无锁文件） | exit 0，不视为错误 |
+| 陈旧锁文件 | isProcessAlive 返回 false，执行 cleanupDaemonFiles |
+| SIGTERM 超时 | 返回 errKillTimeout，提示 "Use --force to force kill"，exit code 3 |
+| cleanupDaemonFiles 失败 | 静默忽略 os.Remove 错误 |
 
 ### 涉及文件
 
@@ -323,6 +288,8 @@ flowchart TD
 
 ## 场景 7: Standalone RPC 回退机制
 
+> 详细流程参阅 [CLI 与 IPC 通信 - CLI 命令执行总流程](cli-ipc.md#1-cli-命令执行总流程)。
+
 ### 主流程
 
 ```mermaid
@@ -331,13 +298,12 @@ sequenceDiagram
     participant Helper as standaloneRPC
     participant WS as WebSocket
     participant Server as Xyncra Server
-    participant DB as 本地 SQLite
 
     CLI->>Helper: standaloneRPC(ctx, cliCtx, method, params)
     Helper->>WS: websocket.DialContext (5s timeout)
     WS->>WS: 构造 protocol.Package (version=1, type=Request)
-    WS->>Server: WriteJSON 发送请求
-    Server-->>WS: ReadJSON 接收响应
+    WS->>Server: WriteJSON 发送请求 (5s write deadline)
+    Server-->>WS: ReadJSON 接收响应 (5s read deadline)
     WS-->>Helper: 返回 protocol.PackageDataResponse
 
     alt 响应码 != OK
@@ -353,17 +319,11 @@ sequenceDiagram
 
 ### 边缘场景
 
-#### 1. WebSocket 连接超时
-
-- 触发条件: 服务端不可达（5 秒 dial 超时）
-- 处理逻辑: 返回连接错误
-- 最终结果: CLI 命令失败
-
-#### 2. 变更操作提示
-
-- 触发条件: isMutationMethod 返回 true
-- 处理逻辑: 输出提示本地 DB 未更新
-- 最终结果: 建议用户运行 listen 同步
+| 场景 | 行为 |
+|------|------|
+| WebSocket 连接超时 (5s) | 返回 dial 连接错误 |
+| 读取超时 (5s) | 返回 "standalone read: server timed out"（net.Error 检测） |
+| 变更操作提示 | isMutationMethod 覆盖: send_message, delete_message, mark_as_read, create_conversation, delete_conversation, restore_conversation |
 
 ### 涉及文件
 
@@ -373,46 +333,16 @@ sequenceDiagram
 
 ## 场景 8: 消息操作 (删除/标记已读/查询/搜索)
 
-### 主流程
+> 详细流程参阅 [CLI 与 IPC 通信 - 消息管理](cli-ipc.md#6-消息管理)。
 
-```mermaid
-flowchart TD
-    A[消息操作命令] --> B{命令类型}
-    B --> C[delete-message]
-    B --> D[mark-as-read]
-    B --> E[get-messages]
-    B --> F[search-messages]
+### 概览
 
-    C --> C1[IPC 优先 -> Standalone 回退]
-    C1 --> C2[本地 DB 同步 Messages.Delete]
-
-    D --> D1{message-id == 0?}
-    D1 -->|是| D2[resolveLastProcessedMessageID 从本地 DB 解析]
-    D1 -->|否| D3[使用指定 message-id]
-    D2 --> D4[IPC 优先 -> Standalone 回退]
-    D3 --> D4
-    D4 --> D5[返回 server-confirmed cursor]
-
-    E --> E1[直接读取本地 SQLite]
-    E1 --> E2[fetch limit+1 检测 hasMore]
-
-    F --> F1[SearchByConversation 本地搜索]
-    F1 --> F2[返回 DESC 顺序结果]
-```
-
-### 边缘场景
-
-#### 1. mark-as-read message-id=0 全部标记
-
-- 触发条件: 用户不指定 message-id（默认 0）
-- 处理逻辑: 从本地 DB 读取 LastProcessedMessageID 作为游标值
-- 最终结果: 服务端使用 MAX 语义更新 read cursor
-
-#### 2. get-messages 本地无数据
-
-- 触发条件: 本地 DB 无消息记录
-- 处理逻辑: 输出 "No messages found."
-- 最终结果: 提示用户先运行 listen 同步
+| 命令 | 模式 | 说明 |
+|------|------|------|
+| delete-message | IPC + standalone 降级 | 删除指定消息 |
+| mark-as-read | IPC + standalone 降级 | message-id=0 时从本地 DB 解析 LastProcessedMessageID |
+| get-messages | 本地 SQLite 直读 | limit+1 检测 hasMore |
+| search-messages | 本地 SQLite 直读 | DESC 顺序结果 |
 
 ### 涉及文件
 
@@ -427,49 +357,75 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[程序启动] --> B[DefaultConfig 读取环境变量]
-    B --> C[XYNCRA_LOG_LEVEL / DIR / FORMAT / MAX_SIZE 等]
+    B --> C[XYNCRA_LOG_LEVEL / DIR / FORMAT / MAX_SIZE / MAX_AGE / MAX_BACKUPS / COMPRESS]
     C --> D[logger.Init cfg]
     D --> E{cfg.Dir 是否为空?}
     E -->|空| F[仅输出到 stdout]
-    E -->|非空| G[创建日志目录]
+    E -->|非空| G[os.MkdirAll 创建日志目录]
     G --> H[lumberjack.Logger 配置滚动]
-    H --> I[io.MultiWriter stdout + 文件]
+    H --> I["io.MultiWriter(stdout, lj)"]
     I --> J{format}
     F --> J
     J -->|json| K[slog.NewJSONHandler]
     J -->|text| L[slog.NewTextHandler]
     K --> M[slog.SetDefault]
     L --> M
-    M --> N[返回 cleanup 函数]
+    M --> N[返回 cleanup 函数关闭 lumberjack]
 ```
+
+### 环境变量
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `XYNCRA_LOG_LEVEL` | `info` | 日志级别: debug, info, warn, error |
+| `XYNCRA_LOG_DIR` | 空（stdout only） | 非空时输出到 stdout + 滚动日志文件 |
+| `XYNCRA_LOG_FORMAT` | `text` | 输出格式: text (人类可读) 或 json (结构化) |
+| `XYNCRA_LOG_MAX_SIZE` | `100` | 单文件最大 MB |
+| `XYNCRA_LOG_MAX_AGE` | `30` | 旧日志保留天数 |
+| `XYNCRA_LOG_MAX_BACKUPS` | `10` | 最大备份文件数 |
+| `XYNCRA_LOG_COMPRESS` | `true` | 是否 gzip 压缩滚动后的日志 |
+
+日志文件名固定为 `xyncra-server.log`（`<cfg.Dir>/xyncra-server.log`）。
 
 ### 边缘场景
 
 #### 1. 日志目录创建失败
 
 - 触发条件: os.MkdirAll 权限不足
-- 处理逻辑: 返回 "logger: create log dir: ..." 错误
+- 处理逻辑: 返回 "logger: create log dir %q: ..." 错误
 - 最终结果: 程序启动失败
 
 #### 2. 无效日志级别
 
-- 触发条件: XYNCRA_LOG_LEVEL 设为不识别的值
-- 处理逻辑: parseLevel 默认回退到 slog.LevelInfo
+- 触发条件: XYNCRA_LOG_LEVEL 设为不识别的值（非 debug/info/warn/error）
+- 处理逻辑: envLevel 回退到默认值 "info"；parseLevel 也回退到 slog.LevelInfo
 - 最终结果: 使用 INFO 级别
 
-#### 3. 日志滚动配置
+#### 3. 无效日志格式
+
+- 触发条件: XYNCRA_LOG_FORMAT 设为不识别的值（非 text/json）
+- 处理逻辑: envFormat 回退到默认值 "text"；Init 中 `format != "json"` 也回退到 "text"
+- 最终结果: 使用 text 格式
+
+#### 4. 日志滚动配置
 
 - 触发条件: 文件达到 MaxSizeMB（默认 100MB）
 - 处理逻辑: lumberjack 自动滚动，保留 MaxBackups（默认 10）个，MaxAge（默认 30 天）
-- 最终结果: 旧日志自动清理
+- 最终结果: 旧日志自动清理，压缩存储（Compress 默认 true）
+
+#### 5. 负数配置值
+
+- 触发条件: XYNCRA_LOG_MAX_SIZE 等设为负数
+- 处理逻辑: envInt 将负数钳制为 0
+- 最终结果: 使用 0 值
 
 ### 涉及文件
 
 - `internal/logger/logger.go`: Init 函数、parseLevel、lumberjack 配置
-- `internal/logger/config.go`: DefaultConfig 从环境变量加载配置
-- `internal/logger/slog_adapter.go`: SlogLogger 适配器
+- `internal/logger/config.go`: Config 结构、DefaultConfig 从环境变量加载、envLevel/envFormat/envInt/envBool 辅助函数
+- `internal/logger/slog_adapter.go`: SlogLogger 适配器，包装 *slog.Logger 满足 Info/Error/Debug 接口
 - `internal/logger/context.go`: FromContext/WithContext 日志上下文传播
-- `internal/logger/fields.go`: 标准字段定义
+- `internal/logger/fields.go`: 标准字段定义（AgentID, UserID, DeviceID, ConversationID, DurationMs, Model）
 
 ---
 
@@ -482,17 +438,35 @@ flowchart TD
     A[程序启动] --> B{XYNCRA_METRICS_ENABLED=true?}
     B -->|否| C[不启动指标收集]
     B -->|是| D[StartRuntimeCollector 启动 goroutine]
-    D --> E[每 10 秒执行 collectRuntime]
-    E --> F[runtime.ReadMemStats 采集内存]
-    F --> G[更新 Goroutines / MemoryAlloc / MemoryInuse / GCCount / GCDuration]
-    G --> H[countOpenFDs 采集文件描述符]
-    H --> I[更新 OpenFDs Gauge]
+    D --> E[立即执行一次 collectRuntime]
+    E --> F[每 10 秒执行 collectRuntime]
+    F --> G[runtime.ReadMemStats 采集内存]
+    G --> H[更新 Goroutines / MemoryAlloc / MemoryInuse / GCCount / GCDuration]
+    H --> I[countOpenFDs 采集文件描述符]
+    I --> J[更新 OpenFDs Gauge]
 
-    J[业务事件发生] --> K[更新对应 Counter/Histogram]
-    K --> L[MessagesSent / MessagesReceived / AgentExecutions 等]
+    K[业务事件发生] --> L[更新对应 Counter/Histogram]
+    L --> M[MessagesSent / MessagesReceived / AgentExecutions 等]
 
-    M[Prometheus 拉取 /metrics] --> N[输出全部指标]
+    N[Prometheus 拉取 /metrics] --> O[输出全部指标]
 ```
+
+### 环境变量
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `XYNCRA_METRICS_ENABLED` | `false` | 是否启用指标收集 |
+
+### 指标清单 (32 个)
+
+| 分类 | 数量 | 指标 |
+|------|------|------|
+| 系统 | 6 | Goroutines, MemoryAlloc, MemoryInuse, GCDuration, GCCount, OpenFDs |
+| 连接 | 3 | ConnectionsActive, ConnectionsTotal, ConnectionsDuration |
+| 消息 | 4 | MessagesSent, MessagesReceived, MessageSizeBytes, MessageLatency |
+| Agent | 9 | AgentExecutions, AgentExecutionsFailed, AgentDuration, AgentActive, AgentQueueDepth, LLMTokensInput, LLMTokensOutput, LLMCallsTotal, LLMCallsFailed |
+| 业务 | 6 | ConversationsActive, ConversationsCreated, DevicesConnected, FunctionsRegistered, ReverseRPCRequests, ReverseRPCFailed |
+| Redis | 4 | RedisConnected, RedisPingDuration, RedisPoolSize, AsynqQueueSize |
 
 ### 边缘场景
 
@@ -502,11 +476,17 @@ flowchart TD
 - 处理逻辑: countOpenFDs 返回 -1，不更新 OpenFDs
 - 最终结果: 指标缺失但不影响运行
 
+#### 2. GC 指标冷启动
+
+- 触发条件: 首次 collectRuntime 时 m.NumGC == 0
+- 处理逻辑: 跳过 GCDuration.Observe，避免除零
+- 最终结果: GCDuration 在首次 GC 完成前无数据点
+
 ### 涉及文件
 
-- `internal/metrics/metrics.go`: 32 个 Prometheus 指标定义
-- `internal/metrics/runtime.go`: StartRuntimeCollector 运行时指标采集
-- `internal/metrics/config.go`: Config 与 DefaultConfig
+- `internal/metrics/metrics.go`: 32 个 Prometheus 指标定义（6 系统 + 3 连接 + 4 消息 + 9 Agent + 6 业务 + 4 Redis）
+- `internal/metrics/runtime.go`: StartRuntimeCollector 运行时指标采集（10 秒间隔，首次立即执行）
+- `internal/metrics/config.go`: Config 与 DefaultConfig（仅 Enabled 字段，读取 XYNCRA_METRICS_ENABLED）
 
 ---
 
@@ -525,23 +505,49 @@ sequenceDiagram
 
     alt cfg.Enabled=false
         Tracer->>Tracer: 安装 noop.NewTracerProvider
+        Tracer->>Tracer: SetTextMapPropagator(TraceContext)
         Tracer-->>App: 返回空 shutdown
     else cfg.Enabled=true
         Tracer->>Tracer: resource.New (service.name, version, hostname)
-        Tracer->>OTLP: otlptracegrpc.New(endpoint)
+        Tracer->>OTLP: otlptracegrpc.New(endpoint, insecure)
         Tracer->>Tracer: NewDebugSampler(sampleRate, debugUsers, debugDevices)
         Tracer->>Tracer: sdktrace.NewTracerProvider(batcher, resource, sampler)
-        Tracer->>Tracer: otel.SetTracerProvider + SetTextMapPropagator
-        Tracer-->>App: 返回 shutdown 函数
+        Tracer->>Tracer: otel.SetTracerProvider + SetTextMapPropagator(TraceContext + Baggage)
+        Tracer-->>App: 返回 shutdown 函数 (5s timeout)
     end
+```
+
+### 环境变量
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `XYNCRA_TRACING_ENABLED` | `false` | 是否启用链路追踪 |
+| `XYNCRA_TRACING_SERVICE_NAME` | `xyncra-server` | 服务名 resource attribute |
+| `XYNCRA_TRACING_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC collector 地址 |
+| `XYNCRA_TRACING_OTLP_INSECURE` | `true` | 是否禁用 TLS |
+| `XYNCRA_TRACING_SAMPLING_RATE` | `1.0` | 采样比率 (0.0-1.0) |
+| `XYNCRA_TRACING_DEBUG_USERS` | 空 | 强制采样的用户 ID 列表（逗号分隔） |
+| `XYNCRA_TRACING_DEBUG_DEVICES` | 空 | 强制采样的设备 ID 列表（逗号分隔） |
+
+### 采样策略 (DebugSampler)
+
+```mermaid
+flowchart TD
+    A[ShouldSample 被调用] --> B{context 携带 debugInfo?}
+    B -->|是| C{user_id 或 device_id 在调试列表中?}
+    C -->|是| D[RecordAndSample]
+    C -->|否| E{父 Span 已采样?}
+    B -->|否| E
+    E -->|是| F[RecordAndSample]
+    E -->|否| G[委托 TraceIDRatioBased 采样]
 ```
 
 ### 边缘场景
 
 #### 1. 调试用户强制采样
 
-- 触发条件: 请求来自 DebugUsers/DebugDevices 列表中的用户/设备
-- 处理逻辑: DebugSampler.ShouldSample 检查 context 中的 debugContextKey，命中则 RecordAndSample
+- 触发条件: 请求来自 DebugUsers/DebugDevices 列表中的用户/设备（OR 逻辑）
+- 处理逻辑: DebugSampler.ShouldSample 检查 context 中的 debugContextKey（通过 WithDebug 设置），命中则 RecordAndSample
 - 最终结果: 该用户的完整链路被采集
 
 #### 2. 父 Span 已采样
@@ -558,9 +564,9 @@ sequenceDiagram
 
 ### 涉及文件
 
-- `internal/tracing/tracing.go`: InitTracer 初始化
-- `internal/tracing/config.go`: TracingConfig 与 DefaultTracingConfig
-- `internal/tracing/middleware.go`: DebugSampler 采样策略
+- `internal/tracing/tracing.go`: InitTracer 初始化、version/hostname 辅助函数
+- `internal/tracing/config.go`: TracingConfig 与 DefaultTracingConfig、Apply 函数选项
+- `internal/tracing/middleware.go`: DebugSampler 采样策略、WithDebug/IsDebugContext context 工具
 
 ---
 
@@ -579,25 +585,39 @@ flowchart TD
     F --> F1[捕获 output + token_usage + duration_ms]
     C -->|WrapInvokableToolCall 入口| G[写入 tool_call 记录]
     G --> G1[捕获 tool_name + tool_args]
+    G --> G2["broadcastFunctionCall (isDone=false)<br>广播函数调用开始"]
     C -->|WrapInvokableToolCall 出口| H[写入 tool_result 记录]
     H --> H1[捕获 tool_result + duration_ms + error]
-    H1 --> HB[broadcastFunctionCall<br>广播 function_call 给客户端]
+    H --> H2["broadcastFunctionCall (isDone=true)<br>广播函数调用完成"]
     C -->|AfterAgent| I[写入 agent_end 记录]
 
     D --> J[LLMLogger.write JSONL]
     E1 --> J
     F1 --> J
     G1 --> J
+    G2 --> K[BroadcastHelper.SendFunctionCall]
     H1 --> J
+    H2 --> K
     I --> J
-    J --> K[io.Writer 输出]
+    J --> L[io.Writer 输出]
 ```
+
+### 日志阶段与字段
+
+| 阶段 | Phase 值 | 关键字段 |
+|------|----------|----------|
+| BeforeAgent | `agent_start` | agent_id, model, iteration |
+| BeforeModelRewriteState | `request` | messages (截断), tools |
+| AfterModelRewriteState | `response` | output, token_usage (input/output/total), duration_ms |
+| WrapInvokableToolCall 入口 | `tool_call` | tool_name, tool_args (截断 2048) |
+| WrapInvokableToolCall 出口 | `tool_result` | tool_name, tool_result (截断 4096), duration_ms, error |
+| AfterAgent | `agent_end` | output (最后一条消息) |
 
 ### 边缘场景
 
 #### 1. 内容截断
 
-- 触发条件: 消息内容超过 4096 字符或工具参数超过 2048 字符
+- 触发条件: 消息内容超过 4096 字符或工具参数/结果超过 2048/4096 字符
 - 处理逻辑: truncate 函数截断并附加 "...[truncated]"
 - 最终结果: 日志记录保持可管理大小
 
@@ -609,13 +629,20 @@ flowchart TD
 
 #### 3. Function Call 广播
 
-- 触发条件: WrapInvokableToolCall 执行时上下文包含 broadcast 元数据
-- 处理逻辑: 读取 context 中的 BroadcastHelper，发送 function_call ephemeral update
+- 触发条件: WrapInvokableToolCall 执行时上下文包含 broadcast 元数据（通过 WithBroadcastInfo 设置）
+- 处理逻辑: 读取 context 中的 BroadcastHelper、HumanUserID、AgentUserID、ConversationID
+- 广播时机: **两次** — 工具调用开始时 (isDone=false, result 为空) 和工具调用完成时 (isDone=true, 携带结果)
 - 最终结果: 客户端实时看到函数调用进度（fire-and-forget，错误不传播）
+
+#### 4. Broadcast 元数据缺失
+
+- 触发条件: context 中未设置 BroadcastHelper 或 HumanUserID/ConversationID 为空
+- 处理逻辑: broadcastFunctionCall 直接返回，不执行广播
+- 最终结果: 静默跳过，不影响日志记录
 
 ### 涉及文件
 
-- `internal/agent/llm_logger.go`: LLMLogger、LoggingMiddleware
+- `internal/agent/llm_logger.go`: LLMLogger、LoggingMiddleware、LogRecord 类型、broadcastFunctionCall
 
 ---
 
@@ -631,8 +658,8 @@ sequenceDiagram
     participant Exporter as OTLP Exporter
 
     Agent->>TM: BeforeModelRewriteState
+    TM->>TM: atomic iteration++, 记录 modelCallStart
     TM->>OTel: Start("agent.llm.call", agent_id, model, iteration)
-    TM->>TM: 记录 modelCallStart
     alt debug 用户匹配
         TM->>OTel: AddEvent("llm.debug.request", messages)
     end
@@ -640,7 +667,7 @@ sequenceDiagram
     Agent->>Agent: 调用 LLM
     Agent->>TM: AfterModelRewriteState
     TM->>TM: 计算 duration_ms
-    TM->>TM: 提取 token usage
+    TM->>TM: 提取 token usage (PromptTokens, CompletionTokens, TotalTokens)
     TM->>OTel: SetAttributes(input_tokens, output_tokens, total_tokens, duration_ms)
     alt debug 用户匹配
         TM->>OTel: AddEvent("llm.debug.response", message)
@@ -663,13 +690,19 @@ sequenceDiagram
     TM->>OTel: span.End()
 ```
 
+### Debug 内容捕获机制
+
+Debug 匹配在 `BeforeModelRewriteState` 中通过 `isDebugCaller(ctx)` 判断一次，结果缓存到 `debugMatched` 字段，在同一次迭代的 `WrapInvokableToolCall` 中复用。每个迭代独立判断（iteration 递增时重新判断）。
+
+匹配逻辑: 从 context 中提取 `CallerDeviceFromContext`，检查 UserID 是否在 debugUsers 中 **或** DeviceID 是否在 debugDevices 中（OR 逻辑）。
+
 ### 边缘场景
 
 #### 1. Debug 内容捕获
 
 - 触发条件: 调用者 user_id/device_id 匹配 debugUsers/debugDevices 配置
 - 处理逻辑: 完整的请求/响应消息和工具输入/输出作为 span event 记录
-- 最终结果: 可在 Jaeger 等工具中查看完整 LLM 交互内容
+- 最终结果: 可在 Jaeger 等工具中查看完整 LLM 交互内容（含 ReasoningContent）
 
 #### 2. LLM 调用失败
 
@@ -677,9 +710,15 @@ sequenceDiagram
 - 处理逻辑: span.SetStatus(codes.Error) + span.RecordError(err)
 - 最终结果: 在追踪系统中标记为错误 Span
 
+#### 3. 未启用追踪
+
+- 触发条件: TracingMiddleware 仅在 SetTracingEnabled(true) 时添加到链中
+- 处理逻辑: 全局 tracer provider 为 noop 时，中间件不被添加
+- 最终结果: 零开销
+
 ### 涉及文件
 
-- `internal/agent/tracing_middleware.go`: TracingMiddleware
+- `internal/agent/tracing_middleware.go`: TracingMiddleware、SetDebugFilter、isDebugCaller、serializeMessages/serializeMessage
 
 ---
 
@@ -694,28 +733,44 @@ flowchart TD
     B -->|是| D[创建独立 HTTP Mux]
     D --> E[注册 /debug/pprof/ 端点]
     E --> F[注意: 不注册 /debug/pprof/profile]
-    F --> G[HTTP Server 启动 127.0.0.1:6060]
+    F --> G["HTTP Server 启动 (默认 127.0.0.1:6060)"]
     G --> H[等待 ctx.Done 或服务器错误]
     H --> I[优雅关闭 5s timeout]
 ```
+
+### 环境变量
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `XYNCRA_PPROF_ENABLED` | `false` | 是否启动 pprof 服务 |
+| `XYNCRA_PPROF_ADDR` | `127.0.0.1:6060` | 监听地址 |
+
+### 已注册端点
+
+- `/debug/pprof/` — Index
+- `/debug/pprof/cmdline` — Cmdline
+- `/debug/pprof/symbol` — Symbol
+- `/debug/pprof/trace` — Trace
+
+**未注册**: `/debug/pprof/profile` — 与 Pyroscope 持续 CPU profiling 冲突。
 
 ### 边缘场景
 
 #### 1. CPU Profiler 冲突
 
-- 触发条件: Pyroscope 同时启用
+- 触发条件: Pyroscope 同时启用（XYNCRA_PROFILING_ENABLED=true）
 - 处理逻辑: 故意不注册 /debug/pprof/profile 端点
 - 最终结果: 避免 "cpu profiling already in use" 错误
 
 #### 2. 安全绑定
 
-- 触发条件: 默认地址 127.0.0.1:6060
+- 触发条件: 默认地址 127.0.0.1:6060（可通过 XYNCRA_PPROF_ADDR 覆盖）
 - 处理逻辑: 仅监听 localhost，不暴露到网络
 - 最终结果: 防止敏感 profiling 数据泄露
 
 ### 涉及文件
 
-- `internal/profiling/pprof.go`: PprofConfig/StartPprof
+- `internal/profiling/pprof.go`: PprofConfig、DefaultPprofConfig、StartPprof
 
 ---
 
@@ -729,21 +784,35 @@ flowchart TD
     B -->|否| C[不启动 Pyroscope]
     B -->|是| D{XYNCRA_PROFILING_SERVER 设置?}
     D -->|否| E[warn 日志, 跳过]
-    D -->|是| F[pyroscope.Start 初始化]
+    D -->|是| F["pyroscope.Start(appName, server)"]
     F --> G{初始化成功?}
-    G -->|是| H[返回 cleanup 函数]
-    G -->|否| I[warn 日志, fail-open]
+    G -->|是| H[返回 cleanup 函数 (调用 profiler.Stop)]
+    G -->|否| I[warn 日志, fail-open, 返回 nil]
     I --> J[程序正常运行]
 ```
+
+### 环境变量
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `XYNCRA_PROFILING_ENABLED` | `false` | 是否启用 Pyroscope |
+| `XYNCRA_PROFILING_SERVER` | 空 | Pyroscope 服务器地址（如 `http://pyroscope:4040`） |
+| `XYNCRA_PROFILING_APP_NAME` | `xyncra-server` | Pyroscope 中的应用名称 |
 
 ### 边缘场景
 
 #### 1. 服务端不可达
 
 - 触发条件: Pyroscope server 连接失败
-- 处理逻辑: fail-open 策略：记录 warning 并继续
+- 处理逻辑: fail-open 策略：记录 warning 并继续（返回 nil, nil）
 - 最终结果: 程序正常运行，无 profiling 数据
+
+#### 2. SERVER 未配置
+
+- 触发条件: XYNCRA_PROFILING_ENABLED=true 但 XYNCRA_PROFILING_SERVER 为空
+- 处理逻辑: warn 日志 "pyroscope enabled but XYNCRA_PROFILING_SERVER not set, skipping"
+- 最终结果: 跳过初始化，返回 nil, nil
 
 ### 涉及文件
 
-- `internal/profiling/pyroscope.go`: PyroscopeConfig/StartPyroscope
+- `internal/profiling/pyroscope.go`: PyroscopeConfig、DefaultPyroscopeConfig、StartPyroscope、FormatPyroscopeStatus

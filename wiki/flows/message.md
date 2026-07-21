@@ -67,21 +67,22 @@ flowchart TD
    - INSERT 消息记录
    - 批量 INSERT UserUpdate 记录 (每批 100 条)
    - UPDATE conversation 的 `last_message_at` 和 `last_processed_message_id`
+   - 若事务失败且是 `ErrDuplicateKey`，通过 `GetByClientMessageID` 查找已存在消息并返回 `duplicate=true`；若查找也失败则回退返回 `InternalError`
 8. **MQ 推送**：构建 `TypeSendMessage` 任务，包含每个 recipient 的 seq 和 payload，异步入队
-9. **Agent 触发**：若发送者是人类且对方是注册的 Agent，额外入队 `TypeAgentProcess` MQ 任务 (带 `MaxRetry=20`)。payload 包含 `message_id`、`conversation_id`、`agent_id`、`sender_id`、`device_id`（D-102：设备路由）
+9. **Agent 触发**：若 `agentRegistry` 非 nil 且发送者是人类且对方是注册的 Agent，额外入队 `TypeAgentProcess` MQ 任务 (带 `MaxRetry=20`)。payload 包含 `message_id`、`conversation_id`、`agent_id`、`sender_id`、`device_id`（D-102：设备路由）
 10. **返回结果**：返回消息和 `duplicate=false`
 
 ### 边缘场景
 
 | 场景 | 处理方式 |
 |------|----------|
-| **幂等性** | `client_message_id + sender_id` 有唯一索引，重复插入触发 `ErrDuplicateKey`，handler 通过 `GetByClientMessageID` 查找已存在的消息并返回 `duplicate=true`，避免 TOCTOU 竞态 |
+| **幂等性** | `client_message_id + sender_id` 有唯一索引，重复插入触发 `ErrDuplicateKey`，handler 通过 `GetByClientMessageID` 查找已存在的消息并返回 `duplicate=true`，避免 TOCTOU 竞态。若 `GetByClientMessageID` 查找也失败（极端竞态），则回退返回 `InternalError` |
 | **空 content** | 允许发送空内容消息，由 Agent 层返回用户友好的错误 |
 | **会话不存在** | 返回 `NotFoundError` |
 | **非成员发送** | 返回 `PermissionDeniedError` |
 | **MQ 入队失败** | 日志记录但不影响主流程，消息已持久化，客户端可通过 `sync_updates` 拉取 |
 | **Agent MQ 入队失败** | 同上，fire-and-forget 模式 |
-| **Agent 触发仅限 1-on-1** | `peerUserID` 仅支持双人会话（`UserID1`/`UserID2`），群聊场景下 `peerID` 为空，不会触发 Agent |
+| **Agent 触发仅限 1-on-1** | `peerUserID` 仅支持双人会话（`UserID1`/`UserID2`），群聊场景下 `peerID` 为空，不会触发 Agent。此外 `agentRegistry` 必须非 nil 才会进入 Agent 检测逻辑 |
 | **成员数上限** | store 层限制最多 500 个成员 (`maxSendMessageUpdates`) |
 | **并发发送** | 事务内读取 `LastProcessedMessageID` 保证 MessageID 分配原子性，消除 TOCTOU 竞态 |
 
@@ -198,7 +199,7 @@ flowchart TD
 | **会话不存在** | 返回 `NotFoundError` |
 | **非成员操作** | 返回 `PermissionDeniedError` |
 | **非发送者删除** | 返回 `PermissionDeniedError` (only the sender can delete this message) |
-| **重复删除** | store 层 `RowsAffected=0` 返回 `ErrNotFound`，handler 将其包装为 `InternalError` 返回给客户端 |
+| **重复删除** | GORM 软删除插件在 `Get()` 查询时自动排除 `deleted_at` 非空的记录，因此重复删除请求在步骤 3（获取消息）即返回 `NotFoundError`。store 层 `Delete()` 的 `RowsAffected=0` 检查是防御性后备，正常路径不会触及 |
 | **UserUpdate 创建失败** | 日志记录但不影响主流程，消息已软删除 |
 | **MQ 广播失败** | 日志记录但不影响数据完整性，客户端可通过 `sync_updates` 拉取 |
 | **GetLatestSeq 失败** | 跳过该成员的 UserUpdate 创建，记录错误日志 |
@@ -259,7 +260,7 @@ flowchart TD
 
 | 场景 | 处理方式 |
 |------|----------|
-| **空 query** | store 层直接返回空数组，不执行查询 |
+| **空 query** | handler 层校验 `query` 为空时直接返回 `ValidationError`；store 层也有防御性检查（空 query 直接返回空数组不执行查询），正常路径不会触及 |
 | **LIKE 通配符注入** | 使用 `escapeLikePattern` 对用户输入中的 `%`、`_`、pipe 字符进行转义，配合 SQL `ESCAPE` 子句 |
 | **会话不存在** | 返回 `NotFoundError` |
 | **非成员访问** | 返回 `PermissionDeniedError` |
@@ -395,7 +396,9 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[开始事务] --> B[读取 conversation.LastProcessedMessageID]
+    A[开始事务] --> A1{上下文已过期?}
+    A1 -->|是| A2[返回错误]
+    A1 -->|否| B[读取 conversation.LastProcessedMessageID]
     B --> C[分配 MessageID = LastProcessedMessageID + 1]
     C --> D[序列化消息为 JSON payload]
     D --> E[遍历成员列表]
@@ -417,16 +420,17 @@ flowchart TD
 
 ### 详细步骤
 
-1. **开始事务**
-2. **读取会话**：获取 `LastProcessedMessageID`
-3. **分配 MessageID**：`MessageID = LastProcessedMessageID + 1`
-4. **序列化消息**：将消息转为 JSON payload
-5. **分配 seq**：为每个成员查询 `COALESCE(MAX(seq), 0) + 1`
-6. **构建 UserUpdate**：为每个成员构建 UserUpdate 记录
-7. **持久化消息**：INSERT 消息记录
-8. **批量持久化 UserUpdate**：每批 100 条记录
-9. **更新会话元数据**：UPDATE `last_message_at` 和 `last_processed_message_id`
-10. **提交事务**
+1. **上下文检查**：若 `ctx.Err()` 非 nil（已过期），直接返回错误，避免无意义的数据库操作
+2. **开始事务**
+3. **读取会话**：获取 `LastProcessedMessageID`
+4. **分配 MessageID**：`MessageID = LastProcessedMessageID + 1`
+5. **序列化消息**：将消息转为 JSON payload
+6. **分配 seq**：为每个成员查询 `COALESCE(MAX(seq), 0) + 1`
+7. **构建 UserUpdate**：为每个成员构建 UserUpdate 记录
+8. **持久化消息**：INSERT 消息记录
+9. **批量持久化 UserUpdate**：每批 100 条记录
+10. **更新会话元数据**：UPDATE `last_message_at` 和 `last_processed_message_id`
+11. **提交事务**
 
 ### 边缘场景
 
@@ -434,6 +438,7 @@ flowchart TD
 |------|----------|
 | **成员数超限** | `len(memberIDs) > 500` 返回错误 |
 | **事务回滚** | 任何步骤失败，整个事务回滚 |
+| **上下文已过期** | `Transaction()` 在开始事务前检查 `ctx.Err()`，若已过期直接返回错误，避免无意义的数据库操作 |
 | **并发 MessageID 分配** | 事务内 SELECT conversation 获取 `LastProcessedMessageID` 再分配，事务隔离级别保证原子性；handler 层通过 `client_message_id + sender_id` 唯一索引捕获重复键实现幂等 |
 | **软删除查询** | GORM DeletedAt 插件自动在 WHERE 中排除已删除记录 |
 | **Restore 操作** | `Unscoped()` 查询 + 设置 `deleted_at = nil` |

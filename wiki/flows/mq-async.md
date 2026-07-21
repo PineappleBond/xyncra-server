@@ -62,7 +62,31 @@ sequenceDiagram
 
 ### 其他 TypeSendMessage 生产者
 
-`delete_message` RPC 也通过 `broadcastDeleteMessageUpdates` 入队 TypeSendMessage 任务，将消息删除更新广播给所有对话成员。流程与消息发送相同：持久化 UserUpdate 后 fire-and-forget 入队，worker 广播给各 recipient。
+`delete_message` RPC 也通过 `broadcastDeleteMessageUpdates` 入队 TypeSendMessage 任务，将消息删除更新广播给所有对话成员。
+
+#### delete_message 流程
+
+1. 解析参数，校验 `message_id` 必填
+2. 获取消息并校验存在
+3. 获取会话并校验存在
+4. 校验调用者是会话成员（C-3）
+5. 校验调用者是消息发送者（D-014：只有发送者可删除）
+6. 软删除消息（`MessageStore.Delete`）
+7. 为每个会话成员创建 UserUpdate：
+   - 调用 `UserUpdateStore.GetLatestSeq` 获取当前最大 seq
+   - 新 seq = latestSeq + 1
+   - Payload 包含 `{message_id, conversation_id, message_id_seq}`
+   - 调用 `UserUpdateStore.Create` 批量创建（失败不回滚主流程）
+8. 通过 `broadcastDeleteMessageUpdates` 入队 TypeSendMessage（fire-and-forget）
+
+#### delete_message 边缘场景
+
+- **消息不存在**: 返回 404
+- **会话不存在**: 返回 404
+- **非会话成员**: 返回 PermissionDenied
+- **非消息发送者**: 返回 PermissionDenied（D-014）
+- **UserUpdate 创建失败**: 记录日志，不回滚软删除（消息已删除，用户通过 sync_updates 可感知）
+- **GetLatestSeq 失败**: 跳过该成员的 UserUpdate，记录日志，继续处理其他成员
 
 ### 涉及文件
 
@@ -98,31 +122,41 @@ sequenceDiagram
     Worker->>Worker: 解码 AgentProcessPayload
     Worker->>Worker: 校验必填字段
     Worker->>Lock: Acquire(conversationID, 130s)
-    alt 锁已持有
+    alt Redis 错误 (fail-open)
+        Lock-->>Worker: err (跳过锁保护继续执行)
+    else 锁被占用
         Lock-->>Worker: acquired=false
         Worker-->>Broker: return error (触发 Asynq 重试)
     else 锁获取成功
         Lock-->>Worker: acquired=true
     end
-    Worker->>Idem: CheckProcessed (processedKey)
-    Worker->>Idem: CheckProcessed (processingKey)
-    alt 已处理或处理中
-        Worker->>Lock: Release
+    Worker->>Idem: CheckProcessed (processedKey) + CheckProcessed (processingKey)
+    alt 已处理或处理中 (任一 key 存在)
+        Worker->>Lock: Release (仅当 lockHeld=true)
         Worker-->>Broker: return nil (跳过)
     else 首次处理
         Worker->>Idem: MarkProcessed (processingKey, 130s)
     end
     Worker->>Exec: ExecuteWithErrorMessage
+    Exec->>Exec: 信号量 + 超时 + 上下文加载 + Agent 构建
     Exec->>LLM: 调用 LLM
     Exec->>BC: SendTyping + SendStreamUpdate
     BC->>WS: BroadcastUpdates
     Exec->>Store: SendMessage (持久化 Agent 回复)
     Exec->>BC: BroadcastMessageUpdate
-    Worker->>Idem: MarkProcessed (processedKey, 24h)
-    Worker->>Idem: DeleteKey (processingKey)
-    Worker->>Lock: Release
+    alt 执行成功 或 永久失败
+        Worker->>Idem: MarkProcessed (processedKey, 24h)
+        Worker->>Idem: DeleteKey (processingKey)
+    else 瞬态错误 (LLM 超时/限流)
+        Note over Worker: 不标记 processedKey，不删除 processingKey (130s 自然过期)
+    end
+    Worker->>Lock: Release (仅当 lockHeld=true)
     Worker->>Exec: InvalidateContextCache
-    Worker-->>Broker: return nil
+    alt 瞬态错误
+        Worker-->>Broker: return error (触发 Asynq 重试)
+    else 其他
+        Worker-->>Broker: return nil
+    end
 ```
 
 ### 边缘场景
@@ -141,20 +175,20 @@ sequenceDiagram
 
 #### 3. 幂等检测 — 重复消息
 
-- 触发条件: 消息已被处理过（processedKey 存在）或正在处理中（processingKey 存在）
-- 处理逻辑: 释放锁，返回 nil，跳过执行
+- 触发条件: 消息已被处理过（`agent:processed:{messageID}` 存在）或正在处理中（`agent:processing:{messageID}` 存在）
+- 处理逻辑: 释放锁（仅当 lockHeld=true），返回 nil，跳过执行
 - 最终结果: 避免重复处理，任务静默完成
 
 #### 4. LLM 超时/限流 (瞬态错误)
 
 - 触发条件: LLM 请求超时 (`ErrLLMTimeout`) 或被限流 (`ErrLLMRateLimited`)
-- 处理逻辑: 不标记 processedKey，不删除 processingKey（130s 后自然过期），return error 给 Asynq 触发重试
+- 处理逻辑: 不标记 `agent:processed:{messageID}`，不删除 `agent:processing:{messageID}`（130s 后自然过期），return error 给 Asynq 触发重试
 - 最终结果: Asynq 指数退避重试，最多 20 次。区分依据：`isTransientError()` 仅匹配 `ErrLLMTimeout` 和 `ErrLLMRateLimited`
 
 #### 5. Agent 执行永久失败
 
 - 触发条件: agent 不存在、配置错误、payload 反序列化失败等非瞬态错误
-- 处理逻辑: 错误消息已通过 sendErrorMessage 持久化为用户可见消息，标记 processedKey（24h），删除 processingKey，释放锁，return nil
+- 处理逻辑: 错误消息已通过 sendErrorMessage 持久化为用户可见消息，标记 `agent:processed:{messageID}`（24h），删除 `agent:processing:{messageID}`，释放锁（仅当 lockHeld=true），return nil
 - 最终结果: 用户看到错误提示，任务不再重试（永久错误不触发 Asynq 重试）
 
 #### 6. HITL 中断 (人机交互暂停)
@@ -195,7 +229,16 @@ sequenceDiagram
     Client->>Handler: agent_resume RPC (conversationID, checkpointID?, interruptID?, answer, agentID)
     Handler->>Handler: 校验必填字段 (conversation_id, answer, agent_id)
     Handler->>Store: GetConversation (校验存在 + 推断 checkpointID)
+    alt 会话不存在
+        Handler-->>Client: 404 conversation not found
+    end
+    alt checkpointID 无法推断
+        Handler-->>Client: 400 checkpoint_id required
+    end
     Handler->>QStore: GetPendingByCheckpoint(checkpointID)
+    alt 查询失败
+        Handler-->>Client: 500 internal error
+    end
     Handler->>Handler: 按 interruptID 过滤，选取首个匹配
     alt 无匹配的 pending question
         Handler->>QStore: GetByCheckpoint (检查是否已回答)
@@ -208,13 +251,20 @@ sequenceDiagram
     Handler->>QStore: UpdateAnswer (idempotent WHERE status='pending')
     alt 冲突 (已被其他设备回答)
         Handler-->>Client: 409 question_already_answered
+    else 未找到
+        Handler-->>Client: 404 question not found
     end
+    Handler->>QStore: GetByCheckpoint (获取全部问题计算 total)
     Handler->>QStore: CountPendingByCheckpoint
     alt 仍有未回答问题 (partial)
         Handler-->>Client: {status:"partial", answered, total, pending}
     else 全部已回答
         Handler->>Broker: Enqueue TypeAgentResume (QueueDefault)
-        Handler-->>Client: {status:"queued", answered, total}
+        alt 入队失败
+            Handler-->>Client: 500 internal error
+        else 入队成功
+            Handler-->>Client: {status:"queued", answered, total}
+        end
     end
     Broker->>Worker: 出队 TypeAgentResume
     Worker->>Worker: 解码 AgentResumePayload
@@ -257,43 +307,43 @@ sequenceDiagram
 #### 1. Checkpoint 过期或不存在
 
 - 触发条件: ResumeWithParams 返回 `ErrCheckpointNotFound` 或 "not found" 错误
-- 处理逻辑: 仅在此分支内执行 `cleanupAfterResumeFailure`（清理会话状态、删除问题、删除 checkpoint）+ 发送错误消息 + 标记 processedKey（24h）+ 删除 processingKey + 释放锁
+- 处理逻辑: 仅在此分支内执行 `cleanupAfterResumeFailure`（清理会话状态、删除问题、删除 checkpoint）+ 发送错误消息 + 标记 `agent:resume:{checkpointID}`（24h）+ 删除 `agent:resume:processing:{checkpointID}` + 释放锁（仅当 weOwnLock=true）
 - 最终结果: 用户看到"等待时间过长，请重新发送消息"，checkpoint 标记为已处理防止重复重试
 
 #### 2. 多轮 HITL (Resume 后再次中断)
 
 - 触发条件: Agent resume 后又返回新的 interrupt
-- 处理逻辑: 更新会话状态为 asking_user，持久化新 Question 到 DB，广播 conversation update（pull notification），广播 agent status（"asking_user"），不释放锁（D-084），删除 processingKey 允许后续 resume
+- 处理逻辑: 更新会话状态为 asking_user，持久化新 Question 到 DB，广播 conversation update（pull notification），广播 agent status（"asking_user"），不释放锁（D-084），删除 `agent:resume:processing:{checkpointID}` 允许后续 resume
 - 最终结果: Agent 再次暂停等待用户回答，可循环多轮
 
 #### 3. Resume 期间 LLM 瞬态错误
 
 - 触发条件: ResumeWithParams 或流式输出中出现 `ErrLLMTimeout` / `ErrLLMRateLimited`
-- 处理逻辑: 不自动重试（与 task_handler 不同，HITL resume 不返回 error 给 Asynq），直接通过 `sendErrorMessage` 通知用户 "服务暂时不可用"，删除 processingKey 允许用户手动重新触发 resume
+- 处理逻辑: 不自动重试（与 task_handler 不同，HITL resume 不返回 error 给 Asynq），直接通过 `sendErrorMessage` 通知用户 "服务暂时不可用"，删除 `agent:resume:processing:{checkpointID}` 允许用户手动重新触发 resume
 - 最终结果: 用户看到"服务暂时不可用，请稍后重试"。设计原因：用户已投入交互成本，应由用户决定是否重试
 
 #### 4. Agent 配置不存在
 
 - 触发条件: `registry.Get(agentID)` 返回 not found
-- 处理逻辑: `cleanupAfterResumeFailure` 清理状态 + 发送错误消息 + 标记 processedKey（24h）+ 删除 processingKey + 释放锁
+- 处理逻辑: `cleanupAfterResumeFailure` 清理状态 + 发送错误消息 + 标记 `agent:resume:{checkpointID}`（24h）+ 删除 `agent:resume:processing:{checkpointID}` + 释放锁（仅当 weOwnLock=true）
 - 最终结果: 用户看到"Agent 配置不存在，请重新发送消息"
 
 #### 5. Agent 构建失败 (Build error)
 
 - 触发条件: `agentBuilder.Build` 返回 error
-- 处理逻辑: 与"Agent 配置不存在"相同——清理状态、发送错误消息、标记 processedKey、释放锁
+- 处理逻辑: 与"Agent 配置不存在"相同——清理状态、发送错误消息、标记 `agent:resume:{checkpointID}`（24h）、释放锁
 - 最终结果: 用户看到"恢复执行失败，请重新发送消息"
 
 #### 6. QuestionStore 为 nil
 
 - 触发条件: `executor.questionStore` 为 nil（配置缺失或未注入）
-- 处理逻辑: 记录错误日志，释放锁，return nil 跳过执行
+- 处理逻辑: 记录错误日志，释放锁（仅当 weOwnLock=true），return nil 跳过执行
 - 最终结果: 任务静默完成，Agent 不会恢复执行。由于 questionStore 为 nil 意味着 HITL 功能不完整，这是一个防御性检查
 
 #### 7. Question 查询失败 (GetByCheckpoint)
 
 - 触发条件: `executor.questionStore.GetByCheckpoint` 返回 error（DB 连接断开等）
-- 处理逻辑: `cleanupAfterResumeFailure` 清理状态 + 发送错误消息 + 标记 processedKey（24h）+ 删除 processingKey + 释放锁
+- 处理逻辑: `cleanupAfterResumeFailure` 清理状态 + 发送错误消息 + 标记 `agent:resume:{checkpointID}`（24h）+ 删除 `agent:resume:processing:{checkpointID}` + 释放锁
 - 最终结果: 用户看到"恢复执行失败，请重新发送消息"
 
 #### 8. 无已回答的 Question (空 targets map)
@@ -313,6 +363,16 @@ sequenceDiagram
 - 触发条件: 问题已被其他设备回答（UpdateAnswer 返回 ErrConflict），或 GetPendingByCheckpoint 无匹配但 GetByCheckpoint 发现已回答的同 interruptID 问题
 - 处理逻辑: 返回 409 `question_already_answered` 错误
 - 最终结果: 客户端收到冲突错误，可选择刷新状态
+
+#### 11. cleanupAfterResumeFailure 详细步骤
+
+`cleanupAfterResumeFailure` 在多个永久失败分支中被调用，执行以下非致命清理步骤（D-122）：
+
+1. `ClearAgentStatus` — 重置会话状态为 idle
+2. `DeleteByCheckpoint` — 软删除该 checkpoint 下的所有 Question
+3. `cleanupAfterResume` — 从 Redis 删除 checkpoint 数据（D-112）
+
+所有步骤的错误均被记录日志但不传播。
 
 ### 涉及文件
 
@@ -479,9 +539,11 @@ flowchart LR
 
 ---
 
-## 场景 6: 后台清理任务 (UserUpdate 过期清理)
+## 场景 6: 后台清理任务
 
-### 主流程
+### 6a. UserUpdate 过期清理
+
+#### 主流程
 
 ```mermaid
 flowchart TD
@@ -496,23 +558,88 @@ flowchart TD
     D -->|ctx.Done| J[退出循环]
 ```
 
-### 边缘场景
+#### 边缘场景
 
-#### 1. 清理执行 panic
+##### 1. 清理执行 panic
 
 - 触发条件: Store.CleanupExpired 内部发生 panic
 - 处理逻辑: defer recover 捕获 panic，记录日志，不中断循环
 - 最终结果: 下一个 tick 继续尝试清理
 
-#### 2. 清理执行失败
+##### 2. 清理执行失败
 
 - 触发条件: 数据库连接断开等导致 CleanupExpired 返回 error
 - 处理逻辑: 记录错误日志，不中断循环
 - 最终结果: 下一个 tick 重试
 
+---
+
+### 6b. HITL 超时清理 (D-123)
+
+> 后台定期扫描卡在 `asking_user` 状态的会话，清理超过最大存活时间（默认 24h）的 HITL 会话。
+
+#### 主流程
+
+```mermaid
+flowchart TD
+    A[NewHITLCleanupTask] -->|校验依赖| B[应用默认配置: Interval=5m, MaxAge=24h, BatchSize=100, LockTTL=30s]
+    B --> C[Run 启动定时循环]
+    C --> D{ticker.C 触发}
+    D -->|每 5 分钟| E[cleanupOnce]
+    E --> F[convStore.ListStaleHITLConversations]
+    F -->|无过期会话| G[返回]
+    F -->|有过期会话| H[遍历每个会话]
+    H --> I[cleanupConversation]
+    I --> I1[Redis SETNX 获取分布式锁]
+    I1 -->|锁被占用| I2[跳过]
+    I1 -->|获取成功| I3[重新检查会话状态]
+    I3 -->|不再是 asking_user| I4[跳过]
+    I3 -->|仍是 asking_user| J[ClearAgentStatus]
+    J --> K[DeleteByCheckpoint]
+    K --> L[Delete checkpoint from Redis]
+    L --> M[SendMessage 超时消息]
+    M --> N[BroadcastAgentTimeout + SendConversationUpdate]
+    D -->|ctx.Done| O[退出循环]
+```
+
+#### 清理步骤详情
+
+每个过期会话执行以下非致命清理步骤（D-122）：
+
+1. **获取分布式锁** — `hitl:cleanup:{conversationID}`，TTL=30s，防止多节点重复清理
+2. **重新检查会话状态** — 可能已被用户或 resume 流程解决
+3. **ClearAgentStatus** — 重置会话状态为 idle
+4. **DeleteByCheckpoint** — 软删除该 checkpoint 下的所有 Question
+5. **Delete checkpoint** — 从 Redis 删除 checkpoint 数据（D-112）
+6. **SendMessage** — 持久化超时消息："抱歉，等待时间过长，会话已超时。请重新发送消息。"
+7. **BroadcastAgentTimeout** — 广播 `agent_timeout` 临时通知（D-087）
+8. **SendConversationUpdate** — 广播会话更新通知（D-124），触发客户端拉取最新状态
+
+#### 边缘场景
+
+##### 1. 多节点竞态清理
+
+- 触发条件: 多个服务器节点同时检测到同一过期会话
+- 处理逻辑: Redis SETNX 分布式锁保证只有一个节点执行清理
+- 最终结果: 其他节点跳过该会话
+
+##### 2. 会话已被解决
+
+- 触发条件: 用户已回答问题或 resume 流程已处理
+- 处理逻辑: 重新检查会话状态，发现不再是 `asking_user` 则跳过
+- 最终结果: 不干扰已解决的会话
+
+##### 3. 单会话 panic
+
+- 触发条件: 清理某个会话时发生 panic
+- 处理逻辑: defer recover 捕获，记录日志，继续处理下一个会话
+- 最终结果: 其他会话不受影响
+
 ### 涉及文件
 
 - `internal/cleanup/cleanup.go`: UserUpdateCleaner 定时清理循环
+- `internal/agent/hitl_cleanup.go`: HITLCleanupTask 超时清理
+- `internal/agent/checkpoint_store.go`: RedisCheckPointStore（checkpoint 删除）
 
 ---
 
@@ -623,3 +750,19 @@ flowchart LR
 
 - `internal/mq/asynq.go`: Enqueue 中注入 metadata，Start 中恢复 trace context
 - `internal/tracing`: InjectTraceContext / ExtractTraceContext
+
+---
+
+## 附录: Redis Key 模式参考
+
+本文档涉及的 Redis key 模式汇总：
+
+| Key 模式 | 用途 | TTL | 来源 |
+| --- | --- | --- | --- |
+| `agent:lock:{conversationID}` | 分布式会话锁（SETNX + Lua DEL） | 130s | `conversation_lock.go` |
+| `agent:processed:{messageID}` | Agent 任务幂等标记（已完成） | 24h | `task_handler.go` |
+| `agent:processing:{messageID}` | Agent 任务幂等标记（进行中） | 130s | `task_handler.go` |
+| `agent:resume:{checkpointID}` | Resume 任务幂等标记（已完成） | 24h | `resume_handler.go` |
+| `agent:resume:processing:{checkpointID}` | Resume 任务幂等标记（进行中） | 130s | `resume_handler.go` |
+| `agent:checkpoint:{checkpointID}` | Eino HITL checkpoint 数据 | 24h | `checkpoint_store.go` |
+| `hitl:cleanup:{conversationID}` | HITL 清理任务分布式锁 | 30s | `hitl_cleanup.go` |

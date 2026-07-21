@@ -435,6 +435,10 @@ flowchart TD
 
     B -->|超时通知| F[SendAgentTimeout]
 
+    B -->|函数调用| F2[SendFunctionCall]
+    F2 --> F3[两次调用: IsDone=false 前 / IsDone=true 后]
+    F3 --> F4[推送给 humanUser]
+
     B -->|会话更新| G[SendConversationUpdate]
     G --> G1[pull notification pattern]
 
@@ -445,6 +449,7 @@ flowchart TD
     D --> I
     E1 --> I
     F --> I
+    F4 --> I
     G1 --> I
     H1 --> I
 
@@ -463,6 +468,7 @@ flowchart TD
 | **WebSocket 发送失败** | 日志记录但不返回错误 (fire-and-forget) |
 | **JSON 序列化失败** | 日志记录并跳过 |
 | **registry 为 nil** | `isAgent` 始终返回 false (nil-safe) |
+| **函数调用广播** | `SendFunctionCall` 由 LoggingMiddleware 调用，每次函数调用发送两次：执行前 (`IsDone=false`, 携带 name + args) 和执行后 (`IsDone=true`, 携带 result 或 error) |
 
 ---
 
@@ -521,7 +527,7 @@ flowchart TD
 
 ## 10. 幂等控制机制
 
-两阶段幂等检查防止重复处理同一消息。Phase 1 防重放，Phase 2 防并发。
+两阶段幂等检查防止重复处理同一消息。Phase 1 防重放，Phase 2 防并发。Resume 路径使用相同的两阶段机制，但 key 格式不同。
 
 ### 流程图
 
@@ -570,6 +576,8 @@ flowchart TD
 | **Redis 不可用** | 幂等检查失败时继续执行 (fail-open) |
 | **processing key 过期但任务仍在执行** | 新任务可能并发进入，被会话锁拦截 |
 | **processed 和 processing key 都存在** | 跳过 (某处异常导致) |
+| **Resume 路径 key 格式** | Phase 1: `agent:resume:CheckpointID`, Phase 2: `agent:resume:processing:CheckpointID`。成功后标记 processed (24h) 并删除 processing key；transient 失败时删除 processing key 允许立即重试；re-interrupt 时删除 processing key 允许后续 resume |
+| **Agent 执行 vs Resume key 差异** | Agent 执行: `agent:processed:{MessageID}` / `agent:processing:{MessageID}`；Resume: `agent:resume:{CheckpointID}` / `agent:resume:processing:{CheckpointID}`。两套 key 独立，互不干扰 |
 
 ---
 
@@ -586,14 +594,15 @@ flowchart TD
     C -->|已 resume| C1[跳过, 返回 nil]
     C -->|未 resume| D[获取会话锁]
 
-    D -->|获取失败| D1[返回 error]
+    D -->|Redis 错误| D1[fail-open, 继续]
+    D -->|锁被占用 (HITL 预期)| D2[weOwnLock=false, 继续]
     D -->|获取成功| E[从 DB 读取已回答 Questions]
 
     E --> F[构建 targets map]
     F --> G[AgentBuilder.Build 重新构建 Agent]
 
     G -->|构建失败| G1[cleanupAfterResumeFailure]
-    G1 --> G2[发送超时提示消息]
+    G1 --> G2[发送错误消息 + 清理幂等 key]
     G -->|构建成功| H[Runner.ResumeWithParams 恢复执行]
 
     H --> I[桥接流式输出]
@@ -605,8 +614,9 @@ flowchart TD
     L1 --> L2[Delete Questions]
     L2 --> L3[Delete Redis checkpoint]
 
-    L3 --> M[广播 conversation_update]
-    M --> N[释放会话锁]
+    L3 --> M[标记 processed (24h) + 删除 processing key]
+    M --> M1[广播 conversation_update]
+    M1 --> N[释放会话锁]
 
     H -->|再次 interrupt| O[重新进入 asking_user 状态]
     O --> O1[不释放锁]
@@ -614,7 +624,8 @@ flowchart TD
 
     style A fill:#4CAF50,color:#fff
     style C1 fill:#FF9800,color:#fff
-    style D1 fill:#f44336,color:#fff
+    style D1 fill:#FF9800,color:#fff
+    style D2 fill:#FF9800,color:#fff
     style G2 fill:#f44336,color:#fff
     style N fill:#4CAF50,color:#fff
     style O fill:#2196F3,color:#fff
@@ -624,7 +635,7 @@ flowchart TD
 
 | 场景 | 处理方式 |
 |------|----------|
-| **Resume 路径的 transient 错误** | 不自动 MQ 重试，而是通知用户自行决定 |
+| **Resume 路径的 transient 错误** | 不自动 MQ 重试，而是发送"服务暂时不可用"消息通知用户，同时删除 processing key 允许立即重试。用户已投入交互成本，应自行决定是否重试 |
 | **Eino 的 resume 路径** | 会用原 checkpointID 保存 re-interrupt 的 checkpoint |
 | **成功 resume 后** | 执行完整清理：ClearAgentStatus + Delete Questions + Delete Redis checkpoint |
 | **checkpoint 过期/丢失** | 调用 `cleanupAfterResumeFailure`，发送超时提示消息 |

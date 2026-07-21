@@ -47,10 +47,11 @@ sequenceDiagram
 
     TH->>Exec: ExecuteWithErrorMessage(payload)
 
+    Note over Exec: 0. 创建 agent.execute 分布式追踪 span
     Note over Exec: 1. 注入 CallerDevice 到 context
     Note over Exec: 2. 获取信号量 (Semaphore)
-    Note over Exec: 3. 注入 BroadcastInfo 到 context
-    Note over Exec: 4. 设置总超时 (默认120s)
+    Note over Exec: 3. 设置总超时 (默认120s)
+    Note over Exec: 4. 注入 BroadcastInfo 到 context (用于函数调用广播)
     Exec->>Reg: Get(agentID) 精确匹配
     Reg-->>Exec: AgentConfig
 
@@ -67,8 +68,10 @@ sequenceDiagram
     Store-->>Exec: messages[]
 
     Exec->>Builder: Build(config)
+    Note over Builder: 创建 agent.build 分布式追踪 span
     Builder->>LLM: CreateChatModel(config)
     LLM-->>Builder: ChatModel
+    Note over Builder: Record LLM metrics (duration, model, error)
     Builder->>Builder: Create tools from registry
     Builder->>Builder: Resolve sub-agents as tools
     Builder->>Builder: Connect MCP servers
@@ -77,11 +80,13 @@ sequenceDiagram
 
     Exec->>Exec: convertMessages(messages, registry)
 
-    Note over Exec: 6. 生成 streamID + checkpointID
+    Note over Exec: 7. 生成 streamID + checkpointID
+    Note over Exec: 8. 创建 agent.run 分布式追踪 span
     Exec->>Exec: Runner.Run(messages, checkpointID)
 
     Exec->>Bridge: BridgeWithInterrupt(iter, chunkCh, interruptCh)
 
+    Note over Exec: 创建 agent.stream 分布式追踪 span
     loop 流式输出
         Bridge-->>Exec: StreamChunk(content, isDone, err)
         alt 首个 token
@@ -93,9 +98,11 @@ sequenceDiagram
     Bridge-->>Exec: StreamChunk(isDone=true)
     Exec->>BC: SendStreamUpdate(finalText, isDone=true)
 
-    Exec->>Store: SendMessage(finalMessage)
-    Store-->>Exec: result (含 UserUpdate[])
-    Exec->>BC: BroadcastMessageUpdate(updates)
+    alt finalText 非空
+        Exec->>Store: SendMessage(finalMessage)
+        Store-->>Exec: result (含 UserUpdate[])
+        Exec->>BC: BroadcastMessageUpdate(updates)
+    end
 
     Exec->>BC: SendTyping(typing=false) [defer]
 
@@ -133,8 +140,8 @@ sequenceDiagram
 
 #### 5. 消息持久化失败
 - 触发条件: store.SendMessage 返回 error
-- 处理逻辑: 返回 error，ExecuteWithErrorMessage 发送用户友好错误消息
-- 最终结果: 用户通过 WebSocket 已看到完整流式回复，但持久化失败导致返回错误（task_handler 会标记 processed 并返回 nil 给 MQ，不重试）
+- 处理逻辑: 返回 error（Execute 内部直接返回），ExecuteWithErrorMessage 捕获后通过 classifyError 发送用户友好错误消息
+- 最终结果: 用户通过 WebSocket 已看到完整流式回复，但持久化失败导致返回 error。task_handler 中 isTransientError 为 false（非 ErrLLMTimeout/ErrLLMRateLimited），标记 processed 并返回 nil 给 MQ（不重试）
 
 #### 6. 上下文缓存 (ContextManager)
 - 实现: DBContextManager 使用 sync.Map + 30s TTL 缓存对话消息
@@ -241,9 +248,16 @@ sequenceDiagram
 - 最终结果: 部分文本通过 SendStreamUpdate(isDone=true) 关闭流，中断信息通过 interruptCh 传递
 
 #### 4. InterruptInfo 中 Data 和 InterruptContexts 都为空
+
 - 触发条件: Eino 版本不兼容或中断数据格式异常
 - 处理逻辑: InterruptInfo 的 Question 和 InterruptID 为空字符串
 - 最终结果: Question 持久化时 questionText 为空，resume 时 targets map 为空
+
+#### 5. 流式输出中途遇到 chunk.Err（非 HITL）
+
+- 触发条件: 流式输出中 chunk.Err 非 nil（LLM 超时/限流/5xx）
+- 处理逻辑: 广播 partialText(isDone=true)，若 partialText 非空则持久化部分响应，映射为 sentinel 错误后返回
+- 最终结果: ExecuteWithErrorMessage 发送用户友好错误消息，task_handler 根据 isTransientError 决定是否重试
 
 ### 涉及文件
 - `stream_bridge.go`: BridgeWithInterrupt 检测 HITL 事件并提取 InterruptInfo
@@ -277,7 +291,7 @@ sequenceDiagram
     participant QS as QuestionStore
     participant MQ as Broker
 
-    C->>H: agent_resume RPC (conversation_id, answer, agent_id)
+    C->>H: agent_resume RPC (conversation_id, answer, agent_id, checkpoint_id?, interrupt_id?)
     H->>H: 解析参数, 校验必填字段
 
     H->>CS: Get(conversationID)
@@ -491,8 +505,8 @@ sequenceDiagram
 
 #### 6. Multi-turn HITL (恢复后再次中断)
 - 触发条件: Resume 后 agent 再次触发 HITL 中断
-- 处理逻辑: 再次进入 HITL 模式，更新会话状态为 asking_user，持久化新 Question；resume handler 不释放锁（若 weOwnLock=false 即初始执行仍持有锁），删除 processingKey 允许后续 resume
-- 注意: resume handler 对 re-interrupt 返回普通 error（非 ErrHITLInterrupted），task_handler 会将其视为永久错误并标记 processed + 释放锁（若拥有）。若初始执行的锁 TTL 未过期（weOwnLock=false），锁保持不释放
+- 处理逻辑: resume handler 在内部直接处理 re-interrupt——更新会话状态为 asking_user，持久化新 Question，广播 conversation update 和 agent status，删除 processingKey 允许后续 resume，然后 return nil 给 MQ（不释放锁）
+- 注意: resume handler 对 re-interrupt 返回 nil（不是 error），task_handler 不介入。若 weOwnLock=false（初始执行的锁 TTL 未过期），锁保持不释放；若 weOwnLock=true，锁由 resume handler 的 defer releaseLock 释放（但 re-interrupt 路径在 releaseLock 之前 return，所以也不释放）
 - 最终结果: 同一 checkpoint 可多次 resume 和中断，实现多轮人机交互
 
 #### 7. cleanupAfterResumeFailure 的非致命错误
@@ -623,7 +637,7 @@ flowchart TD
     W2 --> W3[Summarization (若 EnableSummarization)]
     W3 --> W4[ToolReduction (若 EnableToolReduction)]
     W4 --> W5[LoggingMiddleware (若 llmLogger 非 nil)]
-    W5 --> W6[TracingMiddleware (若 tracingEnabled)]
+    W5 --> W6[TracingMiddleware (若 tracingEnabled, 含 debug user/device 过滤)]
 
     W6 --> X[adk.NewChatModelAgent]
     X --> Y[adk.NewRunner<br/>EnableStreaming=true<br/>可选 CheckPointStore]
@@ -927,7 +941,7 @@ flowchart TD
 
 #### 2. 瞬态错误的 MQ 重试策略
 - 触发条件: isTransientError(execErr) 为 true (ErrLLMTimeout/ErrLLMRateLimited)
-- 处理逻辑: ExecuteWithErrorMessage 先发送用户友好错误消息并持久化，然后 task_handler 返回 error 给 MQ，触发 Asynq 指数退避重试；不标记 processed、不删除 processing key（130s 后自然过期允许重试）
+- 处理逻辑: ExecuteWithErrorMessage 内部调用 Execute 失败后，classifyError 映射为用户友好消息并通过 sendErrorMessage 持久化+广播，然后将原始 error 返回给 task_handler。task_handler 检测到 isTransientError 为 true，不标记 processed、不删除 processing key（130s 后自然过期），返回 error 给 MQ 触发 Asynq 指数退避重试
 - 最终结果: 用户已在首次执行时看到错误消息；若重试成功，用户将看到额外的成功回复（两次响应）
 
 #### 3. 永久错误不重试
@@ -983,9 +997,9 @@ flowchart TD
 - 最终结果: 防止误释放其他实例的锁
 
 #### 3. HITL 中断不释放锁
-- 触发条件: Execute 返回 ErrHITLInterrupted
-- 处理逻辑: task_handler 跳过 releaseLock()
-- 最终结果: 锁自然过期（130s），resume 任务可重新获取
+- 触发条件: Execute 返回 ErrHITLInterrupted（通过 ExecuteWithErrorMessage 透传）
+- 处理逻辑: task_handler 检测到 isHITLInterrupt 为 true，跳过幂等标记（processing key 自然过期）、跳过 releaseLock()、直接 return nil 给 MQ
+- 最终结果: 锁自然过期（130s），resume 任务到达时可检测到锁仍被持有（acquired=false 是预期行为）
 
 #### 4. Resume 任务与初始执行共享锁
 - 触发条件: resume 任务到达时初始执行的锁仍被持有

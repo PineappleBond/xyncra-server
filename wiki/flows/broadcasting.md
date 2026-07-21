@@ -111,13 +111,20 @@ sequenceDiagram
     Note over Client,Redis: 心跳刷新阶段
     loop 定期心跳
         Client->>WS: 心跳消息
-        WS->>Store: Refresh(connID) / Patch(connID, updater)
-        Store->>Redis: 更新 LastHeartbeatAt，重置 TTL
+        alt 仅续期
+            WS->>Store: Refresh(connID)
+            Store->>Redis: luaRefresh 原子重置 info key + user set TTL
+        else 续期 + 更新元数据
+            WS->>Store: Patch(connID, updater)
+            Store->>Store: read-modify-write + luaUpdate
+            Store->>Redis: 更新数据 + 重置 TTL
+        end
     end
 
     Note over OtherNode,Redis: 跨节点查询
     OtherNode->>Store: Get(connID) / ListByUser(userID)
-    Store->>Redis: GET info key / SMEMBERS user set + 逐个 GET
+    Store->>Redis: GET info key / SScan user set + MGet 批量读取
+    Store->>Store: 惰性清理已过期的孤儿条目
     Store-->>OtherNode: 返回连接信息
 
     Note over Client,Redis: 连接断开阶段
@@ -136,11 +143,11 @@ sequenceDiagram
 
 2. **原子写入 Redis**：`RedisConnectionStore.Add` 通过 Lua 脚本 `luaAdd` 原子执行——`GET` info key 检查是否已存在，若新连接则检查 `SCARD` user set 是否超过 `MaxConnectionsPerUser`，`SET` info key（带 TTL），`SADD` user set 添加 connID，对齐 user set 的 TTL（MAX 语义）。
 
-3. **连接信息查询（跨节点可见）**：任何节点可通过 `Get(connID)` 读取 info key，或 `ListByUser(userID)` 读取 user set 中所有 connID 再逐个 GET，`CountByUser` 使用 `SCARD` 近似计数。
+3. **连接信息查询（跨节点可见）**：任何节点可通过 `Get(connID)` 读取 info key，或 `ListByUser(userID)` 使用 `SScan` 增量遍历 user set 并通过 `MGet` 批量读取 info key（非逐个 GET），同时惰性清理已过期的孤儿条目。`CountByUser` 使用 `SCARD` 近似计数（可能包含已过期但尚未清理的条目）。
 
-4. **心跳刷新连接 TTL**：客户端定期发送心跳，服务端调用 `ConnectionStore.Refresh(connID)` 或 `Patch(connID, updater)` 更新 `LastHeartbeatAt` 并重置 Redis key TTL。
+4. **心跳刷新连接 TTL**：客户端定期发送心跳，服务端调用 `ConnectionStore.Refresh(connID)` 重置 Redis key TTL（仅续期，不修改数据字段）。若需同时更新连接元数据（如 `LastHeartbeatAt`），则调用 `Patch(connID, updater)` 执行 read-modify-write 并重置 TTL。
 
-5. **连接断开移除**：`client.Run()` 返回后（客户端断开）调用 `ConnectionStore().Remove(cleanupCtx, connID)`。`Remove` 通过 `luaRemove` 原子删除 info key 并 `SREM` user set，随后调用 `luaCleanupEmptySet` 清理空 user set 防止孤儿 key。
+5. **连接断开移除**：`client.Run()` 返回后（客户端断开）调用 `ConnectionStore().Remove(cleanupCtx, connID)`。`Remove` 先通过 `Get` 查找 userID，再调用 `luaRemove` 原子删除 info key 并 `SREM` user set（Get 和 Lua 之间存在短暂窗口，若 info key 在此期间过期，SREM 仍会执行但移除的是已过期条目，属于安全的 no-op），随后调用 `luaCleanupEmptySet` 清理空 user set 防止孤儿 key。
 
 6. **设备替换时异步清理旧连接**：同一 `(userID, deviceID)` 新连接到来时先在内存 map 中替换，然后异步 goroutine `performDeviceReplacement` 发送 4001 close frame 给旧连接、Close 旧 client、`removeClient` 清理本地索引。旧连接的 `ConnectionStore.Remove` 由其自身的 `handleWebSocket` defer 完成。
 
@@ -154,6 +161,7 @@ sequenceDiagram
 | **MaxConnectionsPerUser 限制的 TOCTOU 竞争** | 存在检查和连接数限制检查都在 Lua 脚本中原子执行，避免了 info key 在 Go 侧 GET 和 Lua 调用之间过期导致绕过限制的竞态 (R3-001)。 |
 | **连接 UserID 变更（overwrite）** | Lua 脚本检测到 `oldUserID != newUserID` 时先 `SREM` 从旧 user set 移除再 `SADD` 到新 user set，同时检查新用户的连接数限制。 |
 | **设备替换时旧连接的 4001 close frame 丢失** | `WriteControl` 写入 TCP send buffer 后 `sleep(10ms)` 等待 flush 再 Close。若客户端仍收不到，旧连接最终因 TCP reset 断开，defer 中的 Remove 仍会执行清理。 |
+| **ListByUser 遇到孤儿条目** | `ListByUser` 使用 `SScan` 遍历 user set，通过 `MGet` 批量读取 info key。若某个 connID 的 info key 已过期（`MGet` 返回 nil），该条目被收集到 `staleIDs` 列表，遍历完成后通过 `SRem` 批量移除并调用 `luaCleanupEmptySet` 清理空 set，实现惰性清理。 |
 
 ---
 

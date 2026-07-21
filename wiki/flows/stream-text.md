@@ -20,8 +20,8 @@
 
 ### 触发条件
 
-- Agent 执行过程中，每次收到 LLM 流式响应时调用
-- 客户端也可以使用此方法实现自己的流式文本功能
+- 客户端直接调用此 RPC 方法实现流式文本功能
+- Agent 执行器**不使用**此 handler，而是通过 `BroadcastHelper.SendStreamUpdate` 直接调用 `BroadcastUpdates`（见[与 Agent 执行的关系](#与-agent-执行的关系)）
 - 最后一次调用应设置 `is_done: true`
 
 ### 关键特性
@@ -53,8 +53,11 @@ sequenceDiagram
     H->>S: ConversationStore.Get(conversation_id)
     S-->>H: 返回会话
 
-    alt 会话不存在
+    alt 会话不存在 (ErrNotFound)
         H-->>WS: NotFoundError
+        WS-->>C: 错误响应
+    else 数据库错误
+        H-->>WS: InternalError
         WS-->>C: 错误响应
     end
 
@@ -99,8 +102,8 @@ sequenceDiagram
    - 包装为 `PackageDataUpdates{Updates: [update]}`
 7. **广播**：遍历所有会话成员，调用 `broadcastFn`（即 `WebSocketServer.BroadcastUpdates`）
    - **本地广播**：推送到该成员在本节点的所有在线 WebSocket 连接
-   - **跨节点广播**：通过 `NodeBroadcaster.Publish` 发布到 Redis Pub/Sub 频道 `xyncra:broadcast:{userID}`，包含 `sourceNodeID` 以避免发送节点重复接收
-   - 单个成员广播失败仅记录 Info 日志，不影响其他成员
+   - **跨节点广播**：通过 `NodeBroadcaster.Publish` 发布到 Redis Pub/Sub 频道 `{keyPrefix}:broadcast:{userID}`（默认 `xyncra:broadcast:{userID}`，前缀可配置），包含 `sourceNodeID` 以避免发送节点重复接收
+   - `BroadcastUpdates` 始终返回 nil（内部 fire-and-forget），handler 层的 error 分支实际不会触发
 8. **返回成功**：返回 `{status: ok}`
 
 ---
@@ -125,19 +128,22 @@ flowchart TD
 | JSON 解析失败 | 返回 `ValidationError('invalid params')` |
 | `text` 为空字符串 | 允许，无校验 |
 
-### 2. 会话不存在
+### 2. 会话获取失败
 
 ```mermaid
 flowchart TD
-    A[获取会话] --> B{会话存在?}
-    B -->|否| C[返回 NotFoundError]
-    B -->|是| D[继续]
+    A[获取会话] --> B{err == ErrNotFound?}
+    B -->|是| C[返回 NotFoundError]
+    B -->|否| D{err != nil?}
+    D -->|是| E[返回 InternalError]
+    D -->|否| F[继续]
 ```
 
 | 场景 | 处理方式 |
 |------|----------|
-| 会话不存在 | 返回 `NotFoundError('conversation not found')` |
+| 会话不存在（`store.ErrNotFound`） | 返回 `NotFoundError('conversation not found')` |
 | 会话已被软删除 | GORM 自动过滤，等同于不存在 |
+| 数据库连接失败等其他错误 | 返回 `InternalError`（包装原始错误） |
 
 ### 3. 非成员操作
 
@@ -181,11 +187,18 @@ flowchart TD
 
 | 场景 | 处理方式 |
 |------|----------|
-| 单个成员本地广播失败 | 记录 Info 日志（非 Error），继续处理其他成员 |
-| 跨节点 Pub/Sub 发布失败 | 记录 Error 日志，不影响本地广播结果和返回值 |
-| 所有成员都离线 | 所有广播失败，但不影响返回值（ephemeral 消息对离线用户静默丢弃） |
+| 跨节点 Pub/Sub 发布失败 | `BroadcastUpdates` 内部记录 Error 日志，函数仍返回 nil（fire-and-forget） |
+| 单个本地连接发送失败 | `broadcastLocal` 内部记录 Error 日志（per-connection），不影响其他连接 |
+| `broadcastFn` 返回 error | Handler 记录 Info 日志，继续处理其他成员（当前 `BroadcastUpdates` 始终返回 nil，此路径实际上不会触发） |
+| 所有成员都离线 | 所有广播为空操作，但不影响返回值（ephemeral 消息对离线用户静默丢弃） |
 
-### 6. Stream ID 管理
+### 6. Payload 序列化失败
+
+| 场景 | 处理方式 |
+|------|----------|
+| `json.Marshal` streamingBroadcastPayload 失败 | 返回 `InternalError`（包装原始错误），不广播 |
+
+### 7. Stream ID 管理
 
 ```mermaid
 flowchart TD
@@ -232,7 +245,7 @@ flowchart TD
 
 | 操作 | 用途 | 场景 |
 |------|------|------|
-| PUBLISH | `xyncra:broadcast:{userID}` | 仅多节点部署，通过 `RedisNodeBroadcaster.Publish` |
+| PUBLISH | `{keyPrefix}:broadcast:{userID}`（默认 `xyncra:broadcast:{userID}`） | 仅多节点部署，通过 `RedisNodeBroadcaster.Publish` |
 
 Handler 自身不直接操作 Redis。Redis 操作发生在 `broadcastFn` 的跨节点路径中。
 
@@ -297,7 +310,7 @@ Handler 构造时启动后台 goroutine，每 5 分钟执行一次清理：
 `broadcastFn` 实际为 `WebSocketServer.BroadcastUpdates`，执行两阶段广播：
 
 1. **本地广播**（`broadcastLocal`）：推送到该用户在本节点的所有在线 WebSocket 连接
-2. **跨节点广播**（`nodeBroadcaster.Publish`）：发布到 Redis Pub/Sub 频道，payload 包含 `sourceNodeID` 以避免发送节点重复接收
+2. **跨节点广播**（`nodeBroadcaster.Publish`）：发布到 Redis Pub/Sub 频道 `{keyPrefix}:broadcast:{userID}`，payload 包含 `sourceNodeID` 以避免发送节点重复接收
 
 - 单节点部署使用 `NoopBroadcaster`（no-op），不产生 Redis 开销
 - 跨节点失败不影响本地广播结果，仅记录日志
@@ -316,6 +329,7 @@ Handler 构造时启动后台 goroutine，每 5 分钟执行一次清理：
 | Rate limiting | 50ms/user/conv | 无（50ms 节流在 StreamBridge 层） |
 | 成员校验 | 校验调用者是会话成员 | 无（Agent 已在 task_handler 中校验） |
 | 广播路径 | broadcastFn (BroadcastUpdates) | BroadcastHelper.SendStreamUpdate (BroadcastUpdates) |
+| Payload 字段 | `streamingBroadcastPayload`（无 `is_agent`） | `StreamingPayload`（含 `is_agent: bool`，标识是否为 Agent 发送） |
 | 持久化 | 不持久化 (Seq=0) | 不持久化 (Seq=0)，最终消息通过 store.SendMessage 持久化 |
 
 Agent 的流式输出路径：

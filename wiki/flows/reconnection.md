@@ -353,9 +353,10 @@ sequenceDiagram
    - **Step 1**：发送 `system.register_functions` 注册设备提供的函数
      - 必须先于 reconnect，确保服务端在重放 PendingStore 请求前有对应的 handler
      - 修复了 PendingStore 重放先于函数注册到达的竞态条件
+     - 有独立的 10 秒超时（从父上下文派生），防止注册阻塞 FullSync
    - **Step 2**：发送 `system.reconnect` 携带 `last_seen_seq`
      - `last_seen_seq` 来自 `lastReqSeq`（uint64），跟踪收到的最高反向 RPC 序列号
-     - 通过 `handleIncomingRequest` 在每次收到服务端请求时更新
+     - 通过 `handleIncomingRequest` 在每次收到服务端请求且 `req.Seq > 0` 时更新
    - 错误记录日志但不阻止 FullSync（优雅降级，D-072）
 
 4. **全量同步**（FullSync）
@@ -369,7 +370,7 @@ sequenceDiagram
 
 | 序列号 | 类型 | 跟踪对象 | 更新时机 | 用途 |
 |--------|------|----------|----------|------|
-| `lastReqSeq` | uint64 | 服务端反向 RPC 请求 | `handleIncomingRequest` 收到请求时 | `system.reconnect` 的 `last_seen_seq` |
+| `lastReqSeq` | uint64 | 服务端反向 RPC 请求 | `handleIncomingRequest` 收到请求且 `req.Seq > 0` 时 | `system.reconnect` 的 `last_seen_seq` |
 | `localMaxSeq` | uint32 | 用户更新（消息、会话等） | `ApplyUpdate` 成功应用后 | `sync_updates` 的 `after_seq` |
 
 ### 客户端幂等性与超时
@@ -378,7 +379,7 @@ sequenceDiagram
 |------|------|
 | **IdempotencyCache** | 客户端维护 LRU 缓存（默认大小可配置），收到服务端请求时检查 `IdempotencyKey`，已处理则跳过，处理成功后写入缓存。防止重放请求被重复处理 |
 | **RTTTracker** | 维护滑动窗口的 RTT 样本，计算修剪均值 SRTT（去除最高/最低 10%），低于 5 个样本时返回默认超时。`AdaptiveTimeout = SRTT * 1.5`，夹紧到 `[min, max]` |
-| **ResponseRetryQueue** | 缓存未收到响应的客户端请求，在重连后自动重试发送 |
+| **ResponseRetryQueue** | 缓存发送失败的服务端响应（服务端发起的请求的响应），由后台 `responseRetryLoop` 定期重试发送 |
 
 ### 边缘场景
 
@@ -387,7 +388,7 @@ sequenceDiagram
 | **4001 设备替换** | 客户端设置 `replaced=true`，取消上下文，daemon 优雅退出（D-111），不尝试重连 | 旧设备实例终止 |
 | **重连握手失败** | 错误记录日志，FullSync 继续执行 | PendingStore 请求可能未被重放，但数据通过 FullSync 同步 |
 | **FullSync 失败** | 错误记录日志，连接监控继续等待下一次断连 | 数据可能不完整，下次重连时重试 |
-| **函数注册与重放竞态** | 函数注册在 reconnect 之前发送，但两者在异步 goroutine 中执行；reconnect handler 在函数注册 RPC 返回后才发送，但服务端处理顺序不保证 | 极端情况下重放可能因无 handler 失败，下次重连时重试 |
+| **函数注册与重放竞态** | 函数注册在 reconnect 之前顺序执行（同一 goroutine 内，注册有 10 秒超时），但整个握手在异步 goroutine 中运行，与 FullSync 并行；服务端 reconnect handler 的重放 goroutine 可能在客户端注册完成前到达 | 极端情况下重放可能因无 handler 失败，下次重连时重试 |
 | **上下文取消期间的重连** | 重连循环和退避等待均检查 `ctx.Err()`，上下文取消时立即退出 | 优雅关闭 |
 | **重连期间收到新更新** | FullSync 从当前 `localMaxSeq` 开始，自动包含重连期间到达的新更新 | 无数据丢失 |
 | **RTT 样本不足（冷启动）** | 低于 5 个样本时 `AdaptiveTimeout` 返回默认超时值 | 使用保守的默认超时 |
@@ -669,7 +670,7 @@ sequenceDiagram
 |------|----------|------|
 | **连接已过期/被驱逐** | 返回 `connection expired`（NotFound），客户端必须重新建立连接并可能需要调用 `system.reconnect` 恢复待处理请求 | 客户端需重连 |
 | **畸形参数** | 故意忽略，心跳不能因坏参数失败，其唯一目的是 TTL 续期 | 无影响 |
-| **心跳间隔大于连接 TTL** | 客户端心跳间隔超过服务端连接 TTL 时，连接会在心跳之间过期，客户端下次心跳收到 `connection expired` 后必须重连 | 需合理配置间隔 |
+| **心跳间隔大于连接 TTL** | 客户端心跳间隔超过服务端连接 TTL 时，连接会在心跳之间过期，客户端下次心跳收到 `connection expired` 后必须重连。客户端默认心跳间隔 30 秒（`defaultHeartbeatInterval`），建议间隔 < TTL/2 | 需合理配置间隔 |
 | **ConnectionStore.Refresh 与 TTL 过期的竞态** | 连接在 Refresh 调用前刚好过期时，Refresh 返回 `ErrConnectionNotFound`，客户端必须重连 | 同上 |
 | **高频心跳** | 每次调用都是 Redis 操作（Refresh），过度心跳产生 Redis 负载，该 Handler 中未见服务端限流 | 需客户端合理控制频率 |
 | **同一用户的多连接** | 心跳基于 connID 而非 userID，每个连接独立拥有自己的 TTL | 无影响 |

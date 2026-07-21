@@ -95,15 +95,6 @@ flowchart TD
     F --> G{接口实现完整?}
     G -->|是| H[通过 StoreAPI 暴露子 Store 访问器]
     G -->|否| I[编译失败]
-
-    subgraph HealthCheck
-        HC1[调用 Ping] --> HC2{Ping 成功?}
-        HC2 -->|否| HC3[返回错误]
-        HC2 -->|是| HC4[执行 SELECT 1 验证查询路径]
-        HC4 --> HC5{查询成功?}
-        HC5 -->|是| HC6[返回 nil]
-        HC5 -->|否| HC7[返回查询错误]
-    end
 ```
 
 ### 边缘场景
@@ -112,7 +103,6 @@ flowchart TD
 |------|------|
 | db 为 nil | 子 Store 创建不会立即 panic，但后续操作会 nil pointer |
 | 编译时接口检查 | 如果 StoreAPI 接口方法签名变更但 Store 未更新，编译失败 |
-| HealthCheck 双重验证 | 先 Ping 底层连接，再执行 SELECT 1 验证查询路径可用（捕获 schema 损坏） |
 
 ---
 
@@ -576,7 +566,7 @@ flowchart TD
 |------|------|
 | 字符串匹配可能误判 | 错误消息中包含关键词但非实际错误类型（MySQL 数字错误码被故意省略以避免误判）；连接失败额外匹配 `dial tcp` 覆盖 TCP 拨号错误 |
 | 跨方言差异 | PostgreSQL/MySQL/SQLite 同一错误的消息文本不同，需分别匹配 |
-| 客户端版本额外错误 | `pkg/store/errors.go` 包含 `ErrDatabaseLocked`（SQLite 特有） |
+| 客户端版本额外错误 | `pkg/store/errors.go` 包含 `ErrDatabaseLocked`（SQLite 特有），`classifyError` 同时匹配 `UNIQUE constraint failed` 和 `duplicate key` |
 | 服务端额外错误 | `internal/store/errors.go` 包含 `ErrConflict`（业务层冲突） |
 | 无测试覆盖 | `classifyError` 有 73+ 调用者但无直接单元测试 |
 
@@ -739,7 +729,7 @@ erDiagram
 
 ```mermaid
 flowchart TD
-    A[New dbPath] --> B[构建 SQLite DSN 含 WAL PRAGMAs]
+    A[New dbPath] --> B[构建 SQLite DSN 含 WAL foreign_keys busy_timeout PRAGMAs]
     B --> C[gorm.Open gsqlite.Open]
     C --> D[配置连接池 MaxOpen=1 MaxIdle=1]
     D --> E[newClientDB]
@@ -848,6 +838,30 @@ flowchart TD
 | GetLatestSeq / SetLatestSeq | 便捷方法，操作 `latest_seq` 键 |
 | SetLocalMaxSeqTx | 事务内设置 local_max_seq |
 
+### 客户端 ConversationStore 与服务端差异
+
+客户端 ConversationStore 除了共享的 Create/Get/GetByUsers 操作外，还有以下与服务端不同的实现：
+
+| 方法 | 客户端实现 | 服务端差异 |
+|------|-----------|-----------|
+| GetByUser | 单条 `WHERE (user_id1 = ? OR user_id2 = ?) AND user_id2 != ''` 查询，使用 Offset/Limit 分页 | 服务端双查询 + 内存合并去重 + 手动排序 |
+| GetUnscoped | 与服务端一致，`Unscoped()` 查询包含软删除记录 | 一致 |
+| SearchByTitle | 与服务端一致，`LIKE` 查询 + `escapeLikePattern` 转义 | 一致 |
+| Update | `Unscoped().Save(conv)` 可更新软删除记录（包括清除 deleted_at） | 服务端 `Save(conv)` 不使用 Unscoped |
+| Upsert | SELECT + INSERT/UPDATE，捕获 `ErrDuplicateKey` 后重试为 UPDATE（TOCTOU 处理） | 服务端无 Upsert |
+| Delete | 事务内级联软删除会话+消息（D-013） | 服务端仅软删除单条会话 |
+| Restore | 事务内级联恢复会话+消息，幂等（已恢复的会话不报错）（D-015） | 服务端仅恢复单条会话，不存在返回 ErrNotFound |
+| UpdateLastRead | 单条 UPDATE 语句，CASE WHEN 同时处理两个用户列 | 服务端先 GET 确定用户位置再 UPDATE |
+
+### 客户端 MessageStore 额外操作
+
+| 方法 | 说明 |
+|------|------|
+| Upsert | SELECT + INSERT/UPDATE，捕获 `ErrDuplicateKey` 后重试为 UPDATE（TOCTOU 处理），按 `(client_message_id, sender_id)` 唯一索引 |
+| updateByCompositeKey | 按 `(client_message_id, sender_id)` 查找记录后通过主键 UPDATE，避免 GORM Save() 的 WHERE 忽略问题 |
+| CreateTx | 事务内插入消息 |
+| SoftDeleteTx | 事务内软删除消息 |
+
 ### 客户端特有事务操作
 
 客户端 ConversationStore 和 MessageStore 提供 `*Tx` 变体，接受外部 `*gorm.DB` 事务句柄，支持在调用方控制的事务中执行：
@@ -898,7 +912,7 @@ erDiagram
         uuid id PK
         uint32 seq "唯一索引"
         string type "size:20 带索引"
-        bytes payload "blob"
+        bytes payload "blob JSON 序列化"
         timestamp created_at "带索引 硬删除清理"
     }
 
@@ -940,7 +954,7 @@ erDiagram
 | 模型 | 表名 | 主键 | 关键索引 | 软删除 | 说明 |
 |------|------|------|----------|--------|------|
 | Draft | drafts | UUID | `uniqueIndex(conversation_id)` | 否 | 每会话最多一个草稿，Save 使用 UPSERT |
-| NotificationLog | notification_logs | UUID | `uniqueIndex(seq)`，`index(type)`，`index(created_at)` | 否 | 记录接收的推送通知用于去重和审计，过期后硬删除 |
+| NotificationLog | notification_logs | UUID | `uniqueIndex(seq)`，`index(type)`，`index(created_at)` | 否 | 记录接收的推送通知用于去重和审计，Payload 为 JSON blob，过期后硬删除 |
 | RetryTask | retry_tasks | UUID | `index(method)`，`index(next_retry)`，`index(status)`，`index(created_at)` | 否 | RPC 重试任务队列，指数退避，status=pending/failed |
 | RPCLog | rpc_logs | UUID | `index(type)`，`index(request_id)`，`index(method)`，`index(status_code)`，`index(conversation_id)`，`index(created_at)` | 否 | RPC 调用日志用于可观测性，支持按时间间隔聚合统计 |
 | SyncState | sync_states | String Key | PK(key) | 否 | 键值对存储客户端同步状态（local_max_seq, latest_seq） |

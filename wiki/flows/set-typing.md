@@ -110,19 +110,21 @@ flowchart TD
 | JSON 解析失败 | 返回 `ValidationError('invalid params')` |
 | `is_typing` 缺省 | Go 零值默认为 `false`，正常广播 `is_typing: false` |
 
-### 2. 会话不存在
+### 2. 会话获取失败
 
 ```mermaid
 flowchart TD
-    A[获取会话] --> B{会话存在?}
-    B -->|否| C[返回 NotFoundError]
-    B -->|是| D[继续]
+    A[获取会话] --> B{err 类型?}
+    B -->|ErrNotFound| C[返回 NotFoundError]
+    B -->|其他错误| D[返回 InternalError]
+    B -->|无错误| E[继续]
 ```
 
 | 场景 | 处理方式 |
 |------|----------|
 | 会话不存在 | 返回 `NotFoundError('conversation not found')` |
-| 会话已被软删除 | GORM 自动过滤，等同于不存在 |
+| 会话已被软删除 | GORM 自动过滤 `DeletedAt`，等同于不存在 |
+| 数据库连接失败 / 超时等 | 返回 `InternalError`，包装底层错误 |
 
 ### 3. 非成员操作
 
@@ -151,7 +153,16 @@ flowchart TD
 | 1 秒内重复发送 | 静默返回 OK，不广播（不是错误） |
 | Rate limiter entry 过期 | 后台 cleanup goroutine 每 5 分钟清理 10 分钟未访问的条目 |
 
-### 5. 广播失败
+### 5. Payload 序列化失败
+
+| 场景 | 处理方式 |
+|------|----------|
+| `json.Marshal(typingBroadcastPayload)` 失败 | 返回 `InternalError('marshal typing payload: ...')` |
+| `marshalResponse(setTypingResponse)` 失败 | 返回 `InternalError('failed to marshal response: ...')` |
+
+> 注：这两种情况在实践中极不可能发生（序列化简单的固定结构体），但代码中有完整错误处理。
+
+### 6. 广播失败
 
 ```mermaid
 flowchart TD

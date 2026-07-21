@@ -1,5 +1,5 @@
 ---
-last_updated: 2026-07-20
+last_updated: 2026-07-21
 ---
 
 # 客户端注册与函数管理
@@ -99,9 +99,10 @@ sequenceDiagram
     WS->>WS: client.Run() 阻塞运行
     Note over WS: 读写泵开始工作
 
-    C->>CS: performReconnectHandshake
-    CS->>WS: system.register_functions
-    CS->>WS: system.reconnect
+    Note over CS: 异步执行重连握手（不阻塞 FullSync）
+    CS->>WS: system.register_functions (异步)
+    CS->>WS: system.reconnect (异步, 携带 last_seen_seq)
+    CS->>CS: syncMgr.FullSync (同步, 分页拉取增量更新)
 
     Note over WS: 连接断开时
     WS->>CM: ConnectionStore.Remove()
@@ -154,10 +155,12 @@ sequenceDiagram
      - `removeClient()`
      - 函数注册表清理
 
-10. **客户端侧握手**
-    - 连接后异步运行 `performReconnectHandshake`
-    - 先发送 `system.register_functions`
-    - 再发送 `system.reconnect`
+10. **客户端侧握手与同步**
+    - 连接后启动异步 `performReconnectHandshake` 协程：
+      - 先发送 `system.register_functions`（确保服务端在 PendingStore 重放前有 handler）
+      - 再发送 `system.reconnect`（携带 `last_seen_seq`）
+    - 握手异步执行，不阻塞后续步骤
+    - 同步执行 `syncMgr.FullSync`（分页拉取增量更新，从本地 `localMaxSeq` 开始）
 
 ### 边缘场景
 
@@ -567,10 +570,12 @@ sequenceDiagram
 
     M->>RH: RegisterAll(handler, deps)
 
+    RH->>MH: RegisterMethod("heartbeat", handler)
     RH->>MH: RegisterMethod("send_message", handler)
     RH->>MH: RegisterMethod("create_conversation", handler)
     RH->>MH: RegisterMethod("get_messages", handler)
-    Note over RH,MH: ... 共 16 个无条件方法处理器
+    RH->>MH: RegisterMethod("agent_resume", handler)
+    Note over RH,MH: ... 共 18 个无条件方法处理器
 
     alt deps.FunctionRegistry != nil
         RH->>MH: RegisterMethod("system.register_functions", handler)
@@ -589,7 +594,9 @@ sequenceDiagram
    - `main.go` 创建包含所有必需存储、注册表和代理的 `Dependencies` 结构体
 
 2. **注册所有处理器**
-   - 调用 `RegisterAll(handler, deps)` 注册 16 个无条件方法处理器 + 2 个条件注册
+   - 调用 `RegisterAll(handler, deps)` 注册 16 个无条件方法处理器 + 2 个条件注册（共 18 个）
+   - 无条件方法包括：`heartbeat`、`send_message`、`sync_updates`、`create_conversation`、`list_conversations`、`get_messages`、`search_messages`、`get_conversation`、`delete_conversation`、`restore_conversation`、`delete_message`、`mark_as_read`、`set_typing`、`stream_text`、`reload_agents`、`agent_resume`
+   - 条件注册：`system.register_functions`（需 `FunctionRegistry`）、`system.reconnect`（需 `ReverseRPC` 和 `PendingStore`）
 
 3. **存储处理器**
    - 每个 `RegisterMethod(methodName, handler)` 将处理器存储在 `DefaultMessageHandler` 的方法分发映射中
@@ -682,3 +689,6 @@ graph TD
 - [系统架构概览](../architecture/system-architecture.md)
 - [协议设计](../architecture/protocol-design.md)
 - [组件关系](../architecture/component-relationships.md)
+- [WebSocket 连接管理](./websocket-connection.md) -- 更详细的连接建立、设备替换、心跳、断开清理、优雅关闭流程
+- [函数注册与动态工具](./function-registry.md) -- 更详细的函数注册/注销、动态工具注入、反向 RPC 调用流程
+- [断线重连与同步](./reconnection.md) -- 客户端重连协调、增量同步、心跳保活的完整流程

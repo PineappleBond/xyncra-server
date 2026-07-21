@@ -76,7 +76,7 @@ flowchart TD
 | standalone WebSocket 连接超时 (5s) | 返回 `dial: context deadline exceeded` |
 | standalone WebSocket 读取超时 | 返回 `standalone read: server timed out`，附带 `net.Error` 检测 |
 | isMutationMethod 为 true 且 standalone 成功 | 打印提示：本地 DB 将在守护进程启动时更新 |
-| device-id 未指定 | 通过 `defaultDeviceID()` 使用 `SHA256(hostname)[:8]`（当前 `NewCLIContext` 要求必填） |
+| device-id 未指定 | `NewCLIContext` 返回错误（必填）。`defaultDeviceID()`（`SHA256(hostname)[:8]`）已实现但未接入主流程，目前仅在测试中使用 |
 
 ---
 
@@ -142,7 +142,9 @@ sequenceDiagram
 | -32700 | JSON 解析错误 |
 | -32600 | 无效的 JSONRPC 版本 |
 | -32601 | 未知方法 |
-| -32000 | 通用服务器错误（handler 返回 generic error） |
+| -32602 | 参数解析错误（IPC handler 内部 `json.Unmarshal` 失败） |
+| -32000 | 通用服务器错误（`dispatch()` 层：handler 返回 Go error 而非 `*IPCResponse`） |
+| -300 | 业务逻辑错误（IPC handler 内部：`XyncraClient` RPC 调用失败但非 `*client.ClientError`） |
 | 自定义 | `*client.ClientError` 中提取的 .Code 和 .Message |
 
 ### 已注册的 IPC 方法
@@ -178,7 +180,7 @@ flowchart TD
     B --> C["acquireLock(LockPath, LockInfo)"]
     C --> D{"锁获取成功?"}
     D -->|否| E["输出错误<br>os.Exit(2)"]
-    D -->|是| F["打开 SQLite (WAL mode,<br>busy_timeout=5000ms, foreign_keys=ON)"]
+    D -->|是| F["打开 SQLite (WAL mode,<br>busy_timeout=5000ms, cache_size=-8000,<br>synchronous=NORMAL, foreign_keys=ON)"]
     F --> G["创建 IPCServer"]
     G --> H["创建 cliUpdateHandler<br>(推送事件输出到 stdout)"]
     H --> I["创建 cliLogger<br>(结构化日志写入 stderr)"]
@@ -244,9 +246,10 @@ flowchart TD
 | 场景 | 行为 |
 |------|------|
 | clientMsgID 为空 | IPC 路径：`XyncraClient` 自动生成 UUID v4；standalone 路径：显式生成 |
-| content 为空字符串 | 允许（标志需要显式提供，空字符串合法） |
+| content 为空字符串 | 允许（`--content` 必须通过 `--content` 显式提供，`--content ""` 合法；未提供则 `cmd.Flags().Changed("content")` 返回 false 并报错） |
 | reply_to 为 0 | 不设置回复上下文 |
-| 消息持久化成功但 UpdateLastMessage 失败 | 警告输出到 stderr，不影响发送结果 |
+| 消息持久化成功但 UpdateLastMessage 失败 | 警告输出到 stderr（`ErrNotFound` 被静默忽略），不影响发送结果 |
+| 消息持久化时 `ErrDuplicateKey` | 静默忽略（幂等语义，消息已存在） |
 | clearDraft 失败 | 警告输出到 stderr，不影响发送结果（best-effort） |
 | 重复消息（基于 client_message_id 幂等） | `SendMessageResult.Duplicate` 为 true，输出到 stdout |
 
@@ -311,7 +314,7 @@ flowchart TD
 | 场景 | 行为 |
 |------|------|
 | 列出会话时无同步数据 | 输出 `'No conversations found. Run xyncra-client listen first to sync data.'` |
-| create-conversation 使用 `--peer-id` 而非 `--user-id` | 避免与全局 `--user-id` 标志冲突 |
+| create-conversation 使用 `--peer-id` 而非 `--user-id` | 避免与全局 `--user-id` 标志冲突。IPC 路径发送 `user_id2`，standalone 路径发送 `user_id`（两种参数名服务器均接受） |
 | standalone 模式下恢复会话且本地记录缺失 | 仅记录警告；下次守护进程同步后会话会出现 |
 | get-conversation 查询已删除会话 | `store.ErrNotFound` 返回用户友好错误 |
 | 分页 | `--offset` 和 `--limit` 标志，使用 `limit+1` 技巧检测 hasMore |
@@ -329,7 +332,7 @@ flowchart TD
     subgraph 删除消息
         DA["delete-message"] --> DB["IPC 调用 delete_message<br>参数: message UUID"]
         DB --> DC{"IPC 成功?"}
-        DC -->|是| DD["完成"]
+        DC -->|是| DD["IPC handler 软删除本地 DB"]
         DC -->|否| DE["standaloneRPC 降级<br>同步本地 DB"]
     end
 
@@ -343,7 +346,7 @@ flowchart TD
         MF -->|是| MG["使用服务器返回的<br>last_read_message_id<br>(MAX 语义) 更新本地游标"]
         MF -->|否| MH["standaloneRPC 降级"]
         MH --> MI{"standalone 成功?"}
-        MI -->|是| MJ["不更新本地读游标<br>(下次守护进程同步时更新)"]
+        MI -->|是| MJ["返回服务器确认的游标 ID 给用户<br>不更新本地 DB 读游标<br>(下次守护进程同步时更新)"]
         MI -->|否| MK["返回错误"]
     end
 
@@ -366,7 +369,7 @@ flowchart TD
 | mark-as-read 使用 `--message-id 0` 但会话不在本地 DB | 返回 `'conversation not found in local database; run xyncra-client listen first'` |
 | get-messages 使用 `--limit <= 0` | 返回验证错误 |
 | search-messages 返回 DESC 排序 | 分页游标 `--after-message-id` 表示"显示序列号小于此值的消息" |
-| mark-as-read standalone 模式 | 不更新本地读游标；下次守护进程同步时更新 |
+| mark-as-read standalone 模式 | 不更新本地 DB 中的读游标；但从服务器响应中解析 `last_read_message_id` 返回给用户显示；下次守护进程同步时更新本地游标 |
 
 ---
 
@@ -488,7 +491,7 @@ flowchart TD
     P --> Q["f.Unlock()"]
     Q --> R{"成功?"}
     R -->|是| S["os.Remove(lockPath)"]
-    R -->|否| T["跳过 Remove"]
+    R -->|否| T["记录 unlock 错误<br>仍执行 os.Remove(lockPath)"]
 
     U["writeLockInfo 失败"] --> V["解锁 flock<br>返回错误"]
 ```
@@ -501,7 +504,7 @@ flowchart TD
 | 锁文件移除竞态 | 另一个进程在 stale 检测和重试之间获取锁，重试 `TryLock` 失败 |
 | PID 复用 | 理论上可能，但 flock 保护：新进程不会持有 flock |
 | `writeLockInfo` 在获取 flock 后失败 | 解锁 flock 并返回错误 |
-| unlock 函数 | 先尝试 `Unlock()` 再尝试 `Remove()`；`Unlock()` 失败则跳过 `Remove()` |
+| unlock 函数 | 先尝试 `Unlock()` 再尝试 `Remove()`；两者都尝试执行。`Unlock()` 失败时函数提前返回错误（此时 `Remove()` 仍执行但其错误被忽略）。`Remove()` 返回 `ErrNotExist` 时视为正常 |
 
 ---
 
@@ -604,7 +607,7 @@ IPC 专属命令，用于在 HITL（Human-In-The-Loop）中断后恢复暂停的
 ```mermaid
 flowchart TD
     A["runAgentResume()"] --> B["解析 CLIContext"]
-    B --> C["读取标志:<br>--conversation-id (必填)<br>--checkpoint-id (必填)<br>--interrupt-id (可选)<br>--answer (必填)<br>--agent-id (必填)"]
+    B --> C["读取标志:<br>--conversation-id (必填)<br>--checkpoint-id (必填)<br>--interrupt-id (可选)<br>--answer (必填)<br>--agent-id (必填,<br>如 agent/my-bot)"]
     C --> D["创建 IPCClient<br>超时 5s"]
     D --> E["IPC 调用 agent_resume<br>携带所有参数"]
     E --> F{"IPC 成功?"}
@@ -748,7 +751,7 @@ flowchart TD
 | 守护进程未运行 | exit code 2 |
 | 服务端重载失败 | 作为 IPC 错误转发 |
 | 结果反序列化失败 | 返回错误 |
-| 未配置任何 Agent | count 为 0 |
+| 未配置任何 Agent | `result["count"]` 为 0 |
 
 ---
 

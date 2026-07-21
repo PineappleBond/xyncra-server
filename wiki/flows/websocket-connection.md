@@ -29,7 +29,7 @@ sequenceDiagram
     HTTP->>WS: 查询 clientsByDevice[deviceKey]
     WS-->>HTTP: oldClients (旧连接列表)
 
-    alt 存在旧连接
+    alt 存在旧连接 且 reverseRPC 已配置
         HTTP->>RR: CancelDevice(userID, deviceID)
         Note over RR: 取消旧设备的待处理 RPC
     end
@@ -170,7 +170,7 @@ sequenceDiagram
 ### 涉及文件
 
 - `websocket_server.go`: handleWebSocket 中的设备替换逻辑、performDeviceReplacement
-- `reverse_rpc.go`: CancelDevice、CancelDeviceWithReason
+- `reverse_rpc.go`: CancelDevice
 - `websocket_client.go`: Client.Close、Client.Done
 
 ---
@@ -237,7 +237,10 @@ sequenceDiagram
     Client->>DMH: Request: method="heartbeat"
     DMH->>HH: HandleRequest(ctx, client, req)
     HH->>HH: 解析可选 device_info (仅记录日志)
-    HH->>CS: Refresh(connID) [Lua 原子操作]
+    HH->>CS: Refresh(connID)
+    CS->>CS: GET infoKey 读取 ConnectionInfo JSON (获取 TTL 配置和 UserID)
+    CS->>CS: Lua: EXISTS infoKey → PEXPIRE infoKey (连接 TTL)
+    CS->>CS: Lua: PTTL userKey → PEXPIRE userKey (MAX 语义)
     CS-->>HH: 成功 / ErrConnectionNotFound
     HH-->>Client: Response: {status: ok} / {status: connection expired}
 ```
@@ -245,9 +248,10 @@ sequenceDiagram
 ### 边缘场景
 
 - 连接已过期/被 Redis 清除: `Refresh` 返回 `ErrConnectionNotFound`，客户端收到 connection expired 错误
-- Redis 不可达: 返回内部错误
+- Redis 不可达: 返回内部错误（分类为 `ErrRedisTimeout` 或 `ErrRedisConnectionFailed`）
 - `device_info` 解析失败: 忽略，不影响心跳处理（宽容解析）
 - 心跳参数缺失: 有效心跳，无参数也正常处理
+- `Refresh` 内部流程: 先 GET infoKey 读取连接 JSON（获取 TTL 配置和 UserID），再通过 Lua 脚本原子执行 EXISTS + PEXPIRE infoKey + PTTL/PEXPIRE userKey（MAX 语义），共 2 次 Redis round-trip
 
 ### 涉及文件
 
@@ -618,7 +622,7 @@ sequenceDiagram
 
 - `websocket_server.go`: handleWebSocket 断开清理逻辑、scheduleFuncCleanup、cancelPendingFuncCleanup
 - `websocket_client.go`: readPump、writePump、Close
-- `redis_connection_store.go`: Remove (Lua 原子操作)
+- `redis_connection_store.go`: Remove (Get + luaRemove + luaCleanupEmptySet)
 - `function_registry.go`: OnDeviceDisconnect
 - `reverse_rpc.go`: CancelDeviceWithReason
 
@@ -844,17 +848,14 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[连接注册 Add] --> B[Lua: SET infoKey JSON PX ttl]
-    B --> C[Lua: SADD userKey connID]
-    C --> D[Lua: PEXPIRE userKey MAX当前ttl]
+    A[连接注册 Add] --> B["Lua 原子执行:<br/>GET infoKey 检查存在 + SCARD 检查限制<br/>SET infoKey JSON PX ttl<br/>SADD userKey connID<br/>PEXPIRE userKey MAX语义"]
 
-    E[连接刷新 Refresh] --> F[GET infoKey 读取 TTL]
-    F --> G[Lua: EXISTS + PEXPIRE infoKey]
-    G --> H[Lua: PEXPIRE userKey MAX当前ttl]
+    E[连接刷新 Refresh] --> F[GET infoKey 读取 ConnectionInfo JSON]
+    F --> G["Lua 原子执行:<br/>EXISTS infoKey<br/>PEXPIRE infoKey (连接 TTL)<br/>PTTL userKey → PEXPIRE userKey (MAX 语义)"]
 
-    R[连接删除 Remove] --> S[GET infoKey 获取 userID]
-    S --> T[Lua: DEL infoKey + SREM userKey connID]
-    T --> U[Lua: luaCleanupEmptySet 原子删除空 SET]
+    R[连接删除 Remove] --> S[Get(connID) 获取 userID]
+    S --> T["Lua luaRemove:<br/>DEL infoKey + SREM userKey connID"]
+    T --> U["Lua luaCleanupEmptySet:<br/>SCARD userKey == 0 则 DEL"]
 
     I[Redis 自动过期] --> J[infoKey TTL 到期自动删除]
     J --> K[userKey 中残留过期 connID]
@@ -885,8 +886,8 @@ flowchart TD
 #### 4. Remove 操作的非原子性
 
 - 触发条件: 所有 Remove 调用
-- 处理逻辑: Remove 先执行 GET 获取 userID（因为 Lua 脚本需要知道 userKey），再执行 luaRemove。如果 infoKey 在 GET 和 luaRemove 之间过期，SREM 仍会对 userKey 执行（移除已过期的条目，无害）
-- 最终结果: 两步操作非完全原子，但对正确性无影响（SREM 幂等）
+- 处理逻辑: Remove 执行 3 步操作：(1) Get(connID) 获取 userID，(2) luaRemove 删除 infoKey 和 userKey 中的 connID，(3) luaCleanupEmptySet 清理空 SET。步骤 1 和 2 之间存在窗口：若 infoKey 在此期间过期，Get 返回 ErrConnectionNotFound，Remove 直接返回 nil（no-op）。若 infoKey 在 Get 和 luaRemove 之间过期，SREM 仍会对 userKey 执行（移除已过期的条目，无害）
+- 最终结果: 三步操作非完全原子，但对正确性无影响（SREM 幂等，luaCleanupEmptySet 原子）
 
 #### 5. Remove 后清理空 SET
 
@@ -896,5 +897,5 @@ flowchart TD
 
 ### 涉及文件
 
-- `redis_connection_store.go`: Add (luaAdd)、Remove (Get + luaRemove + luaCleanupEmptySet)、Refresh (Get + luaRefresh)、ListByUser (SScan + MGet + 懒清理)、RemoveByUser (SMembers + UNLINK 批量删除)
+- `redis_connection_store.go`: Add (luaAdd, 1 round-trip)、Remove (Get + luaRemove + luaCleanupEmptySet, 3 round-trips)、Refresh (Get + luaRefresh, 2 round-trips)、ListByUser (SScan + MGet + 懒清理)、RemoveByUser (SMembers + UNLINK 批量删除)
 - `connection_store.go`: ConnectionInfo.TTL、IsExpired、ConnectionStore 接口定义

@@ -191,6 +191,9 @@ graph TB
 | [Sync Updates](sync-updates.md) | `sync-updates.md` | 增量更新拉取（Gap-filling） |
 | [Reload Agents](reload-agents.md) | `reload-agents.md` | Agent 配置热重载 |
 | [Background Cleanup](background-cleanup.md) | `background-cleanup.md` | 后台清理任务（UserUpdate/HITL/缓存） |
+| [Client Registration](client-registration.md) | `client-registration.md` | 客户端注册与函数管理（连接注册/函数注册/动态工具注入） |
+| [Message Queue](message-queue.md) | `message-queue.md` | 消息队列业务流程（入队/消费/重试/优雅关闭） |
+| [Agent Execution](agent-execution.md) | `agent-execution.md` | Agent 执行引擎与 LLM 交互（MQ 消费/LLM 调用/流式输出） |
 
 ---
 
@@ -270,6 +273,8 @@ graph TB
 
 ### 4. Agent 执行引擎 (agent)
 
+> 详细流程见 [agent.md](agent.md)（综合文档）和 [agent-execution.md](agent-execution.md)（MQ 消费与 LLM 交互）
+
 **职责**：基于 CloudWeGo Eino 框架的 AI Agent 子系统，支持多种 LLM 提供商、流式输出、工具调用和 HITL 中断。
 
 **核心组件**：
@@ -304,6 +309,8 @@ graph TB
 ---
 
 ### 5. 客户端注册与函数管理 (client-registration)
+
+> 详细流程见 [client-registration.md](client-registration.md)
 
 **职责**：管理客户端的注册和函数能力注册，支持动态工具注入到 Agent。
 
@@ -374,6 +381,8 @@ graph TB
 ---
 
 ### 8. 消息队列 (message-queue)
+
+> 详细流程见 [message-queue.md](message-queue.md)
 
 **职责**：基于 Asynq（Redis）的异步任务队列，处理消息广播、Agent 执行等异步任务。
 

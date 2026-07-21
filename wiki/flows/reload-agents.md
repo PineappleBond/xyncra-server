@@ -54,42 +54,49 @@ sequenceDiagram
     H->>R: Reload()
     R->>R: 清空旧配置，更新 dir
     R->>FS: os.ReadDir 扫描 agents 目录
-    FS-->>R: 返回目录条目
-    loop 每个 .md 文件
-        R->>FS: os.ReadFile 读取文件
-        R->>R: ParseFrontMatter（解析 YAML + 验证 + 提取 SystemPrompt）
-        R->>R: 检查 ID 重复，加入 agents map
-    end
+    FS-->>R: 返回目录条目或错误
 
-    alt 加载失败
-        R-->>H: 返回错误
+    alt 目录级错误（权限不足等）
+        R-->>H: 返回 error
         H-->>WS: 返回错误（含目录路径）
         WS-->>C: 错误响应
+    else 目录不存在（IsNotExist）
+        R-->>H: 返回 nil
+        H-->>WS: 返回 {count: 0}
+        WS-->>C: 成功响应
+    else 目录正常
+        loop 每个 .md 文件
+            R->>FS: os.ReadFile 读取文件
+            R->>R: ParseFrontMatter（解析 YAML + 验证 + 提取 SystemPrompt）
+            R->>R: 检查 ID 重复，加入 agents map
+            Note over R,FS: 任何步骤失败：记录 Info 日志，跳过该文件
+        end
+        R-->>H: 返回 nil
+        H->>R: ListAll()
+        R-->>H: 返回 []*AgentConfig
+        H->>H: len(ListAll())
+        H-->>WS: 返回 {count: N}
+        WS-->>C: 成功响应
     end
-
-    R-->>H: 成功
-    H->>R: ListAll()
-    R-->>H: 返回 []*AgentConfig
-    H->>H: len(ListAll())
-    H-->>WS: 返回 {count: N}
-    WS-->>C: 成功响应
 ```
 
 ### 详细步骤
 
-1. **检查 AgentRegistry**：如果为 nil，直接返回 `{count: 0}`（json.Marshal 序列化）
+1. **检查 AgentRegistry**：如果为 nil，直接返回 `{count: 0}`（json.Marshal 序列化），**不调用 Reload()**
 2. **调用 Reload()**：用 `RLock` 读取 `dir` 字段，释放锁后调用 `Load(dir)`
 3. **Load() 加写锁**：`Lock()` 保护整个加载过程
 4. **清空旧配置**：`r.agents = make(map[string]*AgentConfig)`，同时更新 `r.dir`
-5. **扫描目录**：`os.ReadDir(dir)` 遍历目录，跳过子目录和非 `.md` 文件
-6. **逐文件处理**：对每个 `.md` 文件：
-   - `os.ReadFile` 读取文件内容（失败则 skip + 日志）
-   - `ParseFrontMatter` 解析 YAML front matter（缺少 `---` 分隔符返回 `ErrNoFrontMatter`；YAML 解析失败返回 `ErrInvalidFrontMatter`）
-   - `Validate()` 检查必填字段和 MCP 配置（失败则返回错误，该文件被跳过）
+5. **扫描目录**：`os.ReadDir(dir)` 遍历目录
+   - 目录不存在（`IsNotExist`）：返回 nil（视为可选模块禁用）
+   - 其他目录级错误（如权限不足）：返回 error（由 handler 包装后返回给客户端）
+6. **逐文件处理**：跳过子目录和非 `.md` 文件，对每个 `.md` 文件执行：
+   - `os.ReadFile` 读取文件内容
+   - `ParseFrontMatter` 解析 YAML front matter 并验证（内含 `Validate()` 检查必填字段和 MCP 配置）
    - 提取 Markdown body 为 `SystemPrompt`
-   - 检查 ID 重复（重复则 skip + 日志，保留先加载的）
-7. **返回结果**：`Load()` 成功后，handler 调用 `len(h.registry.ListAll())` 获取数量
-8. **错误包装**：`Reload()` 失败时，handler 用 `fmt.Errorf("reload agents from %q: %w", h.registry.Dir(), err)` 包装错误
+   - 检查 ID 重复
+   - **以上任何步骤失败**（读取失败、缺少 `---` 分隔符 `ErrNoFrontMatter`、YAML 解析失败 `ErrInvalidFrontMatter`、必填字段缺失 `ErrMissing*`、MCP 配置错误 `ErrMCP*`、ID 重复）：记录 Info 级日志，**跳过该文件，继续处理下一个**。这些错误不会传播给调用者。
+7. **返回结果**：`Load()` 成功后（即使所有文件都被跳过），handler 调用 `len(h.registry.ListAll())` 获取数量
+8. **错误包装**：仅目录级错误导致 `Load()` 返回 error，handler 用 `fmt.Errorf("reload agents from %q: %w", h.registry.Dir(), err)` 包装错误
 9. **返回响应**：成功返回 `{count: N}`
 
 ---
@@ -115,41 +122,49 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[扫描目录] --> B{目录存在?}
-    B -->|否且 IsNotExist| C[返回 nil（可选模块，D-063）]
-    B -->|否且其他错误| D[返回错误]
-    B -->|是| E[继续处理]
+    A["os.ReadDir(dir)"] --> B{错误类型?}
+    B -->|IsNotExist| C["返回 nil（可选模块，D-063）"]
+    B -->|其他错误| D["返回 fmt.Errorf('read agents dir: %w', err)"]
+    B -->|无错误| E[继续处理文件]
 ```
 
-| 场景 | 处理方式 |
-|------|----------|
-| agents 目录不存在 | 返回 nil（可选模块，agent 功能禁用时允许） |
-| 目录无读取权限 | 返回错误 |
+| 场景 | 处理方式 | 结果 |
+|------|----------|------|
+| agents 目录不存在 | `Load()` 内部 `os.ReadDir` 返回 `IsNotExist`，`Load()` 返回 nil | handler 报告 `{count: 0}`，不报错 |
+| 目录无读取权限 | `Load()` 返回 `fmt.Errorf("read agents dir: %w", err)` | handler 包装为 `reload agents from "dir": read agents dir: ...` |
 
 ### 3. 配置文件解析失败
 
 ```mermaid
 flowchart TD
-    A[解析 YAML front matter] --> B{解析成功?}
-    B -->|失败| C[记录错误, 继续下一个]
-    B -->|成功| D[验证必填字段 + MCP 配置]
-    D --> E{验证通过?}
-    E -->|否| F[记录错误, 继续下一个]
-    E -->|是| G[提取 Markdown body 为 SystemPrompt]
-    G --> H[添加到配置列表]
+    A[读取文件] --> B{读取成功?}
+    B -->|失败| X[记录 Info 日志, 跳过该文件]
+    B -->|成功| C[ParseFrontMatter 解析 YAML]
+    C --> D{解析成功?}
+    D -->|失败| X
+    D -->|成功| E[Validate 验证必填字段 + MCP 配置]
+    E --> F{验证通过?}
+    F -->|否| X
+    F -->|是| G[检查 ID 重复]
+    G --> H{ID 重复?}
+    H -->|是| X
+    H -->|否| I[添加到 agents map]
 ```
 
-| 场景 | 处理方式 |
-| ---- | ---- |
-| 无 front matter（缺少 `---` 分隔符） | 跳过该文件，返回 `ErrNoFrontMatter` |
-| YAML 格式错误 | 跳过该文件，返回 `ErrInvalidFrontMatter`（wrap 原始错误） |
-| 必填字段缺失（id/name/model/api_key_env） | 跳过该配置，返回对应的 `ErrMissing*` 错误 |
-| MCP server 缺少 name | 跳过该配置，返回 `ErrMCPMissingName` |
-| MCP server name 重复 | 跳过该配置，返回 `ErrMCPDuplicateName` |
-| MCP transport 非 "sse"/"stdio" | 跳过该配置，返回 `ErrInvalidMCPTransport` |
-| MCP sse 缺少 url | 跳过该配置，返回 `ErrMCPMissingURL` |
-| MCP stdio 缺少 command | 跳过该配置，返回 `ErrMCPMissingCommand` |
-| 文件读取失败 | 跳过该文件，记录 Info 级日志 |
+**关键行为**：`Load()` 对所有单个文件级错误采取 **skip + Info 日志 + 继续** 策略。这些错误不会传播给调用者。只有目录级错误（如权限不足）才会使 `Load()` 返回 error。
+
+| 场景 | 处理方式 | 传播给调用者? |
+| ---- | ---- | ---- |
+| 文件读取失败 | 跳过该文件，记录 Info 级日志 | 否 |
+| 无 front matter（缺少 `---` 分隔符） | 跳过该文件（`ErrNoFrontMatter`） | 否 |
+| YAML 格式错误 | 跳过该文件（`ErrInvalidFrontMatter`，wrap 原始错误） | 否 |
+| 必填字段缺失（id/name/model/api_key_env） | 跳过该文件（`ErrMissing*`） | 否 |
+| MCP server 缺少 name | 跳过该文件（`ErrMCPMissingName`） | 否 |
+| MCP server name 重复 | 跳过该文件（`ErrMCPDuplicateName`） | 否 |
+| MCP transport 非 "sse"/"stdio" | 跳过该文件（`ErrInvalidMCPTransport`） | 否 |
+| MCP sse 缺少 url | 跳过该文件（`ErrMCPMissingURL`） | 否 |
+| MCP stdio 缺少 command | 跳过该文件（`ErrMCPMissingCommand`） | 否 |
+| 目录权限不足等目录级错误 | `Load()` 返回 error | **是** |
 
 ### 4. 配置冲突
 
@@ -189,14 +204,16 @@ flowchart TD
 
 **行为说明**：这与首次加载时目录不存在的行为一致（D-063）。
 
-**部分加载失败**：`Load()` 对单个文件错误（读取失败、解析失败、验证失败、ID 重复）采取 skip + 继续策略，不影响其他文件。只有目录级别的错误（如权限不足）才会使 `Load()` 返回 error。如果所有文件都被跳过，`Load()` 仍返回 nil，handler 报告 `{count: 0}`。
+**部分加载失败**：`Load()` 对所有单个文件级错误（读取失败、解析失败、验证失败、ID 重复）采取 skip + Info 日志 + 继续策略，不影响其他文件。只有目录级错误（如权限不足）才会使 `Load()` 返回 error。如果所有文件都被跳过，`Load()` 仍返回 nil，handler 报告 `{count: 0}`。
 
 ### 7. Reload 在 Load 之前调用（dir 为空）
 
 | 场景 | 处理方式 |
 | ---- | ---- |
-| `NewRegistry()` 后直接调用 `Reload()` | `dir` 为空字符串，`Load("")` 尝试读取空路径，`os.ReadDir` 返回错误 |
-| 结果 | handler 返回错误：`reload agents from "": read agents dir: ...` |
+| `NewRegistry()` 后直接调用 `Reload()` | `dir` 为空字符串，`Load("")` 尝试读取空路径，`os.ReadDir` 返回错误（非 `IsNotExist`） |
+| 结果 | `Load()` 返回 `fmt.Errorf("read agents dir: %w", err)`，handler 包装为 `reload agents from "": read agents dir: ...` |
+
+**注意**：此场景仅在直接调用 `Reload()` 时发生。通过 handler 调用时，nil registry 检查会先拦截（返回 `{count: 0}`），不会到达 `Reload()`。
 
 ---
 
@@ -242,10 +259,17 @@ AgentRegistry 为 nil 时返回 count=0：
 
 ### 3. Error Propagation
 
-加载失败时返回错误：
-- **原因**：让调用者知道重载失败
-- **行为**：返回具体错误信息
-- **客户端处理**：显示错误消息，检查配置文件
+仅目录级错误（如权限不足、路径无效）传播给调用者：
+
+- **原因**：目录级错误表示 Agent 功能无法工作，调用者需要知道
+- **行为**：handler 用 `fmt.Errorf("reload agents from %q: %w", dir, err)` 包装错误
+- **客户端处理**：显示错误消息，检查目录路径和权限
+
+单个文件级错误（解析失败、验证失败、ID 重复等）**不传播**：
+
+- **原因**：部分文件失败不应阻止其他有效配置的加载
+- **行为**：记录 Info 级日志，跳过该文件，继续处理下一个
+- **结果**：如果所有文件都被跳过，返回 `{count: 0}` 而非错误
 
 ### 4. Hot Reload
 
@@ -335,6 +359,7 @@ tools:
 
 ## 相关文档
 
+- [Agent 注册与加载](agent.md) — `AgentRegistry` 的 `Load()`、`Reload()`、`Get()`、`ListAll()` 等方法的详细行为
+- [CLI 命令](cli-ipc.md) — `reload-agents` CLI 命令的 IPC 调用流程（第 16 节）
 - [Agent 执行流程](agent-execution.md)
-- [CLI 命令](cli-ipc.md)
 - [设计决策](../architecture/design-decisions.md)

@@ -1,10 +1,12 @@
 ---
-last_updated: 2026-07-20
+last_updated: 2026-07-21
 ---
 
 # 消息队列业务流程详解
 
-本文档详细描述 Xyncra Server 消息队列子系统的业务流程，基于 Asynq（Redis）实现的异步任务队列，负责消息广播、Agent 执行等异步任务处理。
+本文档详细描述 Xyncra Server 消息队列子系统的**内部实现细节**，基于 Asynq（Redis）实现的异步任务队列，负责消息广播、Agent 执行等异步任务处理。
+
+> **与 [mq-async.md](./mq-async.md) 的关系**：`mq-async.md` 从**业务场景**角度描述 MQ 的端到端流程（包括 Agent 任务处理、HITL 恢复、BroadcastHelper 等）。本文档聚焦于 MQ **子系统内部**的机制（入队流程、消费流程、重试机制、优雅关闭、任务路由）。两者互补而非重复。
 
 ## 目录
 
@@ -20,7 +22,17 @@ last_updated: 2026-07-20
 
 ### 流程概述
 
-业务处理器（如 `send_message`、`delete_message`、`create_conversation`）先将数据持久化到数据库，然后通过 fire-and-forget 方式将 MQ 任务入队，用于向接收方广播实时更新。入队操作是**非阻塞**的，其失败不影响 HTTP 响应。
+业务处理器先将数据持久化到数据库，然后将 MQ 任务入队用于向接收方广播实时更新。绝大多数处理器使用 **fire-and-forget** 模式——入队失败仅记录日志，不影响客户端响应。已知的生产者包括：
+
+| 生产者 | 任务类型 | 入队模式 |
+|--------|----------|----------|
+| `send_message` | `mq:send_message` + `mq:agent_process`（当对方是 Agent 时） | fire-and-forget |
+| `delete_message` | `mq:send_message`（复用 sendMessageTaskPayload） | fire-and-forget |
+| `mark_as_read` | `mq:send_message`（仅广播给操作用户自己的其他设备） | fire-and-forget |
+| `create_conversation` | `mq:send_message` | fire-and-forget |
+| `delete_conversation` | `mq:send_message` | fire-and-forget |
+| `restore_conversation` | `mq:send_message` | fire-and-forget |
+| `agent_resume` | `mq:agent_resume` | **同步**（入队失败直接返回错误给客户端） |
 
 ### 流程图
 
@@ -81,7 +93,7 @@ flowchart TD
 | **Redis 不可用** | `b.client.EnqueueContext` 返回错误。由于是 fire-and-forget，调用方以 Info 级别记录日志，消息已持久化到数据库（下次 pull 时通过 `sync_updates` 投递） |
 | **重复 TaskID** | 如果使用 `WithTaskID` 且同 ID 任务已存在（pending 状态），Asynq 会拒绝。`send_message` 通常不设置显式 TaskID |
 | **Trace Context 注入失败** | 如果 context 中没有 Span，`InjectTraceContext` 返回空 map；代码通过设置 metadata 为 nil 来省略 JSON 字段 |
-| **Agent 任务入队** | 对于 Agent 对话，会额外入队一个 `TypeAgentProcess` 任务，使用 `WithMaxRetry(20)`（高于默认值），同样采用 fire-and-forget |
+| **Agent 任务入队** | `send_message` 在检测到对方是已注册 Agent 时，额外入队 `TypeAgentProcess` 任务（`WithMaxRetry(20)`，fire-and-forget）。`agent_resume` 在所有 HITL 问题回答完毕后入队 `TypeAgentResume` 任务（默认重试次数，**同步入队**——失败直接返回错误给客户端）。详见 [mq-async.md](./mq-async.md) |
 
 ---
 
@@ -142,7 +154,7 @@ flowchart TD
 | 5 | Asynq 按优先级加权从 Redis 队列出队：`critical:6`，`default:3`，`low:1` |
 | 6 | `asynq.HandlerFunc` 被调用，`decodeAsynqTask` 验证信封的 Type 字段非空 |
 | 7 | `TaskHandler.ProcessTask` 获取读锁，在 handlers map 中查找 `task.Type`，调用注册的函数 |
-| 8 | 对于 `TypeSendMessage`，注册的处理器 `NewSendMessageTaskHandler`：(a) 反序列化 payload 为 `sendMessageTaskPayload`，(b) 遍历 `payload.Recipients`，(c) 对每个接收方调用 `broadcastFn(userID, updates)` 通过 WebSocket 推送，(d) 始终返回 nil（始终成功） |
+| 8 | 对于 `TypeSendMessage`，注册的处理器 `NewSendMessageTaskHandler`：(a) 反序列化 payload 为 `sendMessageTaskPayload`，(b) 遍历 `payload.Recipients`，(c) 对每个接收方调用 `broadcastFn(userID, updates)` 通过 WebSocket 推送，(d) 始终返回 nil（不触发 Asynq 重试——数据已持久化，离线用户通过 `sync_updates` 补偿）。注意：`TypeAgentProcess` 和 `TypeAgentResume` 的处理器会根据错误类型选择性返回 error 触发 Asynq 重试（详见 [mq-async.md](./mq-async.md)） |
 | 9 | 成功时 Asynq 标记任务完成；处理器返回错误时 Asynq 应用重试策略 |
 
 ### 边缘场景
@@ -165,13 +177,17 @@ flowchart TD
 
 ### 流程概述
 
-系统存在两个独立的重试系统：(1) Asynq 内置的任务重试（用于 MQ 任务），(2) 客户端的 `ResponseRetryQueue`（用于 WebSocket 投递失败）。第三个机制 `QueueStore` 提供基于数据库的重试任务持久化，用于长生命周期的重试。
+系统存在多个独立的重试系统，横跨服务端和客户端：
+
+1. **Asynq 内置任务重试**（服务端，`internal/mq`）— 用于 MQ 任务失败后的自动重试
+2. **客户端 `ResponseRetryQueue`**（客户端，`pkg/client`）— 用于 WebSocket 投递失败的内存重试
+3. **客户端 `QueueStore` / `retryManager`**（客户端，`pkg/client`）— 基于数据库的持久化重试，用于长生命周期的重试
 
 ### 流程图
 
 ```mermaid
 flowchart TD
-    subgraph "Asynq 任务重试"
+    subgraph "Asynq 任务重试（服务端）"
         A1[处理器返回非 nil 错误] --> A2[Asynq 递增重试计数]
         A2 --> A3{检查重试次数}
         A3 -->|未耗尽| A4[按指数退避等待]
@@ -183,7 +199,7 @@ flowchart TD
         A8 --> A9[保留在 Redis 中供检查]
     end
 
-    subgraph "WebSocket 投递重试"
+    subgraph "WebSocket 投递重试（客户端）"
         B1[WebSocket 发送失败] --> B2[响应入队 ResponseRetryQueue]
         B2 --> B3[Drain: 取出 nextRetry <= now 的条目]
         B3 --> B4[通过 EnqueueWithBackoff 重新入队]
@@ -193,7 +209,7 @@ flowchart TD
         B6 -->|否| B8[保留在队列中]
     end
 
-    subgraph "数据库持久化重试"
+    subgraph "数据库持久化重试（客户端）"
         C1[RetryTask 持久化<br/>status = pending] --> C2[ListPending 查询:<br/>status = pending<br/>AND next_retry <= now]
         C2 --> C3[按 next_retry 升序排列]
         C3 --> C4[处理任务]
@@ -230,7 +246,7 @@ flowchart LR
 
 ### 步骤详解
 
-#### Asynq 任务重试
+#### Asynq 任务重试（服务端）
 
 | 步骤 | 说明 |
 |------|------|
@@ -241,7 +257,7 @@ flowchart LR
 | 5 | `GetTaskState(ctx, taskID)` 可通过扫描所有队列查询当前状态 |
 | 6 | Agent 处理任务显式设置 `WithMaxRetry(20)`，提供更高的容错能力 |
 
-#### WebSocket 投递重试
+#### WebSocket 投递重试（客户端）
 
 | 步骤 | 说明 |
 |------|------|
@@ -250,7 +266,7 @@ flowchart LR
 | 3 | 失败条目通过 `EnqueueWithBackoff` 重新入队，使用指数退避：`baseDelay * 2^attempts`，上限 16 秒 |
 | 4 | 队列满时（`maxSize`），最旧的条目被丢弃 |
 
-#### 数据库持久化重试
+#### 数据库持久化重试（客户端）
 
 | 步骤 | 说明 |
 |------|------|
@@ -291,17 +307,17 @@ flowchart TD
     F --> G[设置 b.running = false]
     G --> H[关闭 b.done channel]
 
-    I[调用 Close] --> J[获取 cancelMu 锁]
-    J --> K[调用 b.cancel()<br/>幂等操作]
-    K --> L{broker 是否在运行?}
-    L -->|是| M[等待 <-done<br/>确保 Start 完全返回]
-    L -->|否| N[跳过等待]
-    M --> O[调用 b.client.Close]
-    N --> O
-    O --> P[调用 b.inspector.Close<br/>释放 Redis 连接]
-    P --> Q[通过 sync.Once 确保<br/>仅执行一次清理]
-    Q --> R[设置 b.closed = true]
-    R --> S[后续 Enqueue 返回 ErrQueueClosed]
+    I[调用 Close] --> J[通过 sync.Once 确保仅执行一次]
+    J --> K[设置 b.closed = true<br/>后续 Enqueue 立即返回 ErrQueueClosed]
+    K --> L[获取 cancelMu 锁]
+    L --> M[调用 b.cancel()<br/>幂等操作]
+    M --> N{broker 是否在运行?}
+    N -->|是| O[等待 <-done<br/>确保 Start 完全返回]
+    N -->|否| P[跳过等待]
+    O --> Q[调用 b.client.Close]
+    P --> Q
+    Q --> R[调用 b.inspector.Close<br/>释放 Redis 连接]
+    R --> S[返回 error 或 nil]
 
     style A fill:#e1f5fe
     style I fill:#e1f5fe
@@ -315,11 +331,12 @@ flowchart TD
 | 1 | `Stop()` 获取 `cancelMu` 锁，调用 `b.cancel()` 取消 Start 使用的派生 context |
 | 2 | Start 中 `<-ctx.Done()` 解除阻塞，调用 `b.server.Shutdown()` 通知 Asynq 停止接受新任务并等待正在处理的任务完成 |
 | 3 | Start 设置 `b.running = false`，关闭 `b.done` channel |
-| 4 | `Close()` 获取 `cancelMu` 锁，调用 `b.cancel()`（如果 Stop 已调用则幂等） |
-| 5 | 如果 broker 正在运行，`Close` 等待 `<-done` 确保 Start 已完全返回 |
-| 6 | `Close` 调用 `b.client.Close()` 和 `b.inspector.Close()` 释放 Redis 连接 |
-| 7 | 通过 `sync.Once` 确保多次调用安全 -- 仅第一次执行清理 |
-| 8 | 清理完成后 `b.closed = true`，后续 Enqueue 调用返回 `ErrQueueClosed` |
+| 4 | `Close()` 通过 `closeOnce.Do` 确保多次调用安全 -- 仅第一次执行清理 |
+| 5 | 首先设置 `b.closed = true`，后续 Enqueue/GetTaskState 立即返回 `ErrQueueClosed` |
+| 6 | 获取 `cancelMu` 锁，调用 `b.cancel()`（如果 Stop 已调用则幂等） |
+| 7 | 如果 broker 正在运行（`b.running && b.done != nil`），`Close` 等待 `<-done` 确保 Start 已完全返回 |
+| 8 | `Close` 调用 `b.client.Close()` 和 `b.inspector.Close()` 释放 Redis 连接 |
+| 9 | `Close` 返回 error（如果有关闭错误则通过 `errors.Join` 合并多个错误） |
 
 ### 边缘场景
 
@@ -379,15 +396,15 @@ flowchart TD
 
 ### 任务类型注册表
 
-| 任务类型 | 说明 | 处理器 |
-|---------|------|--------|
-| `mq:send_message` | 广播实时消息给接收方 | `NewSendMessageTaskHandler` |
-| `mq:agent_process` | Agent AI 处理 | Agent 处理器 |
-| `mq:agent_resume` | HITL 恢复后继续 Agent | Agent 恢复处理器 |
-| `mq:sync_updates` | 更新 fan-out（预留） | 待实现 |
-| `mq:push_notification` | 推送通知（预留） | 待实现 |
-| `mq:presence_broadcast` | 在线状态广播（预留） | 待实现 |
-| `mq:conversation_sync` | 会话同步（预留） | 待实现 |
+| 任务类型 | 说明 | 处理器 | 状态 |
+|---------|------|--------|------|
+| `mq:send_message` | 广播实时 Updates 给接收方在线设备 | `NewSendMessageTaskHandler` | 已实现 |
+| `mq:agent_process` | Agent AI 处理（LLM 调用 + 流式输出 + 持久化） | `NewAgentTaskHandler` | 已实现 |
+| `mq:agent_resume` | HITL 恢复后继续 Agent 执行 | `NewAgentResumeHandler`（`internal/agent/resume_handler.go`） | 已实现 |
+| `mq:sync_updates` | 更新 fan-out | — | 未注册 handler |
+| `mq:push_notification` | 推送通知 | — | 未注册 handler |
+| `mq:presence_broadcast` | 在线状态广播 | — | 未注册 handler |
+| `mq:conversation_sync` | 会话同步 | — | 未注册 handler |
 
 ### 步骤详解
 
@@ -451,6 +468,7 @@ graph LR
 
 ## 相关文档
 
+- [消息队列与异步任务处理](./mq-async.md) — MQ 业务场景端到端流程（Agent 任务、HITL 恢复、BroadcastHelper、Trace 传播等）
 - [业务流程索引](./index.md)
 - [系统架构概览](../architecture/system-architecture.md)
 - [协议设计](../architecture/protocol-design.md)

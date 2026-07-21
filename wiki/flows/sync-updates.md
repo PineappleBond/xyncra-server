@@ -11,6 +11,8 @@
 - [边缘场景](#边缘场景)
 - [依赖关系](#依赖关系)
 - [关键设计决策](#关键设计决策)
+- [客户端实现建议](#客户端实现建议)
+- [与其他流程的关系](#与其他流程的关系)
 
 ---
 
@@ -52,7 +54,7 @@ sequenceDiagram
     S-->>H: 返回 latestSeq
 
     alt latestSeq <= afterSeq
-        H-->>WS: 返回空 updates, has_more=false
+        H-->>WS: 返回空 updates, has_more=false, latest_seq
         WS-->>C: 成功响应
     end
 
@@ -63,11 +65,13 @@ sequenceDiagram
     H->>H: 构建 seq -> update lookup map
     H->>H: 遍历 [afterSeq+1, expectedEnd], 填充 gaps
 
-    H->>H: 计算 has_more = afterSeq + limit < latestSeq
+    H->>H: 计算 has_more = afterSeq + rawLimit < latestSeq
 
     H-->>WS: 返回 {updates, has_more, latest_seq}
     WS-->>C: 成功响应
 ```
+
+> **注意**：`has_more` 使用原始 limit 值（非规范化后的值）计算。当客户端发送 `limit > 500` 时，`expectedEnd` 使用规范化后的 500，但 `has_more` 使用原始值。这在极少数情况下可能导致 `has_more` 返回 `false` 但实际还有未返回的更新。详见 [has_more 与 expectedEnd 不一致](#7-has_more-与-expectedend-不一致)。
 
 ### 详细步骤
 
@@ -104,7 +108,7 @@ flowchart TD
 ```
 
 | 场景 | 处理方式 |
-|------|----------|
+| ---- | ---- |
 | JSON 解析失败 | 返回 `ValidationError('invalid params')` |
 | `limit <= 0` | 设为默认值 100 |
 | `limit > 500` | 设为上限 500 |
@@ -120,7 +124,7 @@ flowchart TD
 ```
 
 | 场景 | 处理方式 |
-|------|----------|
+| ---- | ---- |
 | `latestSeq = 0` | 用户没有任何更新 |
 | `afterSeq >= latestSeq` | 客户端已是最新状态 |
 
@@ -135,10 +139,11 @@ flowchart TD
 ```
 
 | 场景 | 处理方式 |
-|------|----------|
+| ---- | ---- |
 | 序列号间隙 | 自动填充 `UpdateTypeGap` 占位符 |
-| 间隙原因 | 并发写入、事务回滚、数据清理 |
+| 间隙原因 | 并发写入、事务回滚、数据清理、30 天过期清理（`CleanupExpiredBefore` 硬删除） |
 | 客户端处理 | 收到 gap 更新后可决定是否补全 |
+| Gap 的 CreatedAt | 使用 `time.Now()` 作为合成时间戳，非原始事件时间 |
 
 ### 4. 分页
 
@@ -150,7 +155,7 @@ flowchart TD
 ```
 
 | 场景 | 处理方式 |
-|------|----------|
+| ---- | ---- |
 | 还有更多数据 | `has_more = true`，客户端应继续拉取 |
 | 已拉取完毕 | `has_more = false` |
 | 刚好拉完 | `has_more = false` |
@@ -165,16 +170,32 @@ flowchart TD
 ```
 
 | 场景 | 处理方式 |
-|------|----------|
+| ---- | ---- |
 | `GetLatestSeq` 失败 | 返回 `InternalError` |
 | `ListByUserRange` 失败 | 返回 `InternalError` |
 
 ### 6. uint32 溢出
 
 | 场景 | 处理方式 |
-|------|----------|
+| ---- | ---- |
 | `afterSeq + limit` 溢出 uint32 上限 | `expectedEnd` 计算可能回绕，导致查询范围错误。在约 43 亿序列号后实际可能发生 |
 | `latestSeq <= afterSeq` 在回绕后 | 当 `afterSeq` 接近 uint32 最大值而 `latestSeq` 已回绕时，比较结果不正确 |
+
+### 7. has_more 与 expectedEnd 不一致
+
+代码中 `has_more` 和 `expectedEnd` 使用不同的 limit 值：
+
+- `expectedEnd` 使用**规范化后**的 limit（最大 500）
+- `has_more` 使用**原始** limit 值（`params.AfterSeq + uint32(limit)`，limit 为原始入参）
+
+当客户端发送 `limit > 500` 时（例如 `limit=1000`）：
+
+- `expectedEnd = afterSeq + 500`（规范化后）
+- `has_more = afterSeq + 1000 < latestSeq`
+
+这意味着如果 `latestSeq` 在 `afterSeq + 500` 和 `afterSeq + 1000` 之间，`has_more` 会返回 `false`，但实际还有未返回的更新。这是已知的行为差异，客户端不应依赖 `has_more=false` 作为"已拉取全部数据"的唯一信号，应同时检查 `latestSeq`。
+
+> **实际影响**：由于 limit 上限为 500，客户端正常情况下不会发送 `limit > 500` 的请求。此问题仅在客户端绕过规范化逻辑时出现。
 
 ---
 
@@ -183,21 +204,27 @@ flowchart TD
 ### 内部依赖
 
 | 组件 | 用途 |
-|------|------|
+| ---- | ---- |
 | `store.StoreAPI` | 查询 UserUpdate 数据 |
 
 ### 外部依赖
 
 | 组件 | 用途 |
-|------|------|
-| Database | UserUpdate 表 |
+| ---- | ---- |
+| Database (PostgreSQL/SQLite) | UserUpdate 表 |
 
 ### 数据库操作
 
 | 操作 | 表 | 说明 |
-|------|-----|------|
-| SELECT COALESCE(MAX(seq), 0) | user_updates | 获取用户最新序列号，无记录时返回 0 |
-| SELECT (seq > afterSeq AND seq <= maxSeq, ORDER BY seq ASC) | user_updates | 查询指定范围内的更新，无 LIMIT 限制 |
+| ---- | ---- | ---- |
+| `SELECT COALESCE(MAX(seq), 0) WHERE user_id = ?` | user_updates | 获取用户最新序列号，无记录时返回 0 |
+| `SELECT ... WHERE user_id = ? AND seq > ? AND seq <= ? ORDER BY seq ASC` | user_updates | 查询指定范围内的更新，无 LIMIT 限制 |
+
+### 间接依赖：数据清理
+
+`CleanupExpiredBefore` 会硬删除 30 天前的 `user_updates` 记录。这会导致序列号间隙，是 gap filling 存在的主要原因之一。清理后客户端拉取到的 gap 更新数量会增加。
+
+> **注意**：`sync_updates` 本身不执行清理操作，但清理产生的间隙会影响返回结果。
 
 ---
 
@@ -206,6 +233,7 @@ flowchart TD
 ### 1. Cursor-based Pagination
 
 使用 `after_seq` 作为游标：
+
 - **优点**：客户端只需记住最后看到的 seq
 - **优点**：支持断点续传
 - **优点**：避免 offset-based 分页的数据偏移问题
@@ -213,6 +241,7 @@ flowchart TD
 ### 2. Gap Filling
 
 自动填充缺失的序列号：
+
 - **原因**：客户端需要连续的序列号来检测间隙
 - **实现**：使用 `UpdateTypeGap` 占位符
 - **Payload**：nil，不携带实际数据
@@ -220,6 +249,7 @@ flowchart TD
 ### 3. Limit Capping
 
 限制单次拉取数量：
+
 - **默认值**：100（平衡网络开销和响应时间）
 - **上限**：500（防止过大的响应）
 - **下限**：1（至少返回 1 条）
@@ -227,6 +257,7 @@ flowchart TD
 ### 4. LatestSeq 返回
 
 返回用户的最新序列号：
+
 - **用途**：客户端可以检测是否还有未拉取的更新
 - **实现**：在查询实际更新之前获取，用于早期返回判断
 
@@ -234,80 +265,146 @@ flowchart TD
 
 ## 客户端实现建议
 
-### 拉取策略
+### FullSync（初始/重连同步）
+
+客户端 `syncManager.FullSync` 执行阻塞式分页同步，循环拉取直到 `has_more=false`：
 
 ```mermaid
 flowchart TD
-    A[开始同步] --> B[发送 sync_updates afterSeq=localMaxSeq]
-    B --> C{has_more?}
-    C -->|是| D[更新 afterSeq=最后一条 update 的 seq]
-    D --> B
-    C -->|否| E[同步完成]
+    A[开始 FullSync] --> B[读取 localMaxSeq]
+    B --> C[发送 sync_updates afterSeq=localMaxSeq]
+    C --> D[ApplyUpdates 处理返回的 updates]
+    D --> E[保存 latestSeq]
+    E --> F{has_more?}
+    F -->|是| G[重新读取 localMaxSeq] --> C
+    F -->|否| H[同步完成]
 ```
 
-> **注意**：使用最后一条 update 的 seq 作为下一次 `after_seq`，而非 `latest_seq`。`latest_seq` 是服务端快照时间点的最新序列号，两次请求之间可能有新 update 写入，直接使用 `latest_seq` 会跳过这些 update。
+> **注意**：每页拉取后重新读取 `localMaxSeq`（而非使用 last update seq），因为 `ApplyUpdates` 会推进 `localMaxSeq`。
 
-### 间隙检测
+### 增量拉取（Debounced Pull）
+
+间隙触发的增量拉取使用防抖合并：
 
 ```mermaid
 flowchart TD
-    A[收到 updates] --> B[遍历 updates]
-    B --> C{seq == expectedSeq?}
-    C -->|否| D[检测到间隙]
-    D --> E[决定是否补全]
-    C -->|是| F[更新 expectedSeq]
+    A[检测到 seq gap] --> B[scheduleDebouncedPull]
+    B --> C{已有 pending timer?}
+    C -->|是| D[合并, 不重复触发]
+    C -->|否| E[启动 debounce timer]
+    E --> F[debouncedPull 执行]
+    F --> G[发送 sync_updates]
+    G --> H[ApplyUpdates]
+    H --> I{has_more?}
+    I -->|是| B
+    I -->|否| J[完成]
 ```
+
+### ApplyUpdate 处理流程
+
+```mermaid
+flowchart TD
+    A[收到单个 update] --> B{Seq == 0?}
+    B -->|是| C[跳过 seq 连续性检查和持久化]
+    C --> D[直接通知 handler]
+    B -->|否| E[读取 localMaxSeq]
+    E --> F{seq 连续性检查}
+    F -->|seq <= localMaxSeq| G[跳过, 已处理]
+    F -->|seq > localMaxSeq+1| H[返回 errSeqGap]
+    F -->|seq == localMaxSeq+1| I[原子事务]
+    I --> J[1. 写入 NotificationLog 去重]
+    J --> K[2. 按类型分发 DB 写入]
+    K --> L[3. 推进 localMaxSeq]
+    L --> M[事务提交后通知 handler]
+```
+
+### 客户端 DB 事务保证
+
+客户端使用 SQLite 事务保证原子性（`syncManager.ApplyUpdate`）：
+
+| 步骤 | 操作 | 说明 |
+| ---- | ---- | ---- |
+| 1 | `NotificationLogs.SaveTx` | 写入去重记录（Seq uniqueIndex） |
+| 2 | `dispatchUpdateTx` | 按类型执行 DB 写入（message/conversation/mark_read 等） |
+| 3 | `SyncStates.SetLocalMaxSeqTx` | 推进本地序列号 |
+| 去重 | `ErrDuplicateKey` 跳过 | 重复 update 跳过并推进 seq |
+| 并发保护 | `applyMu` 互斥锁 | 串行化 `ApplyUpdates` 调用（H-3） |
 
 ### 错误处理
 
 ```mermaid
 flowchart TD
     A[发送 sync_updates] --> B{响应成功?}
-    B -->|是| C[处理 updates]
-    B -->|否| D{错误类型?}
-    D -->|网络错误| E[重试]
-    D -->|其他错误| F[记录日志, 延迟重试]
+    B -->|是| C[ApplyUpdates]
+    B -->|否| D[记录错误, 返回]
+    C --> E{errSeqGap?}
+    E -->|是| F[scheduleDebouncedPull]
+    E -->|否| G{其他错误?}
+    G -->|是| H[返回 SyncError]
+    G -->|否| I[成功]
+    F --> J[5s 后单次重试]
 ```
 
 ---
 
 ## 与其他流程的关系
 
-### 重连后同步
+### 初始连接 / 重连后同步
+
+客户端连接后执行 `FullSync`（阻塞式分页同步），拉取所有错过的更新：
 
 ```mermaid
 sequenceDiagram
     participant C as 客户端
     participant WS as WebSocket Server
 
-    C->>WS: system.reconnect {last_seen_seq}
-    WS-->>C: 返回 replayed count
+    Note over C: WebSocket 连接建立
 
-    C->>WS: sync_updates {after_seq: localMaxSeq}
-    WS-->>C: 返回 updates
+    C->>C: FullSync 开始
+    loop 直到 has_more=false
+        C->>WS: sync_updates {after_seq: localMaxSeq, limit: batchSize}
+        WS-->>C: 返回 {updates, has_more, latest_seq}
+        C->>C: ApplyUpdates (原子事务: 去重 + 分发 + 推进 localMaxSeq)
+    end
+    C->>C: FullSync 完成
 
-    Note over C: 应用 updates 到本地
+    Note over C: 可选: system.reconnect (请求重放)
 ```
+
+> **注意**：`system.reconnect` 是独立的请求重放机制（D-108），与 `sync_updates` 的增量同步互不依赖。详见 [断线重连](reconnection.md)。
 
 ### 实时推送 + 增量拉取
 
+实时推送和增量拉取是互补的两条路径：
+
 ```mermaid
 flowchart TD
-    A[实时推送] --> B[WebSocket Updates]
-    C[增量拉取] --> D[sync_updates]
+    A[服务端事件] --> B{推送方式}
+    B -->|实时| C[WebSocket Push: PackageDataUpdates]
+    B -->|拉取| D[sync_updates RPC]
 
-    B --> E[客户端处理]
-    D --> E
+    C --> E[客户端 ApplyUpdate]
+    D --> F[客户端 ApplyUpdates]
 
-    E --> F[更新 localMaxSeq]
+    E --> G[原子事务: 去重 + 分发 + 推进 localMaxSeq]
+    F --> G
+
+    G --> H[通知 UpdateHandler]
 ```
+
+- **实时推送**：服务端通过 `BroadcastHelper` 将更新即时推送给在线客户端
+- **增量拉取**：客户端通过 `sync_updates` 补全错过的更新（重连、间隙、离线期间）
+- **去重保证**：客户端 `NotificationLog` 的 Seq uniqueIndex 确保同一条更新不会被重复处理
+
+详见 [多节点广播](broadcasting.md)。
 
 ---
 
 ## 相关文档
 
-- [断线重连](reconnection.md)
-- [消息处理](message.md)
-- [WebSocket 连接管理](websocket-connection.md)
-- [存储层业务流程](storage.md)
+- [断线重连](reconnection.md) — reconnect + FullSync 协调流程
+- [多节点广播](broadcasting.md) — 实时推送的跨节点投递机制
+- [消息处理](message.md) — send_message 流程（产生 UserUpdate）
+- [WebSocket 连接管理](websocket-connection.md) — 连接生命周期
+- [存储层业务流程](storage.md) — UserUpdate 存储与清理
 - [业务流程索引](index.md)

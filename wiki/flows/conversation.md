@@ -178,8 +178,9 @@ flowchart TD
     C -- 是 --> C1[返回 ValidationError]
     C -- 否 --> D[调用 ConversationStore.Get]
     D --> E{会话是否存在?}
-    E -- 否 --> E1[返回 NotFoundError]
-    E -- 是 --> F{调用者是否为会话成员?}
+    E -- 存在 --> F{调用者是否为会话成员?}
+    E -- 不存在(ErrNotFound) --> E1[返回 NotFoundError]
+    E -- 查询出错 --> E2[返回 InternalError]
     F -- 否 --> F1[返回 PermissionDeniedError]
     F -- 是 --> G[确定调用者的 last_read_message_id]
     G --> H[调用 MessageStore.CountUnread]
@@ -198,6 +199,7 @@ flowchart TD
     style A fill:#4CAF50,color:#fff
     style C1 fill:#f44336,color:#fff
     style E1 fill:#f44336,color:#fff
+    style E2 fill:#f44336,color:#fff
     style F1 fill:#f44336,color:#fff
     style I1 fill:#FFC107,color:#000
     style K1 fill:#FFC107,color:#000
@@ -213,6 +215,7 @@ flowchart TD
 | `conversation_id` 为空 | 返回 `ValidationError('missing required field: conversation_id')` |
 | 会话不存在 | 返回 `NotFoundError('conversation not found')` |
 | 会话已被软删除 | GORM 自动过滤，等同于不存在，返回 `NotFoundError` |
+| `Get` 查询出错（非 `ErrNotFound`） | 返回 `InternalError` |
 | 调用者非会话成员 | 返回 `PermissionDeniedError('user is not a member of the conversation')` |
 | `CountUnread` 查询失败 | 降级为 0（graceful degradation），不中断主流程 |
 | `QuestionStore` 为 nil | 返回空数组 `[]`，不报错 |
@@ -303,8 +306,9 @@ flowchart TD
     C -- 是 --> C1[返回 ValidationError]
     C -- 否 --> D[调用 Get 验证会话存在性]
     D --> E{会话是否存在?}
-    E -- 否 --> E1[返回 NotFoundError]
-    E -- 是 --> F{调用者是否为会话成员?}
+    E -- 存在 --> F{调用者是否为会话成员?}
+    E -- 不存在(ErrNotFound) --> E1[返回 NotFoundError]
+    E -- 查询出错 --> E2[返回 InternalError]
     F -- 否 --> F1[返回 PermissionDeniedError]
     F -- 是 --> G[开启事务]
     G --> H[统计未删除消息数]
@@ -323,6 +327,7 @@ flowchart TD
     style A fill:#4CAF50,color:#fff
     style C1 fill:#f44336,color:#fff
     style E1 fill:#f44336,color:#fff
+    style E2 fill:#f44336,color:#fff
     style F1 fill:#f44336,color:#fff
     style J1 fill:#f44336,color:#fff
     style O1 fill:#FFC107,color:#000
@@ -342,6 +347,7 @@ flowchart TD
 | `conversation_id` 为空 | 返回 `ValidationError('missing required field: conversation_id')` |
 | 会话不存在 | 返回 `NotFoundError('conversation not found')` |
 | 会话已被软删除 | `Get()` 自动过滤，返回 `NotFoundError` |
+| `Get` 查询出错（非 `ErrNotFound`） | 返回 `InternalError` |
 | 调用者非成员 | 返回 `PermissionDeniedError('user is not a member of the conversation')` |
 | `RowsAffected == 0`（并发删除竞争） | 返回 `ErrNotFound` -> `NotFoundError` |
 | `GetLatestSeq` 失败（单个成员） | 跳过该成员的 UserUpdate，其他成员不受影响 |
@@ -380,8 +386,9 @@ flowchart TD
     C -- 是 --> C1[返回 ValidationError]
     C -- 否 --> D[调用 GetUnscoped 获取会话]
     D --> E{会话是否存在?}
-    E -- 否 --> E1[返回 NotFoundError]
-    E -- 是 --> F{调用者是否为会话成员?}
+    E -- 存在 --> F{调用者是否为会话成员?}
+    E -- 不存在(ErrNotFound) --> E1[返回 NotFoundError]
+    E -- 查询出错 --> E2[返回 InternalError]
     F -- 否 --> F1[返回 PermissionDeniedError]
     F -- 是 --> G{会话是否已删除?}
     G -- 否 --> G1[幂等: 返回当前会话, restored_message_count=0]
@@ -396,14 +403,18 @@ flowchart TD
     O -- 否 --> O1[记录日志]
     O -- 是 --> P[重新获取恢复后的会话]
     O1 --> P
-    P --> Q[返回会话, restored_message_count]
+    P --> P2{Get 是否成功?}
+    P2 -- 否 --> P3[返回 InternalError]
+    P2 -- 是 --> Q[返回会话, restored_message_count]
 
     style A fill:#4CAF50,color:#fff
     style C1 fill:#f44336,color:#fff
     style E1 fill:#f44336,color:#fff
+    style E2 fill:#f44336,color:#fff
     style F1 fill:#f44336,color:#fff
     style G1 fill:#2196F3,color:#fff
     style O1 fill:#FFC107,color:#000
+    style P3 fill:#f44336,color:#fff
     style Q fill:#4CAF50,color:#fff
 ```
 
@@ -420,6 +431,7 @@ flowchart TD
 | JSON 解析失败 | 返回 `ValidationError('invalid params')` |
 | `conversation_id` 为空 | 返回 `ValidationError('missing required field: conversation_id')` |
 | 会话完全不存在 | 返回 `NotFoundError('conversation not found')`（`GetUnscoped` 也查不到） |
+| `GetUnscoped` 查询出错（非 `ErrNotFound`） | 返回 `InternalError` |
 | 会话未被删除 | 幂等返回当前状态，`restored_message_count = 0` |
 | 调用者非成员 | 返回 `PermissionDeniedError('user is not a member of the conversation')` |
 | `RowsAffected == 0`（并发恢复竞争） | `ErrNotFound` -> `NotFoundError` |
@@ -428,6 +440,7 @@ flowchart TD
 | 之前已单独删除的消息 | 不受影响（通过精确时间戳匹配区分） |
 | `UserUpdate` 创建失败 | 仅记录日志 |
 | MQ 广播失败 | 仅记录日志 |
+| 恢复后重新获取会话失败 | 返回 `InternalError` |
 
 ---
 
