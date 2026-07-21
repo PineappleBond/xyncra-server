@@ -389,7 +389,7 @@ flowchart TD
     E --> F[ParseFrontMatter 解析]
     F --> G[YAML front matter + Markdown body]
     G --> H{ID 是否重复?}
-    H -->|是| H1[日志警告, 保留先加载的]
+    H -->|是| H1[Info 日志, 保留先加载的]
     H -->|否| I[写入 agents config.ID = config]
 
     E -->|遍历完成| J[注册完成]
@@ -409,8 +409,8 @@ flowchart TD
 | 场景 | 处理方式 |
 |------|----------|
 | **目录不存在** | 返回 nil (可选模块) |
-| **无效配置** | 日志跳过，不中断其他文件加载 |
-| **重复 ID** | 日志警告，保留先加载的 |
+| **无效配置** | Info 日志跳过，不中断其他文件加载 |
+| **重复 ID** | Info 日志，保留先加载的 |
 | **并发访问** | RWMutex 保护所有读写操作 |
 
 ---

@@ -678,7 +678,7 @@ sequenceDiagram
 | 基础延迟 | 1 秒 | 指数退避的基础间隔 |
 | 最大退避 | 16 秒 | 指数退避的上限 |
 
-**退避算法**：`delay = min(1s * 2^attempts, 16s)`。首次重试在 1 秒后，第 2 次 2 秒，第 3 次 4 秒，第 4 次 8 秒，第 5 次及以后均为 16 秒。
+**退避算法**：`delay = min(1s * 2^attempts, 16s)`。首次重试在 2 秒后（attempts=1），第 2 次 4 秒，第 3 次 8 秒，第 4 次及以后均为 16 秒。
 
 这确保了即使在短暂的网络中断期间，客户端的响应也不会丢失。服务端的 ReplayRequest 会因为超时而将请求标记为失败，下次重连时会再次重放。
 
@@ -834,14 +834,17 @@ sequenceDiagram
     end
 
     Handler->>WS: ConnectionStore.Add(connInfo)
-    Note over WS: 注册到 Redis（含 5s 超时保护）
+    Note over WS: 注册到 Redis（使用服务主 context）
 
     Handler->>Client: client.Run()
     Note over Client: 启动 readPump + writePump，阻塞直到断开
 
     Note over OldConn,NewConn: 旧连接清理在独立 goroutine 中
     OldConn->>OldConn: 发送 4001 close frame
+    OldConn->>OldConn: 10ms TCP 缓冲区刷新等待
     OldConn->>OldConn: 关闭旧 client
+    OldConn->>OldConn: 等待旧 goroutine 退出（上限 500ms）
+    OldConn->>OldConn: removeClient
 ```
 
 ### 9b. 正常断开流程
@@ -891,8 +894,8 @@ sequenceDiagram
 4. 所有旧连接的 pending 请求收到 "device replaced" 合成响应
 5. 执行 WebSocket Upgrade
 6. 原子注册新连接（单次锁获取）：从 clientsByDevice 删除旧引用，注册到 clients/clientsByUser/clientsByDevice，同时调用 `cancelPendingFuncCleanup` 取消待执行的函数清理
-7. 若存在旧连接，启动异步 goroutine 执行 `performDeviceReplacement`（发送 4001 close frame，关闭旧 client，removeClient）
-8. 构建 ConnectionInfo 并调用 `ConnectionStore.Add(connInfo)` 注册到 Redis（含 5 秒超时保护）
+7. 若存在旧连接，启动异步 goroutine 执行 `performDeviceReplacement`（发送 4001 close frame，10ms TCP 缓冲区刷新等待，关闭旧 client，等待旧 goroutine 退出（上限 500ms），removeClient）
+8. 构建 ConnectionInfo 并调用 `ConnectionStore.Add(connInfo)` 注册到 Redis（使用服务主 context，由 connectionInfoEnricher 填充额外字段）
 9. 调用 `client.Run()` 启动 readPump + writePump，阻塞直到客户端断开
 10. **ConnectionStore.Add 失败路径**：若 Add 失败，关闭已创建的 Client，调用 `removeClient` 从本地索引移除，直接返回
 

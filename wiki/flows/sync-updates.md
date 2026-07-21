@@ -178,24 +178,24 @@ flowchart TD
 
 | 场景 | 处理方式 |
 | ---- | ---- |
-| `afterSeq + limit` 溢出 uint32 上限 | `expectedEnd` 回绕到小值（如 `uint32(4294967290) + uint32(100)` 回绕到 `94`），导致 `expectedEnd < afterSeq`。`ListByUserRange` 的 `maxSeq <= afterSeq` 检查返回空结果，客户端收到空更新列表。`has_more` 计算也会不正确（基于回绕后的 `expectedEnd`） |
+| `afterSeq + limit` 溢出 uint32 上限 | `expectedEnd` 回绕到小值（如 `uint32(4294967290) + uint32(100)` 回绕到 `94`），导致 `expectedEnd < afterSeq`。`ListByUserRange` 的 `maxSeq <= afterSeq` 检查返回空结果，客户端收到空更新列表。同时 `has_more` 也基于相同的回绕表达式 `params.AfterSeq + uint32(limit)` 计算，当回绕值 < `latestSeq` 时 `has_more=true`，导致客户端收到空更新但被指示继续拉取，形成无限循环。此场景在 30 天清理窗口下极不可能发生（需约 43 亿条用户更新） |
 
 ### 7. has_more 与 expectedEnd 一致性
 
-`has_more` 和 `expectedEnd` 均使用同一规范化后的 limit 值（默认 100，上限 500）：
+`has_more` 和 `expectedEnd` 均使用同一规范化后的局部变量 `limit`（默认 100，上限 500）：
 
 ```go
-// 规范化
+// 规范化（局部变量 limit，非 params.Limit）
 limit := params.Limit
 if limit <= 0 { limit = 100 }
 if limit > 500 { limit = 500 }
 
-// 两者使用同一个 limit 变量
+// 两者使用同一个局部 limit 变量
 expectedEnd := params.AfterSeq + uint32(limit)
 hasMore := params.AfterSeq + uint32(limit) < latestSeq
 ```
 
-因此不存在不一致问题。客户端发送 `limit > 500` 时，两者都使用上限 500。
+因此不存在不一致问题。客户端发送 `limit > 500` 时，`expectedEnd` 和 `hasMore` 都使用上限 500。
 
 ---
 
@@ -302,7 +302,7 @@ flowchart TD
     I -->|否| J[保存 latestSeq, 完成]
 ```
 
-> **Go 与 TS 实现差异**：Go 的 `debouncedPull` 直接读取 `localMaxSeq` 并发送 `sync_updates` RPC；TS 的 `debouncedPull` 调用 `fullSync()`（分页循环）。两者效果等价。
+> **Go 与 TS 实现差异**：Go 的 `debouncedPull` 内联实现分页逻辑——读取 `localMaxSeq`、发送 `sync_updates` RPC、应用更新，`has_more=true` 时通过 `scheduleDebouncedPull()` 调度下一页拉取；TS 的 `debouncedPull` 调用 `fullSync()`（内部分页循环）。两者效果等价，均支持多页拉取。
 >
 > **重试机制**：Go 和 TS 都有单次重试机制。Go 通过 `time.AfterFunc(5s, ...)` 安排重试，TS 通过 `setTimeout(retryInterval)` 安排重试。重试前都检查 `pullPending` 避免重复。拉取成功后都调用 `SetLatestSeq` 保存服务端返回的 `latestSeq`。
 >

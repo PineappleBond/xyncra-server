@@ -265,7 +265,7 @@ flowchart TD
 
     subgraph ListByTimeRange
         LT1[WHERE conv_id=? AND created_at >= ? AND <= ?] --> LT2[ORDER BY msg_id ASC]
-        LT2 --> LT3[limit 范围 1~201 默认 50]
+        LT2 --> LT3[limit 范围 1~200 默认 50]
     end
 
     subgraph SearchByConversation
@@ -673,6 +673,8 @@ erDiagram
     CONVERSATIONS ||--o{ MESSAGES : "has many"
     CONVERSATIONS ||--o{ QUESTIONS : "has many"
 ```
+
+> 注意：UserUpdate 通过 `user_id` 字段与用户关联（非外键），与 Conversation 没有直接的数据库关系。ER 图中不包含 Conversation→UserUpdate 的关系线。
 
 ### 模型说明
 
