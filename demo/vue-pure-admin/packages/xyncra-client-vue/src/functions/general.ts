@@ -66,7 +66,9 @@ export const generalFunctions = [
       timeout_ms: 10000,
     },
     async () => {
-      const pathname = window.location.pathname
+      // In hash-based routers, the route is in the hash (e.g. #/account/settings)
+      const hash = window.location.hash || ''
+      const pathname = hash.startsWith('#') ? hash.slice(1) : window.location.pathname
       const desc = matchPageDescription(pathname)
       if (!desc) {
         return {

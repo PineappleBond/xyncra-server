@@ -192,6 +192,11 @@ export function createXyncraPlugin(options: XyncraPluginOptions = {}) {
       app.provide(XyncraClientKey, provided)
       app.config.globalProperties.$xyncra = provided
 
+      // Expose on window for E2E testing and debugging
+      if (typeof window !== 'undefined') {
+        ;(window as any).$xyncra = provided
+      }
+
       if (autoConnect) {
         app.mixin({
           mounted() {

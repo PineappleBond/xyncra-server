@@ -135,7 +135,7 @@ const pageDescriptions: Record<string, Omit<PageDescription, 'route'>> = {
       },
     ],
   },
-  '/account-settings': {
+  '/account/settings': {
     page_id: 'account-settings',
     title: '账户设置页',
     summary: '用户账户管理中心。分为个人信息、偏好设置、安全日志、账户管理四个模块。',
@@ -143,13 +143,13 @@ const pageDescriptions: Record<string, Omit<PageDescription, 'route'>> = {
     regions: [
       {
         name: '设置导航区',
-        purpose: '切换四个设置模块',
-        functions: ['pg_account_settings_switch_pane'],
+        purpose: '切换四个设置模块（pane 参数传 profile/preferences/securityLog/accountManagement）',
+        functions: ['pg_account_settings_switchPane'],
       },
       {
         name: '设置内容区',
         purpose: '维护个人资料和偏好',
-        functions: ['pg_account_settings_set_field_value'],
+        functions: ['pg_account_settings_setFieldValue'],
       },
     ],
   },
