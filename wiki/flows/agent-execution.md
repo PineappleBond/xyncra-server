@@ -225,7 +225,100 @@ sequenceDiagram
 
 ---
 
-## 场景 3: HITL 恢复 (Resume) 流程
+## 场景 2B: agent_resume RPC 处理流程
+
+> 客户端调用 `agent_resume` RPC 方法，持久化用户答案并在所有问题回答完毕后入队恢复任务。
+
+### 描述
+
+当 Agent 处于 `asking_user` 状态时，客户端通过 `agent_resume` RPC 提交答案。该 Handler 负责：
+
+1. 验证参数并推断 checkpoint_id
+2. 查找待回答的 Question
+3. 幂等更新答案
+4. 统计剩余待回答问题
+5. 若全部回答完毕，入队 `TypeAgentResume` MQ 任务
+
+### 主流程
+
+```mermaid
+sequenceDiagram
+    participant C as 客户端
+    participant H as agentResumeHandler
+    participant CS as ConversationStore
+    participant QS as QuestionStore
+    participant MQ as Broker
+
+    C->>H: agent_resume RPC (conversation_id, answer, agent_id)
+    H->>H: 解析参数, 校验必填字段
+
+    H->>CS: Get(conversationID)
+    CS-->>H: Conversation (含 CheckpointID)
+    H->>H: 推断 checkpoint_id (若未提供)
+
+    H->>QS: GetPendingByCheckpoint(checkpointID)
+    QS-->>H: pending questions[]
+    H->>H: 按 interrupt_id 过滤, 取第一个匹配
+
+    alt 无匹配的 pending question
+        H->>QS: GetByCheckpoint (检查已回答)
+        alt 已回答 → 409 conflict
+            H-->>C: {code: -409, "question_already_answered"}
+        else 未找到
+            H-->>C: NotFoundError
+        end
+    end
+
+    H->>QS: UpdateAnswer(questionID, answer, senderID, deviceID)
+    alt 冲突 (已被回答)
+        QS-->>H: ErrConflict
+        H-->>C: {code: -409, "question_already_answered"}
+    end
+
+    H->>QS: GetByCheckpoint + CountPendingByCheckpoint
+
+    alt pending > 0 (部分回答)
+        H-->>C: {status: "partial", answered: N, total: M, pending: P}
+    else 全部回答
+        H->>MQ: Enqueue(TypeAgentResume, {conversationID, checkpointID, agentID, senderID})
+        H-->>C: {status: "queued", answered: N, total: M}
+    end
+```
+
+### 边缘场景
+
+#### 1. checkpoint_id 未提供
+
+- 触发条件: 客户端未在 params 中提供 checkpoint_id
+- 处理逻辑: 从 Conversation.CheckpointID 推断
+- 最终结果: 若 Conversation 也无 CheckpointID，返回 ValidationError
+
+#### 2. 多设备并发回答同一问题
+
+- 触发条件: 两个设备同时对同一 Question 调用 agent_resume
+- 处理逻辑: QuestionStore.UpdateAnswer 使用 `WHERE status='pending'` 幂等更新，后到者返回 ErrConflict
+- 最终结果: 先到者成功，后到者收到 409
+
+#### 3. 多个 Question 需要依次回答
+
+- 触发条件: Agent 中断时产生多个 Question
+- 处理逻辑: 每次 RPC 只回答一个 Question，返回 "partial" 状态
+- 最终结果: 客户端需多次调用 agent_resume 直到 status="queued"
+
+#### 4. Conversation 不存在
+
+- 触发条件: conversation_id 无效
+- 处理逻辑: 返回 NotFoundError
+
+### 涉及文件
+
+- `internal/handler/agent_resume.go`: RPC Handler，参数校验，答案持久化，MQ 入队
+- `internal/store/question.go`: QuestionStore 操作
+- `internal/store/conversation.go`: ConversationStore.Get
+
+---
+
+## 场景 3: HITL 恢复 (Resume) MQ 处理流程
 
 ### 主流程
 

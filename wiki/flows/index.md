@@ -1,10 +1,67 @@
 ---
-last_updated: 2026-07-20
+last_updated: 2026-07-21
 ---
 
 # 业务流程索引
 
 本文档提供 Xyncra Server 各子系统的业务流程概览，帮助开发者快速理解系统架构和数据流。
+
+## 流程快速索引
+
+下表列出系统中所有可区分的业务流程，便于快速定位。
+
+### 客户端 RPC 方法 (WebSocket Request)
+
+ | # | 方法名 | 流程文档 | 说明 |
+ | --- | --- | --- | --- |
+ | 1 | `heartbeat` | [heartbeat.md](heartbeat.md) | 连接心跳保活，被动续期 TTL |
+ | 2 | `send_message` | [message.md](message.md) | 发送消息，原子持久化 + MQ 扇出 + Agent 触发 |
+ | 3 | `create_conversation` | [conversation.md](conversation.md) | 创建 1-on-1 会话 (find-or-create 幂等) |
+ | 4 | `list_conversations` | [conversation.md](conversation.md) | 分页列出用户会话 |
+ | 5 | `get_conversation` | [conversation.md](conversation.md) | 获取单个会话详情 + 未读数 + HITL 问题 |
+ | 6 | `get_messages` | [message.md](message.md) | 分页获取会话消息 (游标分页) |
+ | 7 | `search_messages` | [message.md](message.md) | 会话内全文搜索 (LIKE) |
+ | 8 | `delete_conversation` | [conversation.md](conversation.md) | 级联软删除会话及消息 |
+ | 9 | `restore_conversation` | [conversation.md](conversation.md) | 级联恢复已删除会话及消息 |
+ | 10 | `delete_message` | [message.md](message.md) | 发送者删除单条消息 (软删除) |
+ | 11 | `mark_as_read` | [message.md](message.md) | 更新读指针 (MAX 语义) |
+ | 12 | `sync_updates` | [sync-updates.md](sync-updates.md) | 增量拉取用户更新 (Gap-filling) |
+ | 13 | `set_typing` | [set-typing.md](set-typing.md) | 输入指示器广播 (Seq=0, 1/s 限流) |
+ | 14 | `stream_text` | [stream-text.md](stream-text.md) | 流式文本广播 (Seq=0, 20/s 限流) |
+ | 15 | `agent_resume` | [agent-execution.md](agent-execution.md) 场景 2B | HITL 恢复：持久化答案，全部回答后入队 resume |
+ | 16 | `reload_agents` | [reload-agents.md](reload-agents.md) | Agent 配置热重载 |
+ | 17 | `system.register_functions` | [function-registry.md](function-registry.md) | 注册客户端函数能力 (全量替换) |
+ | 18 | `system.reconnect` | [reconnection.md](reconnection.md) | 断线重连握手 + 请求重放 |
+
+### MQ 异步任务
+
+ | # | 任务类型 | 流程文档 | 说明 |
+ | --- | --- | --- | --- |
+ | 1 | `mq:send_message` | [mq-async.md](mq-async.md) | 广播实时 Updates 给接收方在线设备 |
+ | 2 | `mq:agent_process` | [agent-execution.md](agent-execution.md) 场景 1 | Agent AI 处理：LLM 调用 + 流式输出 + 持久化 |
+ | 3 | `mq:agent_resume` | [agent-execution.md](agent-execution.md) 场景 3 | HITL 恢复后继续 Agent 执行 |
+
+### 后台任务
+
+ | # | 任务 | 流程文档 | 间隔 |
+ | --- | --- | --- | --- |
+ | 1 | UserUpdate 过期清理 | [background-cleanup.md](background-cleanup.md) | 1 小时 |
+ | 2 | HITL 超时清理 | [background-cleanup.md](background-cleanup.md) | 5 分钟 |
+ | 3 | 上下文缓存清理 | [background-cleanup.md](background-cleanup.md) | 5 分钟 |
+ | 4 | 工具结果清理 | [background-cleanup.md](background-cleanup.md) | 5 分钟 |
+ | 5 | Rate Limiter 清理 | [background-cleanup.md](background-cleanup.md) | 5 分钟 |
+
+### 基础设施流程
+
+ | # | 流程 | 流程文档 | 说明 |
+ | --- | --- | --- | --- |
+ | 1 | WebSocket 连接生命周期 | [websocket-connection.md](websocket-connection.md) | 升级、认证、设备替换、断开、优雅关闭 |
+ | 2 | 跨节点广播 | [broadcasting.md](broadcasting.md) | Redis Pub/Sub 多节点消息路由 |
+ | 3 | 反向 RPC | [reverse-rpc.md](reverse-rpc.md) | 服务端发起请求 + 超时持久化 + 重放 |
+ | 4 | 存储层事务 | [storage.md](storage.md) | SendMessage 原子事务、seq 分配 |
+ | 5 | CLI 与 IPC | [cli-ipc.md](cli-ipc.md) | 命令行客户端 + Unix Socket IPC |
+ | 6 | CLI 可观测性 | [cli-observability.md](cli-observability.md) | LLM 日志、Prometheus 指标、OpenTelemetry |
+ | 7 | 协议层 | [websocket.md](websocket.md) | 3 层信封: Package → Data → Payload |
 
 ## 整体架构图
 
