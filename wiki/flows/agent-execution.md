@@ -372,7 +372,7 @@ sequenceDiagram
 
 - `internal/handler/agent_resume.go`: RPC Handler，参数校验，答案持久化，MQ 入队
 - `internal/store/question.go`: QuestionStore 操作
-- `internal/store/conversation.go`: ConversationStore.Get
+- `internal/store/conversation.go`: ConversationStore.Get (推断 checkpoint_id)
 - `internal/mq/mq.go`: Broker.Enqueue (TypeAgentResume 入队)
 
 ---
@@ -524,7 +524,7 @@ sequenceDiagram
 
 #### 1. Checkpoint 已过期/不存在
 - 触发条件: Runner.ResumeWithParams 返回 ErrCheckpointNotFound 或 "not found"
-- 处理逻辑: 调用 cleanupAfterResumeFailure（清状态/删问题/删 checkpoint），发送 "等待时间过长" 错误消息，标记幂等 processed
+- 处理逻辑: 调用 cleanupAfterResumeFailure（ClearAgentStatus 清状态 -> DeleteByCheckpoint 软删问题 -> cleanupAfterResume 删除 Redis checkpoint），发送 "等待时间过长" 错误消息，标记幂等 processed
 - 最终结果: 会话恢复到 idle 状态，用户收到提示重新发送消息
 
 #### 1b. ResumeWithParams 其他非瞬态错误
@@ -561,7 +561,8 @@ sequenceDiagram
 - 最终结果: 同一 checkpoint 可多次 resume 和中断，实现多轮人机交互
 
 #### 7. cleanupAfterResumeFailure 的非致命错误
-- 触发条件: ClearAgentStatus / DeleteByCheckpoint / Delete 任一操作失败
+
+- 触发条件: ClearAgentStatus / DeleteByCheckpoint / cleanupAfterResume (Delete checkpoint from Redis) 任一操作失败
 - 处理逻辑: 每步独立执行，错误仅记录日志不影响后续步骤
 - 最终结果: 最终一致性，TTL 机制兜底清理
 
@@ -585,10 +586,11 @@ sequenceDiagram
 
 ### 涉及文件
 - `resume_handler.go`: 恢复处理主逻辑，cleanupAfterResumeFailure
-- `executor.go`: cleanupAfterResume (checkpoint 删除)
+- `executor.go`: cleanupAfterResume (checkpoint 删除), sendErrorMessage
 - `stream_bridge.go`: 流式桥接 + 中断检测
 - `question_store (store 层)`: Question 持久化
 - `checkpoint_store.go`: Redis checkpoint 存储/删除
+- `conversation_lock.go`: 会话锁获取/释放
 
 ---
 
