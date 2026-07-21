@@ -259,13 +259,13 @@ flowchart TD
 
     subgraph ListByConversation
         LC1[WHERE conv_id=? AND msg_id > ?] --> LC2[ORDER BY msg_id ASC]
-        LC2 --> LC3[limit 范围 1~200 默认 50]
+        LC2 --> LC3[limit 范围 1~201 默认 50<br/>(支持 limit+1 has_more 探测)]
         LC3 --> LC4[返回消息列表]
     end
 
     subgraph ListByTimeRange
         LT1[WHERE conv_id=? AND created_at >= ? AND <= ?] --> LT2[ORDER BY msg_id ASC]
-        LT2 --> LT3[limit 范围 1~200 默认 50]
+        LT2 --> LT3[limit 范围 1~201 默认 50]
     end
 
     subgraph SearchByConversation
@@ -418,9 +418,7 @@ flowchart TD
     end
 
     subgraph GetLatestSeq
-        GL1[SELECT COALESCE MAX seq 0] --> GL2{有记录?}
-        GL2 -->|是| GL3[返回最新 seq]
-        GL2 -->|否| GL4[返回 0]
+        GL1[SELECT COALESCE(MAX(seq), 0) WHERE user_id=?] --> GL2[返回用户最新 seq (无记录时返回 0)]
     end
 
     subgraph CleanupExpired
@@ -457,11 +455,9 @@ flowchart TD
     G --> H[为每个 member 执行 SELECT COALESCE MAX seq 0 并分配 seq + 1]
     H --> I[tx.Create 插入消息]
     I --> J[tx.CreateInBatches 批量插入 UserUpdate 每批 100]
-    J --> K[tx.Model.Conversation.Updates 更新元数据]
-    K --> L[更新 last_message_at]
-    L --> M[更新 last_processed_message_id]
-    M --> N[返回 SendMessageResult]
-    N --> O[事务提交]
+    J --> K[tx.Model.Conversation.Updates 原子更新 last_message_at + last_processed_message_id]
+    K --> L[事务提交]
+    L --> M[返回 SendMessageResult]
     D -->|fn 返回 error| P[事务自动回滚]
     D -->|提交失败| P
 ```
@@ -533,7 +529,7 @@ flowchart TD
 | 连接断开 | PingContext 失败，返回 classifyError 后的错误 |
 | Schema 损坏 | Ping 成功但 SELECT 1 失败，捕获查询路径问题 |
 | 与 Ping 的区别 | Ping 已同时验证连接存活和查询路径（PingContext + SELECT 1）；HealthCheck 冗余执行 SELECT 1 作为额外保障 |
-| 客户端 Ping | `ClientDB.Ping` 同时执行 `PingContext` 和 `SELECT 1`，等同于服务端 HealthCheck 的双重验证 |
+| 客户端 Ping | `ClientDB.Ping` 同时执行 `PingContext` 和 `SELECT 1`，等同于服务端 `Ping` 的双重验证（服务端 `HealthCheck` 在此基础上再执行一次 `SELECT 1`，共三重验证） |
 
 ---
 

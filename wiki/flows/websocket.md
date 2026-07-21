@@ -233,12 +233,11 @@ flowchart TD
 1. 调用 `client.Send(msg)` 或 `client.SendPackage(pkg)`
 2. 检查 `closed` 状态（`mu.Lock` 保护），若已关闭返回 `ErrClientClosed`
 3. 将消息放入带缓冲的 send channel（默认容量 256，`defaultSendBufSize = 256`），channel 满时返回 `ErrSendBufferFull`
-4. `writePump` 运行 select 循环，四路分支：
-   - **send channel（消息到达）**：读取消息，设置写入截止时间（默认 10s），调用 `conn.NextWriter` 获取写入器，写入内容并关闭写入器
-   - **send channel（已关闭）**：`ok` 为 false 时发送 close frame 后退出（防御性路径，正常流程中 channel 不会关闭）
+4. `writePump` 运行 select 循环，三路分支：
+   - **send channel（消息到达）**：读取消息，设置写入截止时间（默认 10s），调用 `conn.NextWriter` 获取写入器，写入内容并关闭写入器。若 `ok` 为 false（channel 关闭），直接返回（不发送 close frame）
    - **ticker.C**：发送 Ping 消息（默认 54s 间隔 = `pongWait * 9 / 10`）
    - **ctx.Done**：发送 close frame 后退出
-5. send channel 设计为不关闭：避免与并发 `Send` 产生 send-on-closed-channel panic
+5. send channel 设计为不关闭：`Close()` 仅调用 `cancel()` 和 `conn.Close()`，不关闭 channel，避免与并发 `Send` 产生 send-on-closed-channel panic
 
 ### 边缘场景
 
@@ -298,7 +297,7 @@ flowchart TD
 4. `writePump` 检测到 context 取消，发送 close frame 后退出
 5. `Run()` 中的 WaitGroup 等待两个 pump 退出，关闭 done channel
 6. `handleWebSocket` 从 `client.Run()` 返回
-7. 使用 5s 超时 context 调用 `ConnectionStore.Remove` 清理 Redis（`luaRemove` Lua 脚本原子删除 infoKey + SREM userKey connID，随后 `luaCleanupEmptySet` 原子清理空 SET 防止孤儿 key）
+7. 使用 5s 超时 context 调用 `ConnectionStore.Remove` 清理 Redis（3 次 round-trip：`Get` 查找 UserID → `luaRemove` 原子删除 infoKey + SREM userKey connID → `luaCleanupEmptySet` 原子清理空 SET 防止孤儿 key）
 8. 调用 `removeClient` 从 `clients`、`clientsByUser`、`clientsByDevice` 中移除
 9. 检查设备是否还有其他连接，若无则调用 `scheduleFuncCleanup` 延迟清理 `FunctionRegistry`（宽限期默认 10s，期间重连则取消清理）
 10. 检查设备是否还有其他连接，若无则调用 `reverseRPC.CancelDeviceWithReason`
@@ -537,5 +536,4 @@ flowchart TD
 | Close Code | 含义 | 使用场景 |
 |------------|------|----------|
 | 4001 | 设备替换 | 同设备新连接建立时，旧连接收到此码 |
-| 1000 | 正常关闭 | 服务端主动关闭连接 |
-| 1001 | Going Away | 服务器关闭 |
+| 1000 | 正常关闭 | 服务端主动关闭连接（`closeAllClients` 发送空 close message，默认 1000） |

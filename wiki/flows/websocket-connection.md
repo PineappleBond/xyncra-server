@@ -68,7 +68,7 @@ sequenceDiagram
 #### 1. 认证失败
 
 - 触发条件: authenticate 函数返回错误或空 userID
-- 处理逻辑: 返回 HTTP 401 "authentication failed" 或 "missing user id"
+- 处理逻辑: 返回 HTTP 401。默认 `defaultAuthenticate` 在 `user_id` 为空时返回 `ErrAuthenticationFailed`，统一走 `"authentication failed"` 路径。`"missing user id"` 路径仅在自定义 authenticate 函数返回 `("", nil)` 时触发
 - 最终结果: 连接不建立，客户端收到 401 响应
 - 备注: 默认实现 (`defaultAuthenticate`) 从 `user_id` query 参数提取用户 ID；生产环境应通过 `WSWithAuthenticate` 注入 JWT 或 cookie 认证
 
@@ -153,7 +153,7 @@ sequenceDiagram
     WS->>WS: performDeviceReplacement(oldClients) [异步 goroutine]
 
     loop 每个旧连接
-        WS->>OldClient: WriteControl(CloseMessage, code=4001, "replaced", deadline=5s)
+        WS->>OldClient: WriteControl(CloseMessage, code=4001, "replaced by new connection from same device", deadline=5s)
         WS->>WS: time.Sleep(10ms) 等待 TCP 刷盘
         WS->>OldClient: Close()
         WS->>OldClient: 等待 Done() 或超时 500ms

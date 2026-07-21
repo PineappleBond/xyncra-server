@@ -227,9 +227,14 @@ sequenceDiagram
             SRV->>Pending: defer delete(r.pending, reqID)
             SRV-->>Caller: 返回 context.DeadlineExceeded
         end
-    else sendFunc 失败 (设备离线)
-        SRV->>Pending: defer delete(r.pending, reqID)
-        SRV-->>Caller: 返回 "send request" 错误
+    else sendFunc 失败
+        SRV->>SRV: 检查是否 ErrDeviceOffline 且 PendingStore 存在
+        alt ErrDeviceOffline 且有 PendingStore
+            SRV->>PS: persistAsync(pending) 异步持久化
+            SRV-->>Caller: 返回 "device offline, request persisted for replay"
+        else 其他错误
+            SRV-->>Caller: 返回 "send request" 错误
+        end
     end
 ```
 
@@ -248,7 +253,8 @@ sequenceDiagram
 
 | 场景 | 处理方式 |
 |------|----------|
-| `sendFunc` 返回错误（设备离线） | 直接返回 `send request` 错误，不进入 select 等待，但仍执行 defer 清理 pending 记录 |
+| `sendFunc` 返回错误（`ErrDeviceOffline`） | 若配置了 PendingStore，先通过 `persistAsync` 异步持久化请求供后续重播，然后返回 `"send request: device offline, request persisted for replay"` 错误 |
+| `sendFunc` 返回其他错误 | 直接返回 `send request` 错误，不持久化，不进入 select 等待，但仍执行 defer 清理 pending 记录 |
 | `json.Marshal` 请求失败 | 返回 `marshal request` 错误 |
 | deviceID 为空 | sendFunc 走 `sendToUser` 广播到该用户的所有连接，而非指定设备 |
 | 并发调用同一设备 | 每个请求有独立的 reqID 和独立的 respCh，互不干扰 |

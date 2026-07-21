@@ -178,8 +178,7 @@ flowchart TD
 
 | 场景 | 处理方式 |
 | ---- | ---- |
-| `afterSeq + limit` 溢出 uint32 上限 | `expectedEnd` 计算可能回绕，导致查询范围错误。在约 43 亿序列号后实际可能发生 |
-| `latestSeq <= afterSeq` 在回绕后 | 当 `afterSeq` 接近 uint32 最大值而 `latestSeq` 已回绕时，比较结果不正确 |
+| `afterSeq + limit` 溢出 uint32 上限 | `expectedEnd` 回绕到小值（如 `uint32(4294967290) + uint32(100)` 回绕到 `94`），导致 `expectedEnd < afterSeq`。`ListByUserRange` 的 `maxSeq <= afterSeq` 检查返回空结果，客户端收到空更新列表。`has_more` 计算也会不正确（基于回绕后的 `expectedEnd`） |
 
 ### 7. has_more 与 expectedEnd 一致性
 
@@ -305,7 +304,9 @@ flowchart TD
 
 > **Go 与 TS 实现差异**：Go 的 `debouncedPull` 直接读取 `localMaxSeq` 并发送 `sync_updates` RPC；TS 的 `debouncedPull` 调用 `fullSync()`（分页循环）。两者效果等价。
 >
-> **Go 独有细节**：`debouncedPull` 入口检查 `sm.ctx == nil`（context 未初始化时直接返回）。拉取成功后调用 `db.SyncStates.SetLatestSeq` 保存服务端返回的 `latestSeq`。失败时通过 `time.AfterFunc(5s, ...)` 安排单次重试，重试前检查 `pullPending` 避免重复。
+> **重试机制**：Go 和 TS 都有单次重试机制。Go 通过 `time.AfterFunc(5s, ...)` 安排重试，TS 通过 `setTimeout(retryInterval)` 安排重试。重试前都检查 `pullPending` 避免重复。拉取成功后都调用 `SetLatestSeq` 保存服务端返回的 `latestSeq`。
+>
+> **Go 独有细节**：`debouncedPull` 入口检查 `sm.ctx == nil`（context 未初始化时直接返回）。
 
 ### ApplyUpdate 处理流程
 
