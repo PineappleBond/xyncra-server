@@ -28,6 +28,16 @@ func (m *mockFunctionProvider) GetFunctions(_ context.Context, _, _ string) ([]p
 	return m.funcs, m.err
 }
 
+func (m *mockFunctionProvider) GetFunctionsByUser(_ context.Context, _ string) (map[string][]protocol.FunctionInfo, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if len(m.funcs) == 0 {
+		return nil, nil
+	}
+	return map[string][]protocol.FunctionInfo{"dev1": m.funcs}, nil
+}
+
 // mockCallerForDTP implements ClientCaller for testing.
 type mockCallerForDTP struct {
 	resp *protocol.PackageDataResponse
@@ -69,7 +79,7 @@ func TestDynamicToolProvider_InjectsTools(t *testing.T) {
 		nil,
 		nil,
 	)
-	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
+	ctx := ContextWithAgentID(context.Background(), "alice")
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
 
 	_, runCtx, err := dtp.BeforeAgent(ctx, runCtx)
@@ -112,7 +122,7 @@ func TestDynamicToolProvider_EmptyFunctions_NoInjection(t *testing.T) {
 		nil,
 		nil,
 	)
-	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
+	ctx := ContextWithAgentID(context.Background(), "alice")
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
 
 	_, runCtx, err := dtp.BeforeAgent(ctx, runCtx)
@@ -133,7 +143,7 @@ func TestDynamicToolProvider_GetFunctionsError_FailOpen(t *testing.T) {
 		nil,
 		nil,
 	)
-	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
+	ctx := ContextWithAgentID(context.Background(), "alice")
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
 
 	assert.NotPanics(t, func() {
@@ -162,7 +172,7 @@ func TestDynamicToolProvider_FunctionTagsFilter(t *testing.T) {
 		nil,
 		nil,
 	)
-	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
+	ctx := ContextWithAgentID(context.Background(), "alice")
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
 
 	_, runCtx, err := dtp.BeforeAgent(ctx, runCtx)
@@ -190,7 +200,7 @@ func TestDynamicToolProvider_ExcludedFunctions(t *testing.T) {
 		nil,
 		nil,
 	)
-	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
+	ctx := ContextWithAgentID(context.Background(), "alice")
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
 
 	_, runCtx, err := dtp.BeforeAgent(ctx, runCtx)
@@ -223,7 +233,7 @@ func TestDynamicToolProvider_TagsAndExcluded(t *testing.T) {
 		nil,
 		nil,
 	)
-	ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
+	ctx := ContextWithAgentID(context.Background(), "alice")
 	runCtx := &adk.ChatModelAgentContext{Tools: nil}
 
 	_, runCtx, err := dtp.BeforeAgent(ctx, runCtx)
@@ -260,7 +270,7 @@ func TestDynamicToolProvider_ConcurrentBeforeAgent(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			ctx := ContextWithCallerDevice(context.Background(), CallerDevice{UserID: "alice", DeviceID: "dev1"})
+			ctx := ContextWithAgentID(context.Background(), "alice")
 			runCtx := &adk.ChatModelAgentContext{Tools: nil}
 			_, runCtx, err := dtp.BeforeAgent(ctx, runCtx)
 			assert.NoError(t, err)

@@ -205,13 +205,18 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 	ctx, executeFinish := startAgentExecuteSpan(ctx, payload.AgentID, payload.ConversationID, payload.SenderID)
 	defer func() { executeFinish(err) }()
 
-	// Inject caller device into context for DynamicToolProvider (D-102).
+	// Inject caller device into context for tracing/debug (D-102).
 	if payload.DeviceID != "" {
 		ctx = ContextWithCallerDevice(ctx, CallerDevice{
 			UserID:   payload.SenderID,
 			DeviceID: payload.DeviceID,
 		})
 	}
+
+	// Inject agent userID for DynamicToolProvider function lookup.
+	// The agent's registered functions are keyed by the agent's userID,
+	// not the human sender's identity (which is in CallerDevice).
+	ctx = ContextWithAgentID(ctx, payload.AgentID)
 
 	e.logger.Info("agent executor: starting",
 		"message_id", payload.MessageID,

@@ -77,6 +77,13 @@ type FunctionRegistry interface {
 	// If the device has not registered, it returns (nil, nil).
 	GetDeviceFunctions(ctx context.Context, userID, deviceID string) (*DeviceFunctions, error)
 
+	// GetFunctionsByUser returns all registered functions for the given userID,
+	// keyed by deviceID. If no devices have registered, it returns (nil, nil).
+	// This is used by DynamicToolProvider when the agent's deviceID is unknown
+	// but its userID is known. The map keys enable callers to route tool
+	// invocations to the correct device.
+	GetFunctionsByUser(ctx context.Context, userID string) (map[string][]protocol.FunctionInfo, error)
+
 	// OnDeviceDisconnect removes the function registration for a device.
 	// It is idempotent: calling it for an unknown device returns (nil, nil).
 	// The returned *DeviceFunctions (if non-nil) contains the data that was
@@ -234,6 +241,31 @@ func (r *MemoryFunctionRegistry) GetFunctions(_ context.Context, userID, deviceI
 	out := make([]protocol.FunctionInfo, len(df.Functions))
 	copy(out, df.Functions)
 	return out, nil
+}
+
+// GetFunctionsByUser returns all registered functions for the given userID,
+// keyed by deviceID. If no devices have registered, it returns (nil, nil).
+// Returns a copy to prevent callers from mutating registry state.
+func (r *MemoryFunctionRegistry) GetFunctionsByUser(_ context.Context, userID string) (map[string][]protocol.FunctionInfo, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	userDevices, ok := r.devices[userID]
+	if !ok {
+		return nil, nil
+	}
+
+	result := make(map[string][]protocol.FunctionInfo, len(userDevices))
+	for deviceID, df := range userDevices {
+		funcs := make([]protocol.FunctionInfo, len(df.Functions))
+		copy(funcs, df.Functions)
+		result[deviceID] = funcs
+	}
+
+	if len(result) == 0 {
+		return nil, nil
+	}
+	return result, nil
 }
 
 // GetDeviceFunctions returns the full device record including metadata. If

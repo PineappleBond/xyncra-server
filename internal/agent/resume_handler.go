@@ -171,13 +171,16 @@ func NewAgentResumeHandler(
 			return nil
 		}
 
-		// 5. Inject caller device into context for DynamicToolProvider (D-102).
+		// 5. Inject caller device into context for tracing/debug (D-102).
 		if payload.DeviceID != "" {
 			ctx = ContextWithCallerDevice(ctx, CallerDevice{
 				UserID:   payload.SenderID,
 				DeviceID: payload.DeviceID,
 			})
 		}
+
+		// Inject agent userID for DynamicToolProvider function lookup.
+		ctx = ContextWithAgentID(ctx, payload.AgentID)
 
 		// 6. Build the agent.
 		builtAgent, err := executor.agentBuilder.Build(ctx, config)

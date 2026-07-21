@@ -17,6 +17,9 @@ import (
 // package (D-101).
 type ClientFunctionProvider interface {
 	GetFunctions(ctx context.Context, userID, deviceID string) ([]protocol.FunctionInfo, error)
+	// GetFunctionsByUser returns all registered functions for a userID,
+	// keyed by deviceID. Used when the agent's deviceID is unknown.
+	GetFunctionsByUser(ctx context.Context, userID string) (map[string][]protocol.FunctionInfo, error)
 }
 
 // ClientCaller sends a request to a specific client device and waits for
@@ -75,25 +78,31 @@ func NewDynamicToolProvider(
 func (d *DynamicToolProvider) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
 	var merged []tool.BaseTool
 
-	// --- Client function tools (require device context) ---
-	device, hasDevice := CallerDeviceFromContext(ctx)
-	if hasDevice {
-		// 2. Get registered functions for this device (fail-open).
-		funcs, err := d.funcRegistry.GetFunctions(ctx, device.UserID, device.DeviceID)
+	// --- Client function tools (require agent identity in context) ---
+	// Use the agent's userID to look up functions registered by the agent's
+	// device(s). This is distinct from CallerDevice which carries the human
+	// sender's identity (used for tracing/debug).
+	agentID, hasAgent := AgentIDFromContext(ctx)
+	if hasAgent && agentID != "" {
+		// 2. Get registered functions for this agent user, keyed by deviceID (fail-open).
+		deviceFuncs, err := d.funcRegistry.GetFunctionsByUser(ctx, agentID)
 		if err != nil {
-			d.logger.Error("DynamicToolProvider: GetFunctions failed", "user", device.UserID, "device", device.DeviceID, "error", err)
-		} else {
-			funcs = d.applyFilters(funcs)
-			if len(funcs) > 0 {
-				// 4. Create tools for each function.
-				defaultTimeout := d.config.CallTimeout
-				if defaultTimeout <= 0 {
-					defaultTimeout = 30 * time.Second
+			d.logger.Error("DynamicToolProvider: GetFunctionsByUser failed", "agent", agentID, "error", err)
+		} else if len(deviceFuncs) > 0 {
+			defaultTimeout := d.config.CallTimeout
+			if defaultTimeout <= 0 {
+				defaultTimeout = 30 * time.Second
+			}
+
+			for deviceID, funcs := range deviceFuncs {
+				funcs = d.applyFilters(funcs)
+				if len(funcs) == 0 {
+					continue
 				}
 
 				var tools []tool.BaseTool
 				for _, fn := range funcs {
-					t, err := newClientFunctionTool(fn, d.caller, device.UserID, device.DeviceID, defaultTimeout)
+					t, err := newClientFunctionTool(fn, d.caller, agentID, deviceID, defaultTimeout)
 					if err != nil {
 						d.logger.Error("DynamicToolProvider: failed to create tool", "function", fn.Name, "error", err)
 						continue // fail-open per function
@@ -103,7 +112,7 @@ func (d *DynamicToolProvider) BeforeAgent(ctx context.Context, runCtx *adk.ChatM
 
 				if len(tools) > 0 {
 					merged = append(merged, tools...)
-					d.logger.Info("DynamicToolProvider: injected client tools", "count", len(tools), "device", device.DeviceID)
+					d.logger.Info("DynamicToolProvider: injected client tools", "count", len(tools), "device", deviceID)
 				}
 			}
 		}

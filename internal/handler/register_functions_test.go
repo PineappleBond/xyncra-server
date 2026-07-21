@@ -331,6 +331,9 @@ func (r *errTestRegistry) GetDeviceFunctions(_ context.Context, _, _ string) (*s
 func (r *errTestRegistry) OnDeviceDisconnect(_ context.Context, _, _ string) (*server.DeviceFunctions, error) {
 	return nil, nil
 }
+func (r *errTestRegistry) GetFunctionsByUser(_ context.Context, _ string) (map[string][]protocol.FunctionInfo, error) {
+	return nil, nil
+}
 
 func TestRegisterFunctions_HandleRequest_InternalError(t *testing.T) {
 	t.Parallel()
