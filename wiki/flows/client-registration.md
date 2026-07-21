@@ -559,7 +559,7 @@ sequenceDiagram
     RH->>MH: RegisterMethod("send_message", handler)
     RH->>MH: RegisterMethod("create_conversation", handler)
     RH->>MH: RegisterMethod("get_messages", handler)
-    Note over RH,MH: ... 共 17 个方法处理器
+    Note over RH,MH: ... 共 16 个无条件方法处理器
 
     alt deps.FunctionRegistry != nil
         RH->>MH: RegisterMethod("system.register_functions", handler)
@@ -578,7 +578,7 @@ sequenceDiagram
    - `main.go` 创建包含所有必需存储、注册表和代理的 `Dependencies` 结构体
 
 2. **注册所有处理器**
-   - 调用 `RegisterAll(handler, deps)` 注册 17 个方法处理器
+   - 调用 `RegisterAll(handler, deps)` 注册 16 个无条件方法处理器 + 2 个条件注册
 
 3. **存储处理器**
    - 每个 `RegisterMethod(methodName, handler)` 将处理器存储在 `DefaultMessageHandler` 的方法分发映射中

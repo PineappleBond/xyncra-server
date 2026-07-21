@@ -93,9 +93,9 @@ flowchart TD
 | **Agent 未注册** | 返回 `ErrAgentNotFound`，走 `classifyError` 发送友好错误消息 |
 | **LLM 超时** | 映射为 `ErrLLMTimeout`，发送"暂时无法回复"消息，作为 transient error 返回给 MQ 重试 |
 | **LLM 限流 (429)** | 映射为 `ErrLLMRateLimited`，同上 |
-| **HTTP 5xx** | 映射为 `ErrLLMTimeout` (transient) |
+| **HTTP 500/502/503** | 映射为 `ErrLLMTimeout` (transient) |
 | **流式中途错误** | 广播 `is_done=true` + 已累积的部分文本，持久化部分消息 |
-| **持久化失败** | 日志记录但不阻断主流程 (fail-open) |
+| **持久化失败** | 流式中途错误时部分文本持久化为 fail-open；最终消息持久化失败时返回错误，触发 `ExecuteWithErrorMessage` 发送通用错误消息给用户 |
 | **API Key 缺失** | 返回 `ErrAPIKeyMissing`，发送"配置有误"消息 |
 | **MCP 服务不可用** | 跳过该 MCP server 的工具 (fail-open)，不阻断构建 |
 | **context 超时** | 总超时 120s 后所有操作被取消 |
@@ -161,7 +161,7 @@ flowchart TD
 | **resume 永久失败** | 清理状态 + 删除 checkpoint + 删除 questions + 发送错误消息 |
 | **resume transient 失败** | 不自动 MQ 重试，而是通知用户自行决定是否重试 |
 | **并发 resume** | 幂等检查确保同一 checkpoint 只 resume 一次 |
-| **questionStore 为 nil** | Question 创建/读取被跳过 (nil-safe) |
+| **questionStore 为 nil** | 初始中断时 Question 创建被跳过 (nil-safe)；resume 时中止恢复流程并释放锁（非 nil-safe，需配置 questionStore） |
 
 ---
 
@@ -675,9 +675,10 @@ graph LR
 |----------|------|----------|
 | `ErrLLMTimeout` | Transient | MQ 重试 + 用户提示"暂时无法回复" |
 | `ErrLLMRateLimited` | Transient | MQ 重试 + 用户提示"暂时无法回复" |
-| HTTP 5xx | Transient | MQ 重试 |
+| HTTP 500/502/503 | Transient | MQ 重试 |
 | `ErrAgentNotFound` | Permanent | 发送友好错误消息，标记 processed |
 | `ErrAPIKeyMissing` | Permanent | 发送"配置有误"消息，标记 processed |
 | `ErrHITLInterrupted` | Special | 不标记 processed，保留锁，等待 resume |
-| 持久化失败 | Fail-open | 日志记录，不阻断主流程 |
+| 流式中途持久化失败 | Fail-open | 日志记录，不阻断主流程（部分文本已广播） |
+| 最终消息持久化失败 | Permanent | 返回错误，发送通用错误消息给用户，标记 processed |
 | MCP 不可用 | Fail-open | 跳过该 MCP server，不阻断构建 |

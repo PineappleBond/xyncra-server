@@ -147,7 +147,8 @@ flowchart TD
 
 | 操作 | 存储 | 说明 |
 |------|------|------|
-| EXPIRE | Redis | 重置连接 key 的 TTL |
+| PEXPIRE | Redis | 重置连接 info key 的 TTL（毫秒精度），通过 Lua 脚本原子执行 |
+| PEXPIRE | Redis | 刷新 user SET key 的 TTL（MAX 语义：仅当新 TTL > 当前 TTL 时才更新） |
 
 ---
 

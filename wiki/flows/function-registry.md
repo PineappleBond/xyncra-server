@@ -121,12 +121,23 @@ sequenceDiagram
     Note over Registry: 函数已存储
     Client--xWS: 连接断开 (网络异常/主动关闭)
     WS->>WS: handleWebSocket defer 清理
-    WS->>CS: Remove(deviceID)
-    WS->>RPC: CancelDeviceWithReason(userID, deviceID, "device disconnected")
-    WS->>Registry: OnDeviceDisconnect(userID, deviceID)
-    Registry->>Registry: 删除 map[userID][deviceID]
-    Registry->>Registry: 若该 user 无其他设备, 删除 user 级 map entry
-    Note over Registry: 函数已清理
+    WS->>CS: Remove(connID)
+    WS->>WS: removeClient(connID, userID, deviceID)
+
+    alt 设备无其他活跃连接
+        WS->>RPC: CancelDeviceWithReason(userID, deviceID, "device disconnected")
+        WS->>WS: scheduleFuncCleanup(userID, deviceID)
+        Note over WS: 启动 grace period 定时器
+        alt grace period 内设备重连
+            WS->>WS: cancelPendingFuncCleanup(userID, deviceID)
+            Note over WS: 取消清理, 函数保留
+        else grace period 超时且无活跃连接
+            WS->>Registry: OnDeviceDisconnect(userID, deviceID)
+            Registry->>Registry: 删除 map[userID][deviceID]
+            Registry->>Registry: 若该 user 无其他设备, 删除 user 级 map entry
+            Note over Registry: 函数已清理
+        end
+    end
 ```
 
 ### 边缘场景
@@ -146,12 +157,19 @@ sequenceDiagram
 #### 3. 设备替换场景下的函数保留
 
 - 触发条件: 同一 (userID, deviceID) 的新连接建立时旧连接被踢出
-- 处理逻辑: 新连接注册前，旧连接的 cleanup 触发 OnDeviceDisconnect。新连接会重新调用 register_functions
-- 最终结果: 新设备需重新注册函数
+- 处理逻辑: 新连接到达时调用 `cancelPendingFuncCleanup` 取消旧连接的延迟清理，避免页面导航期间函数被误删。CancelDevice 在 Upgrade 前执行，取消旧连接的 pending RPC 请求
+- 最终结果: 函数注册保留（因为清理被取消），新连接无需重新注册函数
+
+#### 4. Grace period 机制
+
+- 触发条件: 设备断开连接后，函数清理不立即执行
+- 处理逻辑: `scheduleFuncCleanup` 启动一个带有 grace period 的定时器。如果设备在 grace period 内重连，`cancelPendingFuncCleanup` 取消清理。只有 grace period 超时且无活跃连接时，才调用 `OnDeviceDisconnect`
+- 最终结果: 避免页面导航期间（短暂断开后立即重连）函数被误删
 
 ### 涉及文件
 
 - `internal/server/function_registry.go`: OnDeviceDisconnect 实现
+- `internal/server/websocket_server.go`: scheduleFuncCleanup、cancelPendingFuncCleanup、removeClient
 - `internal/server/function_lifecycle_test.go`: 断开清理、设备替换、多设备隔离测试
 
 ---
@@ -312,13 +330,14 @@ flowchart TD
 
     G[设备重连] --> H[reconnect handler]
     H --> I[PendingStore.List 获取待重播请求]
-    I --> J[按 Seq 升序逐个重播]
-    J --> K[ReplayRequest: 新 reqID, 保留原 IdempotencyKey]
-    K --> L{响应到达?}
-    L -->|成功| M[PendingStore.Remove 移除]
-    L -->|超时| N{RetryCount < MaxRetries?}
-    N -->|是| O[Update RetryCount, 等下次重连]
-    N -->|否| P[移除, 放弃重试]
+    I --> J[过滤: Seq > last_seen_seq AND RetryCount < MaxRetries]
+    J --> K[按 Seq 升序逐个重播]
+    K --> L[ReplayRequest: 新 reqID, 保留原 IdempotencyKey]
+    L --> M{响应到达?}
+    M -->|成功| N[PendingStore.Remove 移除]
+    M -->|超时| O{RetryCount < MaxRetries?}
+    O -->|是| P[Update RetryCount, 等下次重连]
+    O -->|否| Q[移除, 放弃重试]
 ```
 
 ### 边缘场景
@@ -341,7 +360,13 @@ flowchart TD
 - 处理逻辑: 请求被移除，不再重播
 - 最终结果: 持久化请求被丢弃
 
-#### 4. PendingStore 容量限制
+#### 4. last_seen_seq 过滤
+
+- 触发条件: 客户端在 system.reconnect 请求中携带 last_seen_seq 参数
+- 处理逻辑: 只重播 Seq > last_seen_seq 的请求，跳过客户端已见过的请求
+- 最终结果: 避免重复执行客户端已处理过的请求（即使服务端未收到响应）
+
+#### 5. PendingStore 容量限制
 
 - 触发条件: 单设备 pending 请求超过 MaxPendingPerDevice（默认 50）
 - 处理逻辑: Redis RPush + LTrim 保留最新的 N 条，旧的被丢弃

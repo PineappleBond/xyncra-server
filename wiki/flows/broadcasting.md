@@ -73,7 +73,7 @@ sequenceDiagram
 
 | 场景 | 行为 |
 |------|------|
-| **Redis Pub/Sub 发布失败** | `Publish` 错误被 `BroadcastUpdates` 捕获后仅 `logger.Error`，不返回 error，符合 fire-and-forget 策略 (D-007)。数据已持久化，客户端可通过 `sync_updates` 拉取。 |
+| **Redis Pub/Sub 发布失败** | `BroadcastUpdates` 调用 `nodeBroadcaster.Publish` 后若返回 error，仅 `logger.Error` 记录，`BroadcastUpdates` 仍返回 nil，符合 fire-and-forget 策略 (D-007)。数据已持久化，客户端可通过 `sync_updates` 拉取。 |
 | **Redis 连接断开 / 网络分区** | `Subscribe` 的 `PSubscribe` 底层 channel 会关闭（`ok==false`），`Subscribe` 返回 nil。因为 `Subscribe` 在独立 goroutine 中运行且仅记录日志，不会导致节点崩溃。节点失去 Pub/Sub 能力但本地广播仍正常。 |
 | **消息体畸形（JSON 反序列化失败）** | `Subscribe` 循环中反序列化失败直接 `continue` 跳过该消息，不中断订阅循环。 |
 | **节点重启后 nodeID 变化** | 每个 WebSocketServer 实例启动时 `uuid.New()` 生成新 nodeID，重启后旧消息不会被错误跳过（因为旧 nodeID 不再匹配），但重启瞬间可能有短暂的消息间隙（Subscribe 尚未建立）。 |
@@ -233,6 +233,9 @@ flowchart TD
         A3[SendAgentStatus]
         A4[BroadcastMessageUpdate]
         A5[SendConversationUpdate]
+        A6[SendAgentTimeout]
+        A7[SendFunctionCall]
+        A8[BroadcastRaw]
     end
 
     subgraph BroadcastHelper 处理
@@ -241,6 +244,9 @@ flowchart TD
         B3[构造 AgentStatusPayload<br/>Seq=0, Type=AgentStatus]
         B4[构造 MessageUpdate<br/>Seq=realSeq, Type=Message]
         B5[构造 ConversationUpdate<br/>Seq=0, Type=Conversation]
+        B6[构造 AgentTimeoutPayload<br/>Seq=0, Type=AgentTimeout]
+        B7[构造 FunctionCallPayload<br/>Seq=0, Type=FunctionCall]
+        B8[直接传递预构建的 PackageDataUpdates]
     end
 
     subgraph 广播目标
@@ -249,6 +255,9 @@ flowchart TD
         C3[humanUserID]
         C4[逐条广播<br/>每条带真实 DB seq]
         C5[pull-on-notification<br/>客户端收到后通过 RPC 拉取]
+        C6[humanUserID]
+        C7[humanUserID]
+        C8[targetUserID]
     end
 
     subgraph BroadcastUpdates
@@ -260,6 +269,9 @@ flowchart TD
     A3 --> B3 --> C3 --> D
     A4 --> B4 --> C4 --> D
     A5 --> B5 --> C5 --> D
+    A6 --> B6 --> C6 --> D
+    A7 --> B7 --> C7 --> D
+    A8 --> B8 --> C8 --> D
 ```
 
 ### 详细步骤
@@ -273,6 +285,12 @@ flowchart TD
 4. **BroadcastMessageUpdate**：广播持久化消息。`store.SendMessage` 返回的 `UserUpdate` 列表每条带真实 DB seq 号，BroadcastHelper 逐条构造 `PackageDataUpdate{Seq: realSeq, Type:UpdateTypeMessage}` 广播。这些有真实 seq，客户端会纳入 sync state。
 
 5. **SendConversationUpdate**：广播对话变更通知，构造轻量通知 `{conversation_id, action:'update', updated_at}`。采用 pull-on-notification 模式，客户端收到通知后通过 `get_conversation` RPC 拉取完整状态。
+
+6. **SendAgentTimeout**：广播 Agent 超时通知，构造 `AgentTimeoutPayload{UserID: agentUserID, Reason}`，通过 `broadcastEphemeral` 发送给 `humanUserID`。
+
+7. **SendFunctionCall**：广播函数调用信息，构造 `FunctionCallPayload{Name, Args, Result, Error, DurationMs, IsDone}`。每个函数调用应发送两次——执行前（`IsDone=false`，携带 name 和 args）和执行后（`IsDone=true`，携带 result 或 error）。通过 `broadcastEphemeral` 发送给 `humanUserID`。
+
+8. **BroadcastRaw**：发送预构建的 `PackageDataUpdates` 给指定用户。由 resume handler 用于实时投递持久化的消息更新，直接调用 `wsServer.BroadcastUpdates` 并返回 error（非 fire-and-forget）。
 
 ### 边缘场景
 
@@ -300,7 +318,7 @@ stateDiagram-v2
     state "单节点模式" as SingleNode {
         Created --> NoopBroadcaster: 未注入 WSWithNodeBroadcaster
         NoopBroadcaster --> NoopPublish: Publish → 返回 nil
-        NoopBroadcaster --> NoopSubscribe: Subscribe → 阻塞在 <-ctx.Done()
+        NoopBroadcaster --> NoopSubscribe: Subscribe → 阻塞在 <-ctx.Done(), 返回 ctx.Err()
         NoopBroadcaster --> NoopClose: Close → 返回 nil
     }
 

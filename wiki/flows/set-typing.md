@@ -198,10 +198,11 @@ flowchart TD
 
 ### 2. Rate Limiting
 
-采用 per-user-per-conversation 的 token bucket rate limiter：
-- **速率**：1 秒 1 次
+采用 per-user-per-conversation 的 time-based rate limiter：
+- **速率**：1 秒 1 次（检查距上次允许时间是否 >= 1 秒）
 - **Key**：`userID:conversationID`
 - **超限行为**：静默返回 OK（不是错误）
+- **实现**：`sync.Map` 存储每个 key 的 `typingRateLimiter`，记录 `lastTime` 和 `lastAccess`
 - **清理**：后台 goroutine 每 5 分钟清理 10 分钟未访问的条目
 
 ### 3. Broadcast to All Members

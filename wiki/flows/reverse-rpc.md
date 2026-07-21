@@ -492,7 +492,7 @@ sequenceDiagram
     Store-->>RH: 返回持久化的请求列表
 
     loop 遍历每个持久化请求
-        RH->>RR: ReplayRequest(ctx, userID, deviceID, method, params, idempotencyKey, seq, timeout)
+        RH->>RR: ReplayRequest(ctx, preq, timeout)
         RR->>RR: 生成 replayID = "s-replay-{uuid}"
         RR->>RR: 创建带超时的 context
         RR->>RR: 构建 reverseRPCPending (保留原始 idempotencyKey 和 seq)

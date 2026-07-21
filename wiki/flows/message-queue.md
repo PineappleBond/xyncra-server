@@ -66,7 +66,7 @@ flowchart TD
 | 8 | 通过优先级链解析选项：`With...` option > Task field > broker 级默认值（默认重试次数 `DefaultRetryCount = 3`） |
 | 9 | 通过 `tracing.InjectTraceContext(ctx)` 注入 W3C Trace Context 到 `task.Metadata` |
 | 10 | 序列化 `asynqTaskPayload` 信封（`{type, payload, metadata}`）包裹领域任务 |
-| 11 | 调用 `buildAsynqOptions` 将解析后的选项转换为 `asynq.Option`（Queue, MaxRetry, Timeout, TaskID, Retention, ProcessIn, Deadline, Unique） |
+| 11 | 调用 `buildAsynqOptions` 将解析后的选项转换为 `asynq.Option`（Queue, MaxRetry, Timeout, TaskID, Retention, ProcessIn, Deadline, Unique/UniqueTTL） |
 | 12 | 调用 `b.client.EnqueueContext(ctx, asynqTask, aOpts...)` 写入 Redis |
 | 13 | 成功时返回 Asynq 分配的 Task ID；失败时由调用方记录日志，但不传播到客户端响应 |
 
@@ -277,7 +277,7 @@ flowchart LR
 
 ### 流程概述
 
-Broker 支持协调式优雅关闭，通过 `Stop` 和 `Close` 两个方法实现。`Stop` 通知 worker 排空正在处理的任务；`Close` 等待完成并释放所有资源。
+Broker 支持协调式优雅关闭，通过 `Stop`（`Broker` 接口方法）和 `Close`（`AsynqBroker` 实现方法）两个方法实现。`Stop` 通知 worker 排空正在处理的任务；`Close` 等待完成并释放所有资源。
 
 ### 流程图
 
@@ -436,6 +436,16 @@ graph LR
 | `critical` | 6 | 时间敏感任务（如实时消息广播） |
 | `default` | 3 | 标准优先级任务 |
 | `low` | 1 | 后台任务（如 Agent 处理） |
+
+---
+
+## 默认常量
+
+| 常量 | 值 | 说明 |
+|------|------|------|
+| `DefaultRetryCount` | 3 | 未指定 MaxRetry 时的默认最大重试次数（覆盖 Asynq 内置默认值 25） |
+| `DefaultUniqueTTL` | 5 分钟 | 使用 `WithUnique` 去重时的默认锁 TTL |
+| `retryUseBrokerDefault` | -1 | 哨兵值，表示使用 broker 配置的 RetryCount |
 
 ---
 

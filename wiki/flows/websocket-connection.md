@@ -193,6 +193,41 @@ sequenceDiagram
 
 ---
 
+## 场景 3b: 应用层心跳 (ConnectionStore TTL 刷新)
+
+除 WebSocket 协议层的 Ping/Pong 外，客户端还可发送应用层心跳请求以刷新 ConnectionStore 中的连接 TTL。
+
+### 主流程
+
+```mermaid
+sequenceDiagram
+    participant Client as 客户端
+    participant DMH as DefaultMessageHandler
+    participant HH as heartbeatHandler
+    participant CS as ConnectionStore
+
+    Client->>DMH: Request: method="heartbeat"
+    DMH->>HH: HandleRequest(ctx, client, req)
+    HH->>HH: 解析可选 device_info (仅记录日志)
+    HH->>CS: Refresh(connID) [Lua 原子操作]
+    CS-->>HH: 成功 / ErrConnectionNotFound
+    HH-->>Client: Response: {status: ok} / {status: connection expired}
+```
+
+### 边缘场景
+
+- 连接已过期/被 Redis 清除: `Refresh` 返回 `ErrConnectionNotFound`，客户端收到 connection expired 错误
+- Redis 不可达: 返回内部错误
+- `device_info` 解析失败: 忽略，不影响心跳处理（宽容解析）
+- 心跳参数缺失: 有效心跳，无参数也正常处理
+
+### 涉及文件
+
+- `internal/handler/heartbeat.go`: heartbeatHandler.HandleRequest
+- `redis_connection_store.go`: Refresh (luaRefresh Lua 脚本)
+
+---
+
 ## 场景 4: 客户端消息处理 (Request/Response 分发)
 
 ### 主流程
@@ -505,8 +540,8 @@ sequenceDiagram
     WS->>WS: removeClient(connID, userID, deviceID)
 
     alt FunctionRegistry 已配置 且 该设备无其他连接
-        WS->>FR: OnDeviceDisconnect(userID, deviceID)
-        FR-->>WS: removed functions
+        WS->>WS: scheduleFuncCleanup(userID, deviceID)
+        Note over WS: 启动延迟清理协程 (宽限期默认 10s)<br/>若设备在宽限期内重连则取消清理
     end
 
     alt ReverseRPC 已配置 且 该设备无其他连接
@@ -528,18 +563,24 @@ sequenceDiagram
 #### 2. 设备已被新连接替换后旧连接断开
 
 - 触发条件: 旧连接的 defer cleanup 运行时，新连接已注册
-- 处理逻辑: hasActiveConn 检查为 true，跳过 FunctionRegistry 清理和 CancelDevice
+- 处理逻辑: hasActiveConn 检查为 true，跳过 scheduleFuncCleanup 和 CancelDeviceWithReason
 - 最终结果: 新连接的功能注册和 pending 请求不受影响
 
-#### 3. FunctionRegistry 清理失败
+#### 3. FunctionRegistry 延迟清理与重连竞态
 
-- 触发条件: OnDeviceDisconnect 内部错误
+- 触发条件: 设备断开后在宽限期 (默认 10s) 内重连
+- 处理逻辑: 新连接注册时调用 `cancelPendingFuncCleanup` 取消待执行的清理协程
+- 最终结果: 功能注册不会被误删，新连接可正常注册函数
+
+#### 4. FunctionRegistry 清理失败
+
+- 触发条件: OnDeviceDisconnect 内部错误（宽限期到期后执行）
 - 处理逻辑: 记录错误日志
 - 最终结果: 功能注册可能残留，但不影响核心通信
 
 ### 涉及文件
 
-- `websocket_server.go`: handleWebSocket 断开清理逻辑
+- `websocket_server.go`: handleWebSocket 断开清理逻辑、scheduleFuncCleanup、cancelPendingFuncCleanup
 - `websocket_client.go`: readPump、writePump、Close
 - `redis_connection_store.go`: Remove (Lua 原子操作)
 - `function_registry.go`: OnDeviceDisconnect
@@ -559,23 +600,24 @@ sequenceDiagram
     participant RR as ReverseRPC
     participant Clients as 所有客户端
     participant NB as NodeBroadcaster
+    participant BS as BaseServer
 
     External->>WS: GracefulStop(ctx)
     WS->>NB: Close()
     Note over NB: 释放 Pub/Sub 资源
 
-    WS->>BaseServer: GracefulStop(ctx)
-    BaseServer->>BaseServer: Stop() -> cancel context
+    WS->>BS: GracefulStop(ctx)
+    BS->>BS: Stop() -> cancel context
+
+    Note over WS: Start() 中 <-ctx.Done() 解除阻塞
 
     WS->>HTTP: Shutdown(5s timeout)
     Note over HTTP: 停止接受新连接
 
-    WS->>RR: CancelAll()
-    Note over RR: 取消所有待处理 RPC，发送 "reverse rpc cancelled"
-
     WS->>WS: closeAllClients()
-    WS->>WS: 收集所有 client 引用
-    WS->>WS: 重置 clients/clientsByUser/clientsByDevice
+    WS->>RR: CancelAll() [在 closeAllClients 内部]
+    Note over RR: 取消所有待处理 RPC，发送 "reverse rpc cancelled"
+    WS->>WS: 收集所有 client 引用，重置索引
 
     loop 每个客户端
         WS->>Clients: Close() -> cancel context
@@ -589,6 +631,10 @@ sequenceDiagram
         WS->>WS: 记录超时错误日志
         Note over WS: 强制继续关闭
     end
+
+    Note over WS: Start() 返回
+    BS->>BS: 等待 done channel 关闭
+    BS-->>WS: GracefulStop 返回
 ```
 
 ### 边缘场景

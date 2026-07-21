@@ -204,6 +204,14 @@ flowchart TD
 |------|-----|------|
 | SELECT | conversations | 获取会话信息 |
 
+### Rate Limiter 清理
+
+Handler 构造时启动后台 goroutine，每 5 分钟执行一次清理：
+
+- 遍历 `limiters` sync.Map，检查每个条目的 `lastAccess` 时间
+- 删除超过 10 分钟未访问的条目
+- 防止长时间运行时 rate limiter 条目无限增长
+
 ---
 
 ## 关键设计决策

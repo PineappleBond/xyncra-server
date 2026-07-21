@@ -255,7 +255,7 @@ flowchart TD
     O --> P[从 clientsByUser 移除]
     P --> Q[从 clientsByDevice 移除]
     Q --> R{设备还有其他连接?}
-    R -->|否| S[清理 FunctionRegistry]
+    R -->|否| S[scheduleFuncCleanup 延迟清理]
     S --> T[调用 CancelDeviceWithReason]
     R -->|是| U[完成]
     T --> U
@@ -271,7 +271,7 @@ flowchart TD
 6. `handleWebSocket` 从 `client.Run()` 返回
 7. 使用 5s 超时 context 调用 `ConnectionStore.Remove` 清理 Redis
 8. 调用 `removeClient` 从 `clients`、`clientsByUser`、`clientsByDevice` 中移除
-9. 检查设备是否还有其他连接，若无则清理 `FunctionRegistry`
+9. 检查设备是否还有其他连接，若无则调用 `scheduleFuncCleanup` 延迟清理 `FunctionRegistry`（宽限期默认 10s，期间重连则取消清理）
 10. 检查设备是否还有其他连接，若无则调用 `reverseRPC.CancelDeviceWithReason`
 
 ### 边缘场景
@@ -282,6 +282,8 @@ flowchart TD
 | 旧连接的 `performDeviceReplacement` 协程仍在运行 | 通过 `connID` 隔离，不影响新连接 |
 | `Close()` 被多次调用 | 幂等，`closed` 标志防止重复操作 |
 | send channel 不被关闭 | 设计决策：避免与并发 `Send` 产生 panic |
+| 设备断开后 10s 内重连 | `cancelPendingFuncCleanup` 取消待执行的清理，避免误删函数注册 |
+| 设备替换后旧连接断开 | `hasActiveConn` 为 true，跳过 `scheduleFuncCleanup` 和 `CancelDeviceWithReason` |
 
 ---
 
@@ -394,19 +396,28 @@ flowchart TD
     H -->|失败| I[返回错误]
     H -->|成功| J[启动 HTTP 服务器协程]
     J --> K[启动 Pub/Sub 订阅协程]
-    K --> L[BaseServer.Start 阻塞]
+    K --> L[BaseServer.Start 阻塞等待 context 取消]
+
     L --> M{context 取消}
     M --> N[httpServer.Shutdown 5s 超时]
     N --> O[closeAllClients]
-    O --> P[取消所有 ReverseRPC 请求]
-    P --> Q[GracefulStop]
-    Q --> R[关闭 NodeBroadcaster]
-    R --> S[等待所有连接断开]
-    S -->|超时| T[返回超时错误]
-    S -->|完成| U[服务器关闭]
+    O --> P[内部调用 CancelAll 取消 ReverseRPC]
+    P --> Q[等待所有客户端 Done 或 5s 超时]
+    Q --> R[Start 返回]
+
+    subgraph GracefulStop 调用路径
+        GS1[GracefulStop] --> GS2[关闭 NodeBroadcaster]
+        GS2 --> GS3[BaseServer.Stop 取消 context]
+        GS3 --> GS4[等待 Start 返回的 done channel]
+    end
+
+    M -.->|由 GracefulStop 触发| GS3
+    R -.-> GS4
 ```
 
 ### 详细步骤
+
+#### 启动流程 (Start)
 
 1. `NewWebSocketServer` 创建服务器实例，配置依赖注入
 2. `Start(ctx)` 启动服务器：创建 HTTP mux，注册 `/ws` 和 `/health` 路由
@@ -414,10 +425,17 @@ flowchart TD
 4. 启动 HTTP 服务器协程
 5. 启动 Pub/Sub 订阅协程
 6. 调用 `BaseServer.Start` 阻塞等待 context 取消
-7. 关闭时：调用 `httpServer.Shutdown`（5s 超时）
-8. 调用 `closeAllClients` 关闭所有客户端连接
-9. 取消所有待处理的 ReverseRPC 请求
-10. `GracefulStop`：关闭 `NodeBroadcaster`，等待所有连接断开
+
+#### 关闭流程 (Start 内部)
+
+1. context 取消后，`httpServer.Shutdown`（5s 超时）停止接受新连接
+2. 调用 `closeAllClients`：内部先调用 `reverseRPC.CancelAll()`，再关闭所有客户端并等待 5s
+3. `Start()` 返回
+
+#### 关闭流程 (GracefulStop)
+
+1. 关闭 `NodeBroadcaster` 释放 Pub/Sub 资源
+2. 调用 `BaseServer.GracefulStop`：`Stop()` 取消 context，等待 `Start()` 返回的 done channel
 
 ### 边缘场景
 

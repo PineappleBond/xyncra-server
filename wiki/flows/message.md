@@ -81,6 +81,7 @@ flowchart TD
 | **非成员发送** | 返回 `PermissionDeniedError` |
 | **MQ 入队失败** | 日志记录但不影响主流程，消息已持久化，客户端可通过 `sync_updates` 拉取 |
 | **Agent MQ 入队失败** | 同上，fire-and-forget 模式 |
+| **Agent 触发仅限 1-on-1** | `peerUserID` 仅支持双人会话（`UserID1`/`UserID2`），群聊场景下 `peerID` 为空，不会触发 Agent |
 | **成员数上限** | store 层限制最多 500 个成员 (`maxSendMessageUpdates`) |
 | **并发发送** | 事务内读取 `LastProcessedMessageID` 保证 MessageID 分配原子性，消除 TOCTOU 竞态 |
 
@@ -168,7 +169,7 @@ flowchart TD
     K -->|否| K1[返回 PermissionDeniedError]
     K -->|是| L[执行软删除]
     L --> M{删除成功?}
-    M -->|失败且 RowsAffected=0| M1[返回 ErrNotFound]
+    M -->|失败| M1[返回 InternalError]
     M -->|成功| N[为所有成员创建 UserUpdate]
     N --> O[批量创建 UserUpdate 记录]
     O --> P[MQ 广播删除更新]
@@ -197,7 +198,7 @@ flowchart TD
 | **会话不存在** | 返回 `NotFoundError` |
 | **非成员操作** | 返回 `PermissionDeniedError` |
 | **非发送者删除** | 返回 `PermissionDeniedError` (only the sender can delete this message) |
-| **重复删除** | 第二次删除时 `RowsAffected=0`，返回 `ErrNotFound` |
+| **重复删除** | store 层 `RowsAffected=0` 返回 `ErrNotFound`，handler 将其包装为 `InternalError` 返回给客户端 |
 | **UserUpdate 创建失败** | 日志记录但不影响主流程，消息已软删除 |
 | **MQ 广播失败** | 日志记录但不影响数据完整性，客户端可通过 `sync_updates` 拉取 |
 | **GetLatestSeq 失败** | 跳过该成员的 UserUpdate 创建，记录错误日志 |
@@ -261,7 +262,7 @@ flowchart TD
 | **LIKE 通配符注入** | 使用 `escapeLikePattern` 对用户输入进行转义 |
 | **会话不存在** | 返回 `NotFoundError` |
 | **非成员访问** | 返回 `PermissionDeniedError` |
-| **limit 非法值** | <=0 或 >200 时重置为 50 (store 层上限 201) |
+| **limit 非法值** | handler 层 <=0 或 >200 时重置为 50；store 层独立校验 <=0 或 >201 时重置为 50（防御性编程） |
 | **无匹配结果** | 返回空数组 |
 | **after_message_id = 0** | 不附加游标条件，从最新消息开始 |
 | **游标方向** | 降序分页，`after_message_id` 表示比此 ID 更旧的消息 |
@@ -312,7 +313,7 @@ flowchart TD
    - 若 `params.MessageID > 0`，使用该值
    - 若为 0，使用 `conversation.LastProcessedMessageID` (标记全部已读)
 6. **钳位处理**：若 `messageID > LastProcessedMessageID`，设为 `LastProcessedMessageID`
-7. **更新已读游标**：调用 `ConversationStore.UpdateLastRead`，MAX 语义由 store 层 SQL 保证
+7. **更新已读游标**：调用 `ConversationStore.UpdateLastRead`，MAX 语义由 store 层 SQL `CASE WHEN` 表达式保证（`CASE WHEN 当前值 > 新值 THEN 当前值 ELSE 新值 END`，兼容 SQLite/PostgreSQL/MySQL）
 8. **重新读取会话**：获取实际游标值 (可能与请求值不同，因 MAX 语义)
 9. **计算未读数**：通过实际游标计算未读消息数 (`CountUnread`)
 10. **创建 UserUpdate**：为调用者创建 `UpdateTypeMarkRead` 类型的 UserUpdate
@@ -370,16 +371,16 @@ flowchart TD
 3. **遍历推送**：遍历每个 recipient
    - 将 updates 包装为 `PackageDataUpdates`
    - 调用 `broadcastFn` (即 `WebSocketServer.BroadcastUpdates`) 推送给该用户
-4. **错误处理**：若推送失败，记录日志并 continue (不中断其他 recipient)
+4. **错误处理**：若推送失败，记录日志并 continue (不中断其他 recipient)；用户无在线连接时 `broadcastFn` 不返回错误
 
 ### 边缘场景
 
 | 场景 | 处理方式 |
 |------|----------|
-| **nil task** | 返回错误 |
+| **nil task** | 返回 error（非 nil），broker 可能重试；正常流程不应出现此情况 |
 | **反序列化失败** | 记录错误日志，返回 nil (不重试，数据已持久化) |
 | **单个用户推送失败** | 记录日志，继续处理其他用户，不影响数据一致性 |
-| **用户不在线** | `broadcastFn` 返回错误，已持久化的数据会在用户下次 `sync_updates` 时拉取 |
+| **用户不在线** | `broadcastFn` 不返回错误（本地无连接则跳过，跨节点通过 Redis Pub/Sub 投递），已持久化的数据会在用户下次 `sync_updates` 时拉取 |
 
 ---
 
@@ -432,8 +433,7 @@ flowchart TD
 |------|----------|
 | **成员数超限** | `len(memberIDs) > 500` 返回错误 |
 | **事务回滚** | 任何步骤失败，整个事务回滚 |
-| **并发分配 MessageID** | 事务隔离级别保证原子性 |
-| **Upsert TOCTOU 竞态** | 先 SELECT 再 INSERT，若 INSERT 时 duplicate key 则 fallback 到 UPDATE |
+| **并发 MessageID 分配** | 事务内 SELECT conversation 获取 `LastProcessedMessageID` 再分配，事务隔离级别保证原子性；handler 层通过 `client_message_id + sender_id` 唯一索引捕获重复键实现幂等 |
 | **软删除查询** | GORM DeletedAt 插件自动在 WHERE 中排除已删除记录 |
 | **Restore 操作** | `Unscoped()` 查询 + 设置 `deleted_at = nil` |
 | **CountUnread 负数防御** | 结果 < 0 时强制归零 |

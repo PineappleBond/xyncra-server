@@ -20,7 +20,7 @@
 
 创建 1-on-1 会话。采用 find-or-create 幂等模型，若已存在则直接返回。创建后通过 MQ 向双方设备推送实时通知。
 
-### 流程图
+#### 流程图
 
 ```mermaid
 flowchart TD
@@ -58,11 +58,13 @@ flowchart TD
 
 | 场景 | 处理方式 |
 |------|----------|
+| JSON 解析失败 | 返回 `ValidationError('invalid params')` |
 | `user_id` 为空 | 返回 `ValidationError('missing required field: user_id')` |
 | `user_id == callerID` | 返回 `ValidationError('cannot create conversation with yourself')` |
 | 已存在相同用户对的会话 | 幂等返回已有会话，`duplicate=true` |
+| `GetByUsers` 查询出错（非 `ErrNotFound`） | 返回 `InternalError` |
 | 并发创建竞争（TOCTOU） | 唯一索引触发 `ErrDuplicateKey`，重新查询返回已有会话 |
-| `UserUpdate` 事务失败 | 仅记录日志，不影响会话创建（fire-and-forget 精神） |
+| `UserUpdate` 事务失败 | 仅记录日志，MQ 广播跳过，不影响会话创建（fire-and-forget 精神） |
 | MQ 入队失败 | 仅记录日志，更新已持久化，下次 `sync_updates` 可拉取 |
 
 ---
@@ -139,7 +141,7 @@ flowchart TD
     D --> E[调用 GetByUser: offset, limit+1]
     E --> F[store 内部拆分两个子查询]
     F --> G[user_id1 = callerID]
-    F --> H[user_id2 = callerID AND user_id2 != ''']
+    F --> H["user_id2 = callerID AND user_id2 != ''"]
     G --> I[合并去重, 按 LastMessageAt 降序排序]
     H --> I
     I --> J{返回结果数 > limit?}
@@ -221,7 +223,8 @@ flowchart TD
 | 会话已被软删除 | `Get()` 自动过滤，返回 `NotFoundError` |
 | 调用者非成员 | 返回 `PermissionDeniedError` |
 | `RowsAffected == 0`（并发删除竞争） | 返回 `ErrNotFound` -> `NotFoundError` |
-| `UserUpdate` 创建失败 | 仅记录日志，会话已成功删除 |
+| `GetLatestSeq` 失败（单个成员） | 跳过该成员的 UserUpdate，其他成员不受影响 |
+| `UserUpdate` 批量创建失败 | 仅记录日志，会话已成功删除，MQ 广播仍会执行 |
 | MQ 广播失败 | 仅记录日志，更新已持久化 |
 
 ---
@@ -245,7 +248,7 @@ flowchart TD
     E -- 是 --> F{调用者是否为会话成员?}
     F -- 否 --> F1[返回 PermissionDeniedError]
     F -- 是 --> G{会话是否已删除?}
-    G -- 否 --> G1[幂等: 返回当前会话, restored_count=0]
+    G -- 否 --> G1[幂等: 返回当前会话, restored_message_count=0]
     G -- 是 --> H[开启事务]
     H --> I[恢复会话: 清除 deleted_at]
     I --> J[精确恢复消息: 匹配会话的 deleted_at 时间戳]
@@ -280,9 +283,10 @@ flowchart TD
 |------|----------|
 | `conversation_id` 为空 | 返回 `ValidationError` |
 | 会话完全不存在 | 返回 `NotFoundError`（`GetUnscoped` 也查不到） |
-| 会话未被删除 | 幂等返回当前状态，`restored_count = 0` |
+| 会话未被删除 | 幂等返回当前状态，`restored_message_count = 0` |
 | 调用者非成员 | 返回 `PermissionDeniedError` |
 | `RowsAffected == 0`（并发恢复竞争） | `ErrNotFound` -> `NotFoundError` |
+| `GetLatestSeq` 失败（单个成员） | 跳过该成员的 UserUpdate，其他成员不受影响 |
 | 恢复后无消息 | `LastProcessedMessageID` 和 `LastMessageAt` 保持原值 |
 | 之前已单独删除的消息 | 不受影响（通过精确时间戳匹配区分） |
 | `UserUpdate` 创建失败 | 仅记录日志 |

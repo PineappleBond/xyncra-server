@@ -140,6 +140,7 @@ sequenceDiagram
 
 6. **立即返回响应**
    - 返回 `{status:ok, replayed:N, total:M}`
+   - `replayed` 为正在异步重放的请求数，`total` 为 PendingStore 中该设备的全部待处理请求数
    - 重放计数不代表完成确认
 
 7. **异步重放请求**

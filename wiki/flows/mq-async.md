@@ -128,8 +128,8 @@ sequenceDiagram
 #### 2. 会话锁获取 Redis 错误 (Fail-Open)
 
 - 触发条件: Redis SETNX 调用失败（网络抖动、Redis 不可用）
-- 处理逻辑: 记录错误日志，跳过锁保护，继续执行（fail-open 模式）
-- 最终结果: 任务正常执行，可能有短暂的并发风险
+- 处理逻辑: 记录错误日志，跳过锁保护，继续执行（fail-open 模式 D-072）
+- 最终结果: 任务跳过锁保护继续执行，可能有短暂的并发风险（同一对话的两个任务可能同时执行）
 
 #### 3. 幂等检测 — 重复消息
 
@@ -137,17 +137,17 @@ sequenceDiagram
 - 处理逻辑: 释放锁，返回 nil，跳过执行
 - 最终结果: 避免重复处理，任务静默完成
 
-#### 4. LLM 超时 (瞬态错误)
+#### 4. LLM 超时/限流 (瞬态错误)
 
-- 触发条件: LLM 请求超时，executor 返回 ErrLLMTimeout
+- 触发条件: LLM 请求超时 (`ErrLLMTimeout`) 或被限流 (`ErrLLMRateLimited`)
 - 处理逻辑: 不标记 processedKey，不删除 processingKey（130s 后自然过期），return error 给 Asynq 触发重试
-- 最终结果: Asynq 指数退避重试，最多 20 次
+- 最终结果: Asynq 指数退避重试，最多 20 次。区分依据：`isTransientError()` 仅匹配 `ErrLLMTimeout` 和 `ErrLLMRateLimited`
 
 #### 5. Agent 执行永久失败
 
-- 触发条件: agent 不存在、配置错误等非瞬态错误
-- 处理逻辑: 错误消息已通过 sendErrorMessage 持久化为用户可见消息，标记 processedKey（24h），释放锁，return nil
-- 最终结果: 用户看到错误提示，任务不再重试
+- 触发条件: agent 不存在、配置错误、payload 反序列化失败等非瞬态错误
+- 处理逻辑: 错误消息已通过 sendErrorMessage 持久化为用户可见消息，标记 processedKey（24h），删除 processingKey，释放锁，return nil
+- 最终结果: 用户看到错误提示，任务不再重试（永久错误不触发 Asynq 重试）
 
 #### 6. HITL 中断 (人机交互暂停)
 
@@ -226,27 +226,33 @@ sequenceDiagram
 
 #### 1. Checkpoint 过期或不存在
 
-- 触发条件: ResumeWithParams 返回 "not found" 错误
-- 处理逻辑: 清理会话状态、删除问题、删除 checkpoint、发送错误消息给用户、标记 processedKey、释放锁
-- 最终结果: 用户看到"等待时间过长，请重新发送消息"
+- 触发条件: ResumeWithParams 返回 `ErrCheckpointNotFound` 或 "not found" 错误
+- 处理逻辑: 仅在此分支内执行 `cleanupAfterResumeFailure`（清理会话状态、删除问题、删除 checkpoint）+ 发送错误消息 + 标记 processedKey（24h）+ 删除 processingKey + 释放锁
+- 最终结果: 用户看到"等待时间过长，请重新发送消息"，checkpoint 标记为已处理防止重复重试
 
 #### 2. 多轮 HITL (Resume 后再次中断)
 
 - 触发条件: Agent resume 后又返回新的 interrupt
-- 处理逻辑: 更新会话状态为 asking_user，持久化新 Question 到 DB，广播 conversation update，不释放锁
+- 处理逻辑: 更新会话状态为 asking_user，持久化新 Question 到 DB，广播 conversation update，不释放锁（D-084），删除 processingKey 允许后续 resume
 - 最终结果: Agent 再次暂停等待用户回答，可循环多轮
 
 #### 3. Resume 期间 LLM 瞬态错误
 
-- 触发条件: ResumeWithParams 或流式输出中出现 ErrLLMTimeout / ErrLLMRateLimited
-- 处理逻辑: 不自动重试，直接通知用户 "服务暂时不可用"，删除 processingKey 允许手动重试
-- 最终结果: 用户看到"服务暂时不可用，请稍后重试"
+- 触发条件: ResumeWithParams 或流式输出中出现 `ErrLLMTimeout` / `ErrLLMRateLimited`
+- 处理逻辑: 不自动重试（与 task_handler 不同，HITL resume 不返回 error 给 Asynq），直接通过 `sendErrorMessage` 通知用户 "服务暂时不可用"，删除 processingKey 允许用户手动重新触发 resume
+- 最终结果: 用户看到"服务暂时不可用，请稍后重试"。设计原因：用户已投入交互成本，应由用户决定是否重试
 
 #### 4. Agent 配置不存在
 
-- 触发条件: registry.Get(agentID) 返回 not found
-- 处理逻辑: 清理状态、发送错误消息、标记 processedKey、释放锁
+- 触发条件: `registry.Get(agentID)` 返回 not found
+- 处理逻辑: `cleanupAfterResumeFailure` 清理状态 + 发送错误消息 + 标记 processedKey（24h）+ 删除 processingKey + 释放锁
 - 最终结果: 用户看到"Agent 配置不存在，请重新发送消息"
+
+#### 5. Agent 构建失败 (Build error)
+
+- 触发条件: `agentBuilder.Build` 返回 error
+- 处理逻辑: 与"Agent 配置不存在"相同——清理状态、发送错误消息、标记 processedKey、释放锁
+- 最终结果: 用户看到"恢复执行失败，请重新发送消息"
 
 ### 涉及文件
 
@@ -447,6 +453,18 @@ sequenceDiagram
     loop 每个 userUpdate
         BH->>WS: BroadcastUpdates(u.UserID, Seq=u.Seq)
     end
+
+    Note over Caller,BH: Agent 状态广播
+    Caller->>BH: SendAgentStatus / SendAgentTimeout
+    BH->>WS: BroadcastUpdates(humanUserID)
+
+    Note over Caller,BH: 函数调用广播
+    Caller->>BH: SendFunctionCall(name, args, result, isDone)
+    BH->>WS: BroadcastUpdates(humanUserID)
+
+    Note over Caller,BH: 预构建消息广播 (resume handler)
+    Caller->>BH: BroadcastRaw(targetUserID, updates)
+    BH->>WS: BroadcastUpdates(targetUserID) [返回 error]
 ```
 
 ### 边缘场景
@@ -454,7 +472,7 @@ sequenceDiagram
 #### 1. 广播失败 (用户离线)
 
 - 触发条件: BroadcastUpdates 返回 error
-- 处理逻辑: 所有广播方法均为 fire-and-forget，记录错误日志但不返回 error
+- 处理逻辑: 绝大多数广播方法（Send*系列）均为 fire-and-forget，记录错误日志但不返回 error。例外：`BroadcastRaw` 直接返回 error 给调用方（resume handler 用于持久化消息投递，调用方自行处理错误）
 - 最终结果: 离线用户不会收到实时推送，依赖下次 sync_updates 补偿
 
 #### 2. AgentRegistry 为 nil
@@ -462,6 +480,12 @@ sequenceDiagram
 - 触发条件: BroadcastHelper 未设置 AgentRegistry
 - 处理逻辑: isAgent() 返回 false，所有 payload 中 IsAgent 字段为 false
 - 最终结果: 功能降级但不崩溃
+
+#### 3. FunctionCall 双次调用
+
+- 触发条件: 每次函数调用 SendFunctionCall 被调用两次
+- 处理逻辑: 第一次 `IsDone=false`（携带 name 和 args），第二次 `IsDone=true`（携带 result 或 error 和 durationMs）
+- 最终结果: 客户端可展示函数调用的开始和完成状态
 
 ### 涉及文件
 

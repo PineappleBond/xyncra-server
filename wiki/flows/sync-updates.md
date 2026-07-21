@@ -169,6 +169,13 @@ flowchart TD
 | `GetLatestSeq` 失败 | 返回 `InternalError` |
 | `ListByUserRange` 失败 | 返回 `InternalError` |
 
+### 6. uint32 溢出
+
+| 场景 | 处理方式 |
+|------|----------|
+| `afterSeq + limit` 溢出 uint32 上限 | `expectedEnd` 计算可能回绕，导致查询范围错误。在约 43 亿序列号后实际可能发生 |
+| `latestSeq <= afterSeq` 在回绕后 | 当 `afterSeq` 接近 uint32 最大值而 `latestSeq` 已回绕时，比较结果不正确 |
+
 ---
 
 ## 依赖关系

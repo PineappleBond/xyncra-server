@@ -30,9 +30,9 @@
 flowchart TD
     A[调用 NewDatabase DatabaseConfig] --> B[openDriver 根据 driver 选择 dialector]
     B --> C{driver 类型}
-    C -->|postgres| D[pg dialector]
+    C -->|postgres / postgresql| D[pg dialector]
     C -->|mysql| E[mysql dialector]
-    C -->|sqlite| F[sqlite dialector]
+    C -->|sqlite / sqlite3| F[sqlite dialector]
     C -->|其他| G[返回 unsupported driver 错误]
     D --> H[配置 GORM Logger]
     E --> H
@@ -45,15 +45,16 @@ flowchart TD
     L -->|否| N[MaxOpen=25 MaxIdle=5]
     M --> O[可选设置 ConnMaxLifetime]
     N --> O
-    O --> P[NewFromDatabase 创建 Store]
-    P --> Q[Store.AutoMigrate 执行 GORM AutoMigrate]
-    Q --> R[手动执行索引迁移]
-    R --> S[DROP 旧单列索引]
-    S --> T[CREATE 新复合唯一索引]
-    T --> U[Store.Ping 双重验证连接]
-    U --> V{Ping 成功?}
-    V -->|是| W[初始化完成]
-    V -->|否| X[返回连接错误]
+    O --> P[返回 Database 实例]
+    P --> Q[NewFromDatabase 创建 Store]
+    Q --> R[Store.AutoMigrate 执行 GORM AutoMigrate]
+    R --> S[手动执行索引迁移]
+    S --> T[DROP 旧单列索引 idx_messages_client_message_id]
+    T --> U[CREATE 新复合唯一索引 idx_msg_client_id_sender]
+    U --> V[Store.Ping 双重验证连接]
+    V --> W{Ping 成功?}
+    W -->|是| X[初始化完成]
+    W -->|否| Y[返回连接错误]
 ```
 
 ### 边缘场景
@@ -61,8 +62,11 @@ flowchart TD
 | 场景 | 说明 |
 |------|------|
 | 不支持的 driver 名称 | `openDriver` 返回 `fmt.Errorf("store: unsupported database driver: %s")` |
+| driver 别名 | `postgresql` 等同 `postgres`，`sqlite3` 等同 `sqlite` |
 | 连接失败 | GORM Open 失败返回 `fmt.Errorf("store: failed to open database: %w")` |
 | SQLite 并发限制 | MaxOpen 强制为 1，防止 shared-cache 死锁 |
+| SlowQueryThreshold | 默认 200ms，超过阈值的查询被记录为慢查询 |
+| GORM Logger | IgnoreRecordNotFoundError=true，避免 NotFound 错误的噪声日志 |
 | AutoMigrate 无法处理索引替换 | 单列索引替换为复合索引需手动 DROP/CREATE |
 | Ping 双重检查 | 既检查底层连接存活，又验证查询路径可用（捕获 schema 损坏） |
 | 连接池耗尽 | 超过 MaxOpenConns 的查询会阻塞等待，可能超时 |
@@ -134,6 +138,19 @@ flowchart TD
         GB5 --> GB6[limit+1 探测 has_more]
     end
 
+    subgraph GetUnscoped
+        GU4[Unscoped 查询] --> GU5[包含已软删除记录]
+        GU5 --> GU6{找到?}
+        GU6 -->|是| GU7[返回 Conversation]
+        GU6 -->|否| GU8[ErrNotFound]
+    end
+
+    subgraph Update
+        U1[db.Save conv] --> U2{成功?}
+        U2 -->|是| U3[返回 nil]
+        U2 -->|否| U4[classifyError]
+    end
+
     subgraph Delete
         D1[db.Delete Conversation id] --> D2{RowsAffected == 0?}
         D2 -->|是| D3[ErrNotFound]
@@ -142,9 +159,17 @@ flowchart TD
 
     subgraph Restore
         R1[Unscoped 查询已软删除记录] --> R2[Update deleted_at = nil]
-        R2 --> R3{找到已删除记录?}
-        R3 -->|是| R4[恢复完成]
-        R3 -->|否| R5[无操作]
+        R2 --> R3{RowsAffected == 0?}
+        R3 -->|否| R4[恢复完成]
+        R3 -->|是| R5[返回 ErrNotFound]
+    end
+
+    subgraph UpdateLastMessage
+        UL1[Model.Conversation.Updates] --> UL2[更新 last_message_at]
+        UL2 --> UL3[更新 last_processed_message_id]
+        UL3 --> UL4{RowsAffected == 0?}
+        UL4 -->|是| UL5[ErrNotFound]
+        UL4 -->|否| UL6[返回 nil]
     end
 
     subgraph UpdateLastRead
@@ -153,6 +178,28 @@ flowchart TD
         UR2 -->|UserID2| UR4[选择 last_read_message_id_2]
         UR3 --> UR5[CASE WHEN MAX 只前进不后退]
         UR4 --> UR5
+    end
+
+    subgraph UpdateAgentStatus
+        AS1[Updates agent_status agent_id checkpoint_id] --> AS2[设置 agent_last_activity]
+        AS2 --> AS3[设置 updated_at]
+        AS3 --> AS4{RowsAffected == 0?}
+        AS4 -->|是| AS5[ErrNotFound]
+        AS4 -->|否| AS6[返回 timestamp]
+    end
+
+    subgraph ClearAgentStatus
+        CS1[重置 agent_status=idle] --> CS2[清空 agent_id checkpoint_id]
+        CS2 --> CS3[设置 agent_last_activity]
+        CS3 --> CS4{RowsAffected == 0?}
+        CS4 -->|是| CS5[ErrNotFound]
+        CS4 -->|否| CS6[返回 timestamp]
+    end
+
+    subgraph ListStaleHITLConversations
+        LH1[WHERE agent_status=asking_user] --> LH2[AND agent_last_activity < cutoff]
+        LH2 --> LH3[ORDER BY agent_last_activity ASC]
+        LH3 --> LH4[LIMIT count]
     end
 
     subgraph SearchByTitle
@@ -168,8 +215,14 @@ flowchart TD
 | 并发创建相同 (user_id1, user_id2) 对 | uniqueIndex 触发 ErrDuplicateKey |
 | 软删除后查询 | 默认查询自动排除 `deleted_at IS NOT NULL` 的记录 |
 | GetByUser 分页精度 | 双向查询 + 合并可能导致边界处少量重复，小规模会话列表影响可忽略 |
+| GetUnscoped 查询 | 包含已软删除记录，不存在返回 ErrNotFound |
+| Update 使用 Save | 保存所有字段到数据库，包括零值字段 |
+| UpdateLastMessage 会话不存在 | RowsAffected == 0 返回 ErrNotFound |
 | UpdateLastRead 用户非成员 | 返回 ErrNotFound |
 | UpdateLastRead 并发回退 | CASE WHEN 保证只前进不后退 |
+| UpdateAgentStatus 会话不存在 | RowsAffected == 0 返回 ErrNotFound |
+| ClearAgentStatus 会话不存在 | RowsAffected == 0 返回 ErrNotFound |
+| ListStaleHITLConversations | 查询 agent_status=asking_user 且 agent_last_activity 超过 maxAge 的会话 |
 | SearchByTitle SQL 注入 | `escapeLikePattern` 转义 `%`, `_`, `|` |
 
 ---
@@ -188,10 +241,27 @@ flowchart TD
         MC2 -->|否| MC4[创建成功]
     end
 
+    subgraph Get
+        MG1[db.Where id=?.First] --> MG2{找到?}
+        MG2 -->|是| MG3[返回 Message]
+        MG2 -->|否| MG4[ErrNotFound]
+    end
+
+    subgraph GetByClientMessageID
+        GC1[WHERE client_message_id=? AND sender_id=?] --> GC2{找到?}
+        GC2 -->|是| GC3[返回 Message]
+        GC2 -->|否| GC4[ErrNotFound]
+    end
+
     subgraph ListByConversation
         LC1[WHERE conv_id=? AND msg_id > ?] --> LC2[ORDER BY msg_id ASC]
         LC2 --> LC3[limit 范围 1~200 默认 50]
         LC3 --> LC4[返回消息列表]
+    end
+
+    subgraph ListByTimeRange
+        LT1[WHERE conv_id=? AND created_at >= ? AND <= ?] --> LT2[ORDER BY msg_id ASC]
+        LT2 --> LT3[limit 范围 1~200 默认 50]
     end
 
     subgraph SearchByConversation
@@ -216,11 +286,25 @@ flowchart TD
     end
 
     subgraph Delete
-        MD1[db.Delete msg id] --> MD2[软删除 设置 deleted_at]
+        MD1[db.Delete msg id] --> MD2{RowsAffected == 0?}
+        MD2 -->|是| MD3[ErrNotFound]
+        MD2 -->|否| MD4[软删除 设置 deleted_at]
+    end
+
+    subgraph DeleteByConversation
+        DC1[WHERE conversation_id=?] --> DC2[批量软删除该会话所有消息]
     end
 
     subgraph Restore
-        MR1[Unscoped 查询已删除记录] --> MR2[Update deleted_at = nil]
+        MR1[Unscoped 查询已删除记录] --> MR2{RowsAffected == 0?}
+        MR2 -->|是| MR3[ErrNotFound]
+        MR2 -->|否| MR4[Update deleted_at = nil]
+    end
+
+    subgraph RestoreByConversation
+        RC1[Unscoped WHERE conv_id=?] --> RC2[AND deleted_at IS NOT NULL]
+        RC2 --> RC3[Update deleted_at = nil]
+        RC3 --> RC4[返回 restored count]
     end
 ```
 
@@ -230,7 +314,13 @@ flowchart TD
 |------|------|
 | 幂等性 | `client_message_id + sender_id` 唯一索引防止重复插入，触发 ErrDuplicateKey |
 | 并发 MessageID 分配 | 在 SendMessage 事务内原子分配，避免 TOCTOU 竞争 |
+| GetByClientMessageID | 用于发送前幂等性检查，找不到返回 ErrNotFound |
+| ListByTimeRange | 按 created_at 范围查询，limit 范围 1~200 默认 50 |
 | 搜索空内容 | 直接返回空切片避免无意义 LIKE 查询 |
+| Delete 不存在 | RowsAffected == 0 返回 ErrNotFound |
+| DeleteByConversation | 批量软删除该会话所有消息，不影响其他会话 |
+| Restore 不存在 | RowsAffected == 0 返回 ErrNotFound |
+| RestoreByConversation | 恢复该会话所有已软删除消息，返回恢复数量 |
 | CountUnread 负数防御 | 并发删除可能导致 count 异常，强制 >= 0 |
 | 软删除排除 | GORM 自动在查询中添加 `deleted_at IS NULL` 条件 |
 
@@ -253,7 +343,12 @@ flowchart TD
     end
 
     subgraph GetPendingByCheckpoint
-        GP1[WHERE checkpoint_id=? AND status=pending]
+        GP1[WHERE checkpoint_id=? AND status=pending] --> GP2[按 created_at ASC 排序]
+    end
+
+    subgraph GetByCheckpoint
+        GBC1[WHERE checkpoint_id=?] --> GBC2[返回 pending 和 answered]
+        GBC2 --> GBC3[按 created_at ASC 排序]
     end
 
     subgraph UpdateAnswer
@@ -267,9 +362,13 @@ flowchart TD
         UA7 -->|否| UA9[返回原始错误]
     end
 
+    subgraph CountPendingByCheckpoint
+        CP1[WHERE checkpoint_id=? AND status=pending] --> CP2[COUNT 返回数量]
+    end
+
     subgraph Delete
-        QD1[DeleteByConversation] --> QD2[按 conversation_id 批量删除]
-        QD3[DeleteByCheckpoint] --> QD4[按 checkpoint_id 批量删除]
+        QD1[DeleteByConversation] --> QD2[按 conversation_id 批量软删除]
+        QD3[DeleteByCheckpoint] --> QD4[按 checkpoint_id 批量软删除]
     end
 ```
 
@@ -279,8 +378,12 @@ flowchart TD
 |------|------|
 | 重复回答 | `WHERE status = 'pending'` 条件防止覆盖已回答的问题，返回 ErrConflict |
 | 问题不存在 | 二次查询确认后返回 ErrNotFound |
-| 事务性 | `DeleteByConversationTx` 支持在外部事务中执行 |
+| GetByCheckpoint | 返回该 checkpoint 的所有问题（pending + answered） |
+| GetPendingByCheckpoint | 仅返回 status=pending 的问题 |
+| CountPendingByCheckpoint | 返回 pending 状态问题数量，用于判断是否所有问题已回答 |
+| 事务性 | 客户端 `pkg/store` 的 `DeleteByConversationTx` 支持在外部事务中执行 |
 | 软删除 | Question 模型有 DeletedAt 字段，支持软删除 |
+| InterruptID | 存储 Eino interrupt 地址 ID，用于 ResumeParams.Targets |
 
 ---
 
@@ -344,12 +447,12 @@ flowchart TD
     A[校验 memberIDs <= 500] --> B{数量合法?}
     B -->|否| C[返回错误]
     B -->|是| D[开启事务 Transaction ctx fn]
-    D --> E[SELECT FOR UPDATE 获取 Conversation]
+    D --> E[tx.Where id=? .First 获取 Conversation]
     E --> F[原子分配 MessageID = LastProcessedMessageID + 1]
     F --> G[JSON 序列化消息为 UserUpdate payload]
-    G --> H[为每个 member 查询 MAX seq 并分配 seq + 1]
+    G --> H[为每个 member 执行 SELECT COALESCE MAX seq 0 并分配 seq + 1]
     H --> I[tx.Create 插入消息]
-    I --> J[tx.CreateInBatches 批量插入 UserUpdate]
+    I --> J[tx.CreateInBatches 批量插入 UserUpdate 每批 100]
     J --> K[tx.Model.Conversation.Updates 更新元数据]
     K --> L[更新 last_message_at]
     L --> M[更新 last_processed_message_id]
@@ -363,12 +466,13 @@ flowchart TD
 
 | 场景 | 说明 |
 |------|------|
-| TOCTOU 竞争消除 | MessageID 在事务内读取+分配，并发发送者不会分配到相同 ID |
+| TOCTOU 竞争 | MessageID 在事务内读取+分配。代码使用普通 SELECT（无 FOR UPDATE），依赖数据库默认事务隔离级别防止并发分配相同 ID。在默认 READ COMMITTED 下可能存在极小窗口的竞争风险 |
 | 会话不存在 | `ErrRecordNotFound` 映射为 `ErrNotFound` |
 | 成员数超限 | >500 直接返回错误 |
 | 事务回滚 | fn 返回任何 error 都触发回滚 |
 | 上下文超时 | Transaction 入口检查 `ctx.Err()`，已过期直接返回 |
 | 批量插入分片 | `CreateInBatches` 按 100 条分批，避免单次 INSERT 过大 |
+| seq 分配是 per-user | 每个 member 独立 SELECT MAX(seq) 并 +1，不同用户的 seq 独立递增 |
 
 ---
 
@@ -479,7 +583,13 @@ erDiagram
         uuid id PK
         uuid user_id1
         uuid user_id2 "可为空 支持群组"
-        string agent_status "状态机"
+        string type "1-on-1/group/channel"
+        string title
+        bool pinned
+        bool muted
+        string avatar_url
+        text description
+        string agent_status "状态机 idle/thinking/tool_calling/generating/asking_user/timeout"
         uuid agent_id
         uuid checkpoint_id
         timestamp agent_last_activity
@@ -487,7 +597,7 @@ erDiagram
         bigint last_processed_message_id
         bigint last_read_message_id_1
         bigint last_read_message_id_2
-        timestamp deleted_at "软删除"
+        timestamp deleted_at "软删除 复合索引"
         timestamp created_at
         timestamp updated_at
     }
@@ -495,35 +605,37 @@ erDiagram
     MESSAGES {
         uuid id PK
         uuid conversation_id FK
-        bigint message_id "会话内序号"
-        string client_message_id
+        bigint message_id "会话内序号 非主键"
+        string client_message_id "客户端生成"
         uuid sender_id
-        string content
-        string role
-        jsonb metadata
-        timestamp deleted_at "软删除"
+        text content
+        string type "默认 text"
+        bigint reply_to "回复目标消息ID"
+        string status "默认 sent"
+        timestamp deleted_at "软删除 复合索引"
         timestamp created_at
     }
 
     USER_UPDATES {
         uuid id PK
         uuid user_id
-        bigint seq "单调递增"
-        json payload "JSON 序列化"
-        timestamp created_at
-        timestamp expires_at "30天过期"
+        bigint seq "单调递增 per-user"
+        string type "默认 message"
+        bytes payload "JSON 序列化"
+        timestamp created_at "索引 30天过期硬删除"
     }
 
     QUESTIONS {
         uuid id PK
         uuid conversation_id FK
         uuid checkpoint_id
-        string status "pending/answered"
-        string question
-        string answer
+        string interrupt_id "Eino interrupt 地址"
+        text question_text
+        string status "pending/answered 索引"
+        text answer
         uuid answered_by
         uuid answered_device_id
-        timestamp answered_at
+        timestamp answered_at "可为空"
         timestamp deleted_at "软删除"
         timestamp created_at
     }
@@ -536,16 +648,24 @@ erDiagram
 
 | 模型 | 表名 | 主键 | 关键索引 | 软删除 | 说明 |
 |------|------|------|----------|--------|------|
-| Conversation | conversations | UUID | `uniqueIndex(user_id1, user_id2)` 复合软删除索引 | 是 | AgentStatus 状态机，LastReadMessageID1/2 |
-| Message | messages | UUID | `uniqueIndex(client_message_id, sender_id)`，`composite(conv_id, msg_id, deleted_at)` | 是 | MessageID 为会话内序号（非主键） |
-| UserUpdate | user_updates | UUID | `composite(user_id, seq)` | 否 | Seq 单调递增，过期后硬删除 |
-| Question | questions | UUID | `index(conversation_id)`，`index(status)` | 是 | 状态机 pending/answered，外键关联 Conversation |
+| Conversation | conversations | UUID | `uniqueIndex(user_id1, user_id2)` 复合软删除索引，`index(user_id1, deleted_at)`，`index(user_id2, deleted_at)`，`index(last_message_at, deleted_at)`，`index(type)`，`index(agent_status)`，`index(deleted_at)` | 是 | Type 区分 1-on-1/group/channel，AgentStatus 状态机，LastReadMessageID1/2 |
+| Message | messages | UUID | `uniqueIndex(client_message_id, sender_id)`，`composite(conv_id, msg_id, deleted_at)`，`index(sender_id)`，`index(created_at)`，`index(deleted_at)` | 是 | MessageID 为会话内序号（非主键），Type 默认 text，Status 默认 sent |
+| UserUpdate | user_updates | UUID | `composite(user_id, seq)`，`index(user_id)`，`index(type)`，`index(created_at)` | 否 | Seq 单调递增 per-user，Type 默认 message，过期后硬删除 |
+| Question | questions | UUID | `index(conversation_id)`，`index(status)`，`index(deleted_at)` | 是 | 状态机 pending/answered，外键关联 Conversation，InterruptID 存储 Eino interrupt 地址 |
 
 ### 边缘场景
 
 | 场景 | 说明 |
 |------|------|
 | Conversation.UserID2 可为空 | 支持群组/频道等非 1v1 场景 |
+| Conversation.Type | 区分 1-on-1 / group / channel，带索引 |
+| Conversation.Pinned/Muted | 布尔标记，支持客户端会话管理 |
 | Message.MessageID 是会话内序号 | 主键是 UUID，MessageID 仅用于会话内排序 |
+| Message.Type | 消息类型，默认 text，支持扩展 |
+| Message.ReplyTo | 回复目标消息 ID，0 表示非回复 |
+| Message.Status | 消息状态，默认 sent |
 | UserUpdate 无软删除 | 过期后硬删除，`Unscoped()` 绕过软删除机制 |
+| UserUpdate.Type | 更新类型，默认 message，支持扩展 |
+| Question.InterruptID | Eino interrupt 地址 ID，用于 ResumeParams.Targets |
+| Question.AnsweredAt | 指针类型，未回答时为 nil |
 | Question 有外键 | Conversation 关系，级联删除需注意数据完整性 |

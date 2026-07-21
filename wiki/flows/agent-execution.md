@@ -113,11 +113,11 @@ sequenceDiagram
 - 最终结果: 错误消息持久化到对话，返回 nil 给 MQ（不重试）
 
 #### 3. LLM 流式输出中途错误
-- 触发条件: chunk.Err 非 nil（超时/限流/5xx）
+- 触发条件: chunk.Err 非 nil（超时/限流/500/502/503）
 - 处理逻辑:
   - 将已累积的 partialText 通过 SendStreamUpdate(isDone=true) 广播
   - 若 partialText 非空则持久化为部分响应
-  - 错误分类: context.DeadlineExceeded -> ErrLLMTimeout; 429/rate -> ErrLLMRateLimited; 5xx -> ErrLLMTimeout
+  - 错误分类: context.DeadlineExceeded -> ErrLLMTimeout; 429/rate -> ErrLLMRateLimited; 500/502/503 -> ErrLLMTimeout
 - 最终结果: 返回包装后的错误，由 ExecuteWithErrorMessage 发送用户友好消息
 
 #### 4. Typing 超时
@@ -127,8 +127,8 @@ sequenceDiagram
 
 #### 5. 消息持久化失败
 - 触发条件: store.SendMessage 返回 error
-- 处理逻辑: 记录错误日志，但不中断流程（finalText 已通过流式广播给用户）
-- 最终结果: 用户通过 WebSocket 已看到完整回复，但 sync_updates 不会有该消息记录
+- 处理逻辑: 返回 error，ExecuteWithErrorMessage 发送用户友好错误消息
+- 最终结果: 用户通过 WebSocket 已看到完整流式回复，但持久化失败导致返回错误（task_handler 会标记 processed 并返回 nil 给 MQ，不重试）
 
 #### 6. 会话锁获取失败 (Redis 错误)
 - 触发条件: lock.Acquire 返回 error
@@ -178,10 +178,24 @@ sequenceDiagram
     Exec->>Exec: 从 interruptCh 读取 InterruptInfo
 
     Exec->>Store: UpdateAgentStatus(convID, "asking_user", agentID, checkpointID)
+    alt UpdateAgentStatus 失败
+        Store-->>Exec: error
+        Exec-->>TH: return error（非 ErrHITLInterrupted）
+        TH->>Idem: MarkProcessed + DeleteKey
+        TH->>Lock: Release
+        TH-->>MQ: return nil（永久错误，不重试）
+    end
     Store-->>Exec: updatedAt
 
     alt questionStore 非 nil
         Exec->>QS: Create(Question{convID, checkpointID, interruptID, questionText, "pending"})
+        alt Create 失败
+            QS-->>Exec: error
+            Exec-->>TH: return error（非 ErrHITLInterrupted）
+            TH->>Idem: MarkProcessed + DeleteKey
+            TH->>Lock: Release
+            TH-->>MQ: return nil
+        end
     end
 
     Exec->>BC: SendStreamUpdate(partialText, isDone=true)
@@ -199,13 +213,13 @@ sequenceDiagram
 
 #### 1. Question 持久化失败
 - 触发条件: questionStore.Create 返回 error
-- 处理逻辑: 直接返回 error（ExecuteWithErrorMessage 会发送错误消息）
-- 最终结果: HITL 流程中断，会话状态可能不一致（已标记 asking_user 但无 Question 记录）
+- 处理逻辑: 返回普通 error（非 ErrHITLInterrupted），task_handler 将其视为永久错误，标记 processed 并释放锁
+- 最终结果: HITL 流程中断，会话状态已标记 asking_user 但无 Question 记录，processing key 被删除，会话锁释放
 
 #### 2. 会话状态更新失败
 - 触发条件: UpdateAgentStatus 返回 error
-- 处理逻辑: 直接返回 error，不继续持久化 Question
-- 最终结果: HITL 流程中断，checkpoint 已保存但会话未标记
+- 处理逻辑: 返回普通 error（非 ErrHITLInterrupted），不继续持久化 Question，task_handler 标记 processed 并释放锁
+- 最终结果: HITL 流程中断，checkpoint 已保存但会话未标记 asking_user，processing key 被删除，会话锁释放
 
 #### 3. 流式输出有部分文本后遇到中断
 - 触发条件: agent 在输出部分文本后触发 HITL 中断
@@ -258,21 +272,25 @@ sequenceDiagram
 
     H->>QS: GetPendingByCheckpoint(checkpointID)
     QS-->>H: pending questions[]
-    H->>H: 按 interrupt_id 过滤, 取第一个匹配
+    H->>H: 按 interrupt_id 过滤, 取第一个匹配的 pending question
 
     alt 无匹配的 pending question
-        H->>QS: GetByCheckpoint (检查已回答)
-        alt 已回答 → 409 conflict
-            H-->>C: {code: -409, "question_already_answered"}
-        else 未找到
-            H-->>C: NotFoundError
+        H->>QS: GetByCheckpoint (检查是否有已回答的匹配问题)
+        loop 遍历所有 questions
+            alt status=answered 且 interrupt_id 匹配
+                H-->>C: {code: -409, "question_already_answered"}
+            end
         end
+        H-->>C: NotFoundError("no pending question found")
     end
 
-    H->>QS: UpdateAnswer(questionID, answer, senderID, deviceID)
-    alt 冲突 (已被回答)
+    H->>QS: UpdateAnswer(targetID, answer, senderID, deviceID)
+    alt ErrConflict (WHERE status='pending' 未命中，已被其他设备回答)
         QS-->>H: ErrConflict
         H-->>C: {code: -409, "question_already_answered"}
+    else ErrNotFound
+        QS-->>H: ErrNotFound
+        H-->>C: NotFoundError
     end
 
     H->>QS: GetByCheckpoint + CountPendingByCheckpoint
@@ -353,20 +371,43 @@ sequenceDiagram
 
     RH->>Reg: Get(agentID)
     alt Agent 不存在
-        RH->>RH: cleanupAfterResumeFailure
+        RH->>RH: cleanupAfterResumeFailure (清状态/删问题/删checkpoint)
         RH->>BC: sendErrorMessage("Agent 配置不存在")
+        RH->>Idem: DeleteKey(processingKey) + MarkProcessed(processedKey, 24h)
         RH->>Lock: Release (若拥有)
         RH-->>MQ: return nil
     end
 
     RH->>Builder: Build(config)
+    alt Build 失败
+        Builder-->>RH: error
+        RH->>RH: cleanupAfterResumeFailure
+        RH->>BC: sendErrorMessage("恢复执行失败")
+        RH->>Idem: DeleteKey(processingKey) + MarkProcessed(processedKey, 24h)
+        RH->>Lock: Release (若拥有)
+        RH-->>MQ: return nil
+    end
     Builder-->>RH: BuiltAgent
 
     RH->>BC: SendTyping(typing=true)
 
+    alt questionStore 为 nil
+        RH->>RH: 记录错误日志
+        RH->>Lock: Release (若拥有)
+        RH-->>MQ: return nil
+    end
+
     RH->>QS: GetByCheckpoint(checkpointID)
+    alt GetByCheckpoint 失败
+        QS-->>RH: error
+        RH->>RH: cleanupAfterResumeFailure
+        RH->>BC: sendErrorMessage("恢复执行失败")
+        RH->>Idem: DeleteKey(processingKey) + MarkProcessed(processedKey, 24h)
+        RH->>Lock: Release (若拥有)
+        RH-->>MQ: return nil
+    end
     QS-->>RH: questions[]
-    RH->>RH: 构建 targets map (interruptID -> answer)
+    RH->>RH: 构建 targets map (仅 status=answered 且 interruptID 非空)
 
     RH->>Runner: ResumeWithParams(checkpointID, params)
 
@@ -415,8 +456,8 @@ sequenceDiagram
 - 最终结果: 会话恢复到 idle 状态，用户收到提示重新发送消息
 
 #### 2. 无已回答的 Question
-- 触发条件: GetByCheckpoint 返回空或所有 Question 状态非 answered
-- 处理逻辑: targets map 为空，ResumeWithParams 正常调用（Eino 内部处理）
+- 触发条件: GetByCheckpoint 返回空或所有 Question 状态非 answered（或 InterruptID 为空）
+- 处理逻辑: targets map 为空，记录 info 日志 "no answered questions found for checkpoint"，ResumeWithParams 正常调用
 - 最终结果: agent 可能重新提问或直接结束
 
 #### 3. LLM 暂时不可用 (限流/超时)
@@ -562,7 +603,14 @@ flowchart TD
     U --> W[buildMiddleware]
     V --> W
 
-    W --> X[adk.NewChatModelAgent]
+    W --> W1[DynamicToolProvider (首位, 若 EnableClientTools)]
+    W1 --> W2[PatchToolCalls (若 EnablePatchToolCalls)]
+    W2 --> W3[Summarization (若 EnableSummarization)]
+    W3 --> W4[ToolReduction (若 EnableToolReduction)]
+    W4 --> W5[LoggingMiddleware (若 llmLogger 非 nil)]
+    W5 --> W6[TracingMiddleware (若 tracingEnabled)]
+
+    W6 --> X[adk.NewChatModelAgent]
     X --> Y[adk.NewRunner<br/>EnableStreaming=true<br/>可选 CheckPointStore]
     Y --> Z[返回 BuiltAgent]
 ```

@@ -544,9 +544,15 @@ sequenceDiagram
 - 处理逻辑: DebugSampler.ShouldSample 检查 context 中的 debugContextKey，命中则 RecordAndSample
 - 最终结果: 该用户的完整链路被采集
 
-#### 2. 比率采样回退
+#### 2. 父 Span 已采样
 
-- 触发条件: 非调试用户，无父 Span
+- 触发条件: 非调试用户，但父 Span 已被采样（IsValid && IsSampled）
+- 处理逻辑: 尊重父 Span 的采样决策，直接 RecordAndSample
+- 最终结果: 保持 trace 完整性
+
+#### 3. 比率采样回退
+
+- 触发条件: 非调试用户，无父 Span 或父 Span 未采样
 - 处理逻辑: 委托给 TraceIDRatioBased(sampleRate) 按比率采样
 - 最终结果: 按配置比例采集
 
@@ -575,6 +581,7 @@ flowchart TD
     G --> G1[捕获 tool_name + tool_args]
     C -->|WrapInvokableToolCall 出口| H[写入 tool_result 记录]
     H --> H1[捕获 tool_result + duration_ms + error]
+    H1 --> HB[broadcastFunctionCall<br>广播 function_call 给客户端]
     C -->|AfterAgent| I[写入 agent_end 记录]
 
     D --> J[LLMLogger.write JSONL]
@@ -599,6 +606,12 @@ flowchart TD
 - 触发条件: 多个 Agent 并发执行
 - 处理逻辑: LLMLogger 内部 sync.Mutex 序列化写入
 - 最终结果: JSONL 输出不交错
+
+#### 3. Function Call 广播
+
+- 触发条件: WrapInvokableToolCall 执行时上下文包含 broadcast 元数据
+- 处理逻辑: 读取 context 中的 BroadcastHelper，发送 function_call ephemeral update
+- 最终结果: 客户端实时看到函数调用进度（fire-and-forget，错误不传播）
 
 ### 涉及文件
 
@@ -628,7 +641,7 @@ sequenceDiagram
     Agent->>TM: AfterModelRewriteState
     TM->>TM: 计算 duration_ms
     TM->>TM: 提取 token usage
-    TM->>OTel: SetAttributes(input_tokens, output_tokens, duration_ms)
+    TM->>OTel: SetAttributes(input_tokens, output_tokens, total_tokens, duration_ms)
     alt debug 用户匹配
         TM->>OTel: AddEvent("llm.debug.response", message)
     end
@@ -636,8 +649,14 @@ sequenceDiagram
 
     Agent->>TM: WrapInvokableToolCall
     TM->>OTel: Start("agent.tool.call", agent_id, tool_name)
+    alt debug 用户匹配
+        TM->>OTel: AddEvent("tool.debug.input", argumentsInJSON)
+    end
     Agent->>Agent: 执行工具
     TM->>OTel: SetAttributes(duration_ms)
+    alt debug 用户匹配
+        TM->>OTel: AddEvent("tool.debug.output", result)
+    end
     alt 错误
         TM->>OTel: SetStatus(Error) + RecordError
     end

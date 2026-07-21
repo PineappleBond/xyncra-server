@@ -27,9 +27,9 @@
 ### 关键特性
 
 - **Hot reload**：无需重启服务器
-- **Full replacement**：完全替换现有配置（不是增量更新）
-- **Nil-safe**：AgentRegistry 为 nil 时返回 count=0
-- **Error propagation**：加载失败时返回错误
+- **Full replacement**：完全替换现有配置（清空后重新加载）
+- **Nil-safe**：AgentRegistry 为 nil 时返回 count=0，不报错
+- **Error propagation**：加载失败时返回错误（含目录路径信息）
 
 ---
 
@@ -52,11 +52,11 @@ sequenceDiagram
     end
 
     H->>R: Reload()
-    R->>FS: 扫描 agents 目录
+    R->>FS: 扫描 agents 目录（.md 文件）
     FS-->>R: 返回配置文件列表
-    R->>R: 解析 YAML 配置
-    R->>R: 验证配置
-    R->>R: 替换现有配置
+    R->>R: 解析 YAML front matter
+    R->>R: 验证必填字段
+    R->>R: 清空旧配置，加载新配置
 
     alt 加载失败
         R-->>H: 返回错误
@@ -65,8 +65,8 @@ sequenceDiagram
     end
 
     R-->>H: 成功
-    H->>R: ListAll()
-    R-->>H: 返回所有 Agent 配置
+    H->>R: Count()
+    R-->>H: 返回 Agent 数量
     H-->>WS: 返回 {count: N}
     WS-->>C: 成功响应
 ```
@@ -74,12 +74,12 @@ sequenceDiagram
 ### 详细步骤
 
 1. **检查 AgentRegistry**：如果为 nil，直接返回 `{count: 0}`
-2. **调用 Reload()**：触发配置重载
-3. **扫描目录**：遍历 agents 目录下的所有 `.yaml` 文件
-4. **解析配置**：解析每个 YAML 文件为 AgentConfig
-5. **验证配置**：检查必填字段、模型配置等
-6. **替换配置**：完全替换现有 AgentRegistry 中的配置
-7. **获取数量**：调用 `ListAll()` 获取所有配置
+2. **调用 Reload()**：读取上次加载的目录路径，调用 `Load(dir)`
+3. **扫描目录**：遍历 agents 目录下的所有 `.md` 文件（跳过子目录和非 `.md` 文件）
+4. **解析配置**：解析每个 `.md` 文件的 YAML front matter 为 AgentConfig（Markdown body 作为 SystemPrompt）
+5. **验证配置**：检查必填字段（`id`、`name`、`model`、`api_key_env`）
+6. **替换配置**：清空现有配置后加载新配置（完全替换）
+7. **获取数量**：调用 `Count()` 获取已注册的 agent 数量
 8. **返回结果**：返回 `{count: N}`
 
 ---
@@ -106,46 +106,49 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[扫描目录] --> B{目录存在?}
-    B -->|否| C[返回错误]
-    B -->|是| D[继续处理]
+    B -->|否且 IsNotExist| C[返回 nil（可选模块，D-063）]
+    B -->|否且其他错误| D[返回错误]
+    B -->|是| E[继续处理]
 ```
 
 | 场景 | 处理方式 |
 |------|----------|
-| agents 目录不存在 | 返回错误 |
+| agents 目录不存在 | 返回 nil（可选模块，agent 功能禁用时允许） |
 | 目录无读取权限 | 返回错误 |
 
 ### 3. 配置文件解析失败
 
 ```mermaid
 flowchart TD
-    A[解析 YAML] --> B{解析成功?}
+    A[解析 YAML front matter] --> B{解析成功?}
     B -->|失败| C[记录错误, 继续下一个]
-    B -->|成功| D[验证配置]
+    B -->|成功| D[验证必填字段]
     D --> E{验证通过?}
     E -->|否| F[记录错误, 继续下一个]
-    E -->|是| G[添加到配置列表]
+    E -->|是| G[提取 Markdown body 为 SystemPrompt]
+    G --> H[添加到配置列表]
 ```
 
 | 场景 | 处理方式 |
 |------|----------|
+| 无 front matter（缺少 `---` 分隔符） | 跳过该文件，记录错误日志 |
 | YAML 格式错误 | 跳过该文件，记录错误日志 |
-| 必填字段缺失 | 跳过该配置，记录错误日志 |
-| 模型配置无效 | 跳过该配置，记录错误日志 |
+| 必填字段缺失（id/name/model/api_key_env） | 跳过该配置，记录错误日志 |
+| 文件读取失败 | 跳过该文件，记录错误日志 |
 
 ### 4. 配置冲突
 
 ```mermaid
 flowchart TD
-    A[加载配置] --> B{存在同名 Agent?}
-    B -->|是| C[后者覆盖前者]
+    A[加载配置] --> B{ID 已存在?}
+    B -->|是| C[记录日志, 跳过（保留先加载的）]
     B -->|否| D[正常添加]
 ```
 
 | 场景 | 处理方式 |
 |------|----------|
-| 多个文件定义同名 Agent | 后加载的覆盖先加载的 |
-| Agent ID 冲突 | 使用文件名或配置中的 ID |
+| 多个文件定义同名 Agent ID | 先加载的保留，后加载的被跳过并记录日志 |
+| Agent ID 来源 | 配置 front matter 中的 `id` 字段（非文件名） |
 
 ### 5. 并发访问
 
@@ -183,7 +186,7 @@ flowchart TD
 | 操作 | 路径 | 说明 |
 |------|------|------|
 | READDIR | agents/ | 扫描目录 |
-| READ | agents/*.yaml | 读取配置文件 |
+| READ | agents/*.md | 读取配置文件（YAML front matter + Markdown body） |
 
 ---
 
@@ -215,47 +218,57 @@ AgentRegistry 为 nil 时返回 count=0：
 
 无需重启服务器：
 - **原因**：提高运维效率
-- **实现**：AgentRegistry 使用互斥锁保护配置
-- **副作用**：正在进行的 Agent 执行使用旧配置
+- **实现**：`Reload()` 先用 `RLock` 读取目录路径，再调用 `Load()` 用 `Lock` 清空并重新加载配置
+- **副作用**：正在进行的 Agent 执行使用旧配置（Build 时已拷贝 config）
 
 ---
 
 ## 配置文件格式
 
+配置文件使用 `.md` 格式，包含 YAML front matter 和 Markdown body。
+
 ### 示例配置
 
-```yaml
-agent_id: my-agent
+```markdown
+---
+id: my-agent
+name: My Agent
 model: gpt-4
-provider: openai
-system_prompt: |
-  你是一个 helpful assistant.
-temperature: 0.7
-max_tokens: 2048
+api_key_env: OPENAI_API_KEY
+parameters:
+  temperature: 0.7
+  max_tokens: 2048
 tools:
-  - name: get_weather
-    description: 获取天气信息
-  - name: get_current_time
-    description: 获取当前时间
+  - get_weather
+  - get_current_time
+---
+
+你是一个 helpful assistant.
 ```
 
-### 必填字段
+### 必填字段（Validate 检查）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `agent_id` | string | Agent 唯一标识 |
-| `model` | string | LLM 模型名称 |
-| `provider` | string | LLM 提供商 |
-| `system_prompt` | string | 系统提示词 |
+| `id` | string | Agent 唯一标识（front matter 中） |
+| `name` | string | Agent 显示名称 |
+| `model` | string | LLM 模型名称（用于自动检测 provider） |
+| `api_key_env` | string | API Key 对应的环境变量名 |
 
 ### 可选字段
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `temperature` | float | 0.7 | 生成温度 |
-| `max_tokens` | int | 2048 | 最大 token 数 |
-| `tools` | list | [] | 工具列表 |
-| `sub_agents` | list | [] | 子 Agent 列表 |
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `description` | string | Agent 描述 |
+| `base_url` | string | 自定义 LLM API 端点 |
+| `parameters.temperature` | float | 生成温度 |
+| `parameters.max_tokens` | int | 最大 token 数 |
+| `tools` | list | 工具名称列表（从 tool registry 解析） |
+| `dynamic_tools` | list | 运行时动态解析的工具名称 |
+| `tool_config` | map | 每个工具的独立配置 |
+| `sub_agents` | list | 子 Agent ID 列表 |
+| `mcp_servers` | list | MCP 服务器连接配置 |
+| Markdown body | string | 作为 SystemPrompt（非 YAML 字段） |
 
 ---
 

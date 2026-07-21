@@ -18,8 +18,10 @@
 10. [日志管理](#10-日志管理)
 11. [同步更新 (sync_updates)](#11-同步更新-sync_updates)
 12. [Agent 恢复 (agent_resume)](#12-agent-恢复-agent_resume)
-13. [内置诊断函数](#13-内置诊断函数)
-14. [重载 Agent 配置 (reload_agents)](#14-重载-agent-配置-reload_agents)
+13. [设置输入状态 (set_typing)](#13-设置输入状态-set_typing)
+14. [流式文本 (stream_text)](#14-流式文本-stream_text)
+15. [内置诊断函数](#15-内置诊断函数)
+16. [重载 Agent 配置 (reload_agents)](#16-重载-agent-配置-reload_agents)
 
 ---
 
@@ -559,7 +561,7 @@ flowchart TD
 | 场景 | 行为 |
 |------|------|
 | `--limit <= 0` | tail 和 search 返回验证错误 |
-| Export `--limit > 10000` | 静默截断为 10000 |
+| Export `--limit > 10000` 或 `<= 0` | 静默重置为默认值 1000 |
 | Export `--output ''` 或 `'-'` | 写入 stdout |
 | listen 模式下自动清理 | 每 1 小时运行，删除 7 天前的日志，在事务中执行。失败仅记录日志，不终止守护进程 |
 
@@ -623,7 +625,65 @@ flowchart TD
 
 ---
 
-## 13. 内置诊断函数
+## 13. 设置输入状态 (set_typing)
+
+IPC 专属命令，向指定会话发送 typing indicator。无 standalone 降级，因为 typing 是 fire-and-forget 广播，守护进程未运行时无接收方。
+
+### 流程图
+
+```mermaid
+flowchart TD
+    A["runSetTyping()"] --> B["解析 CLIContext"]
+    B --> C["读取标志:<br>--conversation-id (必填)<br>--stop (可选, 默认 false)"]
+    C --> D["创建 IPCClient<br>超时 5s"]
+    D --> E["IPC 调用 set_typing<br>参数: conversation_id, is_typing"]
+    E --> F{"IPC 成功?"}
+    F -->|否| G["输出守护进程未运行错误<br>exit 2"]
+    F -->|是| H{"resp.Error 非 nil?"}
+    H -->|是| I["返回错误"]
+    H -->|否| J["输出确认信息"]
+```
+
+### 边缘场景
+
+| 场景 | 行为 |
+|------|------|
+| 守护进程未运行 | exit code 2 |
+| `--stop` | 发送 `is_typing: false` 清除指示器 |
+| 服务端转发失败 | 作为 IPC 错误转发 |
+
+---
+
+## 14. 流式文本 (stream_text)
+
+IPC 专属命令，向指定会话发送流式文本片段。无 standalone 降级，因为流式文本需要通过守护进程的 WebSocket 连接广播给其他客户端。
+
+### 流程图
+
+```mermaid
+flowchart TD
+    A["runStreamText()"] --> B["解析 CLIContext"]
+    B --> C["读取标志:<br>--conversation-id (必填)<br>--stream-id (必填)<br>--text (必填)<br>--done (可选, 默认 false)"]
+    C --> D["创建 IPCClient<br>超时 5s"]
+    D --> E["IPC 调用 stream_text<br>携带所有参数"]
+    E --> F{"IPC 成功?"}
+    F -->|否| G["输出守护进程未运行错误<br>exit 2"]
+    F -->|是| H{"resp.Error 非 nil?"}
+    H -->|是| I["返回错误"]
+    H -->|否| J["输出确认信息"]
+```
+
+### 边缘场景
+
+| 场景 | 行为 |
+|------|------|
+| 守护进程未运行 | exit code 2 |
+| `--done` | 标记流结束 (`is_done: true`) |
+| `--stream-id` 重复 | 服务端处理去重 |
+
+---
+
+## 15. 内置诊断函数
 
 每个客户端设备暴露三个诊断函数，服务器可通过反向 RPC 调用。
 
@@ -662,7 +722,7 @@ flowchart TD
 
 ---
 
-## 14. 重载 Agent 配置 (reload_agents)
+## 16. 重载 Agent 配置 (reload_agents)
 
 IPC 专属命令，触发守护进程从磁盘热重载 Agent 配置。
 
@@ -702,8 +762,8 @@ flowchart TD
 | `restore_conversation` | 变更 | 恢复会话 | 支持（功能受限） |
 | `delete_message` | 变更 | 删除消息 | 支持 |
 | `mark_as_read` | 变更 | 标记已读 | 支持（不更新本地游标） |
-| `set_typing` | 变更 | 设置输入状态 | - |
-| `stream_text` | 变更 | 流式文本 | - |
+| `set_typing` | 守护进程专属 | 设置输入状态 | 不支持 |
+| `stream_text` | 守护进程专属 | 流式文本 | 不支持 |
 | `sync_updates` | 守护进程专属 | 触发 FullSync | 不支持 |
 | `agent_resume` | 守护进程专属 | 恢复 Agent | 不支持 |
 | `reload_agents` | 守护进程专属 | 热重载配置 | 不支持 |
