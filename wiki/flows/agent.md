@@ -106,7 +106,7 @@ flowchart TD
 
 Agent 在执行过程中通过 Eino 框架的 interrupt 机制暂停，等待用户回答后通过 resume 恢复执行。支持多轮 HITL（re-interrupt）。
 
-### 流程图
+### 流程概览
 
 ```mermaid
 flowchart TD
@@ -119,59 +119,36 @@ flowchart TD
         F --> G[写入 checkpointID]
         G --> H[持久化 Question 到 DB]
         H --> I[关闭流式输出, is_done=true]
-        I --> J[广播 conversation_update]
-        J --> K[广播 agent_status = asking_user]
-        K --> L[返回 ErrHITLInterrupted, 不释放会话锁]
+        I --> J[广播 conversation_update + agent_status]
+        J --> K[返回 ErrHITLInterrupted, 不释放会话锁]
     end
 
     subgraph resume_phase [Resume 阶段]
         M[用户回答] --> M1[客户端调用 agent_resume RPC]
-        M1 --> M2[RPC Handler 校验参数]
-        M2 --> M3[QuestionStore.UpdateAnswer 持久化答案]
-        M3 --> M4{所有问题已回答?}
-        M4 -->|否| M5[返回 partial 状态, 等待下一个问题]
-        M4 -->|是| M6[入队 TypeAgentResume MQ 任务]
-        M6 --> N[MQ 消费 TypeAgentResume]
-        N --> O[NewAgentResumeHandler 处理]
-        O --> P[反序列化 AgentResumePayload]
-        P --> Q[两阶段幂等检查]
-        Q --> R[获取会话锁]
-        R --> S[从 DB 读取已回答 Questions]
-        S --> T[构建 targets map]
-        T --> U[AgentBuilder.Build 重新构建 Agent]
-        U --> V[发送 typing 指示]
-        V --> V1[Runner.ResumeWithParams 恢复执行]
-        V1 --> W[桥接流式输出, 广播结果]
-        W --> X[持久化最终消息]
-        X --> X1[标记 processed (24h) + 删除 processing key]
-        X1 --> Y[清理状态]
-        Y --> Y1[ClearAgentStatus]
-        Y1 --> Y2[Delete Questions]
-        Y2 --> Y3[Delete Redis checkpoint]
-        Y3 --> Z[广播 conversation_update 通知客户端清理完成]
-        Z --> X3[释放会话锁]
+        M1 --> M2[RPC Handler 持久化答案]
+        M2 --> M3{所有问题已回答?}
+        M3 -->|否| M4[返回 partial 状态]
+        M3 -->|是| M5[入队 TypeAgentResume MQ 任务]
+        M5 --> N[MQ 消费 + Resume Handler 处理]
+        N --> O[恢复执行 + 流式输出 + 持久化]
+        O --> P[清理状态 + 释放锁]
     end
 
-    L -.->|等待用户回答| M
+    K -.->|等待用户回答| M
 
     style A fill:#4CAF50,color:#fff
-    style L fill:#FF9800,color:#fff
+    style K fill:#FF9800,color:#fff
     style M fill:#2196F3,color:#fff
-    style AA fill:#4CAF50,color:#fff
 ```
 
-### 边缘场景
+> **详细流程**: Resume 阶段的完整流程图和边缘场景见 [Section 11: Agent Resume 流程](#11-agent-resume-流程)。
+
+### Interrupt 阶段边缘场景
 
 | 场景 | 处理方式 |
 |------|----------|
-| **checkpoint 过期/丢失** | 调用 `cleanupAfterResumeFailure`，发送"等待时间过长"消息 |
-| **re-interrupt (多轮HITL)** | resume 后再次 interrupt，重新进入 `asking_user` 状态，不释放锁，删除 processing key 允许后续 resume。不执行 cleanup 操作（ClearAgentStatus / Delete Questions / Delete checkpoint）——cleanup 仅在成功完成（无 re-interrupt）时执行 |
-| **resume 永久失败** | 调用 `cleanupAfterResumeFailure`（清状态 + 删 checkpoint + 删 questions）+ 发送错误消息 + 清理幂等 key + 释放锁 |
-| **resume transient 失败** | 不自动 MQ 重试，而是通知用户自行决定是否重试 |
-| **并发 resume** | 幂等检查确保同一 checkpoint 只 resume 一次 |
-| **questionStore 为 nil** | 初始中断时 Question 创建被跳过 (nil-safe)；resume 时记录错误日志，释放锁（若拥有），直接返回 nil 给 MQ。不执行清理操作（ClearAgentStatus / Delete Questions / Delete checkpoint），不发送错误消息给用户。与 `GetByCheckpoint` 失败不同，此路径不调用 `cleanupAfterResumeFailure` |
-| **多设备并发回答同一问题** | QuestionStore.UpdateAnswer 使用 `WHERE status='pending'` 幂等更新，后到者返回 409 |
-| **多个 Question 需要依次回答** | 每次 RPC 只回答一个 Question，返回 "partial" 状态；全部回答完毕后入队 MQ 任务 |
+| **questionStore 为 nil** | Question 创建被跳过 (nil-safe)，Agent 继续执行 |
+| **多轮 HITL (re-interrupt)** | resume 后再次 interrupt，重新进入 `asking_user` 状态，不释放锁，删除 processing key 允许后续 resume |
 
 ---
 
@@ -383,7 +360,7 @@ flowchart TD
 
 `AgentBuilder.Build` 在构建 Agent 时按固定顺序组装中间件链（`middleware.go`）。每个中间件初始化失败时跳过（fail-open）：
 
-1. **DynamicToolProvider** — 必须最先执行，注入客户端函数和注册表工具
+1. **DynamicToolProvider** — 必须最先执行，注入客户端函数和注册表工具（仅当 `config.Middleware.EnableClientTools=true` 且 `clientFunctionProvider` 和 `clientCaller` 均非 nil 时添加）
 2. **PatchToolCalls** — 修补工具调用格式
 3. **Summarization** — 上下文超长时自动摘要（默认阈值 160k tokens）
 4. **ToolReduction** — 工具结果过长时截断（默认 50k chars）
@@ -546,7 +523,8 @@ flowchart TD
 | 场景 | 处理方式 |
 |------|----------|
 | **信号量 nil** | Acquire/Release 均为 no-op |
-| **Redis 不可用** | 会话锁获取失败时 fail-open，继续执行 |
+| **Redis 不可用** | 会话锁获取失败时 fail-open，继续执行（与锁被占用不同） |
+| **锁被占用** | 返回 error，由 Asynq 重试 |
 | **锁过期 (TTL)** | 自然释放，不阻塞后续任务 |
 | **非 owner 释放锁** | Lua 脚本检查 token，非 owner 的 DEL 被忽略 |
 
@@ -605,6 +583,7 @@ flowchart TD
 | **processed 和 processing key 都存在** | 跳过 (某处异常导致) |
 | **Resume 路径 key 格式** | Phase 1: `agent:resume:CheckpointID`, Phase 2: `agent:resume:processing:CheckpointID`。成功后标记 processed (24h) 并删除 processing key；transient 失败时删除 processing key 允许立即重试；re-interrupt 时删除 processing key 允许后续 resume |
 | **Agent 执行 vs Resume key 差异** | Agent 执行: `agent:processed:{MessageID}` / `agent:processing:{MessageID}`；Resume: `agent:resume:{CheckpointID}` / `agent:resume:processing:{CheckpointID}`。两套 key 独立，互不干扰 |
+| **初始执行 HITL 中断** | Agent 执行中检测到 HITL 中断时，不标记 processed、不删除 processing key（130s 后自然过期），返回 nil 给 MQ |
 
 ---
 

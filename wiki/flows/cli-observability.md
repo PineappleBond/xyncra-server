@@ -503,7 +503,7 @@ logs 命令族完全在本地 SQLite 上操作（RPCLog / NotificationLog 表）
 |------|------|
 | limit <= 0 | 返回 "must be a positive integer" |
 | 无效 time 参数 | 返回格式提示错误 |
-| logs export limit > 10000 | 钳制为 1000 |
+| logs export limit <= 0 或 > 10000 | 钳制为 1000 |
 | logs cleanup --dry-run | 仅输出将删除的条数，不执行删除 |
 
 ### 涉及文件

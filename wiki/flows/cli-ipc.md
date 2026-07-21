@@ -211,7 +211,7 @@ flowchart TD
 | `OnConversation` | `[conversation] id=%s title=%q` | 会话状态变更；当 `agent_status == "asking_user"` 时额外显示 HITL 待回答问题 |
 | `OnGap` | `[gap] seq=%d` | 序列号间隙通知 |
 | `OnTyping` | `[typing] user=%s conv=%s started/stopped typing` | 输入指示器；agent 显示为 `[thinking]` |
-| `OnStreaming` | `[streaming/agent] user=%s conv=%s stream=%s status=%s text=%q` | 流式文本事件；agent 来源显示为 `[agent]` |
+| `OnStreaming` | `[streaming] user=%s conv=%s stream=%s status=%s text=%q` 或 `[agent] user=%s conv=%s stream=%s status=%s text=%q` | 流式文本事件；前缀根据来源动态切换：人类为 `[streaming]`，Agent 为 `[agent]` |
 | `OnAgentStatus` | `[agent_status] agent=%s conv=%s status=%s` | Agent 状态变更（如 running、asking_user、idle） |
 | `OnAgentTimeout` | `[agent_timeout] agent=%s conv=%s reason=%q` | Agent 超时事件 |
 

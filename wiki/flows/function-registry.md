@@ -28,7 +28,7 @@ sequenceDiagram
         Handler->>Registry: RegisterFunctions(ctx, userID, deviceID, params)
         Registry->>Registry: 校验函数数量 <= MaxFunctionsPerDevice
         Registry->>Registry: 校验每个函数名 (非空, 长度, 无重复)
-        Registry->>Registry: 深拷贝 Functions 和 DeviceInfo
+        Registry->>Registry: 浅拷贝 Functions (slice copy)，深拷贝 DeviceInfo
         Registry->>Registry: 写入 map[userID][deviceID] = DeviceFunctions
         Registry-->>Handler: nil (成功)
         Handler-->>WS: {"status":"ok", "count": N, "device_id": "..."}
@@ -321,14 +321,14 @@ sequenceDiagram
 #### 1. 超时处理
 
 - 触发条件: 客户端未在 timeout 内响应
-- 处理逻辑: `ctx.Done()` 触发，若为 `DeadlineExceeded` 且配置了 PendingStore，异步持久化请求
+- 处理逻辑: `ctx.Done()` 触发，若为 `DeadlineExceeded` 且配置了 PendingStore，异步持久化请求。注意：仅 `DeadlineExceeded` 触发持久化，`context.Canceled`（父 context 取消）不持久化
 - 最终结果: 返回 `context.DeadlineExceeded` 错误，请求被保存供后续重播
 
 #### 2. 发送失败
 
 - 触发条件: sendFunc 返回错误（设备离线/连接断开）
-- 处理逻辑: 立即返回错误，不进入 select 等待
-- 最终结果: 直接报错
+- 处理逻辑: 若错误为 `ErrDeviceOffline` 且配置了 PendingStore，请求先通过 `persistAsync` 异步持久化后再返回错误（与场景 6 的超时持久化类似）；否则立即返回错误，不进入 select 等待
+- 最终结果: 直接报错（离线时请求已保存供后续重播）
 
 #### 3. 响应到达时 pending 已清理 (迟到响应)
 
@@ -554,6 +554,12 @@ sequenceDiagram
 - 触发条件: 任何工具调用失败（网络/业务/超时）
 - 处理逻辑: 所有失败都通过 SoftFailure 返回内容而非 Go error
 - 最终结果: Agent 运行不中断，LLM 可自行处理失败
+
+#### 4. 设备离线重试
+
+- 触发条件: ServerRequest 返回离线错误（`isDeviceOfflineError` 检测 "device offline"、"no connections"、"device is offline" 子串）
+- 处理逻辑: 等待 3 秒后重试一次（设备可能正在重连中），若 ctx 取消则立即返回 SoftFailure
+- 最终结果: 若重试成功则正常返回，若仍失败则通过 SoftFailure 返回 "device is offline"
 
 ### 涉及文件
 

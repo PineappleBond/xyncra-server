@@ -208,7 +208,7 @@ sequenceDiagram
 
     Note over RH: 使用认证的 client.DeviceID()<br/>覆盖客户端提供的 deviceID (D-093)
 
-    RH->>FR: RegisterFunctions(ctx, userID, deviceID, functions, deviceInfo)
+    RH->>FR: RegisterFunctions(ctx, userID, deviceID, &params)
 
     FR->>FR: 验证函数数量 <= MaxFunctionsPerDevice (500)
     FR->>FR: 验证每个名称非空
@@ -465,7 +465,7 @@ sequenceDiagram
 | 场景 | 处理方式 | 设计决策 |
 |------|---------|---------|
 | `registry` 为 nil | 返回 `{count: 0}` 且无错误 | D-063：nil-safe 设计 |
-| 目录不存在 | `Load` 返回 nil | D-063：可选模块，agents 映射被清空，实际上卸载所有代理 |
+| 目录不存在 | agents 映射已被清空（Load 先清空再读目录），目录不存在返回 nil | D-063：可选模块，所有代理被卸载 |
 | `dir` 为空字符串（从未加载） | `os.ReadDir("")` 失败 | 错误被包装并返回 |
 | 跨文件的重复代理 ID | 先到先得 | 后续重复项被记录日志并跳过 |
 | `.md` 文件中的无效前置数据 | 该文件被跳过 | 其他文件继续加载 |
@@ -572,7 +572,7 @@ sequenceDiagram
 | `runCtx.Tools` 为 nil | 分配新切片 | 注入无论初始状态如何都能工作 |
 | Eino 框架 0->非零工具转换 | 运行时从注册表解析的动态工具触发图重建 | Eino 架构要求 |
 | 客户端函数调用超时 | `formatClientToolError` 返回 "request timed out" 作为 soft failure | LLM 可自行决定重试或通知用户 |
-| 客户端设备离线 | `formatClientToolError` 返回 "device is offline" 作为 soft failure | LLM 可自行决定通知用户 |
+| 客户端设备离线 | 检测到 `isDeviceOfflineError` 后等待 3 秒再重试一次（设备可能正在重连）。若重试仍失败或 ctx 取消，返回 "device is offline" 作为 soft failure | LLM 可自行决定通知用户 |
 | 客户端返回业务错误（`resp.Code < 0`） | 返回 "client returned error (code N): msg" 作为 soft failure | LLM 可看到具体错误原因并适配 |
 
 ---

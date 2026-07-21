@@ -40,7 +40,9 @@ flowchart TD
     I --> J[调用 store.SendMessage 原子事务]
     J --> K{事务是否成功?}
     K -->|失败且是重复键| K1[通过 GetByClientMessageID 查询]
-    K1 --> K2[返回已存在消息, duplicate=true]
+    K1 --> K2{查询是否成功?}
+    K2 -->|是| K4[返回已存在消息, duplicate=true]
+    K2 -->|否| K5[返回 InternalError (原始 ErrDuplicateKey)]
     K -->|失败且非重复键| K3[返回错误]
     K -->|成功| L[构建 MQ 任务]
     L --> M[异步入队 TypeSendMessage]
@@ -343,10 +345,10 @@ flowchart TD
 | **message_id = 0** | 等价于全部标记已读，使用 `LastProcessedMessageID` |
 | **message_id > LastProcessedMessageID** | 被钳位到 `LastProcessedMessageID` |
 | **后退请求** | store 层 MAX 语义保证游标不会后退，实际游标值可能大于请求值 |
-| **UserUpdate 创建失败** | 日志记录但不影响主流程，游标已持久化 |
+| **UpdateLastRead 后重新读取会话失败** | `ConversationStore.Get()` 返回错误时，handler 返回 `InternalError`（游标已更新但客户端未收到响应） |
+| **UserUpdate 创建失败** | 日志记录但不影响主流程，游标已持久化。注意：MQ 广播仍会执行（使用未持久化的 seq），这是当前实现的行为 |
 | **MQ 广播失败** | 日志记录，客户端可通过 `sync_updates` 拉取 |
-| **已读游标仅同步给操作者自己的设备** | 不暴露给对方用户 |
-| **GetLatestSeq 失败** | 跳过 UserUpdate 创建，记录错误日志 |
+| **GetLatestSeq 失败** | 跳过 UserUpdate 创建和 MQ 广播（if/else 块内跳过），记录错误日志 |
 | **仅同步给操作者** | mark_read 的 UserUpdate 只创建给调用者本人，不像 delete_message 扇出给所有成员 |
 
 ---

@@ -156,8 +156,8 @@ sequenceDiagram
 
 6. **立即返回响应**
    - 返回 `{status:ok, replayed:N, total:M}`
-   - `replayed` 为正在异步重放的请求数，`total` 为 PendingStore 中该设备的全部待处理请求数
-   - 重放计数不代表完成确认
+   - `replayed` 为通过过滤条件的请求数（`Seq > last_seen_seq AND RetryCount < MaxRetries`），`total` 为 PendingStore 中该设备的全部待处理请求数
+   - 重放计数不代表完成确认（返回时重放尚未开始）
 
 7. **异步重放请求**
    - 为每个过滤后的请求启动 goroutine 调用 `replayOne(preq)`
@@ -325,15 +325,13 @@ sequenceDiagram
 
     Note over C: 连接建立成功
 
-    par 异步重连握手
-        C->>S: system.register_functions
+    par 异步重连握手 (goroutine) 与 全量同步 (主协程) 并行
+        C->>S: system.register_functions (顺序 1)
         Note over C: 先注册函数，确保服务端有 handler
 
-        C->>S: system.reconnect {last_seen_seq}
+        C->>S: system.reconnect {last_seen_seq} (顺序 2)
         Note over C: last_seen_seq = lastReqSeq<br/>(uint64, 反向 RPC 序列号)
-    end
-
-    par 异步全量同步
+    and FullSync 与握手并行执行
         C->>S: sync_updates {after_seq:localMaxSeq, limit:N}
         Note over C: uint32, 用户更新序列号
         S-->>C: {updates, has_more, latestSeq}

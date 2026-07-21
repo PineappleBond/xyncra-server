@@ -55,7 +55,7 @@ flowchart TD
     O --> P[调用 asynq client.EnqueueContext<br/>写入 Redis]
     P --> Q{入队结果}
     Q -->|成功| R[返回 Asynq 分配的 Task ID]
-    Q -->|失败| S[记录日志<br/>不影响客户端响应]
+    Q -->|失败| S[大多数调用方: 记录日志, 不影响客户端响应<br/>agent_resume: 返回 InternalError 给客户端]
 
     style A fill:#e1f5fe
     style R fill:#c8e6c9
@@ -73,7 +73,7 @@ flowchart TD
 | 3 | 将 payload 序列化为 `json.RawMessage` |
 | 4 | 创建 `mq.Task`，设置 `Type = mq.TypeSendMessage` |
 | 5 | （仅 `send_message`）调用 `startBrokerEnqueueSpan(ctx, taskType)` 创建 OpenTelemetry `handler.broker.enqueue` Span 用于分布式追踪。其他生产者（`delete_message`、`mark_as_read`、`create_conversation`、`delete_conversation`、`restore_conversation`、`agent_resume`）直接调用 `broker.Enqueue`，不创建此 Span |
-| 6 | 调用 `broker.Enqueue(ctx, task)` 进入 `AsynqBroker.Enqueue`。注意：`delete_message`、`mark_as_read`、`delete_conversation`、`restore_conversation` 使用 `context.Background()` 而非请求 context，因此 W3C Trace Context 不会传播到这些入队操作；`send_message` 和 `create_conversation` 传播请求 context |
+| 6 | 调用 `broker.Enqueue(ctx, task)` 进入 `AsynqBroker.Enqueue`。注意：`delete_message`、`mark_as_read`、`delete_conversation`、`restore_conversation` 使用 `context.Background()` 而非请求 context，因此 W3C Trace Context 不会传播到这些入队操作；`send_message`、`create_conversation` 和 `agent_resume` 传播请求 context |
 | 7 | Enqueue 检查 broker 未关闭（`b.closed`），验证 task 非空且有 Type |
 | 8 | 通过优先级链解析选项：`With...` option > Task field > broker 级默认值（默认重试次数 `DefaultRetryCount = 3`）。实现上先设置 broker 默认值（`defaultEnqueueOptions`，`maxRetry = -1` 哨兵值），再由 `applyTaskDefaults` 仅在当前值仍为默认时覆盖 Task 字段，最后应用 `With...` 函数选项。由于 `With...` 选项在 `applyTaskDefaults` 之后执行，它们始终覆盖 Task 字段 |
 | 9 | 通过 `tracing.InjectTraceContext(ctx)` 注入 W3C Trace Context 到 `task.Metadata` |
@@ -269,7 +269,7 @@ flowchart LR
 | 1 | WebSocket 发送失败时，响应入队到 `ResponseRetryQueue` |
 | 2 | `Drain(now)` 返回所有 `nextRetry <= now` 且未超过 `maxRetry` 的条目；超过 `maxRetry` 的条目被静默丢弃 |
 | 3 | 调用方（`client.go` 的重试循环）在调用 `EnqueueWithBackoff` 前检查 `entry.attempts < entry.maxRetry`，超过则丢弃 |
-| 4 | 失败条目通过 `EnqueueWithBackoff` 重新入队，使用指数退避：`baseDelay * 2^(attempts-1)`（`baseDelay = 1 秒`，调用方在入队前递增 attempts，因此首次重试时 attempts=1，延迟=1s），上限 16 秒（`maxBackoff`）。注意：此队列不使用随机抖动 |
+| 4 | 失败条目通过 `EnqueueWithBackoff` 重新入队，使用指数退避：`baseDelay * 2^attempts`（`baseDelay = 1 秒`，调用方在入队前递增 attempts，因此首次重试时 attempts=1，延迟=2s），上限 16 秒（`maxBackoff`）。注意：此队列不使用随机抖动 |
 | 5 | 队列满时（`maxSize`），最旧的条目被丢弃 |
 
 #### 数据库持久化重试（客户端）

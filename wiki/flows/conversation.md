@@ -110,8 +110,11 @@ flowchart TD
     I --> J1{Create 是否成功?}
     J1 -- 是 --> L[事务中为双方分配递增 seq]
     L --> M[写入 UserUpdate 记录]
-    M --> N[MQ 入队 TypeSendMessage 通知双方设备 fire-and-forget]
+    M --> M1{UserUpdate 事务是否成功?}
+    M1 -- 是 --> N[MQ 入队 TypeSendMessage 通知双方设备 fire-and-forget]
+    M1 -- 否 --> N1[记录日志, 跳过 MQ 广播]
     N --> P[返回会话, duplicate=false]
+    N1 --> P
     J1 -- 否 --> J{是否 ErrDuplicateKey?}
     J -- 是 --> K[TOCTOU 竞争: 重新查询 GetByUsers]
     K --> K2{重查询是否成功?}
@@ -143,7 +146,7 @@ flowchart TD
 | `Create` 返回非 `ErrDuplicateKey` 错误 | 返回 `InternalError` |
 | 并发创建竞争（TOCTOU） | 唯一索引触发 `ErrDuplicateKey`，重新查询返回已有会话 |
 | TOCTOU 重查询也失败 | `GetByUsers` 返回错误，落入 `InternalError` |
-| 已存在软删除的相同用户对会话 | `GetByUsers` 不返回软删除记录，`Create` 因唯一索引冲突返回 `ErrDuplicateKey`，重查询仍不返回软删除记录，最终返回 `InternalError`。需先恢复旧会话 |
+| 已存在软删除的相同用户对会话 | `GetByUsers` 不返回软删除记录（GORM 默认过滤），`Create` 因唯一索引（含软删除记录）冲突返回 `ErrDuplicateKey`，TOCTOU 重查询仍不返回软删除记录，最终返回 `InternalError`。需先恢复旧会话。注意：正常情况下（非软删除会话已存在），`GetByUsers` 会直接找到并返回 `duplicate=true`，不会进入 `Create` 路径 |
 | `UserUpdate` 事务失败 | 仅记录日志，MQ 广播跳过，不影响会话创建（fire-and-forget 精神） |
 | MQ 入队失败 | 仅记录日志，更新已持久化，下次 `sync_updates` 可拉取 |
 

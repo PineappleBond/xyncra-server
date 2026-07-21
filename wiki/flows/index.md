@@ -59,9 +59,12 @@ last_updated: 2026-07-21
  | 2 | 跨节点广播 | [broadcasting.md](broadcasting.md) | Redis Pub/Sub 多节点消息路由 |
  | 3 | 反向 RPC | [reverse-rpc.md](reverse-rpc.md) | 服务端发起请求 + 超时持久化 + 重放 |
  | 4 | 存储层事务 | [storage.md](storage.md) | SendMessage 原子事务、seq 分配 |
- | 5 | CLI 与 IPC | [cli-ipc.md](cli-ipc.md) | 命令行客户端 + Unix Socket IPC |
- | 6 | CLI 可观测性 | [cli-observability.md](cli-observability.md) | LLM 日志、Prometheus 指标、OpenTelemetry |
- | 7 | WebSocket 协议概览 | [websocket.md](websocket.md) | WebSocket 连接生命周期高层流程图（详见 websocket-connection.md） |
+ | 5 | 消息队列流程 | [message-queue.md](message-queue.md) | 入队、消费、重试、优雅关闭 |
+ | 6 | Agent 执行引擎 | [agent-execution.md](agent-execution.md) | MQ 消费、LLM 调用、流式输出、HITL 中断 |
+ | 7 | 客户端注册与函数管理 | [client-registration.md](client-registration.md) | 连接注册、函数注册、动态工具注入 |
+ | 8 | CLI 与 IPC | [cli-ipc.md](cli-ipc.md) | 命令行客户端 + Unix Socket IPC |
+ | 9 | CLI 可观测性 | [cli-observability.md](cli-observability.md) | LLM 日志、Prometheus 指标、OpenTelemetry |
+ | 10 | WebSocket 协议概览 | [websocket.md](websocket.md) | WebSocket 连接生命周期高层流程图（详见 websocket-connection.md） |
 
 ## 整体架构图
 
@@ -178,26 +181,6 @@ graph TB
 ```
 
 ## 子系统列表
-
-### 0. 新增独立流程文档
-
-以下流程已从各子系统文档中提取为独立文档，便于单独查阅：
-
-| 流程 | 文件 | 说明 |
-| --- | --- | --- |
-| [Set Typing](set-typing.md) | `set-typing.md` | 输入指示器广播（Seq=0, Rate-limited） |
-| [Stream Text](stream-text.md) | `stream-text.md` | 流式文本广播（Seq=0, Rate-limited） |
-| [Heartbeat](heartbeat.md) | `heartbeat.md` | 连接心跳保活（被动续期） |
-| [Sync Updates](sync-updates.md) | `sync-updates.md` | 增量更新拉取（Gap-filling） |
-| [Reload Agents](reload-agents.md) | `reload-agents.md` | Agent 配置热重载 |
-| [Background Cleanup](background-cleanup.md) | `background-cleanup.md` | 后台清理任务（UserUpdate/HITL/缓存） |
-| [Client Registration](client-registration.md) | `client-registration.md` | 客户端注册与函数管理（连接注册/函数注册/动态工具注入） |
-| [Function Registry](function-registry.md) | `function-registry.md` | 函数注册与动态工具详细流程（system.register_functions RPC） |
-| [Message Queue](message-queue.md) | `message-queue.md` | 消息队列业务流程（入队/消费/重试/优雅关闭） |
-| [Agent Execution](agent-execution.md) | `agent-execution.md` | Agent 执行引擎与 LLM 交互（MQ 消费/LLM 调用/流式输出） |
-| [CLI Observability](cli-observability.md) | `cli-observability.md` | CLI 操作与可观测性（LLM 日志/Prometheus 指标/OpenTelemetry） |
-
----
 
 ### 1. WebSocket 连接管理 (websocket)
 

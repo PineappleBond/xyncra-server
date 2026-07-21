@@ -207,9 +207,9 @@ sequenceDiagram
 
 #### 4. LLM 超时/限流 (瞬态错误)
 
-- 触发条件: LLM 请求超时 (`ErrLLMTimeout`) 或被限流 (`ErrLLMRateLimited`)
-- 处理逻辑: 不标记 `agent:processed:{messageID}`，不删除 `agent:processing:{messageID}`（130s 后自然过期），return error 给 Asynq 触发重试
-- 最终结果: Asynq 指数退避重试，最多 20 次。区分依据：`isTransientError()` 仅匹配 `ErrLLMTimeout` 和 `ErrLLMRateLimited`
+- 触发条件: LLM 请求超时 (`ErrLLMTimeout`)、被限流 (`ErrLLMRateLimited`)、或 HTTP 5xx 错误 (500/502/503 映射为 `ErrLLMTimeout`)
+- 处理逻辑: 不标记 `agent:processed:{messageID}`，不删除 `agent:processing:{messageID}`（130s 后自然过期），释放锁，`InvalidateContextCache`，return error 给 Asynq 触发重试
+- 最终结果: Asynq 指数退避重试，最多 20 次。区分依据：`isTransientError()` 匹配 `ErrLLMTimeout` 和 `ErrLLMRateLimited`（HTTP 5xx 被映射为 `ErrLLMTimeout`）
 
 ##### 流式输出中的部分响应持久化
 
@@ -699,6 +699,7 @@ flowchart TD
     H --> I[cleanupConversation]
     I --> I1[Redis SETNX 获取分布式锁]
     I1 -->|锁被占用| I2[跳过]
+    I1 -->|Redis 错误| I5[记录日志, 提前返回, 跳过所有清理步骤]
     I1 -->|获取成功| I3[重新检查会话状态]
     I3 -->|不再是 asking_user| I4[跳过]
     I3 -->|仍是 asking_user| J[ClearAgentStatus]
@@ -711,7 +712,7 @@ flowchart TD
 
 #### 清理步骤详情
 
-每个过期会话执行以下非致命清理步骤（D-122）：
+每个过期会话执行以下非致命清理步骤（D-122）。注意：Redis 锁获取错误（SETNX 失败）会导致提前返回，跳过所有清理步骤；仅"锁已被其他节点持有"时跳过当前会话继续处理下一个：
 
 1. **获取分布式锁** — `hitl:cleanup:{conversationID}`，TTL=30s，防止多节点重复清理
 2. **重新检查会话状态** — 可能已被用户或 resume 流程解决

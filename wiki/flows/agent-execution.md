@@ -105,7 +105,7 @@ sequenceDiagram
         Exec->>BC: BroadcastMessageUpdate(updates)
     end
 
-    Exec->>BC: SendTyping(typing=false) [defer]
+    Exec->>BC: SendTyping(typing=false) [defer, sync.Once 防止与 typing 超时 goroutine 重复清除]
 
     alt 执行成功 或 永久错误 (非 ErrHITLInterrupted, 非 transient)
         TH->>Idem: MarkProcessed("agent:processed:{msgID}", 24h)
@@ -304,6 +304,7 @@ sequenceDiagram
 
     C->>H: agent_resume RPC (conversation_id, answer, agent_id, checkpoint_id?, interrupt_id?)
     H->>H: 解析参数, 校验必填字段
+    Note over H: senderID/deviceID 从 WebSocket 客户端连接获取（client.UserID()/DeviceID()），非 RPC 参数
 
     H->>CS: Get(conversationID)
     CS-->>H: Conversation (含 CheckpointID)
@@ -555,7 +556,7 @@ sequenceDiagram
 #### 6. Multi-turn HITL (恢复后再次中断)
 - 触发条件: Resume 后 agent 再次触发 HITL 中断
 - 处理逻辑: resume handler 在内部直接处理 re-interrupt——更新会话状态为 asking_user，持久化新 Question，广播 conversation update 和 agent status，删除 processingKey 允许后续 resume，然后 return nil 给 MQ
-- 锁策略: 成功路径不释放锁（return nil 在 defer releaseLock 之前执行，defer 不会被触发），锁保持到下一次 resume。但若 UpdateAgentStatus 或 Create Question 失败，代码显式调用 releaseLock() 后返回 error 给 MQ
+- 锁策略: 成功路径不释放锁（releaseLock 是显式调用而非 defer，re-interrupt 成功路径故意省略该调用），锁保持到下一次 resume。但若 UpdateAgentStatus 或 Create Question 失败，代码显式调用 releaseLock() 后返回 error 给 MQ
 - 注意: resume handler 对 re-interrupt 成功时返回 nil（不是 error），task_handler 不介入
 - 最终结果: 同一 checkpoint 可多次 resume 和中断，实现多轮人机交互
 
@@ -567,7 +568,7 @@ sequenceDiagram
 #### 8. Re-interrupt 时 UpdateAgentStatus 或 Create Question 失败
 
 - 触发条件: multi-turn HITL re-interrupt 路径中 UpdateAgentStatus 或 questionStore.Create 返回 error
-- 处理逻辑: 代码显式调用 releaseLock() 后返回普通 error（非 ErrHITLInterrupted）给 MQ。task_handler 将其视为永久错误，标记 processed 并释放锁（若 task_handler 持有锁）
+- 处理逻辑: 代码显式调用 releaseLock() 后返回普通 error（非 ErrHITLInterrupted）给 MQ。resume handler 是独立的 MQ handler（不经过 task_handler），返回 error 后由 Asynq 按其重试策略处理
 - 最终结果: 用户看不到错误提示（无 sendErrorMessage），会话可能停留在中间状态（UpdateAgentStatus 失败时未标记 asking_user，Create 失败时已标记 asking_user 但无 Question），需要等待 HITL 超时清理兜底
 
 #### 9. 流式输出错误时无部分文本持久化
@@ -575,6 +576,12 @@ sequenceDiagram
 - 触发条件: resume handler 流式输出中 chunk.Err 非 nil
 - 处理逻辑: 广播 partialText(isDone=true) 关闭流，若 isTransientError(chunk.Err) 则发送错误消息给用户并删除 processingKey 允许立即重试，否则不发送错误消息。释放锁。**不持久化部分文本到 DB**（与 task_handler 的初始执行路径不同）
 - 最终结果: 用户通过 WebSocket 看到了部分流式文本，但该文本不会作为消息记录在 DB 中。非瞬态错误时用户看不到错误提示，会话可能停留在 asking_user 状态（需等待 HITL 超时清理兜底）
+
+#### 10. Resume 路径无 typing 超时 goroutine
+
+- 触发条件: resume handler 流式输出期间 LLM 挂起不产出 token
+- 处理逻辑: 与初始执行路径不同，resume handler 不启动 typing 超时 goroutine（executor.go 初始路径有 60s typing 超时 goroutine）。resume 路径仅依赖 `defer clearTyping()` 在函数返回时清除 typing 状态
+- 最终结果: 若 LLM 挂起，typing 指示器将持续显示直到 totalTimeout 触发函数返回
 
 ### 涉及文件
 - `resume_handler.go`: 恢复处理主逻辑，cleanupAfterResumeFailure

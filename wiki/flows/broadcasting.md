@@ -79,7 +79,7 @@ sequenceDiagram
 | **Redis Pub/Sub 发布失败** | `BroadcastUpdates` 调用 `nodeBroadcaster.Publish` 后若返回 error，仅 `logger.Error` 记录，`BroadcastUpdates` 仍返回 nil，符合 fire-and-forget 策略 (D-007)。数据已持久化，客户端可通过 `sync_updates` 拉取。 |
 | **Redis 连接断开 / 网络分区** | `Subscribe` 的 `PSubscribe` 底层 channel 会关闭（`ok==false`），`Subscribe` 返回 nil。因为 `Subscribe` 在独立 goroutine 中运行且仅记录日志，不会导致节点崩溃。节点失去 Pub/Sub 能力但本地广播仍正常。 |
 | **消息体畸形（JSON 反序列化失败）** | `Subscribe` 循环中反序列化失败直接 `continue` 跳过该消息，不中断订阅循环。 |
-| **节点重启后 nodeID 变化** | 每个 WebSocketServer 实例启动时 `uuid.New()` 生成新 nodeID，重启后旧消息不会被错误跳过（因为旧 nodeID 不再匹配），但重启瞬间可能有短暂的消息间隙（Subscribe 尚未建立）。 |
+| **节点重启后 nodeID 变化** | 每个 WebSocketServer 实例在 `NewWebSocketServer` 构造时 `uuid.New()` 生成新 nodeID，重启后旧消息不会被错误跳过（因为旧 nodeID 不再匹配），但重启瞬间可能有短暂的消息间隙（Subscribe 尚未建立）。 |
 | **用户在所有节点均无连接** | `broadcastLocal` 从 `clientsByUser` 取出空 slice，循环不执行。消息被 Redis Pub/Sub 投递后无人消费（fire-and-forget），数据持久化在 DB 中。 |
 
 ---
@@ -262,7 +262,7 @@ flowchart TD
 
 ### 概述
 
-`BroadcastHelper` 是 Agent 层对 `WebSocketServer.BroadcastUpdates` 的封装，负责将 Agent 执行过程中的实时事件（streaming 文本、typing 指示器、agent 状态、对话更新）广播给用户。所有广播都是 ephemeral（Seq=0），不持久化。
+`BroadcastHelper` 是 Agent 层对 `WebSocketServer.BroadcastUpdates` 的封装，负责将 Agent 执行过程中的实时事件（streaming 文本、typing 指示器、agent 状态、对话更新）广播给用户。除 `BroadcastMessageUpdate`（使用真实 DB seq 号）外，所有广播都是 ephemeral（Seq=0），不持久化。
 
 ### 流程图
 
@@ -461,7 +461,7 @@ stateDiagram-v2
 | **Close 被多次调用** | `b.ps` 在第一次 Close 时被置 nil，后续调用检测 `ps == nil` 直接返回 nil，幂等安全。 |
 | **Publish 和 Subscribe 使用同一 redis.Client** | 文档注释要求 Pub/Sub 使用专用连接（go-redis 限制）。如果共享 client，Subscribe 会独占连接导致其他命令阻塞。 |
 | **GracefulStop 时 Subscribe 尚未建立** | Subscribe 在独立 goroutine 中启动，Close 时 `b.ps` 可能为 nil（Subscribe 还没执行到 PSubscribe）。Close 检查 `ps==nil` 直接返回，无 panic。 |
-| **Subscribe 返回后调用 Close** | 当 ctx 取消时 Subscribe 先返回，其 `defer ps.Close()` 已关闭 PubSub 连接，但 `b.ps` 仍非 nil。后续 `GracefulStop` 调用 `Close()` 会读取 `b.ps`、置 nil、再次调用 `ps.Close()`，此时可能返回 error（已关闭的连接）。`GracefulStop` 中对该 error 仅 `logger.Error`，不影响关闭流程。 |
+| **Subscribe 返回后调用 Close** | `GracefulStop` 先调用 `nodeBroadcaster.Close()`（置 `b.ps=nil` 并关闭 PubSub），然后调用 `BaseServer.GracefulStop` 取消 context。`Subscribe` 的 `defer ps.Close()` 在 context 取消后触发，对已关闭的 PubSub 再次 Close。这是无害的双重关闭，error 仅记录日志，不影响关闭流程。 |
 
 ---
 
