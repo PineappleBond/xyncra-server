@@ -305,7 +305,7 @@ AgentRegistry 为 nil 时返回 count=0：
 仅目录级错误（如权限不足、路径无效）传播给调用者：
 
 - **原因**：目录级错误表示 Agent 功能无法工作，调用者需要知道
-- **行为**：handler 用 `fmt.Errorf("reload agents from %q: %w", dir, err)` 包装错误
+- **行为**：handler 用 `fmt.Errorf("reload agents from %q: %w", h.registry.Dir(), err)` 包装错误
 - **客户端处理**：显示错误消息，检查目录路径和权限
 
 单个文件级错误（解析失败、验证失败、ID 重复等）**不传播**：
