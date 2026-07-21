@@ -22,7 +22,7 @@ export default defineConfig({
   ],
   webServer: {
     command: 'pnpm dev',
-    url: 'http://localhost:8848',
+    url: 'http://localhost:8851',
     reuseExistingServer: true, // 复用已启动的 dev server
   },
 })
