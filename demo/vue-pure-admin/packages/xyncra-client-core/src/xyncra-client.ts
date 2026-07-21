@@ -621,6 +621,50 @@ export class XyncraClient {
       user_id: userId2,
       title: title ?? '',
     })) as Record<string, unknown>;
+
+    // Optimistically persist the conversation to IndexedDB so it is
+    // immediately available for listConversations after page refresh.
+    // The server broadcast will arrive later but the SyncManager's
+    // handleConversationCreateTx catches duplicate-key errors, so this is safe.
+    const convData = result.conversation as Record<string, unknown> | undefined;
+    if (convData) {
+      try {
+        const dbConv: DBConversation = {
+          id: (convData.id as string) ?? '',
+          user_id1: (convData.user_id1 as string) ?? '',
+          user_id2: (convData.user_id2 as string) ?? '',
+          type: (convData.type as string) ?? '1-on-1',
+          title: (convData.title as string) ?? '',
+          pinned: (convData.pinned as boolean) ?? false,
+          muted: (convData.muted as boolean) ?? false,
+          avatar_url: (convData.avatar_url as string) ?? '',
+          description: (convData.description as string) ?? '',
+          last_processed_message_id: (convData.last_processed_message_id as number) ?? 0,
+          created_at: convData.created_at
+            ? new Date(convData.created_at as string)
+            : new Date(),
+          updated_at: convData.updated_at
+            ? new Date(convData.updated_at as string)
+            : new Date(),
+          last_message_at: convData.last_message_at
+            ? new Date(convData.last_message_at as string)
+            : new Date(),
+          last_read_message_id1: (convData.last_read_message_id1 as number) ?? 0,
+          last_read_message_id2: (convData.last_read_message_id2 as number) ?? 0,
+          agent_status: (convData.agent_status as string) ?? 'idle',
+          agent_id: (convData.agent_id as string) ?? '',
+          checkpoint_id: (convData.checkpoint_id as string) ?? '',
+          agent_last_activity: convData.agent_last_activity
+            ? new Date(convData.agent_last_activity as string)
+            : new Date(),
+          deleted_at: convData.deleted_at ? new Date(convData.deleted_at as string) : null,
+        };
+        await this.db.conversationsStore.upsert(dbConv);
+      } catch (err) {
+        this.logger.debug('createConversation: optimistic local persist failed', err);
+      }
+    }
+
     return result as unknown as CreateConversationResult;
   }
 
