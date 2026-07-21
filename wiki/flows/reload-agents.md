@@ -47,7 +47,7 @@ sequenceDiagram
     participant FS as 文件系统
 
     C->>C: NewCLIContext（解析 user-id/device-id，失败则返回错误）
-    C->>D: reload_agents {}（IPC，socket 超时 5s，context 超时 10s）
+    C->>D: reload_agents（IPC，socket 超时 5s，context 超时 10s）
     D->>WS: xc.Call(ctx, "reload_agents", nil)（WebSocket 转发）
     WS->>H: HandleRequest(ctx, client, req)
 
