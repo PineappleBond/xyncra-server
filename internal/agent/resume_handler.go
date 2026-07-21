@@ -115,7 +115,9 @@ func NewAgentResumeHandler(
 		// task reuses the same lock. If the lock is still held (expected for
 		// HITL), we proceed without failing. If it's not held (e.g. TTL
 		// expired), we acquire a new one.
-		weOwnLock := false
+		// The lock is always released at the end (success or failure), because
+		// the release Lua script checks token ownership — safe even if we did
+		// not originally acquire it.
 		if lock != nil {
 			acquired, err := lock.Acquire(ctx, payload.ConversationID, 130*time.Second)
 			if err != nil {
@@ -124,16 +126,14 @@ func NewAgentResumeHandler(
 				// fail-open: proceed without lock
 			} else if !acquired {
 				// Lock already held by the initial HITL execution — this is
-				// expected (D-084). We do NOT own it.
+				// expected (D-084).
 				logger.Debug("agent resume: lock already held (HITL in progress)",
 					"conversation_id", payload.ConversationID)
-			} else {
-				weOwnLock = true
 			}
 		}
 
 		releaseLock := func() {
-			if weOwnLock && lock != nil {
+			if lock != nil {
 				if err := lock.Release(ctx, payload.ConversationID); err != nil {
 					logger.Error("agent resume: lock release failed",
 						"conversation_id", payload.ConversationID, "error", err)
