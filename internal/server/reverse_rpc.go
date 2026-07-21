@@ -131,6 +131,12 @@ func (r *ReverseRPC) ServerRequest(ctx context.Context, userID, deviceID string,
 	}
 
 	if err := r.sendFunc(userID, deviceID, pkg); err != nil {
+		// If device is offline and PendingStore is configured, persist the
+		// request for later replay when the device reconnects.
+		if errors.Is(err, ErrDeviceOffline) && r.pendingStore != nil {
+			r.persistAsync(pending)
+			return nil, fmt.Errorf("send request: device offline, request persisted for replay: %w", err)
+		}
 		return nil, fmt.Errorf("send request: %w", err)
 	}
 

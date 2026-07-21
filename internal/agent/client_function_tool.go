@@ -76,6 +76,9 @@ func buildToolInfo(funcInfo protocol.FunctionInfo) (*schema.ToolInfo, error) {
 // executeClientFunction sends a ReverseRPC request to the client device
 // and returns the response data as a string. Errors are mapped to
 // LLM-friendly messages per D-100.
+//
+// When the device is detected as offline, the function waits briefly (3s)
+// and retries once, since the device may be in the process of reconnecting.
 func executeClientFunction(
 	ctx context.Context,
 	c ClientCaller,
@@ -93,6 +96,15 @@ func executeClientFunction(
 	}
 
 	resp, err := c.ServerRequest(ctx, userID, deviceID, funcInfo.Name, input, timeout)
+	if err != nil && isDeviceOfflineError(err) {
+		// Wait 3 seconds before retrying — the device may be reconnecting.
+		select {
+		case <-time.After(3 * time.Second):
+		case <-ctx.Done():
+			return agenttools.SoftFailure("tool call cancelled"), nil
+		}
+		resp, err = c.ServerRequest(ctx, userID, deviceID, funcInfo.Name, input, timeout)
+	}
 	if err != nil {
 		// Recoverable failure: surface the reason as normal tool content so the
 		// LLM can self-correct or retry, instead of aborting the run (D-101).
@@ -111,6 +123,16 @@ func executeClientFunction(
 	return string(resp.Data), nil
 }
 
+// isDeviceOfflineError returns true if the error indicates the target device
+// is not connected. It checks for known offline-related error strings that
+// cross the agent/server package boundary via fmt.Errorf wrapping.
+func isDeviceOfflineError(err error) bool {
+	errStr := err.Error()
+	return strings.Contains(errStr, "device offline") ||
+		strings.Contains(errStr, "no connections") ||
+		strings.Contains(errStr, "device is offline")
+}
+
 // formatClientToolError maps low-level errors to LLM-friendly messages
 // per D-100. The returned string is used as the tool error shown to the
 // LLM, allowing it to decide on retry or user notification.
@@ -119,6 +141,10 @@ func formatClientToolError(err error) string {
 
 	if strings.Contains(errStr, "deadline exceeded") || strings.Contains(errStr, "timeout") {
 		return "tool call failed: request timed out. The client device may be slow or unresponsive."
+	}
+
+	if strings.Contains(errStr, "persisted for replay") {
+		return "tool call failed: device is temporarily offline. The request has been queued and will be executed when the device reconnects. Please inform the user to wait a moment."
 	}
 
 	if strings.Contains(errStr, "no connections") || strings.Contains(errStr, "device") {

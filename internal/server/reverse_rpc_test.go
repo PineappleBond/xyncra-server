@@ -1411,3 +1411,70 @@ func TestReverseRPC_PendingStore_Accessor(t *testing.T) {
 	rpc2 := newTestReverseRPC(ms)
 	assert.Nil(t, rpc2.PendingStore())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4: Device-offline persistence tests
+// ---------------------------------------------------------------------------
+
+// TestServerRequest_DeviceOffline_PersistsToPendingStore verifies that when
+// sendFunc returns ErrDeviceOffline and a PendingStore is configured, the
+// request is persisted for later replay.
+func TestServerRequest_DeviceOffline_PersistsToPendingStore(t *testing.T) {
+	ms := &mockSendFunc{err: ErrDeviceOffline}
+	ps := &mockPendingStore{}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+
+	params := json.RawMessage(`{"key":"value"}`)
+	_, err := rpc.ServerRequest(context.Background(), "user-1", "device-1", "test.method", params, 2*time.Second)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDeviceOffline)
+	assert.Contains(t, err.Error(), "persisted for replay")
+
+	// persistAsync runs in a goroutine; wait for Save to be called.
+	require.Eventually(t, func() bool {
+		return ps.savedCount() == 1
+	}, 2*time.Second, 5*time.Millisecond, "Save should be called after device offline")
+
+	saved := ps.lastSaved()
+	require.NotNil(t, saved)
+	assert.Equal(t, "user-1", saved.UserID)
+	assert.Equal(t, "device-1", saved.DeviceID)
+	assert.Equal(t, "test.method", saved.Method)
+	assert.Equal(t, params, saved.Params)
+	assert.Equal(t, saved.ID, saved.IdempotencyKey)
+	assert.True(t, saved.Seq > 0, "seq should be > 0, got %d", saved.Seq)
+	assert.Equal(t, 0, saved.RetryCount)
+	assert.Equal(t, defaultMaxReplayRetries, saved.MaxRetries)
+	assert.False(t, saved.CreatedAt.IsZero(), "CreatedAt should be set")
+}
+
+// TestServerRequest_DeviceOffline_NoPendingStore_NoPersist verifies that when
+// sendFunc returns ErrDeviceOffline but no PendingStore is configured, the
+// error is returned without persistence (no panic).
+func TestServerRequest_DeviceOffline_NoPendingStore_NoPersist(t *testing.T) {
+	ms := &mockSendFunc{err: ErrDeviceOffline}
+	rpc := newTestReverseRPC(ms) // no PendingStore
+
+	_, err := rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 2*time.Second)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDeviceOffline)
+	assert.NotContains(t, err.Error(), "persisted for replay")
+}
+
+// TestServerRequest_OtherSendError_NoPersist verifies that a non-offline
+// sendFunc error does NOT trigger persistence.
+func TestServerRequest_OtherSendError_NoPersist(t *testing.T) {
+	ms := &mockSendFunc{err: errors.New("some other send error")}
+	ps := &mockPendingStore{}
+	rpc := newTestReverseRPCWithStore(ms, ps)
+
+	_, err := rpc.ServerRequest(context.Background(), "user-1", "device-1", "ping", nil, 2*time.Second)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrDeviceOffline)
+	assert.NotContains(t, err.Error(), "persisted for replay")
+
+	// Small delay to ensure no spurious async persist.
+	require.Never(t, func() bool {
+		return ps.savedCount() > 0
+	}, 200*time.Millisecond, 10*time.Millisecond, "should not persist for non-offline errors")
+}

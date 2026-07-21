@@ -118,6 +118,31 @@ func (e *errCaller) ServerRequest(_ context.Context, _, _, _ string, _ json.RawM
 	return nil, e.err
 }
 
+// retryCaller returns an error on the first call, then returns a success
+// response on subsequent calls. Used to test the offline retry logic.
+type retryCaller struct {
+	mu      sync.Mutex
+	first   error
+	resp    *protocol.PackageDataResponse
+	callNum int
+}
+
+func (r *retryCaller) ServerRequest(_ context.Context, _, _, _ string, _ json.RawMessage, _ time.Duration) (*protocol.PackageDataResponse, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.callNum++
+	if r.callNum == 1 {
+		return nil, r.first
+	}
+	return r.resp, nil
+}
+
+func (r *retryCaller) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.callNum
+}
+
 // errWithMessage returns an error with the given message.
 type errorWithMessage string
 
@@ -348,4 +373,115 @@ func TestBuildToolInfo_InvalidSchema(t *testing.T) {
 			})
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// CFT-12: Offline retry — first call fails, retry succeeds
+// ---------------------------------------------------------------------------
+
+// TestNewClientFunctionTool_OfflineRetry_Success verifies that when the first
+// ServerRequest returns a device-offline error, executeClientFunction waits
+// and retries once, succeeding on the second attempt.
+func TestNewClientFunctionTool_OfflineRetry_Success(t *testing.T) {
+	funcInfo := protocol.FunctionInfo{
+		Name:        "read_file",
+		Description: "Read a local file",
+		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+	caller := &retryCaller{
+		first: errWithMessage("send request: device offline, request persisted for replay: reverse_rpc: device is offline"),
+		resp:  &protocol.PackageDataResponse{Data: json.RawMessage(`"recovered"`), Code: 0},
+	}
+	tool, err := newClientFunctionTool(funcInfo, caller, "alice", "dev-1", 30*time.Second)
+	require.NoError(t, err)
+
+	result, err := tool.InvokableRun(context.Background(), `{}`)
+	require.NoError(t, err)
+	assert.Equal(t, `"recovered"`, result)
+	assert.Equal(t, 2, caller.callCount(), "should have called ServerRequest twice")
+}
+
+// ---------------------------------------------------------------------------
+// CFT-13: Offline retry — both attempts fail (persisted for replay message)
+// ---------------------------------------------------------------------------
+
+// TestNewClientFunctionTool_OfflineRetry_PersistedMessage verifies that when
+// both the initial call and retry return a device-offline error with
+// "persisted for replay", the LLM-friendly message reflects that the request
+// was queued.
+func TestNewClientFunctionTool_OfflineRetry_PersistedMessage(t *testing.T) {
+	funcInfo := protocol.FunctionInfo{
+		Name:        "read_file",
+		Description: "Read a local file",
+		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+	// errCaller always returns the same error — both attempts fail.
+	caller := &errCaller{err: errWithMessage("send request: device offline, request persisted for replay: reverse_rpc: device is offline")}
+	tool, err := newClientFunctionTool(funcInfo, caller, "alice", "dev-1", 30*time.Second)
+	require.NoError(t, err)
+
+	result, err := tool.InvokableRun(context.Background(), `{}`)
+	require.NoError(t, err)
+	assert.Contains(t, result, `"success":false`)
+	assert.Contains(t, result, "queued")
+	assert.Contains(t, result, "reconnects")
+}
+
+// ---------------------------------------------------------------------------
+// CFT-14: isDeviceOfflineError helper
+// ---------------------------------------------------------------------------
+
+func TestIsDeviceOfflineError(t *testing.T) {
+	tests := []struct {
+		name     string
+		errMsg   string
+		expected bool
+	}{
+		{"device offline", "send request: device offline, request persisted for replay: reverse_rpc: device is offline", true},
+		{"no connections", "no connections available for device", true},
+		{"device is offline", "device is offline", true},
+		{"timeout", "context deadline exceeded", false},
+		{"connection reset", "connection reset by peer", false},
+		{"generic error", "something else", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := errWithMessage(tc.errMsg)
+			assert.Equal(t, tc.expected, isDeviceOfflineError(err))
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CFT-15: Offline retry — context cancelled during wait
+// ---------------------------------------------------------------------------
+
+// TestNewClientFunctionTool_OfflineRetry_ContextCancelled verifies that if the
+// context is cancelled during the 3-second retry wait, the function returns
+// a soft failure "tool call cancelled" without attempting the retry.
+func TestNewClientFunctionTool_OfflineRetry_ContextCancelled(t *testing.T) {
+	funcInfo := protocol.FunctionInfo{
+		Name:        "read_file",
+		Description: "Read a local file",
+		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+	caller := &retryCaller{
+		first: errWithMessage("send request: device offline, request persisted for replay: reverse_rpc: device is offline"),
+		resp:  &protocol.PackageDataResponse{Data: json.RawMessage(`"ok"`), Code: 0},
+	}
+	tool, err := newClientFunctionTool(funcInfo, caller, "alice", "dev-1", 30*time.Second)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel after 500ms — well within the 3-second retry wait.
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		cancel()
+	}()
+
+	result, err := tool.InvokableRun(ctx, `{}`)
+	require.NoError(t, err)
+	assert.Contains(t, result, `"success":false`)
+	assert.Contains(t, result, "cancelled")
+	assert.Equal(t, 1, caller.callCount(), "should NOT have retried after context cancel")
 }
