@@ -431,13 +431,13 @@ sequenceDiagram
 #### 4. Agent 配置不存在
 
 - 触发条件: `registry.Get(agentID)` 返回 not found
-- 处理逻辑: `cleanupAfterResumeFailure` 清理状态 + 发送错误消息 + 标记 `agent:resume:{checkpointID}`（24h）+ 删除 `agent:resume:processing:{checkpointID}` + 释放锁（仅当 weOwnLock=true）
-- 最终结果: 用户看到"Agent 配置不存在，请重新发送消息"
+- 处理逻辑: `cleanupAfterResumeFailure` 清理状态 + 发送错误消息（`sendErrorMessage`："抱歉，恢复执行失败，请重新发送消息。"）+ 标记 `agent:resume:{checkpointID}`（24h）+ 删除 `agent:resume:processing:{checkpointID}` + 释放锁（仅当 weOwnLock=true）
+- 最终结果: 用户看到"恢复执行失败，请重新发送消息"
 
 #### 5. Agent 构建失败 (Build error)
 
 - 触发条件: `agentBuilder.Build` 返回 error
-- 处理逻辑: 与"Agent 配置不存在"相同——清理状态、发送错误消息、标记 `agent:resume:{checkpointID}`（24h）、释放锁
+- 处理逻辑: 与"Agent 配置不存在"相同——清理状态、发送错误消息（同一消息文本）、标记 `agent:resume:{checkpointID}`（24h）、删除 `agent:resume:processing:{checkpointID}`、释放锁
 - 最终结果: 用户看到"恢复执行失败，请重新发送消息"
 
 #### 6. QuestionStore 为 nil
@@ -784,7 +784,7 @@ sequenceDiagram
     BH->>WS: BroadcastUpdates(humanUserID)
     Note over Client: 客户端收到后主动拉取完整会话状态
 
-    Note over Caller,BH: 持久化消息广播
+    Note over Caller,BH: 持久化消息广播 (executor/resume handler 持久化后)
     Caller->>BH: BroadcastMessageUpdate(userUpdates)
     loop 每个 userUpdate
         BH->>WS: BroadcastUpdates(u.UserID, Seq=u.Seq)

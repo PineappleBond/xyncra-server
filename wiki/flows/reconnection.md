@@ -814,7 +814,7 @@ graph TB
 | 场景 | 处理方式 | 影响 |
 |------|----------|------|
 | **孤立的 user-set 条目** | 连接的 info key 在 Redis 中过期但 user-set 条目未清理时，`CountByUser` 返回膨胀的计数，`ListByUser` 通过检查每个条目的活跃性处理此问题 | 统计可能不准确 |
-| **并发 Update/Patch 调用** | `Update` 使用原子 Lua 脚本写入 Redis，但 `Patch` 在 Go 层执行读-修改-写，并发调用者的元数据更改可能被静默覆盖 | 数据可能丢失 |
+| **并发 Update/Patch 调用** | `Update` 和 `Patch` 均在 Go 层执行非原子的读-修改-写（Get → 修改 → 写回），Lua 脚本仅保证写回阶段的存在性检查，并发调用者的元数据更改可能被静默覆盖 | 数据可能丢失 |
 | **默认连接 TTL** | `RedisConnectionStore` 默认 TTL 为 30 分钟（`defaultConnectionTTL`），连接在最后一次 Refresh 后 30 分钟无心跳即过期驱逐 | 需确保心跳间隔 < 15 分钟 |
 | **超过 MaxConnectionsPerUser** | Add 返回 `ErrMaxConnectionsExceeded`，客户端在释放一个连接前无法建立新连接 | 需客户端管理连接数 |
 

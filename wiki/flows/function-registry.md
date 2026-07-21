@@ -275,8 +275,8 @@ sequenceDiagram
 
 #### 7. 动态工具注册表创建失败
 
-- 触发条件: `toolRegistry.Create(ctx, dynamicTools, nil)` 返回错误（部分工具工厂函数失败）
-- 处理逻辑: `Create` 是 fail-open 的——未注册的工具名被跳过并记录警告，工厂函数出错的工具被跳过并记录错误，但**已成功创建的工具仍被返回**。`BeforeAgent` 记录错误日志后，仍会注入已成功创建的工具（`len(staticTools) > 0` 检查）
+- 触发条件: `toolRegistry.Create(ctx, dynamicTools, nil)` 中部分工具工厂函数失败
+- 处理逻辑: `Create` 有两种降级行为——(1) 未注册的工具名被跳过并记录警告，不进入返回列表；(2) 工厂函数出错的工具被跳过并记录错误，错误被收集并在最后以 `errors.Join` 返回。**已成功创建的工具仍被返回**（`Create` 返回 `([]tool.BaseTool, error)` 元组）。`BeforeAgent` 记录错误日志后，仍会注入已成功创建的工具（`len(staticTools) > 0` 检查）
 - 最终结果: Agent 继续运行，部分动态工具可用。与客户端函数的逐个 fail-open 行为一致
 
 ### 涉及文件

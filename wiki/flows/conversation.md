@@ -477,5 +477,5 @@ flowchart TD
 ### 事务一致性
 
 - 删除和恢复操作在单个事务中执行，确保会话与消息状态一致（会话删除/恢复 + 消息级联操作）
-- 创建操作中 seq 分配和 `UserUpdate` 创建在同一个事务中完成（`store.Transaction`），防止并发操作导致 seq 冲突
-- 删除和恢复操作的 `GetLatestSeq` + `UserUpdate` 创建在主事务**之外**执行（事务提交后），存在理论上的 seq TOCTOU 风险（实践中因并发删除/恢复同一会话的概率极低，可接受）
+- 创建操作中 seq 分配和 `UserUpdate` 创建在同一个事务中完成（`store.Transaction`，内部使用 `tx.Model(&model.UserUpdate{}).Select("COALESCE(MAX(seq), 0)").Scan` 内联查询），防止并发操作导致 seq 冲突
+- 删除和恢复操作的 `GetLatestSeq` + `UserUpdate` 创建在主事务**之外**执行（事务提交后），直接调用 `store.UserUpdateStore().GetLatestSeq()` 和 `store.UserUpdateStore().Create()`，存在理论上的 seq TOCTOU 风险（实践中因并发删除/恢复同一会话的概率极低，可接受）

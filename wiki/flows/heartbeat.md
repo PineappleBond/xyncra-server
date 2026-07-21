@@ -28,7 +28,7 @@
 ### 关键特性
 
 - **Passive renewal**：仅刷新 TTL，不更新元数据
-- **Optional device info**：handler 支持接收设备信息用于可观测性，但当前 Go 和 TypeScript 客户端均不发送（Go 发送 `nil`，TS 发送 `null`）
+- **Optional device info**：handler 支持接收设备信息用于可观测性，但当前 Go 和 TypeScript 客户端均不发送 device_info。Go 客户端传递 `nil` 作为整个 params 参数（序列化为 `{}`），TS 客户端传递 `null` 作为 params 参数。两种情况下 device_info 字段均不出现在请求 JSON 中
 - **Best-effort params**：参数解析失败不影响 heartbeat
 - **Connection expiry detection**：连接过期时返回错误
 - **No rate limiting**：heartbeat 不做频率限制，依赖客户端自律
@@ -69,7 +69,7 @@ sequenceDiagram
         Note over CS: EXISTS infoKey（不存在则返回 0）
         Note over CS: PEXPIRE infoKey（重置连接 TTL）
         Note over CS: PTTL userKey（读取当前 TTL）
-        Note over CS: PEXPIRE userKey（仅当新 TTL > 当前 TTL）
+        Note over CS: PEXPIRE userKey（当 setPTTL < 0 或新 TTL > 当前 TTL）
 
         alt Lua 返回 0（连接已过期）
             CS-->>H: ErrConnectionNotFound
@@ -95,7 +95,7 @@ sequenceDiagram
      - `EXISTS infoKey`：再次检查连接是否存在（防止 GET 与 Lua 之间 key 被淘汰），不存在则返回 0
      - `PEXPIRE infoKey`：重置连接 info key 的 TTL（毫秒精度）
      - `PTTL userKey`：读取 user SET key 的当前剩余 TTL（-1 = 无过期，-2 = key 不存在）
-     - `PEXPIRE userKey`：仅当新 TTL > 当前 TTL 时才更新（MAX 语义）
+     - `PEXPIRE userKey`：当 `setPTTL < 0`（key 无过期或不存在）或新 TTL > 当前 TTL 时才更新（MAX 语义）
    - 若 Lua 返回 0：连接在 GET 与 Lua 之间过期，返回 `ErrConnectionNotFound`
 4. **TTL 解析**：使用连接自身的 `TTL` 字段；若为零或负数，回退到 ConnectionStore 的 `defaultTTL`（默认 30 分钟）
 5. **处理结果**：
@@ -166,7 +166,7 @@ flowchart TD
 
 ### 5. 用户 SET TTL MAX 语义
 
-当多个连接属于同一用户时，user SET key 的 TTL 采用 MAX 语义：仅当新 TTL > 当前 TTL 时才更新。这避免了短 TTL 连接的心跳意外缩短长 TTL 连接的 user SET 有效期。
+当多个连接属于同一用户时，user SET key 的 TTL 采用 MAX 语义：当 `setPTTL < 0`（key 无过期或不存在）或新 TTL > 当前 TTL 时才更新。这避免了短 TTL 连接的心跳意外缩短长 TTL 连接的 user SET 有效期。
 
 ### 6. 心跳间隔大于连接 TTL
 
@@ -255,7 +255,7 @@ Lua 脚本中 `PTTL userKey` 的返回值有三种情况：
 | EXISTS | Redis（Lua） | 检查 info key 是否存在 |
 | PEXPIRE | Redis（Lua） | 重置连接 info key 的 TTL（毫秒精度） |
 | PTTL | Redis（Lua） | 读取 user SET key 的当前剩余 TTL |
-| PEXPIRE | Redis（Lua） | 刷新 user SET key 的 TTL（MAX 语义：仅当新 TTL > 当前 TTL 时才更新） |
+| PEXPIRE | Redis（Lua） | 刷新 user SET key 的 TTL（MAX 语义：当 setPTTL < 0 或新 TTL > 当前 TTL 时才更新） |
 
 > 注：GET 在 Lua 脚本外执行；Lua 脚本内的 4 个操作原子执行。总计 2 次 Redis round-trip。
 
