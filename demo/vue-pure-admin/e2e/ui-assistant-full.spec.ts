@@ -9,8 +9,41 @@ const BASE_URL = 'http://localhost:8848'
 const UI_ASSISTANT_INDEX = 7
 
 // ============================================================================
-// IndexedDB 查询工具
+// IndexedDB 工具
 // ============================================================================
+
+/**
+ * 清空 IndexedDB 中的消息数据，确保每个测试从干净状态开始。
+ * 只清空 messages 表，保留 conversations 表以维持会话状态。
+ */
+async function clearIndexedDB(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const databases = await indexedDB.databases()
+    const dbNames = databases
+      .map(db => db.name)
+      .filter(name => name && name.startsWith('xyncra-'))
+
+    for (const dbName of dbNames) {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open(dbName)
+        request.onsuccess = () => resolve(request.result)
+        request.onerror = () => reject(request.error)
+      })
+
+      try {
+        const tx = db.transaction('messages', 'readwrite')
+        const store = tx.objectStore('messages')
+        store.clear()
+        await new Promise<void>((resolve, reject) => {
+          tx.oncomplete = () => resolve()
+          tx.onerror = () => reject(tx.error)
+        })
+      } catch {
+        // store might not exist, ignore
+      }
+    }
+  })
+}
 
 async function getAgentMessages(page: Page): Promise<any[]> {
   return page.evaluate(async () => {
@@ -300,6 +333,9 @@ test.describe('UI Assistant E2E 测试 - P0 场景', () => {
     // 登录后自动跳转到 /#/welcome，无需再次 page.goto(BASE_URL)
     // 避免多余的页面刷新导致 WebSocket 断连重连
     await login(page)
+
+    // 清空 IndexedDB 历史消息，确保每个测试从干净状态开始
+    await clearIndexedDB(page)
 
     // 等待 FloatingAssistant 连接就绪（绿色按钮 = 已连接）
     await waitForFloatingAssistant(page)
@@ -673,6 +709,9 @@ test.describe('UI Assistant E2E 测试 - P1 场景', () => {
   test.beforeEach(async ({ page }) => {
     // 登录后自动跳转到 /#/welcome，无需再次 page.goto(BASE_URL)
     await login(page)
+
+    // 清空 IndexedDB 历史消息，确保每个测试从干净状态开始
+    await clearIndexedDB(page)
 
     // 等待 FloatingAssistant 连接就绪
     await waitForFloatingAssistant(page)
