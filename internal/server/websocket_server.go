@@ -692,11 +692,7 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 	// Cancel any pending function cleanup for this device. This prevents
 	// the race condition where functions are cleaned up during page
 	// navigation while the client is reconnecting.
-	if cancel, ok := s.pendingFuncCleanup[deviceKey]; ok {
-		cancel()
-		delete(s.pendingFuncCleanup, deviceKey)
-		s.logger.Info("websocket: cancelled pending function cleanup on new connection", "userID", userID, "deviceID", deviceID)
-	}
+	s.cancelPendingFuncCleanup(userID, deviceID)
 	if s.clientsByDevice[deviceKey] == nil {
 		s.clientsByDevice[deviceKey] = make(map[string]*Client)
 	}
