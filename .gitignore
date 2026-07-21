@@ -48,6 +48,7 @@ go.work.sum
 # TypeScript 编译产物
 *.d.ts
 *.js.map
+*.tsbuildinfo
 
 # Demo web 编译产物
 demo/web/src/**/*.js

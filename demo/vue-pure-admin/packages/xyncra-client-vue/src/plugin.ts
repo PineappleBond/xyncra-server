@@ -165,14 +165,8 @@ export function createXyncraPlugin(options: XyncraPluginOptions = {}) {
         const b = wsFactory.getLastBridge()
         if (b) {
           b.reconnect()
-        } else {
-          // Fallback: restart client
-          connectionStatus.value = 'connecting'
-          client.start().catch((err) => {
-            logger.error('Xyncra client reconnect failed', err)
-            connectionStatus.value = 'disconnected'
-          })
         }
+        connectionStatus.value = 'connecting'
       }
 
       const provided = {

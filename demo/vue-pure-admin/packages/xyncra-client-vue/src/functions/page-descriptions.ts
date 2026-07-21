@@ -238,7 +238,7 @@ const pageDescriptions: Record<string, Omit<PageDescription, 'route'>> = {
       {
         name: '指标切换区',
         purpose: '切换销售额/访问量等指标',
-        functions: ['pg_dashboard_analysis_tab'],
+        functions: ['pg_dashboard_analysis_switchMetric', 'pg_dashboard_analysis_switchDateRange'],
       },
     ],
   },

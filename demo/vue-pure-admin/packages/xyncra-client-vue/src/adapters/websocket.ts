@@ -234,7 +234,6 @@ class CoreWebSocketBridge implements IWebSocket {
 
     this.ws.onclose = (event: globalThis.CloseEvent) => {
       if (this.closeHandler) this.closeHandler(event.code, event.reason);
-      // Auto-reconnect unless intentionally closed
       if (!this.intentionalClose) {
         this.scheduleReconnect();
       }
