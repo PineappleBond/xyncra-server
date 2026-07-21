@@ -309,4 +309,5 @@ flowchart TD
 - [断线重连](reconnection.md)
 - [消息处理](message.md)
 - [WebSocket 连接管理](websocket-connection.md)
-- [UserUpdate 存储](../architecture/user-update.md)
+- [存储层业务流程](storage.md)
+- [业务流程索引](index.md)

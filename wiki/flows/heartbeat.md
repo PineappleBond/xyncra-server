@@ -295,4 +295,5 @@ flowchart TD
 
 - [WebSocket 连接管理](websocket-connection.md)
 - [断线重连](reconnection.md)
-- [ConnectionStore 实现](../architecture/connection-store.md)
+- [多节点广播](broadcasting.md)
+- [业务流程索引](index.md)

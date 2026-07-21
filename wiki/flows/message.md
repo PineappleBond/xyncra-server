@@ -497,7 +497,8 @@ MQ 推送采用 fire-and-forget 模式，推送失败不影响主流程。客户
 
 ## 相关文档
 
-- [消息存储层接口定义](../architecture/message-store.md)
-- [WebSocket 实时推送架构](../architecture/websocket.md)
-- [MQ 任务处理机制](../architecture/mq.md)
-- [UserUpdate 同步机制](../architecture/user-update.md)
+- [存储层业务流程](storage.md)
+- [WebSocket 连接管理](websocket.md)
+- [消息队列业务流程](message-queue.md)
+- [同步更新](sync-updates.md)
+- [业务流程索引](index.md)
