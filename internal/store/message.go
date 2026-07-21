@@ -61,7 +61,7 @@ func (ms *MessageStore) ListByConversation(ctx context.Context, convID string, a
 		attribute.String(tracing.AttrConversationID, convID))
 	defer func() { finish(err) }()
 
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 || limit > 201 {
 		limit = 50
 	}
 

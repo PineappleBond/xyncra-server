@@ -54,6 +54,7 @@ services:
 
   jaeger-e2e:
     image: jaegertracing/all-in-one:latest
+    user: "root"
     ports:
       - "14317:4317"    # OTLP gRPC
       - "14318:4318"    # OTLP HTTP

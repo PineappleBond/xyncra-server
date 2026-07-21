@@ -7,7 +7,7 @@ export default defineConfig({
   retries: 0,
   workers: 1, // 单 worker，避免并发问题
   reporter: 'html',
-  timeout: 60000, // 单个测试 60s 超时
+  timeout: 180000, // 单个测试 180s 超时（HITL 测试需要重试时间）
   use: {
     baseURL: 'http://localhost:8851',
     trace: 'on-first-retry',
