@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Test & coverage
+coverage/
+playwright-report/
+test-results/
+e2e/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Local env
+.env
+.env.local
+.env.*.local
+
+# Temp
+*.tmp
+*.bak

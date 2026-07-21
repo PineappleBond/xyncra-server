@@ -1,0 +1,34 @@
+{
+  "name": "@xyncra/client-vue",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@xyncra/client-core": "workspace:*",
+    "@xyncra/protocol": "workspace:*",
+    "dayjs": "^1.11.21",
+    "dompurify": "^3.2.6",
+    "highlight.js": "^11.11.1",
+    "marked": "^15.0.0",
+    "marked-highlight": "^2.2.4",
+    "vue": "^3.5.40"
+  },
+  "peerDependencies": {
+    "vue": "^3.5.40"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/dompurify": "^3.2.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "@vue/test-utils": "^2.4.6",
+    "jsdom": "^26.1.0",
+    "vitest": "^3.2.1"
+  }
+}
