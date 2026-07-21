@@ -79,7 +79,7 @@ sequenceDiagram
 4. **解析配置**：解析每个 `.md` 文件的 YAML front matter 为 AgentConfig（Markdown body 作为 SystemPrompt）
 5. **验证配置**：检查必填字段（`id`、`name`、`model`、`api_key_env`）
 6. **替换配置**：清空现有配置后加载新配置（完全替换）
-7. **获取数量**：调用 `Count()` 获取已注册的 agent 数量
+7. **获取数量**：调用 `len(h.registry.ListAll())` 获取已注册的 agent 数量
 8. **返回结果**：返回 `{count: N}`
 
 ---

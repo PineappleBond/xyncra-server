@@ -257,7 +257,7 @@ sequenceDiagram
 | **范围内所有更新都是 gap** | 客户端收到整页 `type:gap` 条目 | 表明数据丢失或 DB 清理（30 天保留期 DefaultCleanupRetention） |
 | **GetLatestSeq 数据库查询错误** | 返回内部错误给客户端 | 客户端应重试 |
 | **ListByUserRange 数据库查询错误** | 返回内部错误给客户端 | 客户端应重试 |
-| **Seq 回绕** | AfterSeq 为 uint32，在约 43 亿处回绕，`latestSeq <= afterSeq` 比较会不正确 | 30 天清理窗口下实际不太可能发生 |
+| **Seq 回绕** | AfterSeq 为 uint32，在约 43 亿处回绕，`latestSeq <= afterSeq` 比较会不正确。但 pending store 使用 uint64 seq（`reverse_rpc.go` 的 `nextSeq`），不会回绕 | 30 天清理窗口下实际不太可能发生 |
 | **超大间隙** | 客户端落后数千个 seq 且 limit=500 时，收到 500 条混合条目（真实+gap） | `has_more=true` 信号客户端继续分页 |
 | **同步期间并发写入** | GetLatestSeq 之后 ListByUserRange 之前可能有新 update 写入请求范围内的 seq | 该 update 会被包含在本次或下次同步中，属于良性情况 |
 | **空用户（从未有更新）** | GetLatestSeq 返回 0，afterSeq=0 时触发提前退出返回空 | 无影响 |

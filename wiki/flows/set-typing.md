@@ -140,7 +140,7 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[检查 Rate Limiter] --> B{距上次 > 1秒?}
-    B -->|否| C[静默返回 OK]
+    B -->|否| C[静默返回 OK (不广播)]
     B -->|是| D[记录当前时间, 继续广播]
 ```
 

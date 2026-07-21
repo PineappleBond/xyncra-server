@@ -213,7 +213,9 @@ sequenceDiagram
     Worker->>BC: SendTyping(false)
     Worker->>BC: SendStreamUpdate (isDone=true)
     Worker->>Store: SendMessage (持久化 Agent 回复)
-    Worker->>BC: BroadcastMessageUpdate
+    loop 每个 recipient
+        Worker->>BC: BroadcastRaw(userID, updates) [返回 error]
+    end
     Worker->>Idem: MarkProcessed (processedKey, 24h)
     Worker->>Idem: DeleteKey (processingKey)
     Worker->>Exec: ClearAgentStatus + DeleteQuestions + DeleteCheckpoint
@@ -253,6 +255,12 @@ sequenceDiagram
 - 触发条件: `agentBuilder.Build` 返回 error
 - 处理逻辑: 与"Agent 配置不存在"相同——清理状态、发送错误消息、标记 processedKey、释放锁
 - 最终结果: 用户看到"恢复执行失败，请重新发送消息"
+
+#### 6. QuestionStore 为 nil
+
+- 触发条件: `executor.questionStore` 为 nil（配置缺失或未注入）
+- 处理逻辑: 记录错误日志，释放锁，return nil 跳过执行
+- 最终结果: 任务静默完成，Agent 不会恢复执行。由于 questionStore 为 nil 意味着 HITL 功能不完整，这是一个防御性检查
 
 ### 涉及文件
 

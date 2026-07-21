@@ -296,7 +296,7 @@ flowchart TD
 
 | 场景 | 行为 |
 |------|------|
-| **BroadcastUpdates 返回 error** | 所有 BroadcastHelper 方法都是 fire-and-forget，error 仅 `logger.Error` 不向调用方传播，Agent 执行不会因广播失败而中断。 |
+| **BroadcastUpdates 返回 error** | 除 `BroadcastRaw` 外，所有 BroadcastHelper 方法都是 fire-and-forget，error 仅 `logger.Error` 不向调用方传播，Agent 执行不会因广播失败而中断。`BroadcastRaw` 直接返回 error 给调用方（resume handler 用于持久化消息投递，调用方自行处理错误）。 |
 | **AgentRegistry 为 nil（nil-safe D-063）** | `isAgent()` 检查 `registry == nil` 时返回 false，BroadcastHelper 在 registry 为 nil 时仍正常工作，只是 `isAgent` 字段始终为 false。 |
 | **JSON Marshal 失败** | 各 Send 方法中 marshal 失败直接 return 不发送任何消息，error 被 `logger.Error` 记录。 |
 | **同一用户有多设备连接** | `BroadcastUpdates` -> `broadcastLocal` 遍历 `clientsByUser[userID]` 中所有连接，每个设备都收到更新，这是预期行为。 |
@@ -362,7 +362,7 @@ stateDiagram-v2
 
 | 场景 | 行为 |
 |------|------|
-| **Subscribe goroutine 中 Redis 连接断开** | `ps.Channel()` 返回的 channel 会被关闭（`ok==false`），`Subscribe` 返回 nil。WebSocketServer 中仅记录日志（如果 ctx 未取消），节点失去跨节点广播能力但不崩溃。 |
+| **Subscribe goroutine 中 Redis 连接断开** | `ps.Channel()` 返回的 channel 会被关闭（`ok==false`），`Subscribe` 返回 nil。`Subscribe` 函数自带 `defer ps.Close()`，返回时自动关闭 PubSub 连接。WebSocketServer 中仅记录日志（如果 ctx 未取消），节点失去跨节点广播能力但不崩溃。 |
 | **Close 被多次调用** | `b.ps` 在第一次 Close 时被置 nil，后续调用检测 `ps == nil` 直接返回 nil，幂等安全。 |
 | **Publish 和 Subscribe 使用同一 redis.Client** | 文档注释要求 Pub/Sub 使用专用连接（go-redis 限制）。如果共享 client，Subscribe 会独占连接导致其他命令阻塞。 |
 | **GracefulStop 时 Subscribe 尚未建立** | Subscribe 在独立 goroutine 中启动，Close 时 `b.ps` 可能为 nil（Subscribe 还没执行到 PSubscribe）。Close 检查 `ps==nil` 直接返回，无 panic。 |

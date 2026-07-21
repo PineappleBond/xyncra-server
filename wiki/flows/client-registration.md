@@ -288,9 +288,16 @@ sequenceDiagram
     alt functionRegistry != nil
         WS->>WS: 检查 clientsByDevice[deviceKey]
         alt !hasActiveConn (该设备无其他连接)
-            WS->>FR: OnDeviceDisconnect(ctx, userID, deviceID)
-            FR->>FR: 从 devices[userID][deviceID] 移除
-            FR->>FR: 清理用户级映射条目 (如果无其他设备)
+            WS->>WS: scheduleFuncCleanup(userID, deviceID)
+            Note over WS: 启动 grace period 定时器 (默认 10s)
+            alt grace period 内设备重连
+                WS->>WS: cancelPendingFuncCleanup(userID, deviceID)
+                Note over WS: 取消清理, 函数保留
+            else grace period 超时且无活跃连接
+                WS->>FR: OnDeviceDisconnect(ctx, userID, deviceID)
+                FR->>FR: 从 devices[userID][deviceID] 移除
+                FR->>FR: 清理用户级映射条目 (如果无其他设备)
+            end
         end
     end
 
@@ -319,9 +326,11 @@ sequenceDiagram
    - 服务器检查 `functionRegistry != nil`
    - 查找 `clientsByDevice[deviceKey]`
 
-5. **清理函数注册**
+5. **延迟清理函数注册**
    - 如果 `!hasActiveConn`（该设备无其他连接）：
-     - 调用 `functionRegistry.OnDeviceDisconnect(ctx, userID, deviceID)`
+     - 调用 `scheduleFuncCleanup(userID, deviceID)` 启动 grace period 定时器（默认 10 秒）
+     - 如果设备在 grace period 内重连，`cancelPendingFuncCleanup` 取消清理，函数注册保留
+     - 如果 grace period 超时且仍无活跃连接，调用 `OnDeviceDisconnect(ctx, userID, deviceID)`
      - 从 `devices[userID][deviceID]` 中移除设备条目
      - 如果该用户不再有设备，清理用户级映射条目以防止内存泄漏
 
@@ -334,12 +343,14 @@ sequenceDiagram
 
 | 场景 | 处理方式 | 设计决策 |
 |------|---------|---------|
-| 设备替换（旧连接断开清理之前新连接已建立） | `hasActiveConn` 为 true，跳过函数清理 | 防止替换连接的函数被删除的竞态 |
+| 设备替换（旧连接断开清理之前新连接已建立） | `cancelPendingFuncCleanup` 取消 grace period 定时器；若已超时则 `hasActiveConn` 为 true 跳过清理 | 双重保护：grace period 内重连取消清理 + `hasActiveConn` 防止替换连接的函数被删除的竞态 |
 | 对未知设备调用 `OnDeviceDisconnect` | 幂等，返回 `(nil, nil)` | 无副作用 |
 | `ConnectionStore.Remove` 期间 Redis 不可达 | 5 秒超时，错误被记录但清理继续 | 清理不因存储故障阻塞 |
 | `functionRegistry` 为 nil | 整个清理块被跳过 | D-063：nil-safe 设计 |
 | 服务器关闭 | `closeAllClients()` 关闭所有连接 | 不触发逐设备的函数清理（批量清理路径） |
-| 同一设备的多个连接 | 最后一次断开触发清理 | D-095 替换逻辑后不应发生，但防御性处理 |
+| 同一设备的多个连接 | 最后一次断开触发 `scheduleFuncCleanup` | D-095 替换逻辑后不应发生，但防御性处理 |
+| Grace period 内设备重连 | `cancelPendingFuncCleanup` 取消定时器，函数保留 | 避免页面导航期间（短暂断开后立即重连）函数被误删 |
+| Grace period 超时（默认 10s） | `OnDeviceDisconnect` 执行实际清理 | 双重检查 `hasActiveConn` 防止竞态 |
 
 ---
 

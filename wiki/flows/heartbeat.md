@@ -147,8 +147,9 @@ flowchart TD
 
 | 操作 | 存储 | 说明 |
 |------|------|------|
+| GET | Redis | 读取连接 info key 的 JSON 数据，获取 TTL 配置和 UserID；若 key 不存在则返回 ErrConnectionNotFound |
 | PEXPIRE | Redis | 重置连接 info key 的 TTL（毫秒精度），通过 Lua 脚本原子执行 |
-| PEXPIRE | Redis | 刷新 user SET key 的 TTL（MAX 语义：仅当新 TTL > 当前 TTL 时才更新） |
+| PEXPIRE | Redis | 刷新 user SET key 的 TTL（MAX 语义：仅当新 TTL > 当前 TTL 时才更新），通过同一 Lua 脚本原子执行 |
 
 ---
 

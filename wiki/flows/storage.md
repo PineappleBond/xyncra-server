@@ -593,7 +593,7 @@ erDiagram
         uuid agent_id
         uuid checkpoint_id
         timestamp agent_last_activity
-        bigint last_message_at
+        timestamp last_message_at
         bigint last_processed_message_id
         bigint last_read_message_id_1
         bigint last_read_message_id_2
