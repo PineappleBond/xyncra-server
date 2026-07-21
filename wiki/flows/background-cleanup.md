@@ -1,6 +1,6 @@
 # Background Cleanup 业务流程
 
-本文档描述 Xyncra 服务器和服务端/客户端中的后台清理任务，包括 UserUpdate 过期清理、HITL 超时清理、上下文缓存清理、工具结果清理、Rate Limiter 清理和客户端日志清理。
+本文档描述 Xyncra 服务器和服务端/客户端中的后台清理任务，包括 UserUpdate 过期清理、HITL 超时清理、上下文缓存清理、工具结果清理、Rate Limiter 清理和客户端日志清理。所有服务端清理任务在 `cmd/xyncra-server/main.go` 中启动，通过共享的 `context.Context` 管理生命周期。
 
 ---
 
@@ -117,8 +117,10 @@ sequenceDiagram
                 alt 状态已不是 asking_user
                     BG->>BG: 跳过 (已被其他操作解决)
                 else 仍为 asking_user
+                    BG->>BG: 确定 humanUserID（排除 AgentID）
+
                     BG->>CS: ClearAgentStatus(convID)
-                    CS->>DB: UPDATE conversations SET agent_status='idle'
+                    CS->>DB: UPDATE conversations SET agent_status='idle', agent_id='', checkpoint_id=''
                     DB-->>CS: 返回 updated_at
 
                     alt checkpointID 非空
@@ -131,7 +133,7 @@ sequenceDiagram
                         CP->>Redis: DEL checkpoint key
                     end
 
-                    BG->>DS: SendMessage(超时提示消息)
+                    BG->>DS: SendMessage(超时提示消息, recipients=[humanUserID, agentID])
                     DS->>DB: INSERT message ("抱歉，等待时间过长，会话已超时。请重新发送消息。")
 
                     BG->>BC: SendAgentTimeout(humanUserID, agentID, convID, "hitl_timeout")
@@ -145,17 +147,18 @@ sequenceDiagram
 
 ### 详细步骤
 
-1. **定时触发**：每 5 分钟触发一次（默认值，可配置）
-2. **查询超时会话**：调用 `ListStaleHITLConversations`，获取所有 `agent_status='asking_user'` 且 `agent_last_activity < NOW() - 24h` 的会话，限制最多 100 条
-3. **分布式锁**：对每个会话使用 Redis `SETNX` 获取分布式锁（key: `hitl:cleanup:{conversationID}`，TTL: 30 秒），防止多节点重复处理
-4. **重新检查状态**：获取锁后重新查询会话最新状态，确认仍为 `asking_user`（其他节点或用户操作可能已解决）
-5. **清理操作**（所有步骤非致命，失败仅记录日志）：
-   - 清除会话的 agent 状态（重置为 idle），返回 `updated_at`
-   - 如果 `checkpointID` 非空，软删除该 checkpoint 的所有 questions（GORM `Delete`）
-   - 如果 `checkpointID` 非空，删除 Redis 中的 checkpoint key
-6. **发送超时消息**：通过 `DataStore.SendMessage` 向用户发送超时提示消息（"抱歉，等待时间过长，会话已超时。请重新发送消息。"）
-7. **广播通知**：发送 `agent_timeout` 临时事件通知和 `conversation_update` 通知客户端刷新状态
-8. **锁释放**：通过 Redis TTL（30 秒）自动释放，无需显式 DEL
+1. **定时触发**：每 5 分钟触发一次（默认值，可通过 `HITLCleanupConfig.Interval` 配置）
+2. **查询超时会话**：调用 `ListStaleHITLConversations`，获取所有 `agent_status='asking_user'` 且 `agent_last_activity < NOW() - 24h` 的会话，限制最多 100 条（`BatchSize` 可配置）
+3. **分布式锁**：对每个会话使用 Redis `SETNX` 获取分布式锁（key: `hitl:cleanup:{conversationID}`，TTL: 30 秒），防止多节点重复处理。获取锁失败或 Redis 不可达时跳过该会话
+4. **重新检查状态**：获取锁后重新查询会话最新状态（通过 `ConversationStore.Get`，自动排除软删除记录），确认仍为 `asking_user`（其他节点或用户操作可能已解决）
+5. **确定 humanUserID**：从会话的 `UserID1`/`UserID2` 中排除 `AgentID`，得到人类用户 ID
+6. **清理操作**（所有步骤非致命，失败仅记录日志）：
+   - 清除会话的 agent 状态：`ClearAgentStatus` 执行 `UPDATE conversations SET agent_status='idle', agent_id='', checkpoint_id='', agent_last_activity=NOW(), updated_at=NOW()`，返回 `updated_at`
+   - 如果 `checkpointID` 非空且 `questionStore != nil`，软删除该 checkpoint 的所有 questions（GORM `Delete`，设置 `deleted_at`）
+   - 如果 `checkpointID` 非空且 `checkpointStore != nil`，删除 Redis 中的 checkpoint key
+7. **发送超时消息**：通过 `DataStore.SendMessage` 向 humanUserID 和 agentID 双方发送超时提示消息（"抱歉，等待时间过长，会话已超时。请重新发送消息。"），消息类型为 text，status 为 sent
+8. **广播通知**：通过 `BroadcastHelper` 发送 `agent_timeout` 临时事件通知（reason: `"hitl_timeout"`）和 `conversation_update` 通知客户端刷新状态（仅在 `broadcaster != nil` 时）
+9. **锁释放**：通过 Redis TTL（30 秒）自动释放，无需显式 DEL
 
 ### 边缘场景
 
@@ -163,13 +166,15 @@ sequenceDiagram
 |------|----------|
 | 获取锁失败 | 跳过该会话，其他节点正在处理 |
 | 获取锁后状态已变更 | 重新检查后跳过，避免误清理 |
-| 清理期间 panic | 每个会话独立 recover，不影响其他会话 |
+| 清理期间 panic | 每个会话独立 recover，不影响其他会话（双层 recover：per-cycle + per-conversation） |
 | 数据库不可达 | 记录错误日志，下次重试 |
-| Redis 不可达 | 锁获取失败，跳过该会话 |
+| Redis 不可达 | 锁获取失败（SetNX 返回 error），跳过该会话 |
 | questionStore 为 nil | 跳过 questions 清理（nil-safe, D-063） |
 | checkpointStore 为 nil | 跳过 checkpoint 清理（nil-safe） |
+| broadcaster 为 nil | 跳过广播通知（nil-safe） |
 | 发送超时消息失败 | 记录错误日志，不影响其他清理步骤 |
-| 批量处理上限 | 每次最多处理 100 条，剩余下次处理 |
+| 批量处理上限 | 每次最多处理 100 条（BatchSize 可配置），剩余下次处理 |
+| AgentID 与 UserID1 相同 | humanUserID 回退为 UserID2 |
 
 ---
 
@@ -206,7 +211,7 @@ sequenceDiagram
 2. **遍历缓存**：使用 `sync.Map.Range` 遍历所有缓存条目
 3. **检查过期**：检查每个条目的 `fetchedAt` 时间，与当前时间比较是否超过 TTL（默认 30 秒）
 4. **删除过期条目**：删除超过 TTL 的条目，同时删除类型不正确的损坏条目
-5. **Panic Recovery**：`cleanupExpired` 方法有 `defer recover()` 保护，防止清理 panic 终止 goroutine
+5. **Panic Recovery**：`cleanupExpired` 方法有 `defer recover()` 保护，防止清理 panic 终止 goroutine。注意：recover 后静默继续（不记录 panic 信息，因为没有 logger 引用）
 
 ### 边缘场景
 
@@ -215,7 +220,8 @@ sequenceDiagram
 | 缓存为空 | 静默跳过 |
 | 并发访问 | `sync.Map` 支持并发读写，无需额外锁 |
 | 清理期间有新请求 | 新请求正常处理，不受影响 |
-| 条目类型损坏 | 检测后删除损坏条目 |
+| 条目类型损坏 | 检测后删除损坏条目（`value.(*cachedContext)` 类型断言失败） |
+| 清理 panic | `defer recover()` 保护，静默继续（无 logger） |
 
 ---
 
@@ -248,20 +254,21 @@ sequenceDiagram
 
 ### 详细步骤
 
-1. **定时触发**：由调用方通过 `StartCleanup(ctx, interval)` 启动，间隔由调用方配置
-2. **遍历结果**：遍历 `map[string]storedResult` 中的所有条目
+1. **定时触发**：由调用方通过 `StartCleanup(ctx, interval)` 启动，服务端在 `main.go` 中以 5 分钟间隔启动（`DefaultToolResultStore.StartCleanup(ctx, 5*time.Minute)`）
+2. **遍历结果**：持有写锁（`sync.RWMutex.Lock`），遍历 `map[string]storedResult` 中的所有条目
 3. **检查过期**：检查每个结果的 `createdAt` 时间，与当前时间比较是否超过 TTL（默认 1 小时）
 4. **删除过期结果**：删除超过 TTL 的结果
-5. **容量驱逐**：当条目数超过 `maxSize`（默认 10000）时，`Store` 方法会主动驱逐最旧的条目
+5. **容量驱逐**：当条目数超过 `maxSize`（默认 10000）时，`Store` 方法会主动驱逐最旧的条目（`evictOldest` 遍历全部条目找 oldest）
 
 ### 边缘场景
 
 | 场景 | 处理方式 |
 |------|----------|
 | 存储为空 | 静默跳过 |
-| 并发访问 | `sync.RWMutex` 保护，支持并发读写 |
-| 清理期间有新请求 | 新请求正常处理，不受影响 |
+| 并发访问 | `sync.RWMutex` 保护（Cleanup 持有写锁，Retrieve/Store 使用读锁/写锁） |
+| 清理期间有新请求 | Cleanup 持有写锁期间新请求会阻塞，完成后正常处理 |
 | 超过最大容量 | 写入时主动驱逐最旧条目 |
+| panic recovery | **无 recovery**，Cleanup 方法无 `defer recover()`，依赖调用方的 goroutine 管理 |
 
 ---
 
@@ -312,7 +319,7 @@ sequenceDiagram
 2. **遍历条目**：遍历 `sync.Map` 中的所有条目
 3. **检查访问时间**：获取每个条目的 `lastAccess` 时间（加锁读取后立即释放）
 4. **删除过期条目**：删除 10 分钟未访问的条目
-5. **注意**：`cleanupLoop` 没有 panic recovery，也没有 context 取消机制（`for range ticker.C`），goroutine 依赖 ticker 的 GC 回收
+5. **注意**：`cleanupLoop` 没有 panic recovery，也没有 context 取消机制（`for range ticker.C` 无限循环），goroutine 依赖进程退出终止。如果 `cleanupStaleLimiters` panic，goroutine 将终止，rate limiter 条目将不再被清理
 
 ### 边缘场景
 
@@ -321,7 +328,9 @@ sequenceDiagram
 | Map 为空 | 静默跳过 |
 | 并发访问 | `sync.Map` 支持并发读写 |
 | 清理期间有新请求 | 新请求正常处理，`LoadOrStore` 原子操作 |
-| 条目被访问时清理 | 读取 `lastAccess` 时加锁，避免数据竞争 |
+| 条目被访问时清理 | 读取 `lastAccess` 时加锁（`rl.mu.Lock`），获取值后立即释放，避免数据竞争 |
+| cleanupLoop panic | **无 recovery**，goroutine 终止，rate limiter 条目不再被清理直到进程重启 |
+| context 取消 | **不响应 ctx.Done()**，goroutine 持续运行直到进程退出 |
 
 ---
 
@@ -341,30 +350,30 @@ sequenceDiagram
 
     loop 每 1 小时
         BG->>BG: runCleanup(retention=7天)
-        BG->>DB: BEGIN TRANSACTION
+        BG->>DB: BEGIN TRANSACTION (db.Transaction)
 
-        BG->>DB: DELETE FROM rpc_logs WHERE created_at < NOW() - 7天
+        BG->>DB: DELETE FROM rpc_logs WHERE created_at < before (GORM model delete)
         DB-->>BG: 删除行数
 
-        BG->>DB: DELETE FROM notification_logs WHERE created_at < NOW() - 7天
+        BG->>DB: DELETE FROM notification_logs WHERE created_at < before (GORM model delete)
         DB-->>BG: 删除行数
 
         alt 任一删除失败
-            BG->>DB: ROLLBACK
+            BG->>DB: ROLLBACK (自动)
             BG->>Logger: Error("auto-cleanup", error)
         else 全部成功
-            BG->>DB: COMMIT
+            BG->>DB: COMMIT (自动)
         end
     end
 ```
 
 ### 详细步骤
 
-1. **定时触发**：每 1 小时触发一次（`defaultCleanupInterval`）
-2. **事务执行**：在单个数据库事务中执行两个 DELETE 操作（L-1 原子性）
-3. **清理 RPC 日志**：`DELETE FROM rpc_logs WHERE created_at < NOW() - 7天`
-4. **清理通知日志**：`DELETE FROM notification_logs WHERE created_at < NOW() - 7天`
-5. **错误处理**：清理失败仅记录日志，不终止 daemon
+1. **定时触发**：每 1 小时触发一次（`defaultCleanupInterval`），通过 `startLogCleanup` goroutine 运行，响应 `ctx.Done()` 退出
+2. **事务执行**：在单个 GORM 事务（`db.Transaction`）中执行两个 DELETE 操作（L-1 原子性）。`runCleanup` 内部创建 `context.Background()`
+3. **清理 RPC 日志**：GORM model delete `&model.RPCLog{}` 条件 `created_at < before`
+4. **清理通知日志**：GORM model delete `&model.NotificationLog{}` 条件 `created_at < before`
+5. **错误处理**：清理失败通过 `cliLogger.Error` 记录日志，不终止 daemon
 
 ### 边缘场景
 
@@ -387,7 +396,7 @@ sequenceDiagram
 | `ConversationStore` | `internal/store` | HITL 超时清理（ListStaleHITLConversations, ClearAgentStatus, Get） |
 | `QuestionStore` | `internal/store` | HITL 超时清理（DeleteByCheckpoint，可选） |
 | `DeletableCheckPointStore` | `internal/agent` | HITL 超时清理（Delete，可选） |
-| `BroadcastHelper` | `internal/agent` | HITL 清理后广播通知 |
+| `BroadcastHelper` | `internal/agent` | HITL 清理后广播通知（可选，nil-safe） |
 | `StoreAPI` (DataStore) | `internal/store` | HITL 超时消息发送（SendMessage） |
 | `redisClient` | `internal/agent` | HITL 分布式锁（SetNX） |
 | `DBContextManager` | `internal/agent` | 上下文缓存清理 |
@@ -430,11 +439,11 @@ HITL 清理使用分布式锁：
 ### 3. Panic Recovery（部分覆盖）
 
 部分清理任务有 panic recovery：
-- **有 recovery**：UserUpdateCleaner（per-cycle）、HITLCleanupTask（per-cycle + per-conversation）、DBContextManager.cleanupExpired
+- **有 recovery**：UserUpdateCleaner（per-cycle，记录日志）、HITLCleanupTask（per-cycle + per-conversation，记录日志）、DBContextManager.cleanupExpired（per-cycle，**静默** recover 无日志）
 - **无 recovery**：ToolResultStore.StartCleanup、streamTextHandler.cleanupLoop、setTypingHandler.cleanupLoop、startLogCleanup
 - **原因**：防止清理任务崩溃导致 goroutine 泄漏
 - **行为**：recover 后继续运行
-- **日志**：记录 panic 信息用于调试
+- **日志**：UserUpdateCleaner 和 HITLCleanupTask 记录 panic 信息用于调试；DBContextManager 静默继续（无 logger 引用）
 
 ### 4. Graceful Degradation
 

@@ -49,15 +49,21 @@ sequenceDiagram
 
     Note over Exec: 1. 注入 CallerDevice 到 context
     Note over Exec: 2. 获取信号量 (Semaphore)
-    Note over Exec: 3. 设置总超时 (默认120s)
+    Note over Exec: 3. 注入 BroadcastInfo 到 context
+    Note over Exec: 4. 设置总超时 (默认120s)
     Exec->>Reg: Get(agentID) 精确匹配
     Reg-->>Exec: AgentConfig
 
     Exec->>BC: SendTyping(typing=true)
 
-    Note over Exec: 4. 启动 typing 超时 goroutine (60s)
+    Note over Exec: 5. 启动 typing 超时 goroutine (60s)
 
     Exec->>Store: GetContext(conversationID, config)
+    Note over Store: sync.Map 缓存 (30s TTL)，命中则直接返回
+    Store->>Store: ListRecentByConversation(DB 查询)
+    Store->>Store: defaultMessageFilter + reverseMessages
+    Store->>Store: trimByTokens 或 trimByMessages
+    Store->>Store: 写入缓存
     Store-->>Exec: messages[]
 
     Exec->>Builder: Build(config)
@@ -71,7 +77,7 @@ sequenceDiagram
 
     Exec->>Exec: convertMessages(messages, registry)
 
-    Note over Exec: 5. 生成 streamID + checkpointID
+    Note over Exec: 6. 生成 streamID + checkpointID
     Exec->>Exec: Runner.Run(messages, checkpointID)
 
     Exec->>Bridge: BridgeWithInterrupt(iter, chunkCh, interruptCh)
@@ -113,11 +119,11 @@ sequenceDiagram
 - 最终结果: 错误消息持久化到对话，返回 nil 给 MQ（不重试）
 
 #### 3. LLM 流式输出中途错误
-- 触发条件: chunk.Err 非 nil（超时/限流/500/502/503）
+- 触发条件: chunk.Err 非 nil（超时/限流/500/502/503/其他）
 - 处理逻辑:
   - 将已累积的 partialText 通过 SendStreamUpdate(isDone=true) 广播
   - 若 partialText 非空则持久化为部分响应
-  - 错误分类: context.DeadlineExceeded -> ErrLLMTimeout; 429/rate -> ErrLLMRateLimited; 500/502/503 -> ErrLLMTimeout
+  - 错误分类: context.DeadlineExceeded -> ErrLLMTimeout; 429/rate -> ErrLLMRateLimited; 500/502/503 -> ErrLLMTimeout; 其他未知错误 -> ErrLLMTimeout (兜底)
 - 最终结果: 返回包装后的错误，由 ExecuteWithErrorMessage 发送用户友好消息
 
 #### 4. Typing 超时
@@ -130,12 +136,19 @@ sequenceDiagram
 - 处理逻辑: 返回 error，ExecuteWithErrorMessage 发送用户友好错误消息
 - 最终结果: 用户通过 WebSocket 已看到完整流式回复，但持久化失败导致返回错误（task_handler 会标记 processed 并返回 nil 给 MQ，不重试）
 
-#### 6. 会话锁获取失败 (Redis 错误)
+#### 6. 上下文缓存 (ContextManager)
+- 实现: DBContextManager 使用 sync.Map + 30s TTL 缓存对话消息
+- 缓存命中: 直接返回内存中的消息列表，跳过 DB 查询
+- 缓存失效: task_handler 在任务完成后调用 InvalidateContextCache 清除缓存，确保重试时加载最新消息
+- 清理机制: 后台 goroutine 每 5 分钟清理过期条目（panic-safe）
+- 裁剪策略: 优先按 token 数裁剪 (MaxTokens)，否则按消息数裁剪 (MaxMessages)
+
+#### 7. 会话锁获取失败 (Redis 错误)
 - 触发条件: lock.Acquire 返回 error
 - 处理逻辑: fail-open 模式，记录错误日志后继续执行（不持有锁）
 - 最终结果: 任务正常执行，但失去并发保护
 
-#### 7. 会话锁已被占用
+#### 8. 会话锁已被占用
 - 触发条件: lock.Acquire 返回 acquired=false
 - 处理逻辑: 返回 error 给 MQ，Asynq 指数退避重试
 - 最终结果: 任务稍后重试
@@ -143,6 +156,7 @@ sequenceDiagram
 ### 涉及文件
 - `executor.go`: 核心执行流水线，编排 Build/Run/Broadcast/Persist
 - `task_handler.go`: MQ 任务处理入口，幂等检查，会话锁管理
+- `db_context_manager.go`: ContextManager 实现，sync.Map 缓存 + token 裁剪
 - `eino_agent.go`: LLM Provider 工厂，Agent 构建器
 - `stream_bridge.go`: 流式输出桥接，HITL 中断检测
 - `broadcast.go`: WebSocket 广播（流式/typing/状态/消息）
@@ -434,7 +448,7 @@ sequenceDiagram
 
     RH->>BC: SendStreamUpdate(finalText, isDone=true)
     RH->>Store: SendMessage(finalMessage)
-    RH->>BC: BroadcastMessageUpdate
+    RH->>BC: BroadcastRaw (per-user, 含 DB seq)
 
     Note over RH: Phase 2 清理
     RH->>Store: ClearAgentStatus(convID)
@@ -477,7 +491,8 @@ sequenceDiagram
 
 #### 6. Multi-turn HITL (恢复后再次中断)
 - 触发条件: Resume 后 agent 再次触发 HITL 中断
-- 处理逻辑: 再次进入 HITL 模式，更新会话状态为 asking_user，持久化新 Question，不释放锁
+- 处理逻辑: 再次进入 HITL 模式，更新会话状态为 asking_user，持久化新 Question；resume handler 不释放锁（若 weOwnLock=false 即初始执行仍持有锁），删除 processingKey 允许后续 resume
+- 注意: resume handler 对 re-interrupt 返回普通 error（非 ErrHITLInterrupted），task_handler 会将其视为永久错误并标记 processed + 释放锁（若拥有）。若初始执行的锁 TTL 未过期（weOwnLock=false），锁保持不释放
 - 最终结果: 同一 checkpoint 可多次 resume 和中断，实现多轮人机交互
 
 #### 7. cleanupAfterResumeFailure 的非致命错误
@@ -912,8 +927,8 @@ flowchart TD
 
 #### 2. 瞬态错误的 MQ 重试策略
 - 触发条件: isTransientError(execErr) 为 true (ErrLLMTimeout/ErrLLMRateLimited)
-- 处理逻辑: task_handler 返回 error 给 MQ，触发 Asynq 指数退避重试
-- 最终结果: 任务自动重试，processing key 在 130s 后过期允许重试
+- 处理逻辑: ExecuteWithErrorMessage 先发送用户友好错误消息并持久化，然后 task_handler 返回 error 给 MQ，触发 Asynq 指数退避重试；不标记 processed、不删除 processing key（130s 后自然过期允许重试）
+- 最终结果: 用户已在首次执行时看到错误消息；若重试成功，用户将看到额外的成功回复（两次响应）
 
 #### 3. 永久错误不重试
 - 触发条件: isTransientError(execErr) 为 false（如 Agent 配置错误）

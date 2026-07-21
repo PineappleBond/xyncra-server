@@ -1,6 +1,11 @@
 # WebSocket 连接管理 & 服务端通信
 
 > WebSocket 连接的完整生命周期：建立、心跳、消息路由、设备替换、断开、优雅关闭。
+>
+> **可观测性**: 全流程使用 OpenTelemetry 追踪，关键 span 包括：
+> `ws.connection`（连接生命周期）、`ws.message.receive`（消息接收）、
+> `handler.invoke`（方法处理）、`handler.broadcast`（广播）、
+> 以及所有 Redis 操作的 `redis.*` span。
 
 ## 场景 1: WebSocket 连接建立
 
@@ -16,6 +21,7 @@ sequenceDiagram
     participant RR as ReverseRPC
 
     Client->>HTTP: GET /ws?user_id=xxx&device_id=yyy
+    HTTP->>HTTP: CheckOrigin(r) [始终返回 true，CORS 由反向代理处理]
     HTTP->>Auth: authenticate(r)
     Auth-->>HTTP: userID
 
@@ -29,14 +35,22 @@ sequenceDiagram
     end
 
     HTTP->>HTTP: upgrader.Upgrade(w, r)
-    HTTP->>WS: NewClient(conn, userID, deviceID, connID)
+    HTTP->>HTTP: startConnectionSpan(ctx, userID, deviceID, connID)
+    HTTP->>HTTP: NewClient(conn, ..., WithContext(connCtx))
     HTTP->>WS: 原子注册新连接到 clients/clientsByUser/clientsByDevice
     HTTP->>WS: 从 clientsByDevice 删除旧连接引用
+    HTTP->>WS: cancelPendingFuncCleanup(userID, deviceID)
 
     alt 存在旧连接
         HTTP->>WS: performDeviceReplacement(oldClients) [异步]
     end
 
+    HTTP->>HTTP: extractIP(r) [优先 X-Forwarded-For]
+    HTTP->>HTTP: 构建 ConnectionInfo (ID, UserID, DeviceID, Protocol, IPAddress, Status)
+    alt connectionInfoEnricher 已配置
+        HTTP->>HTTP: connectionInfoEnricher(connInfo, r)
+        Note over HTTP: 从 HTTP 请求填充额外字段（如 user-agent、session headers）
+    end
     HTTP->>CS: Add(connInfo)
     CS-->>HTTP: OK
 
@@ -78,13 +92,26 @@ sequenceDiagram
 - 处理逻辑: Lua 脚本原子检查并返回 -1，Add 返回 ErrMaxConnectionsExceeded
 - 最终结果: 连接不注册，Client 被关闭
 
+#### 6. Upgrade 失败但 CancelDevice 已执行
+
+- 触发条件: 存在旧连接，CancelDevice 已取消旧连接的待处理 RPC，但随后 Upgrade 失败
+- 处理逻辑: 直接返回，旧连接仍在 clients/clientsByUser/clientsByDevice 中正常运行
+- 最终结果: 旧连接的待处理 RPC 被不必要地取消（发送 "device replaced" 错误响应），但旧连接本身不受影响，客户端可重试
+
+#### 7. CheckOrigin 始终放行
+
+- 触发条件: 所有 WebSocket 升级请求
+- 处理逻辑: upgrader.CheckOrigin 始终返回 true（D-004: CORS 由反向代理处理）
+- 最终结果: 不做来源校验，依赖外部反向代理进行安全过滤
+
 ### 涉及文件
 
-- `websocket_server.go`: handleWebSocket 主流程、设备替换、连接注册
+- `websocket_server.go`: handleWebSocket 主流程、设备替换、连接注册、extractIP、cancelPendingFuncCleanup
 - `websocket_client.go`: NewClient、Run 启动读写协程
 - `connection_store.go`: ConnectionInfo 模型定义
 - `redis_connection_store.go`: Lua 原子 Add 操作
 - `memory_connection_store.go`: 内存实现的 Add
+- `tracing_helpers.go`: startConnectionSpan 创建连接生命周期 span
 
 ---
 
@@ -111,12 +138,13 @@ sequenceDiagram
     WS->>WS: performDeviceReplacement(oldClients) [异步 goroutine]
 
     loop 每个旧连接
-        WS->>OldClient: WriteControl(CloseMessage, code=4001, "replaced")
+        WS->>OldClient: WriteControl(CloseMessage, code=4001, "replaced", deadline=5s)
         WS->>WS: time.Sleep(10ms) 等待 TCP 刷盘
         WS->>OldClient: Close()
         WS->>OldClient: 等待 Done() 或超时 500ms
         WS->>WS: removeClient(oldConnID)
     end
+    Note over WS: ConnectionStore.Remove 由旧连接自身的 defer 处理<br/>performDeviceReplacement 不跟踪 WaitGroup（best-effort）
 ```
 
 ### 边缘场景
@@ -242,10 +270,12 @@ sequenceDiagram
 
     Client->>RP: WebSocket 消息
     RP->>RP: unmarshalPackage(message)
+    RP->>RP: startMessageReceiveSpan(ctx, method, sizeBytes)
 
     alt PackageTypeRequest
         RP->>DMH: HandleMessage(ctx, client, pkg)
         DMH->>DMH: 解析 PackageDataRequest
+        DMH->>DMH: startHandlerInvokeSpan(ctx, method)
         DMH->>DMH: 查找 methods[req.Method]
         alt 方法已注册
             DMH->>MH: HandleRequest(ctx, client, req)
@@ -325,6 +355,7 @@ sequenceDiagram
 
     alt deviceID 非空
         WS->>WS: sendToDevice(userID, deviceID, pkg)
+        Note over WS: 从 clientsByDevice 中取第一个连接（break）
         WS->>Client: client.Send(data)
     else deviceID 为空
         WS->>WS: sendToUser(userID, pkg)
@@ -388,7 +419,11 @@ sequenceDiagram
 
 ## 场景 6: 待处理请求重放 (设备重连后)
 
-### 主流程
+> **注意**: 此场景描述的是设计意图。`ReplayRequest` 方法和 `PendingStore` 接口已实现，
+> 但 `handleWebSocket` 中尚未编排重连后的自动重放逻辑。
+> 上层应用需要自行在设备重连时调用 `PendingStore.List` + `ReverseRPC.ReplayRequest`。
+
+### 主流程（设计）
 
 ```mermaid
 sequenceDiagram
@@ -406,7 +441,7 @@ sequenceDiagram
     loop 每个 PendingRequest
         alt RetryCount < MaxRetries
             WS->>RR: ReplayRequest(ctx, preq, timeout)
-            RR->>RR: 生成新 replayID，保留原始 IdempotencyKey
+            RR->>RR: 生成新 replayID ("s-replay-{uuid}")，保留原始 IdempotencyKey
             RR->>Device: sendFunc(userID, deviceID, pkg)
 
             alt 收到响应
@@ -446,10 +481,10 @@ sequenceDiagram
 
 ### 涉及文件
 
-- `reverse_rpc.go`: ReplayRequest
-- `pending_store.go`: PendingRequest 模型
-- `redis_pending_store.go`: Save、List、Remove、Update
-- `websocket_server.go`: 设备重连后的重放逻辑
+- `reverse_rpc.go`: ReplayRequest（已实现但未在 handleWebSocket 中调用）
+- `pending_store.go`: PendingRequest 模型、PendingStore 接口
+- `redis_pending_store.go`: Save、List、Remove、Update（均已实现）
+- `websocket_server.go`: **注意**：handleWebSocket 中暂无重放编排逻辑
 
 ---
 
@@ -466,13 +501,14 @@ sequenceDiagram
     participant ClientsB as 节点B上的用户连接
 
     Caller->>WS1: BroadcastUpdates(userID, updates)
+    WS1->>WS1: startBroadcastSpan(ctx, userID)
     WS1->>WS1: broadcastLocal(userID, updates)
     Note over WS1: 发送到节点A上该用户的所有本地连接
 
-    WS1->>Redis: PUBLISH xyncra:broadcast:{userID}
+    WS1->>Redis: PUBLISH {keyPrefix}:broadcast:{userID}
     Note over Redis: payload: {sourceNodeID, updates}
 
-    Redis-->>WS2: PSubscribe 消息到达
+    Redis-->>WS2: PSubscribe({keyPrefix}:broadcast:*) 消息到达
     WS2->>WS2: handleRemoteBroadcast(userID, updates, sourceNodeID)
     WS2->>WS2: 检查 sourceNodeID != self.nodeID
     WS2->>ClientsB: broadcastLocal(userID, updates)
@@ -541,7 +577,7 @@ sequenceDiagram
 
     alt FunctionRegistry 已配置 且 该设备无其他连接
         WS->>WS: scheduleFuncCleanup(userID, deviceID)
-        Note over WS: 启动延迟清理协程 (宽限期默认 10s)<br/>若设备在宽限期内重连则取消清理
+        Note over WS: 启动延迟清理协程 (宽限期默认 10s)<br/>使用 context.Background() 避免 handleWebSocket 返回时立即取消<br/>宽限期到期后再次检查 hasActiveConn，双重保险
     end
 
     alt ReverseRPC 已配置 且 该设备无其他连接
@@ -617,7 +653,9 @@ sequenceDiagram
     WS->>WS: closeAllClients()
     WS->>RR: CancelAll() [在 closeAllClients 内部]
     Note over RR: 取消所有待处理 RPC，发送 "reverse rpc cancelled"
-    WS->>WS: 收集所有 client 引用，重置索引
+    WS->>WS: 收集所有 client 引用
+    WS->>WS: 原子重置所有索引 (clients/clientsByUser/clientsByDevice)
+    Note over WS: 单次锁获取完成，避免锁分离
 
     loop 每个客户端
         WS->>Clients: Close() -> cancel context
@@ -787,9 +825,15 @@ flowchart TD
 - 处理逻辑: 返回最后一个错误，包装 "all sends to user {userID} failed"
 - 最终结果: 调用方收到错误
 
+#### 3. sendToDevice 只取第一个连接
+
+- 触发条件: 同一设备有多个连接（理论上不应发生，因为设备替换会关闭旧连接）
+- 处理逻辑: 从 clientsByDevice map 中遍历取第一个连接后 break
+- 最终结果: 只有一个连接收到消息
+
 ### 涉及文件
 
-- `websocket_server.go`: sendToUser
+- `websocket_server.go`: sendToUser、sendToDevice
 - `websocket_client.go`: Send (ErrClientClosed、ErrSendBufferFull)
 
 ---
@@ -800,13 +844,17 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[连接注册 Add] --> B[SET infoKey JSON PX ttl]
-    B --> C[SADD userKey connID]
-    C --> D[PEXPIRE userKey MAX当前ttl]
+    A[连接注册 Add] --> B[Lua: SET infoKey JSON PX ttl]
+    B --> C[Lua: SADD userKey connID]
+    C --> D[Lua: PEXPIRE userKey MAX当前ttl]
 
-    E[连接刷新 Refresh] --> F[读取信息获取 TTL]
+    E[连接刷新 Refresh] --> F[GET infoKey 读取 TTL]
     F --> G[Lua: EXISTS + PEXPIRE infoKey]
     G --> H[Lua: PEXPIRE userKey MAX当前ttl]
+
+    R[连接删除 Remove] --> S[GET infoKey 获取 userID]
+    S --> T[Lua: DEL infoKey + SREM userKey connID]
+    T --> U[Lua: luaCleanupEmptySet 原子删除空 SET]
 
     I[Redis 自动过期] --> J[infoKey TTL 到期自动删除]
     J --> K[userKey 中残留过期 connID]
@@ -834,7 +882,19 @@ flowchart TD
 - 处理逻辑: Lua 脚本中原子 SREM 旧 userKey，SADD 新 userKey
 - 最终结果: 旧用户的连接集被正确清理
 
+#### 4. Remove 操作的非原子性
+
+- 触发条件: 所有 Remove 调用
+- 处理逻辑: Remove 先执行 GET 获取 userID（因为 Lua 脚本需要知道 userKey），再执行 luaRemove。如果 infoKey 在 GET 和 luaRemove 之间过期，SREM 仍会对 userKey 执行（移除已过期的条目，无害）
+- 最终结果: 两步操作非完全原子，但对正确性无影响（SREM 幂等）
+
+#### 5. Remove 后清理空 SET
+
+- 触发条件: Remove 执行后 userKey 可能变为空 SET
+- 处理逻辑: Remove 在 luaRemove 之后调用 luaCleanupEmptySet，原子检查 SCARD 并 DEL
+- 最终结果: 避免 orphan SET key 残留
+
 ### 涉及文件
 
-- `redis_connection_store.go`: Add (luaAdd)、Remove (luaRemove)、Refresh (luaRefresh)、ListByUser (懒清理)
-- `connection_store.go`: ConnectionInfo.TTL、IsExpired
+- `redis_connection_store.go`: Add (luaAdd)、Remove (Get + luaRemove + luaCleanupEmptySet)、Refresh (Get + luaRefresh)、ListByUser (SScan + MGet + 懒清理)、RemoveByUser (SMembers + UNLINK 批量删除)
+- `connection_store.go`: ConnectionInfo.TTL、IsExpired、ConnectionStore 接口定义

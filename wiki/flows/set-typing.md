@@ -27,9 +27,10 @@
 ### 关键特性
 
 - **Ephemeral**：Seq=0，不持久化到数据库
-- **Rate-limited**：每个用户每个会话每秒最多 1 次
-- **Broadcast to all**：广播给所有成员（包括发送者自己）
-- **No MQ**：直接通过 WebSocket 广播，不经过消息队列
+- **Rate-limited**：每个用户每个会话每秒最多 1 次（in-memory `sync.Map`，非 Redis）
+- **Broadcast to all**：广播给所有成员（包括发送者自己，D-050）
+- **No MQ**：不经过消息队列；本地连接直接 WebSocket 推送，跨节点通过 Redis Pub/Sub 广播（D-018）
+- **1-on-1 only**：成员列表仅从 `Conversation.UserID1` / `UserID2` 获取，当前仅支持单聊会话
 
 ---
 
@@ -71,7 +72,7 @@ sequenceDiagram
 
     H->>H: 构建 typingBroadcastPayload
     H->>B: broadcastFn(memberID, updates) for each member
-    B->>B: 广播到所有成员的在线连接
+    B->>B: 本地 WebSocket 推送 + Redis Pub/Sub 跨节点广播 (D-018)
 
     H-->>WS: 返回 {status: ok}
     WS-->>C: 成功响应
@@ -79,15 +80,15 @@ sequenceDiagram
 
 ### 详细步骤
 
-1. **解析参数**：提取 `conversation_id` 和 `is_typing`
+1. **解析参数**：提取 `conversation_id` 和 `is_typing`（`is_typing` 缺省时默认 `false`）
 2. **校验必填字段**：`conversation_id` 不能为空
-3. **获取会话**：验证会话存在性
-4. **身份验证**：验证调用者是会话成员
+3. **获取会话**：通过 `ConversationStore.Get` 验证会话存在性（软删除的会话等同不存在）
+4. **身份验证**：从 `Conversation.UserID1` / `UserID2` 提取成员列表，验证调用者在其中
 5. **Rate limiting**：检查每个用户每个会话的 rate limiter（1 秒 1 次）
    - Key 格式：`userID:conversationID`
-   - 超限时静默返回 OK（不报错）
-6. **构建 payload**：包含 `user_id`、`conversation_id`、`is_typing`、`is_agent`、`timestamp`
-7. **广播**：遍历所有会话成员，调用 `broadcastFn` 广播
+   - 超限时静默返回 OK（不报错），同时刷新 `lastAccess`
+6. **构建 payload**：`typingBroadcastPayload` 包含 `user_id`、`conversation_id`、`is_typing`、`is_agent`（固定 `false`）、`timestamp`（Unix 秒）
+7. **广播**：遍历所有会话成员，调用 `broadcastFn` 广播（内部先本地 WebSocket 推送，再通过 Redis Pub/Sub 发送到其他节点，D-018）
 8. **返回成功**：返回 `{status: ok}`
 
 ---
@@ -107,6 +108,7 @@ flowchart TD
 |------|----------|
 | `conversation_id` 为空 | 返回 `ValidationError('missing required field: conversation_id')` |
 | JSON 解析失败 | 返回 `ValidationError('invalid params')` |
+| `is_typing` 缺省 | Go 零值默认为 `false`，正常广播 `is_typing: false` |
 
 ### 2. 会话不存在
 
@@ -176,13 +178,15 @@ flowchart TD
 
 ### 外部依赖
 
-无。`set_typing` 不依赖消息队列或外部服务。
+| 服务 | 用途 |
+|------|------|
+| Redis Pub/Sub | `broadcastFn` 内部通过 `nodeBroadcaster.Publish` 将 typing 事件发布到其他节点（D-018），失败仅记录日志 |
 
 ### 数据库操作
 
 | 操作 | 表 | 说明 |
 |------|-----|------|
-| SELECT | conversations | 获取会话信息 |
+| SELECT | conversations | `ConversationStore.Get` 获取会话，成员从 `UserID1`/`UserID2` 提取 |
 
 ---
 
@@ -210,6 +214,13 @@ flowchart TD
 广播给所有成员（包括发送者自己），原因：
 - 发送者可能有多个设备，需要同步状态
 - 简化实现，避免过滤逻辑
+
+`broadcastFn`（即 `WebSocketServer.BroadcastUpdates`）的投递路径：
+
+1. **本地广播**：遍历 `clientsByUser[userID]`，通过 WebSocket 直接推送给本节点的在线连接
+2. **跨节点广播**：通过 `nodeBroadcaster.Publish` 发布到 Redis Pub/Sub，其他节点订阅后推送给各自本地连接（D-018）
+
+Pub/Sub 发布失败仅记录日志，不影响返回值（fire-and-forget，D-007）。
 
 ### 4. No Persistence
 

@@ -14,9 +14,10 @@
 - [6. 用户更新 CRUD](#6-用户更新-crud)
 - [7. 发送消息事务](#7-发送消息事务)
 - [8. 手动事务](#8-手动事务)
-- [9. 错误分类](#9-错误分类)
-- [10. 可观测性集成](#10-可观测性集成)
-- [11. 数据模型](#11-数据模型)
+- [9. 健康检查](#9-健康检查)
+- [10. 错误分类](#10-错误分类)
+- [11. 可观测性集成](#11-可观测性集成)
+- [12. 数据模型](#12-数据模型)
 
 ---
 
@@ -92,6 +93,15 @@ flowchart TD
     F --> G{接口实现完整?}
     G -->|是| H[通过 StoreAPI 暴露子 Store 访问器]
     G -->|否| I[编译失败]
+
+    subgraph HealthCheck
+        HC1[调用 Ping] --> HC2{Ping 成功?}
+        HC2 -->|否| HC3[返回错误]
+        HC2 -->|是| HC4[执行 SELECT 1 验证查询路径]
+        HC4 --> HC5{查询成功?}
+        HC5 -->|是| HC6[返回 nil]
+        HC5 -->|否| HC7[返回查询错误]
+    end
 ```
 
 ### 边缘场景
@@ -100,6 +110,7 @@ flowchart TD
 |------|------|
 | db 为 nil | 子 Store 创建不会立即 panic，但后续操作会 nil pointer |
 | 编译时接口检查 | 如果 StoreAPI 接口方法签名变更但 Store 未更新，编译失败 |
+| HealthCheck 双重验证 | 先 Ping 底层连接，再执行 SELECT 1 验证查询路径可用（捕获 schema 损坏） |
 
 ---
 
@@ -505,7 +516,34 @@ flowchart TD
 
 ---
 
-## 9. 错误分类
+## 9. 健康检查
+
+`HealthCheck` 对数据库连接进行全面健康检查：先 Ping 底层连接，再执行 SELECT 1 验证查询路径可用。
+
+### 流程图
+
+```mermaid
+flowchart TD
+    A[HealthCheck 入口] --> B[调用 Ping]
+    B --> C{Ping 成功?}
+    C -->|否| D[返回连接错误]
+    C -->|是| E[执行 SELECT 1]
+    E --> F{查询成功?}
+    F -->|是| G[返回 nil]
+    F -->|否| H[返回查询路径错误]
+```
+
+### 边缘场景
+
+| 场景 | 说明 |
+|------|------|
+| 连接断开 | PingContext 失败，返回 classifyError 后的错误 |
+| Schema 损坏 | Ping 成功但 SELECT 1 失败，捕获查询路径问题 |
+| 与 Ping 的区别 | Ping 仅验证连接存活；HealthCheck 额外验证查询路径可用 |
+
+---
+
+## 10. 错误分类
 
 `classifyError` 将 GORM/驱动层错误翻译为标准 store 层错误，支持 PostgreSQL/MySQL/SQLite 三种方言。
 
@@ -540,7 +578,7 @@ flowchart TD
 
 ---
 
-## 10. 可观测性集成
+## 11. 可观测性集成
 
 每个 store 公开方法通过 `startSpan` 创建手动 span，与自动插桩 (otelgorm) 故意分离。
 
@@ -571,7 +609,7 @@ flowchart TD
 
 ---
 
-## 11. 数据模型
+## 12. 数据模型
 
 4 个核心模型 + 1 个客户端模型，使用 GORM tag 定义索引、约束和默认值。
 
@@ -581,62 +619,62 @@ flowchart TD
 erDiagram
     CONVERSATIONS {
         uuid id PK
-        uuid user_id1
-        uuid user_id2 "可为空 支持群组"
-        string type "1-on-1/group/channel"
-        string title
+        string user_id1 "size:64 唯一索引+复合软删除索引"
+        string user_id2 "size:64 可为空 支持群组"
+        string type "size:20 1-on-1/group/channel 带索引"
+        string title "size:255"
         bool pinned
         bool muted
-        string avatar_url
+        string avatar_url "size:512"
         text description
-        string agent_status "状态机 idle/thinking/tool_calling/generating/asking_user/timeout"
-        uuid agent_id
-        uuid checkpoint_id
+        string agent_status "size:32 状态机 idle/thinking/tool_calling/generating/asking_user/timeout 默认 idle"
+        string agent_id "size:64"
+        string checkpoint_id "size:36"
         timestamp agent_last_activity
-        timestamp last_message_at
-        bigint last_processed_message_id
-        bigint last_read_message_id_1
-        bigint last_read_message_id_2
-        timestamp deleted_at "软删除 复合索引"
-        timestamp created_at
+        timestamp last_message_at "复合索引"
+        uint32 last_processed_message_id "会话内最大已处理消息序号"
+        uint32 last_read_message_id_1 "UserID1 读游标"
+        uint32 last_read_message_id_2 "UserID2 读游标"
+        timestamp deleted_at "软删除 多个复合索引"
+        timestamp created_at "带索引"
         timestamp updated_at
     }
 
     MESSAGES {
         uuid id PK
-        uuid conversation_id FK
-        bigint message_id "会话内序号 非主键"
-        string client_message_id "客户端生成"
-        uuid sender_id
+        string conversation_id "size:36 FK 复合索引(conv_id msg_id deleted_at)"
+        uint32 message_id "会话内序号 非主键 复合索引"
+        string client_message_id "size:36 唯一复合索引(client_message_id sender_id)"
+        string sender_id "size:64 带索引 唯一复合索引"
         text content
-        string type "默认 text"
-        bigint reply_to "回复目标消息ID"
-        string status "默认 sent"
+        string type "size:20 默认 text"
+        uint32 reply_to "回复目标消息ID 0表示非回复"
+        string status "size:20 默认 sent"
         timestamp deleted_at "软删除 复合索引"
-        timestamp created_at
+        timestamp created_at "带索引"
     }
 
     USER_UPDATES {
         uuid id PK
-        uuid user_id
-        bigint seq "单调递增 per-user"
-        string type "默认 message"
-        bytes payload "JSON 序列化"
-        timestamp created_at "索引 30天过期硬删除"
+        string user_id "size:64 复合索引(user_id seq)"
+        uint32 seq "单调递增 per-user 复合索引"
+        string type "size:20 默认 message 带索引"
+        bytes payload "JSON 序列化 完整 Message 对象"
+        timestamp created_at "带索引 30天过期硬删除"
     }
 
     QUESTIONS {
         uuid id PK
-        uuid conversation_id FK
-        uuid checkpoint_id
-        string interrupt_id "Eino interrupt 地址"
-        text question_text
-        string status "pending/answered 索引"
+        string conversation_id "size:36 FK 带索引 not null"
+        string checkpoint_id "size:36 not null"
+        string interrupt_id "size:64 not null Eino interrupt 地址"
+        text question_text "not null"
+        string status "size:16 pending/answered 默认 pending 带索引"
         text answer
-        uuid answered_by
-        uuid answered_device_id
-        timestamp answered_at "可为空"
-        timestamp deleted_at "软删除"
+        string answered_by "size:64"
+        string answered_device_id "size:64"
+        timestamp answered_at "可为空 指针类型"
+        timestamp deleted_at "软删除 带索引"
         timestamp created_at
     }
 
@@ -653,19 +691,36 @@ erDiagram
 | UserUpdate | user_updates | UUID | `composite(user_id, seq)`，`index(user_id)`，`index(type)`，`index(created_at)` | 否 | Seq 单调递增 per-user，Type 默认 message，过期后硬删除 |
 | Question | questions | UUID | `index(conversation_id)`，`index(status)`，`index(deleted_at)` | 是 | 状态机 pending/answered，外键关联 Conversation，InterruptID 存储 Eino interrupt 地址 |
 
+### 常量定义
+
+| 常量 | 值 | 说明 |
+|------|------|------|
+| AgentStatusIdle | `"idle"` | Agent 空闲 |
+| AgentStatusThinking | `"thinking"` | Agent 思考中 |
+| AgentStatusToolCalling | `"tool_calling"` | Agent 调用工具 |
+| AgentStatusGenerating | `"generating"` | Agent 生成回复 |
+| AgentStatusAskingUser | `"asking_user"` | HITL 等待用户回答 |
+| AgentStatusTimeout | `"timeout"` | Agent 超时 |
+| QuestionStatusPending | `"pending"` | 问题待回答 |
+| QuestionStatusAnswered | `"answered"` | 问题已回答 |
+| DefaultCleanupRetention | `30 * 24h` | UserUpdate 过期清理保留期 |
+
 ### 边缘场景
 
 | 场景 | 说明 |
 |------|------|
-| Conversation.UserID2 可为空 | 支持群组/频道等非 1v1 场景 |
+| Conversation.UserID2 可为空 | 空字符串（非 NULL），支持群组/频道等非 1v1 场景 |
 | Conversation.Type | 区分 1-on-1 / group / channel，带索引 |
 | Conversation.Pinned/Muted | 布尔标记，支持客户端会话管理 |
-| Message.MessageID 是会话内序号 | 主键是 UUID，MessageID 仅用于会话内排序 |
+| Message.MessageID 是会话内序号 | 主键是 UUID，MessageID 仅用于会话内排序，类型 uint32 |
 | Message.Type | 消息类型，默认 text，支持扩展 |
-| Message.ReplyTo | 回复目标消息 ID，0 表示非回复 |
+| Message.ReplyTo | 回复目标消息 ID，0 表示非回复，类型 uint32 |
 | Message.Status | 消息状态，默认 sent |
 | UserUpdate 无软删除 | 过期后硬删除，`Unscoped()` 绕过软删除机制 |
 | UserUpdate.Type | 更新类型，默认 message，支持扩展 |
+| UserUpdate.Payload | JSON 序列化的完整 Message 对象（包含分配后的 MessageID） |
 | Question.InterruptID | Eino interrupt 地址 ID，用于 ResumeParams.Targets |
-| Question.AnsweredAt | 指针类型，未回答时为 nil |
-| Question 有外键 | Conversation 关系，级联删除需注意数据完整性 |
+| Question.AnsweredAt | 指针类型 `*time.Time`，未回答时为 nil |
+| Question.Conversation 外键 | `foreignKey:ConversationID`，服务端使用软删除避免外键约束问题 |
+| Question.TableName | 显式覆盖为 `"questions"`（GORM 默认复数规则可能不一致） |
+| Question.Status 常量 | `QuestionStatusPending="pending"` / `QuestionStatusAnswered="answered"` |

@@ -211,9 +211,9 @@ flowchart TD
 
 1. 调用 `client.Send(msg)` 或 `client.SendPackage(pkg)`
 2. 检查 `closed` 状态，若已关闭返回 `ErrClientClosed`
-3. 将消息放入带缓冲的 send channel（默认 256）
+3. 将消息放入带缓冲的 send channel（默认容量 256，`defaultSendBufSize = 256`）
 4. `writePump` 从 channel 读取消息
-5. 设置写入截止时间（默认 10s）
+5. 设置写入截止时间（默认 10s，`defaultWriteWait = 10s`）
 6. 调用 `conn.NextWriter` 获取写入器
 7. 写入消息内容并关闭写入器
 8. 定期发送 Ping 消息（默认 54s 间隔）

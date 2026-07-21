@@ -196,8 +196,8 @@ flowchart TD
 
 | 操作 | 表 | 说明 |
 |------|-----|------|
-| SELECT MAX(seq) | user_updates | 获取用户最新序列号 |
-| SELECT | user_updates | 查询指定范围内的更新 |
+| SELECT COALESCE(MAX(seq), 0) | user_updates | 获取用户最新序列号，无记录时返回 0 |
+| SELECT (seq > afterSeq AND seq <= maxSeq, ORDER BY seq ASC) | user_updates | 查询指定范围内的更新，无 LIMIT 限制 |
 
 ---
 
@@ -240,10 +240,12 @@ flowchart TD
 flowchart TD
     A[开始同步] --> B[发送 sync_updates afterSeq=localMaxSeq]
     B --> C{has_more?}
-    C -->|是| D[更新 afterSeq=latestSeq]
+    C -->|是| D[更新 afterSeq=最后一条 update 的 seq]
     D --> B
     C -->|否| E[同步完成]
 ```
+
+> **注意**：使用最后一条 update 的 seq 作为下一次 `after_seq`，而非 `latest_seq`。`latest_seq` 是服务端快照时间点的最新序列号，两次请求之间可能有新 update 写入，直接使用 `latest_seq` 会跳过这些 update。
 
 ### 间隙检测
 

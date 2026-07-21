@@ -63,9 +63,9 @@ sequenceDiagram
 
 3. **跨节点发布**：调用 `nodeBroadcaster.Publish(ctx, userID, updates, s.nodeID)`，`s.nodeID` 是每个 WebSocketServer 实例启动时生成的 UUID。
 
-4. **Redis 发布**：`RedisNodeBroadcaster.Publish` 构造 `broadcastMessage{SourceNodeID, Updates}`，JSON 序列化后 `PUBLISH` 到 Redis channel `xyncra:broadcast:{userID}`。
+4. **Redis 发布**：`RedisNodeBroadcaster.Publish` 构造 `broadcastMessage{SourceNodeID, Updates}`，JSON 序列化后 `PUBLISH` 到 Redis channel `{keyPrefix}:broadcast:{userID}`（`keyPrefix` 默认 `"xyncra"`，通过 `NewRedisNodeBroadcaster` 第二个参数配置）。
 
-5. **远端订阅接收**：远端节点的 `RedisNodeBroadcaster.Subscribe` 通过 `PSubscribe('xyncra:broadcast:*')` 订阅所有用户频道，收到消息后从 channel 名提取 userID，反序列化 `broadcastMessage`。
+5. **远端订阅接收**：远端节点的 `RedisNodeBroadcaster.Subscribe` 通过 `PSubscribe('{keyPrefix}:broadcast:*')` 订阅所有用户频道（默认 `xyncra:broadcast:*`），收到消息后从 channel 名提取 userID，反序列化 `broadcastMessage`。
 
 6. **远端本地投递**：远端节点 `WebSocketServer.handleRemoteBroadcast` 处理远程消息——检查 `sourceNodeID == s.nodeID` 则跳过（避免本地重复投递），否则调用 `broadcastLocal` 将更新推送给本节点上该用户的所有 WebSocket 连接。
 
@@ -350,7 +350,7 @@ stateDiagram-v2
 
 1. **配置注入**：配置层通过 `WSWithNodeBroadcaster` option 注入 `Broadcaster` 实现。未注入时默认 `NoopBroadcaster`（单节点无跨节点路由）。
 
-2. **启动 Pub/Sub 订阅**：`WebSocketServer.Start` 在独立 goroutine 中调用 `nodeBroadcaster.Subscribe(s.Context(), s.handleRemoteBroadcast)`。订阅 pattern 为 `xyncra:broadcast:*`，阻塞直到 ctx 取消。
+2. **启动 Pub/Sub 订阅**：`WebSocketServer.Start` 在独立 goroutine 中调用 `nodeBroadcaster.Subscribe(s.Context(), s.handleRemoteBroadcast)`。订阅 pattern 为 `{keyPrefix}:broadcast:*`（默认 `xyncra:broadcast:*`），阻塞直到 ctx 取消。
 
 3. **RedisNodeBroadcaster.Subscribe**：建立 `PSubscribe` 并保存引用——调用 `client.PSubscribe(ctx, pattern)` 将返回的 `*redis.PubSub` 保存到 `b.ps`（加锁），然后进入 select 循环读取 `ps.Channel()`。
 
@@ -366,6 +366,7 @@ stateDiagram-v2
 | **Close 被多次调用** | `b.ps` 在第一次 Close 时被置 nil，后续调用检测 `ps == nil` 直接返回 nil，幂等安全。 |
 | **Publish 和 Subscribe 使用同一 redis.Client** | 文档注释要求 Pub/Sub 使用专用连接（go-redis 限制）。如果共享 client，Subscribe 会独占连接导致其他命令阻塞。 |
 | **GracefulStop 时 Subscribe 尚未建立** | Subscribe 在独立 goroutine 中启动，Close 时 `b.ps` 可能为 nil（Subscribe 还没执行到 PSubscribe）。Close 检查 `ps==nil` 直接返回，无 panic。 |
+| **Subscribe 返回后调用 Close** | 当 ctx 取消时 Subscribe 先返回，其 `defer ps.Close()` 已关闭 PubSub 连接，但 `b.ps` 仍非 nil。后续 `GracefulStop` 调用 `Close()` 会读取 `b.ps`、置 nil、再次调用 `ps.Close()`，此时可能返回 error（已关闭的连接）。`GracefulStop` 中对该 error 仅 `logger.Error`，不影响关闭流程。 |
 
 ---
 

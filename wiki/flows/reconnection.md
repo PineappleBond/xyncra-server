@@ -1,5 +1,5 @@
 ---
-last_updated: 2026-07-20
+last_updated: 2026-07-21
 ---
 
 # 断线重连与同步
@@ -11,10 +11,11 @@ last_updated: 2026-07-20
 - [整体架构](#整体架构)
 - [1. 重连流程 (reconnect)](#1-重连流程-reconnect)
 - [2. 增量同步流程 (sync_updates)](#2-增量同步流程-sync_updates)
-- [3. Agent 恢复流程 (agent_resume)](#3-agent-恢复流程-agent_resume)
-- [4. 心跳保活流程 (heartbeat)](#4-心跳保活流程-heartbeat)
-- [5. Checkpoint 存储 (checkpoint_store)](#5-checkpoint-存储-checkpoint_store)
-- [6. 连接存储 (connection_store)](#6-连接存储-connection_store)
+- [3. 客户端重连协调](#3-客户端重连协调)
+- [4. Agent 恢复流程 (agent_resume)](#4-agent-恢复流程-agent_resume)
+- [5. 心跳保活流程 (heartbeat)](#5-心跳保活流程-heartbeat)
+- [6. Checkpoint 存储 (checkpoint_store)](#6-checkpoint-存储-checkpoint_store)
+- [7. 连接存储 (connection_store)](#7-连接存储-connection_store)
 - [设计原则](#设计原则)
 
 ---
@@ -24,7 +25,10 @@ last_updated: 2026-07-20
 ```mermaid
 graph TB
     subgraph "客户端"
-        Client[客户端应用]
+        ConnMonitor[连接监控<br/>两阶段重连]
+        SyncMgr[同步管理器<br/>FullSync + 增量]
+        RTTTracker[RTT 追踪器<br/>自适应超时]
+        IdemCache[幂等缓存<br/>LRU]
         LocalDB[本地 SQLite]
     end
 
@@ -33,7 +37,7 @@ graph TB
         Heartbeat[心跳保活]
     end
 
-    subgraph "重连与同步层"
+    subgraph "服务端重连与同步层"
         Reconnect[重连处理器]
         SyncUpdates[增量同步]
         AgentResume[Agent 恢复]
@@ -52,11 +56,17 @@ graph TB
         ReverseRPC[反向 RPC]
     end
 
-    Client -->|断线重连| WS
+    ConnMonitor -->|重连 + 握手| WS
+    ConnMonitor -->|register_functions| Reconnect
+    ConnMonitor -->|system.reconnect| Reconnect
+    ConnMonitor --> SyncMgr
+    SyncMgr -->|sync_updates| SyncUpdates
     WS --> Heartbeat
     WS --> Reconnect
     WS --> SyncUpdates
     WS --> AgentResume
+    RTTTracker -.->|自适应超时| ConnMonitor
+    IdemCache -.->|去重| WS
 
     Reconnect --> PendingStore
     Reconnect --> ReverseRPC
@@ -74,7 +84,11 @@ graph TB
 
 ### 概述
 
-客户端检测到网络中断并重新建立连接后，发送 `system.reconnect` 请求。服务端查询 PendingStore 中该设备超时的反向 RPC 请求，按序列号和重试次数过滤后异步重放给刚重连的客户端。
+客户端检测到网络中断并重新建立连接后，执行三步重连协调（详见 [第 3 节](#3-客户端重连协调)）：(1) 重新注册设备函数（`system.register_functions`），(2) 发送 `system.reconnect` 请求触发服务端重放，(3) 执行 `FullSync` 拉取增量更新。本节仅描述服务端 `system.reconnect` handler 的处理逻辑。
+
+服务端查询 PendingStore 中该设备超时的反向 RPC 请求，按序列号和重试次数过滤后异步重放给刚重连的客户端。
+
+**双序列号空间**：`system.reconnect` 的 `last_seen_seq` 是 uint64 类型，跟踪的是服务端发起的反向 RPC 请求的序列号（`ReverseRPC.nextSeq`），与 `sync_updates` 的 uint32 类型用户更新序列号（`UserUpdateStore`）是完全独立的两个空间。客户端通过 `lastReqSeq` 字段跟踪收到的最高反向 RPC 序列号。
 
 ### 流程图
 
@@ -168,6 +182,9 @@ sequenceDiagram
 | **并发重连 + 正常反向 RPC** | 重放使用新 reqID（`s-replay-*`）避免与进行中的正常请求冲突 | 无冲突 |
 | **重放后 PendingStore Remove/Update 错误** | 记录日志但非致命，下次重连时可能再次重放 | 最终一致 |
 | **RedisPendingStore 非原子 Remove** | 读-过滤-重写管道非事务性，Del 和 RPush 之间的崩溃可能丢失条目 | 按 fail-open 语义记录为可接受 |
+| **设备替换（4001 Close Frame）** | 服务端对同一设备的新连接发送 4001 关闭帧，客户端设置 `replaced=true` 并取消上下文，不尝试重连，daemon 优雅退出（D-111） | 被替换的设备实例终止 |
+| **reconnect 与 FullSync 的顺序** | 客户端在 reconnect handshake 完成后总是执行 FullSync，即使 reconnect 失败也会执行；两者运行在异步 goroutine 中，不阻塞彼此 | 确保数据最终一致 |
+| **函数注册先于重放** | 客户端先发送 `system.register_functions` 再发送 `system.reconnect`，确保服务端在重放请求前已有对应的 handler | 避免重放请求因无 handler 而失败 |
 
 ---
 
@@ -264,7 +281,120 @@ sequenceDiagram
 
 ---
 
-## 3. Agent 恢复流程 (agent_resume)
+## 3. 客户端重连协调
+
+### 概述
+
+客户端（`XyncraClient`）在连接断开后自动执行重连协调流程。该流程包括连接监控（两阶段重连）、重连握手（函数注册 + reconnect）、以及全量同步（FullSync）。本节描述客户端视角的完整重连生命周期。
+
+### 连接监控架构
+
+```mermaid
+graph TB
+    subgraph "阶段一：初始连接"
+        IC[连接循环<br/>无限重试] -->|成功| HS1[重连握手]
+        HS1 --> FS1[FullSync]
+        FS1 --> RL[标准重连循环]
+        IC -->|失败| IC
+    end
+
+    subgraph "阶段二：标准重连循环"
+        RL --> DC[等待断连信号<br/>Disconnected]
+        DC -->|4001| EXIT[优雅退出<br/>D-111]
+        DC -->|正常断连| RE[重连循环<br/>指数退避]
+        RE -->|成功| HS2[重连握手]
+        HS2 --> FS2[FullSync]
+        FS2 --> RL
+        RE -->|失败| RE
+    end
+```
+
+### 重连握手流程
+
+```mermaid
+sequenceDiagram
+    participant C as 客户端
+    participant S as 服务端
+
+    Note over C: 连接建立成功
+
+    par 异步重连握手
+        C->>S: system.register_functions
+        Note over C: 先注册函数，确保服务端有 handler
+
+        C->>S: system.reconnect {last_seen_seq}
+        Note over C: last_seen_seq = lastReqSeq<br/>(uint64, 反向 RPC 序列号)
+    end
+
+    par 异步全量同步
+        C->>S: sync_updates {after_seq:localMaxSeq, limit:N}
+        Note over C: uint32, 用户更新序列号
+        S-->>C: {updates, has_more, latestSeq}
+        loop has_more == true
+            C->>S: sync_updates {after_seq:newLocalMaxSeq, limit:N}
+            S-->>C: {updates, has_more, latestSeq}
+        end
+    end
+```
+
+### 详细步骤
+
+1. **检测断连**
+   - 连接监控 goroutine 通过 `Disconnected()` channel 检测意外断连
+   - 若为 4001 设备替换，取消上下文并优雅退出（D-111），不尝试重连
+   - 否则进入重连循环
+
+2. **指数退避重连**
+   - 退避算法：`base * 2^(attempt-1)`，上限 max，指数上限 30，+/-25% 随机抖动（C3）
+   - 每次重连尝试前等待退避延迟，支持 AbortSignal 取消
+   - 重连成功后 `attempt` 计数器重置为 0
+
+3. **重连握手**（异步执行，不阻塞 FullSync）
+   - **Step 1**：发送 `system.register_functions` 注册设备提供的函数
+     - 必须先于 reconnect，确保服务端在重放 PendingStore 请求前有对应的 handler
+     - 修复了 PendingStore 重放先于函数注册到达的竞态条件
+   - **Step 2**：发送 `system.reconnect` 携带 `last_seen_seq`
+     - `last_seen_seq` 来自 `lastReqSeq`（uint64），跟踪收到的最高反向 RPC 序列号
+     - 通过 `handleIncomingRequest` 在每次收到服务端请求时更新
+   - 错误记录日志但不阻止 FullSync（优雅降级，D-072）
+
+4. **全量同步**（FullSync）
+   - 在 reconnect handshake 启动后立即执行（不等待 handshake 完成）
+   - 从本地 `localMaxSeq` 开始分页拉取 `sync_updates`
+   - 服务端返回连续序列的更新（含 gap 填充），客户端逐条应用
+   - 应用更新时通过 NotificationLog 去重，通过事务保证原子性
+   - `has_more=true` 时继续拉取下一页
+
+### 客户端序列号跟踪
+
+| 序列号 | 类型 | 跟踪对象 | 更新时机 | 用途 |
+|--------|------|----------|----------|------|
+| `lastReqSeq` | uint64 | 服务端反向 RPC 请求 | `handleIncomingRequest` 收到请求时 | `system.reconnect` 的 `last_seen_seq` |
+| `localMaxSeq` | uint32 | 用户更新（消息、会话等） | `ApplyUpdate` 成功应用后 | `sync_updates` 的 `after_seq` |
+
+### 客户端幂等性与超时
+
+| 机制 | 说明 |
+|------|------|
+| **IdempotencyCache** | 客户端维护 LRU 缓存（默认大小可配置），收到服务端请求时检查 `IdempotencyKey`，已处理则跳过，处理成功后写入缓存。防止重放请求被重复处理 |
+| **RTTTracker** | 维护滑动窗口的 RTT 样本，计算修剪均值 SRTT（去除最高/最低 10%），低于 5 个样本时返回默认超时。`AdaptiveTimeout = SRTT * 1.5`，夹紧到 `[min, max]` |
+| **ResponseRetryQueue** | 缓存未收到响应的客户端请求，在重连后自动重试发送 |
+
+### 边缘场景
+
+| 场景 | 处理方式 | 影响 |
+|------|----------|------|
+| **4001 设备替换** | 客户端设置 `replaced=true`，取消上下文，daemon 优雅退出（D-111），不尝试重连 | 旧设备实例终止 |
+| **重连握手失败** | 错误记录日志，FullSync 继续执行 | PendingStore 请求可能未被重放，但数据通过 FullSync 同步 |
+| **FullSync 失败** | 错误记录日志，连接监控继续等待下一次断连 | 数据可能不完整，下次重连时重试 |
+| **函数注册与重放竞态** | 函数注册在 reconnect 之前发送，但两者在异步 goroutine 中执行；reconnect handler 在函数注册 RPC 返回后才发送，但服务端处理顺序不保证 | 极端情况下重放可能因无 handler 失败，下次重连时重试 |
+| **上下文取消期间的重连** | 重连循环和退避等待均检查 `ctx.Err()`，上下文取消时立即退出 | 优雅关闭 |
+| **重连期间收到新更新** | FullSync 从当前 `localMaxSeq` 开始，自动包含重连期间到达的新更新 | 无数据丢失 |
+| **RTT 样本不足（冷启动）** | 低于 5 个样本时 `AdaptiveTimeout` 返回默认超时值 | 使用保守的默认超时 |
+
+---
+
+## 4. Agent 恢复流程 (agent_resume)
 
 ### 概述
 
@@ -478,7 +608,7 @@ sequenceDiagram
 
 ---
 
-## 4. 心跳保活流程 (heartbeat)
+## 5. 心跳保活流程 (heartbeat)
 
 ### 概述
 
@@ -546,7 +676,7 @@ sequenceDiagram
 
 ---
 
-## 5. Checkpoint 存储 (checkpoint_store)
+## 6. Checkpoint 存储 (checkpoint_store)
 
 ### 概述
 
@@ -596,7 +726,7 @@ graph LR
 
 ---
 
-## 6. 连接存储 (connection_store)
+## 7. 连接存储 (connection_store)
 
 ### 概述
 
@@ -660,7 +790,8 @@ graph TB
 
 ### 2. 幂等性保证
 
-- **重连重放**：保留原始 IdempotencyKey，客户端去重
+- **重连重放**：保留原始 IdempotencyKey，客户端通过 IdempotencyCache（LRU）去重
+- **客户端请求去重**：客户端收到服务端请求时检查 IdempotencyKey，已处理则跳过，处理成功后写入缓存
 - **Agent 恢复**：两阶段幂等（processed + processing key）
 - **问题回答**：`WHERE status=pending` 实现幂等更新
 
@@ -675,6 +806,8 @@ graph TB
 | 机制 | 超时 | 重试 |
 |------|------|------|
 | 重连重放 | 10 秒/请求 | MaxRetries=3 |
+| 客户端 RPC 超时 | 自适应（RTTTracker: SRTT * 1.5，夹紧到 [min, max]），冷启动使用默认值 | 由 ResponseRetryQueue 在重连后重试 |
+| 客户端重连退避 | base * 2^(attempt-1)，上限 max，+/-25% 抖动 | 无限重试直到连接成功或上下文取消 |
 | Agent 恢复锁 | 130 秒 TTL | 无自动重试 |
 | Checkpoint 保留 | 24 小时 TTL | 无 |
 | 连接 TTL | 可配置 | 心跳续期 |

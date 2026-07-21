@@ -52,12 +52,12 @@ flowchart TD
 
 ### 详细步骤
 
-1. **解析请求参数**：提取 `conversation_id`、`client_message_id`、`content`、`type`、`reply_to`
-2. **校验必填字段**：`conversation_id` 和 `client_message_id` 不能为空，`content` 允许为空
+1. **解析请求参数**：提取 `conversation_id`、`client_message_id`、`content`、`type`、`reply_to`（引用回复的目标消息 ID）
+2. **校验必填字段**：`conversation_id` 和 `client_message_id` 不能为空，`content` 允许为空（D-091：空内容由 Agent 层返回用户友好错误）
 3. **默认类型**：若 `type` 为空，默认设为 `text`
 4. **获取会话**：验证会话存在性
 5. **身份验证**：从 client 连接获取 `senderID`，验证发送者是会话成员
-6. **构建消息对象**：`MessageID` 留空由事务内分配，`Status` 设为 `sent`
+6. **构建消息对象**：`MessageID` 留空由事务内分配，`Status` 设为 `sent`，`ID` 由 handler 生成 UUID v4
 7. **原子事务**：调用 `store.SendMessage`
    - 读取 `conversation.LastProcessedMessageID`
    - 分配 `MessageID = LastProcessedMessageID + 1`
@@ -68,7 +68,7 @@ flowchart TD
    - 批量 INSERT UserUpdate 记录 (每批 100 条)
    - UPDATE conversation 的 `last_message_at` 和 `last_processed_message_id`
 8. **MQ 推送**：构建 `TypeSendMessage` 任务，包含每个 recipient 的 seq 和 payload，异步入队
-9. **Agent 触发**：若发送者是人类且对方是注册的 Agent，额外入队 `TypeAgentProcess` MQ 任务 (带 `MaxRetry=20`)
+9. **Agent 触发**：若发送者是人类且对方是注册的 Agent，额外入队 `TypeAgentProcess` MQ 任务 (带 `MaxRetry=20`)。payload 包含 `message_id`、`conversation_id`、`agent_id`、`sender_id`、`device_id`（D-102：设备路由）
 10. **返回结果**：返回消息和 `duplicate=false`
 
 ### 边缘场景
@@ -247,7 +247,8 @@ flowchart TD
 4. **身份验证**：验证请求者是会话成员
 5. **规范化 limit**：默认 50，上限 200
 6. **执行搜索**：调用 `MessageStore.SearchByConversation`
-   - 查询条件：`conversation_id = X AND content LIKE '%escaped_query%'`
+   - 查询条件：`conversation_id = X AND content LIKE '%escaped_query%' ESCAPE '|'`
+   - 使用 `escapeLikePattern` 对用户输入中的 `%`、`_`、`|` 字符进行转义
    - 若 `after_message_id > 0`，附加 `message_id < afterMessageID`
    - 按 `message_id DESC` 排序
    - `LIMIT limit+1`
@@ -259,7 +260,7 @@ flowchart TD
 | 场景 | 处理方式 |
 |------|----------|
 | **空 query** | store 层直接返回空数组，不执行查询 |
-| **LIKE 通配符注入** | 使用 `escapeLikePattern` 对用户输入进行转义 |
+| **LIKE 通配符注入** | 使用 `escapeLikePattern` 对用户输入中的 `%`、`_`、pipe 字符进行转义，配合 SQL `ESCAPE` 子句 |
 | **会话不存在** | 返回 `NotFoundError` |
 | **非成员访问** | 返回 `PermissionDeniedError` |
 | **limit 非法值** | handler 层 <=0 或 >200 时重置为 50；store 层独立校验 <=0 或 >201 时重置为 50（防御性编程） |

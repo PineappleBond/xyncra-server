@@ -21,7 +21,10 @@ sequenceDiagram
     Store-->>Handler: conversation
     Handler->>Store: SendMessage (原子持久化 message + user_updates)
     Store-->>Handler: sendResult (message + per-user seq)
-    Handler->>Broker: Enqueue TypeSendMessage (critical 队列)
+    Handler->>Broker: Enqueue TypeSendMessage (default 队列)
+    alt 发送者是人类 且 对方是已注册 Agent
+        Handler->>Broker: Enqueue TypeAgentProcess (maxRetry=20, default 队列)
+    end
     Handler-->>Client: 返回 message + duplicate=false
     Broker->>Worker: 出队 TypeSendMessage
     Worker->>Worker: 解码 payload, 提取 recipients
@@ -57,9 +60,14 @@ sequenceDiagram
 - 处理逻辑: worker 返回 nil（不重试），因为数据已持久化
 - 最终结果: 该任务静默丢弃，用户通过 sync_updates 获取消息
 
+### 其他 TypeSendMessage 生产者
+
+`delete_message` RPC 也通过 `broadcastDeleteMessageUpdates` 入队 TypeSendMessage 任务，将消息删除更新广播给所有对话成员。流程与消息发送相同：持久化 UserUpdate 后 fire-and-forget 入队，worker 广播给各 recipient。
+
 ### 涉及文件
 
-- `internal/handler/send_message.go`: 消息持久化 + 入队 TypeSendMessage 任务
+- `internal/handler/send_message.go`: 消息持久化 + 入队 TypeSendMessage 和 TypeAgentProcess 任务
+- `internal/handler/delete_message.go`: 消息软删除 + 入队 TypeSendMessage 广播删除更新
 - `internal/handler/mq_send_message.go`: TypeSendMessage 消费者，广播给各 recipient
 - `internal/mq/mq.go`: Broker 接口定义、队列常量、Task 类型
 - `internal/mq/asynq.go`: AsynqBroker 实现
@@ -203,8 +211,8 @@ sequenceDiagram
     Worker->>QStore: GetByCheckpoint(checkpointID)
     QStore-->>Worker: answered questions
     Worker->>Worker: 构建 targets map (interruptID -> answer)
-    Worker->>Agent: ResumeWithParams(checkpointID, targets)
     Worker->>BC: SendTyping(true)
+    Worker->>Agent: ResumeWithParams(checkpointID, targets)
     loop 流式输出
         Agent-->>Worker: StreamChunk (content)
         Worker->>BC: SendStreamUpdate
@@ -235,7 +243,7 @@ sequenceDiagram
 #### 2. 多轮 HITL (Resume 后再次中断)
 
 - 触发条件: Agent resume 后又返回新的 interrupt
-- 处理逻辑: 更新会话状态为 asking_user，持久化新 Question 到 DB，广播 conversation update，不释放锁（D-084），删除 processingKey 允许后续 resume
+- 处理逻辑: 更新会话状态为 asking_user，持久化新 Question 到 DB，广播 conversation update（pull notification），广播 agent status（"asking_user"），不释放锁（D-084），删除 processingKey 允许后续 resume
 - 最终结果: Agent 再次暂停等待用户回答，可循环多轮
 
 #### 3. Resume 期间 LLM 瞬态错误
@@ -264,6 +272,7 @@ sequenceDiagram
 
 ### 涉及文件
 
+- `internal/handler/agent_resume.go`: agent_resume RPC handler，持久化回答 + 入队 TypeAgentResume 任务
 - `internal/agent/resume_handler.go`: TypeAgentResume 消费者
 - `internal/agent/task_handler.go`: 共享锁和幂等模式
 - `internal/agent/conversation_lock.go`: 分布式锁
@@ -339,14 +348,14 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph 生产者
-        A[send_message handler] -->|critical| Q1[QueueCritical: weight=6]
-        A -->|TypeAgentProcess| Q1
-        B[其他 handler] -->|default| Q2[QueueDefault: weight=3]
-        C[清理/批处理] -->|low| Q3[QueueLow: weight=1]
+        A[send_message handler] -->|default| Q2[QueueDefault: weight=3]
+        B[delete_message handler] -->|default| Q2
+        C[agent_resume RPC handler] -->|default| Q2
+        D[清理/批处理] -->|low| Q3[QueueLow: weight=1]
     end
 
     subgraph 消费者
-        Q1 --> W[Worker Pool]
+        Q1[QueueCritical: weight=6] --> W[Worker Pool]
         Q2 --> W
         Q3 --> W
         W -->|按权重轮询| H[TaskHandler 路由表]
@@ -356,6 +365,8 @@ flowchart LR
         H -->|未注册类型| H4[返回 ErrHandlerNotRegistered]
     end
 ```
+
+> 注意: 当前所有业务任务均使用 QueueDefault。QueueCritical 和 QueueLow 已定义权重但尚未被生产者使用，留作未来扩展。
 
 ### 边缘场景
 
@@ -382,6 +393,20 @@ flowchart LR
 - 触发条件: Enqueue 时指定 WithUnique()
 - 处理逻辑: Asynq 检查是否有相同类型和 payload 的 pending 任务，有则拒绝入队
 - 最终结果: 防止短时间内重复入队相同任务
+
+### Task 类型常量
+
+`internal/mq/mq.go` 定义了 7 个 Task 类型常量，其中 3 个已注册 handler，4 个已定义但尚未实现消费者：
+
+| 常量 | 值 | 状态 |
+| --- | --- | --- |
+| TypeSendMessage | `mq:send_message` | 已注册 handler |
+| TypeAgentProcess | `mq:agent_process` | 已注册 handler |
+| TypeAgentResume | `mq:agent_resume` | 已注册 handler |
+| TypeSyncUpdates | `mq:sync_updates` | 已定义，未注册 handler |
+| TypePushNotification | `mq:push_notification` | 已定义，未注册 handler |
+| TypePresenceBroadcast | `mq:presence_broadcast` | 已定义，未注册 handler |
+| TypeConversationSync | `mq:conversation_sync` | 已定义，未注册 handler |
 
 ### 涉及文件
 

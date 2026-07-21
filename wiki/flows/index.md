@@ -308,8 +308,8 @@ graph TB
 **职责**：管理客户端的注册和函数能力注册，支持动态工具注入到 Agent。
 
 **核心功能**：
-- 客户端注册：通过 `register` 方法注册客户端信息
-- 函数注册：通过 `system.register_functions` 注册客户端函数能力
+- 客户端连接注册：通过 WebSocket 连接建立时自动注册（见 websocket-connection.md）
+- 函数注册：通过 `system.register_functions` RPC 注册客户端函数能力
 - 动态工具：注册的函数自动注入为 Agent 工具 (D-101)
 
 **函数注册流程**：

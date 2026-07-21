@@ -52,35 +52,45 @@ sequenceDiagram
     end
 
     H->>R: Reload()
-    R->>FS: 扫描 agents 目录（.md 文件）
-    FS-->>R: 返回配置文件列表
-    R->>R: 解析 YAML front matter
-    R->>R: 验证必填字段
-    R->>R: 清空旧配置，加载新配置
+    R->>R: 清空旧配置，更新 dir
+    R->>FS: os.ReadDir 扫描 agents 目录
+    FS-->>R: 返回目录条目
+    loop 每个 .md 文件
+        R->>FS: os.ReadFile 读取文件
+        R->>R: ParseFrontMatter（解析 YAML + 验证 + 提取 SystemPrompt）
+        R->>R: 检查 ID 重复，加入 agents map
+    end
 
     alt 加载失败
         R-->>H: 返回错误
-        H-->>WS: 返回错误
+        H-->>WS: 返回错误（含目录路径）
         WS-->>C: 错误响应
     end
 
     R-->>H: 成功
-    H->>R: Count()
-    R-->>H: 返回 Agent 数量
+    H->>R: ListAll()
+    R-->>H: 返回 []*AgentConfig
+    H->>H: len(ListAll())
     H-->>WS: 返回 {count: N}
     WS-->>C: 成功响应
 ```
 
 ### 详细步骤
 
-1. **检查 AgentRegistry**：如果为 nil，直接返回 `{count: 0}`
-2. **调用 Reload()**：读取上次加载的目录路径，调用 `Load(dir)`
-3. **扫描目录**：遍历 agents 目录下的所有 `.md` 文件（跳过子目录和非 `.md` 文件）
-4. **解析配置**：解析每个 `.md` 文件的 YAML front matter 为 AgentConfig（Markdown body 作为 SystemPrompt）
-5. **验证配置**：检查必填字段（`id`、`name`、`model`、`api_key_env`）
-6. **替换配置**：清空现有配置后加载新配置（完全替换）
-7. **获取数量**：调用 `len(h.registry.ListAll())` 获取已注册的 agent 数量
-8. **返回结果**：返回 `{count: N}`
+1. **检查 AgentRegistry**：如果为 nil，直接返回 `{count: 0}`（json.Marshal 序列化）
+2. **调用 Reload()**：用 `RLock` 读取 `dir` 字段，释放锁后调用 `Load(dir)`
+3. **Load() 加写锁**：`Lock()` 保护整个加载过程
+4. **清空旧配置**：`r.agents = make(map[string]*AgentConfig)`，同时更新 `r.dir`
+5. **扫描目录**：`os.ReadDir(dir)` 遍历目录，跳过子目录和非 `.md` 文件
+6. **逐文件处理**：对每个 `.md` 文件：
+   - `os.ReadFile` 读取文件内容（失败则 skip + 日志）
+   - `ParseFrontMatter` 解析 YAML front matter（缺少 `---` 分隔符返回 `ErrNoFrontMatter`；YAML 解析失败返回 `ErrInvalidFrontMatter`）
+   - `Validate()` 检查必填字段和 MCP 配置（失败则返回错误，该文件被跳过）
+   - 提取 Markdown body 为 `SystemPrompt`
+   - 检查 ID 重复（重复则 skip + 日志，保留先加载的）
+7. **返回结果**：`Load()` 成功后，handler 调用 `len(h.registry.ListAll())` 获取数量
+8. **错误包装**：`Reload()` 失败时，handler 用 `fmt.Errorf("reload agents from %q: %w", h.registry.Dir(), err)` 包装错误
+9. **返回响应**：成功返回 `{count: N}`
 
 ---
 
@@ -122,7 +132,7 @@ flowchart TD
 flowchart TD
     A[解析 YAML front matter] --> B{解析成功?}
     B -->|失败| C[记录错误, 继续下一个]
-    B -->|成功| D[验证必填字段]
+    B -->|成功| D[验证必填字段 + MCP 配置]
     D --> E{验证通过?}
     E -->|否| F[记录错误, 继续下一个]
     E -->|是| G[提取 Markdown body 为 SystemPrompt]
@@ -130,11 +140,16 @@ flowchart TD
 ```
 
 | 场景 | 处理方式 |
-|------|----------|
-| 无 front matter（缺少 `---` 分隔符） | 跳过该文件，记录错误日志 |
-| YAML 格式错误 | 跳过该文件，记录错误日志 |
-| 必填字段缺失（id/name/model/api_key_env） | 跳过该配置，记录错误日志 |
-| 文件读取失败 | 跳过该文件，记录错误日志 |
+| ---- | ---- |
+| 无 front matter（缺少 `---` 分隔符） | 跳过该文件，返回 `ErrNoFrontMatter` |
+| YAML 格式错误 | 跳过该文件，返回 `ErrInvalidFrontMatter`（wrap 原始错误） |
+| 必填字段缺失（id/name/model/api_key_env） | 跳过该配置，返回对应的 `ErrMissing*` 错误 |
+| MCP server 缺少 name | 跳过该配置，返回 `ErrMCPMissingName` |
+| MCP server name 重复 | 跳过该配置，返回 `ErrMCPDuplicateName` |
+| MCP transport 非 "sse"/"stdio" | 跳过该配置，返回 `ErrInvalidMCPTransport` |
+| MCP sse 缺少 url | 跳过该配置，返回 `ErrMCPMissingURL` |
+| MCP stdio 缺少 command | 跳过该配置，返回 `ErrMCPMissingCommand` |
+| 文件读取失败 | 跳过该文件，记录 Info 级日志 |
 
 ### 4. 配置冲突
 
@@ -161,9 +176,27 @@ flowchart TD
 ```
 
 | 场景 | 处理方式 |
-|------|----------|
+| ---- | ---- |
 | Reload 期间有 Agent 执行 | 使用旧配置执行，不影响正在进行的任务 |
-| 多个 Reload 并发 | AgentRegistry 内部使用互斥锁保护 |
+| 多个 Reload 并发 | AgentRegistry 内部使用 RWMutex 保护；`Reload()` 先用 RLock 读 dir，再用 Lock 调 `Load()` |
+
+### 6. 目录在首次加载后被删除
+
+| 场景 | 处理方式 |
+| ---- | ---- |
+| agents 目录在 `Load()` 成功后被删除 | 下次 `Reload()` 调用 `Load(dir)` 时 `os.ReadDir` 返回 `IsNotExist` 错误，`Load()` 返回 nil（视为模块禁用） |
+| 结果 | 返回 `{count: 0}`，不报错 |
+
+**行为说明**：这与首次加载时目录不存在的行为一致（D-063）。
+
+**部分加载失败**：`Load()` 对单个文件错误（读取失败、解析失败、验证失败、ID 重复）采取 skip + 继续策略，不影响其他文件。只有目录级别的错误（如权限不足）才会使 `Load()` 返回 error。如果所有文件都被跳过，`Load()` 仍返回 nil，handler 报告 `{count: 0}`。
+
+### 7. Reload 在 Load 之前调用（dir 为空）
+
+| 场景 | 处理方式 |
+| ---- | ---- |
+| `NewRegistry()` 后直接调用 `Reload()` | `dir` 为空字符串，`Load("")` 尝试读取空路径，`os.ReadDir` 返回错误 |
+| 结果 | handler 返回错误：`reload agents from "": read agents dir: ...` |
 
 ---
 
@@ -249,7 +282,7 @@ tools:
 ### 必填字段（Validate 检查）
 
 | 字段 | 类型 | 说明 |
-|------|------|------|
+| ---- | ---- | ---- |
 | `id` | string | Agent 唯一标识（front matter 中） |
 | `name` | string | Agent 显示名称 |
 | `model` | string | LLM 模型名称（用于自动检测 provider） |
@@ -258,22 +291,50 @@ tools:
 ### 可选字段
 
 | 字段 | 类型 | 说明 |
-|------|------|------|
+| ---- | ---- | ---- |
 | `description` | string | Agent 描述 |
 | `base_url` | string | 自定义 LLM API 端点 |
 | `parameters.temperature` | float | 生成温度 |
 | `parameters.max_tokens` | int | 最大 token 数 |
+| `parameters.top_p` | float | nucleus sampling 参数 |
+| `context.max_tokens` | int | 上下文窗口最大 token 数 |
+| `context.max_messages` | int | 上下文最大消息数 |
 | `tools` | list | 工具名称列表（从 tool registry 解析） |
 | `dynamic_tools` | list | 运行时动态解析的工具名称 |
-| `tool_config` | map | 每个工具的独立配置 |
+| `tool_config` | map | 每个工具的独立配置（key 为工具名） |
+| `middleware` | object | Eino 中间件开关（见下表） |
 | `sub_agents` | list | 子 Agent ID 列表 |
-| `mcp_servers` | list | MCP 服务器连接配置 |
+| `mcp_servers` | list | MCP 服务器连接配置（见下表） |
 | Markdown body | string | 作为 SystemPrompt（非 YAML 字段） |
+
+### middleware 子字段
+
+| 字段 | 类型 | 默认值 | 说明 |
+| ---- | ---- | ------ | ---- |
+| `enable_summarization` | bool | false | 启用上下文摘要中间件 |
+| `summarization_tokens` | int | 160000 | 触发摘要的 token 阈值 |
+| `enable_tool_reduction` | bool | false | 启用工具缩减中间件 |
+| `tool_reduction_max_chars` | int | 50000 | 工具描述最大字符数 |
+| `enable_patch_tool_calls` | bool | false | 启用工具调用修补 |
+| `enable_client_tools` | bool | false | 启用客户端设备函数注入为 Agent 工具 |
+| `client_tools` | object | - | 客户端工具配置（function_tags, excluded_functions, call_timeout） |
+
+### mcp_servers 子字段
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `name` | string | **必填**，服务器名称（不可重复） |
+| `transport` | string | **必填**，传输方式：`"sse"` 或 `"stdio"` |
+| `url` | string | SSE 端点地址（transport=sse 时必填） |
+| `command` | string | stdio 命令（transport=stdio 时必填） |
+| `args` | list | stdio 命令参数 |
+| `env` | list | stdio 环境变量 |
+| `tools` | list | 过滤特定工具（空 = 全部） |
 
 ---
 
 ## 相关文档
 
 - [Agent 执行流程](agent-execution.md)
-- [Agent 配置](../architecture/agent-config.md)
 - [CLI 命令](cli-ipc.md)
+- [设计决策](../architecture/design-decisions.md)

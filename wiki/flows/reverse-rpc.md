@@ -13,7 +13,7 @@
 - [6. 全局取消流程 (CancelAll_Shutdown)](#6-全局取消流程)
 - [7. 持久化重放流程 (ReplayRequest_PersistenceReplay)](#7-持久化重放流程)
 - [8. 并发请求流程 (ConcurrentRequests_MultiGoroutine)](#8-并发请求流程)
-- [9. 设备重连时序流程 (DeviceReconnect_CancelDeviceTiming)](#9-设备重连时序流程)
+- [9. 设备生命周期与 CancelDevice 时序](#9-设备生命周期与-canceldevice-时序)
 - [10. 端到端测试流程 (E2E_BasicRoundTrip)](#10-端到端测试流程)
 
 ---
@@ -49,15 +49,58 @@
 
 ```
 reverseRPCPending {
-    reqID           string              // 请求 ID
-    userID          string              // 用户 ID
-    deviceID        string              // 设备 ID
-    method          string              // 调用方法名
-    seq             uint64              // 序列号
-    idempotencyKey  string              // 幂等键
-    sentAt          time.Time           // 发送时间
     respCh          chan *PackageDataResponse  // 响应 channel (cap=1)
     cancel          context.CancelFunc  // context 取消函数
+    userID          string              // 用户 ID (CancelDevice 过滤)
+    deviceID        string              // 设备 ID (CancelDevice 过滤)
+    reqID          string              // 请求 ID
+    method         string              // 调用方法名
+    params         json.RawMessage     // 方法参数
+    idempotencyKey string              // 幂等键 (等于 reqID)
+    seq            uint64              // 每设备序列号
+}
+```
+
+### PendingRequest 模型（持久化）
+
+超时请求持久化到 Redis 时使用 `PendingRequest` 结构体：
+
+```
+PendingRequest {
+    ID             string          `json:"id"`              // 原始 reqID
+    UserID         string          `json:"user_id"`
+    DeviceID       string          `json:"device_id"`
+    Method         string          `json:"method"`
+    Params         json.RawMessage `json:"params"`
+    IdempotencyKey string          `json:"idempotency_key"` // 等于 reqID
+    Seq            uint64          `json:"seq"`
+    RetryCount     int             `json:"retry_count"`     // 已重放次数
+    MaxRetries     int             `json:"max_retries"`     // 最大重放次数 (默认 3)
+    CreatedAt      time.Time       `json:"created_at"`      // 首次持久化时间
+}
+```
+
+### PendingStore 接口
+
+`PendingStore` 是可选的持久化存储接口，用于超时请求的保存和重放。当前实现为 `RedisPendingStore`（基于 Redis List）。
+
+```
+PendingStore interface {
+    Save(ctx, req *PendingRequest) error                             // 追加到设备列表，超限裁剪最旧
+    List(ctx, userID, deviceID string) ([]*PendingRequest, error)    // 返回设备的所有 pending 请求
+    Remove(ctx, userID, deviceID, requestID string) error            // 按 ID 删除单条
+    RemoveByDevice(ctx, userID, deviceID string) error               // 删除设备的全部 pending
+    Update(ctx, req *PendingRequest) error                           // 按 ID 替换（用于更新 RetryCount）
+}
+```
+
+### PendingStoreConfig 配置
+
+```
+PendingStoreConfig {
+    MaxPendingPerDevice int           // 每设备最大 pending 数，默认 50
+    RequestTTL          time.Duration // Redis TTL，默认 24h
+    MaxReplayRetries    int           // 最大重放次数，默认 3
 }
 ```
 
@@ -85,6 +128,20 @@ PackageDataResponse {
 }
 ```
 
+### Redis 操作详情（RedisPendingStore）
+
+RedisPendingStore 使用 Redis List 存储每个设备的 pending 请求。Key 格式为 `pending:{userID}\x00{deviceID}`。
+
+| 操作 | Redis 命令 | 说明 |
+|------|----------|------|
+| Save | `RPUSH` + `LTRIM` + `EXPIRE` (pipeline) | 追加 JSON，LTRIM 裁剪到 MaxPendingPerDevice，刷新 TTL |
+| List | `LRANGE 0 -1` | 返回全部条目，JSON 反序列化，跳过损坏条目 |
+| Remove | `LRANGE` -> 过滤 -> `DEL` + `RPUSH` + `EXPIRE` (pipeline) | 非原子读-改-写，跳过损坏条目 |
+| Update | `LRANGE` -> 替换 -> `DEL` + `RPUSH` + `EXPIRE` (pipeline) | 与 Remove 相同模式，用于更新 RetryCount |
+| RemoveByDevice | `DEL` | 直接删除整个 key |
+
+> **注意**：Remove 和 Update 使用 Del+RPush pipeline 而非事务，进程崩溃可能丢失条目。这对 pending store 是可接受的（fail-open 语义）。
+
 ---
 
 ## 流程总览
@@ -109,9 +166,22 @@ graph TB
         J[设备重连] --> K[CancelDevice 旧连接]
         K --> L[WebSocket Upgrade]
         L --> M[注册新连接]
-        M --> N{PendingStore 有记录?}
-        N -->|是| O[ReplayRequest]
-        N -->|否| P[正常流程]
+        M --> N[客户端发送 system.reconnect]
+        N --> O{PendingStore 有记录?}
+        O -->|是| P[异步 replayOne]
+        O -->|否| Q[返回 replayed=0]
+        P --> R{重放成功?}
+        R -->|是| S[Remove from Redis]
+        R -->|否| T{超过 MaxRetries?}
+        T -->|是| S
+        T -->|否| U[Update RetryCount]
+    end
+
+    subgraph 断开流程
+        V[设备断开] --> W[removeClient]
+        W --> X{有替代连接?}
+        X -->|否| Y[CancelDeviceWithReason]
+        X -->|是| Z[跳过取消]
     end
 ```
 
@@ -475,47 +545,63 @@ CancelAll 采用"快照语义"：在加锁瞬间取出当前所有 pending，解
 
 **流程名称**：ReplayRequest_PersistenceReplay
 
-**描述**：设备重连后，从 PendingStore 取出之前超时持久化的请求，重新发送给客户端。使用新的 reqID 进行响应路由，但保留原始 IdempotencyKey 供客户端去重。
+**描述**：设备重连后，客户端发送 `system.reconnect` RPC 请求（携带 `last_seen_seq`），服务端从 PendingStore 取出之前超时持久化的请求，按 `last_seen_seq` 过滤后异步重放。重放使用新的 replayID 进行响应路由，但保留原始 IdempotencyKey 供客户端去重。重放结果（成功/失败/超限丢弃）会反馈到 PendingStore。
 
 ### 流程图
 
 ```mermaid
 sequenceDiagram
-    participant RH as 重连处理器
-    participant Store as PendingStore
+    participant Client as 客户端
+    participant RH as reconnectHandler
+    participant Store as PendingStore (Redis)
     participant RR as ReplayRequest
     participant Pending as pending 映射表
     participant WS as WebSocket
-    participant Client as 客户端
 
-    RH->>Store: pendingStore.Load(userID, deviceID)
-    Store-->>RH: 返回持久化的请求列表
+    Client->>RH: system.reconnect({last_seen_seq: N})
+    RH->>RH: 解析 last_seen_seq (默认 0)
+    RH->>Store: ps.List(ctx, userID, deviceID)
+    Store-->>RH: 返回持久化请求列表
 
-    loop 遍历每个持久化请求
-        RH->>RR: ReplayRequest(ctx, preq, timeout)
+    RH->>RH: 过滤: Seq > last_seen_seq && RetryCount < MaxRetries
+
+    RH-->>Client: 立即返回 {status:"ok", replayed:M, total:T}
+
+    par 每个待重放请求 (独立 goroutine)
+        RH->>RR: replayOne(preq)
         RR->>RR: 生成 replayID = "s-replay-{uuid}"
-        RR->>RR: 创建带超时的 context
-        RR->>RR: 构建 reverseRPCPending (保留原始 idempotencyKey 和 seq)
-
+        RR->>RR: 创建带 10s 超时的 context
         RR->>Pending: r.pending[replayID] = pending
-        RR->>RR: 序列化 PackageDataRequest (ID=replayID, IdempotencyKey=原始值)
-        RR->>WS: sendFunc(Package{Type: Request})
+        RR->>WS: sendFunc(Package{Type: Request, ID: replayID})
         WS->>Client: 发送请求
 
-        alt 收到响应
-            Client-->>WS: Package{Type: Response}
+        alt 收到成功响应 (Code == 0)
+            Client-->>WS: Package{Type: Response, Code: 0}
             WS-->>RR: respCh <- response
-            RR->>Pending: defer delete(r.pending, replayID)
-            RR-->>RH: 返回 *PackageDataResponse
-        else 超时
-            RR->>Pending: defer delete(r.pending, replayID)
-            Note over RR: 不自动重新持久化
-            RR-->>RH: 返回 DeadlineExceeded
+            RR->>Store: ps.Remove(ctx, preq.ID) -- 从 Redis 删除
+        else 超时或失败响应 (Code != 0)
+            RR->>RR: preq.RetryCount++
+            alt RetryCount >= MaxRetries
+                RR->>Store: ps.Remove(ctx, preq.ID) -- 超限丢弃
+            else RetryCount < MaxRetries
+                RR->>Store: ps.Update(ctx, preq) -- 更新 RetryCount
+            end
         end
     end
 ```
 
 ### 详细步骤
+
+1. 客户端发送 `system.reconnect` RPC，params 包含 `last_seen_seq`（默认 0）
+2. reconnectHandler 查询 PendingStore.List 获取该设备的所有持久化请求
+3. 过滤：仅保留 `Seq > last_seen_seq` 且 `RetryCount < MaxRetries` 的请求
+4. 立即返回响应 `{status:"ok", replayed: N, total: M}` 给客户端（不等待重放完成）
+5. 每个待重放请求启动独立 goroutine 执行 `replayOne`
+6. `replayOne` 调用 `ReplayRequest`（10 秒超时），生成新 replayID，保留原始 IdempotencyKey 和 Seq
+7. 重放成功（Code == 0）：调用 `ps.Remove` 从 Redis 删除
+8. 重放失败：递增 `RetryCount`，若未超限调用 `ps.Update` 更新计数，若超限调用 `ps.Remove` 丢弃
+
+### ReplayRequest 详细步骤
 
 1. 生成新的 replayID，格式为 `s-replay-{uuid}`
 2. 创建带超时的 context 和新的 reverseRPCPending 结构体
@@ -525,17 +611,29 @@ sequenceDiagram
 6. 调用 sendFunc 发送到原始 (userID, deviceID)
 7. select 等待响应或超时
 8. defer 清理 pending 记录
-9. 超时时不自动持久化（由调用方负责更新 PendingStore 的 RetryCount 或移除）
+9. ReplayRequest 本身不处理持久化（由调用方 reconnectHandler 负责）
+
+### PendingStore 在重放中的操作
+
+| 时机 | 操作 | 说明 |
+|------|------|------|
+| reconnect 请求到达 | List | 查询设备的所有 pending 请求 |
+| 重放成功 (Code == 0) | Remove | 从 Redis 删除已完成的请求 |
+| 重放失败，未超限 | Update | 更新 RetryCount 到 Redis |
+| 重放失败，超过 MaxRetries | Remove | 从 Redis 删除超限请求 |
 
 ### 边缘场景
 
 | 场景 | 处理方式 |
 |------|----------|
-| 超时后不自动重新持久化 | 调用方（reconnect handler）负责管理重试计数和 maxRetries 判断 |
+| PendingStore 为 nil | reconnectHandler 返回 `{replayed:0, total:0}`，不做任何重放 |
+| List 返回错误 | fail-open：记录日志，返回 `{replayed:0, total:0}` |
 | 客户端利用 IdempotencyKey 去重 | 若客户端已执行过该请求（通过 IdempotencyKey 识别），直接返回缓存的结果 |
 | 与 CancelDevice 交互 | ReplayRequest 的 pending 记录同样会被 CancelDevice 取消，因为 CancelDevice 匹配的是 userID+deviceID |
-| sendFunc 错误 | 返回 "send replay request" 错误，不进入 select 等待 |
+| sendFunc 错误 | ReplayRequest 返回 "send replay request" 错误，replayOne 递增 RetryCount |
 | 多次重放同一原始请求 | 每次生成不同的 replayID，互不干扰 |
+| last_seen_seq 过滤 | 仅重放 Seq > last_seen_seq 的请求，客户端可通过此机制跳过已处理的请求 |
+| Remove/Update 失败 | 仅记录日志，不影响主流程（fail-open） |
 
 ### 为什么使用新的 reqID
 
@@ -638,13 +736,13 @@ sequenceDiagram
 
 ---
 
-## 9. 设备重连时序流程
+## 9. 设备生命周期与 CancelDevice 时序
 
 **流程名称**：DeviceReconnect_CancelDeviceTiming
 
-**描述**：设备重连时，WebSocketServer 在 Upgrade 之前调用 CancelDevice，确保旧连接的 pending 请求在新连接注册前被取消，避免误取消新连接的请求。
+**描述**：设备连接生命周期中有两个关键的 CancelDevice 调用时机：重连时（Upgrade 前）和正常断开时（removeClient 后）。两者都通过 `hasActiveConn` 检查避免误取消替代连接的请求。
 
-### 流程图
+### 9a. 设备重连流程
 
 ```mermaid
 sequenceDiagram
@@ -662,6 +760,7 @@ sequenceDiagram
 
     Handler->>CD: CancelDevice(userID, deviceID)
     Note over CD: 取消旧连接的所有 pending 请求
+    Note over CD: reason = "device replaced"
     CD-->>Handler: 返回
 
     Handler->>Handler: WebSocket Upgrade
@@ -678,8 +777,32 @@ sequenceDiagram
     OldConn->>OldConn: 关闭旧 client
 ```
 
+### 9b. 正常断开流程
+
+```mermaid
+sequenceDiagram
+    participant Client as 客户端
+    participant Handler as handleWebSocket
+    participant RC as removeClient
+    participant CD as CancelDeviceWithReason
+
+    Client->>Handler: 连接断开 (client.Run() 返回)
+    Handler->>Handler: ConnectionStore.Remove(connID)
+    Handler->>RC: removeClient(connID, userID, deviceID)
+    Note over RC: 从 clients/clientsByUser/clientsByDevice 删除
+
+    Handler->>Handler: 检查 hasActiveConn
+    alt hasActiveConn == false (无替代连接)
+        Handler->>CD: CancelDeviceWithReason(userID, deviceID, "device disconnected")
+        Note over CD: 取消该设备的所有 pending 请求
+    else hasActiveConn == true (已有替代连接)
+        Note over Handler: 跳过取消，避免误取消新连接的请求
+    end
+```
+
 ### 详细步骤
 
+**重连路径**：
 1. 客户端发起新的 WebSocket 连接请求
 2. handleWebSocket 检测到该 (userID, deviceID) 已有旧连接
 3. **在 Upgrade 之前**调用 `reverseRPC.CancelDevice(userID, deviceID)`
@@ -688,26 +811,44 @@ sequenceDiagram
 6. 注册新连接到 clients/clientsByUser/clientsByDevice 映射表
 7. 异步清理旧连接（发送 4001 close frame，关闭旧 client）
 
+**正常断开路径**：
+1. 客户端连接断开，`client.Run()` 返回
+2. 从 ConnectionStore 删除连接记录
+3. 调用 `removeClient` 从本地映射表删除
+4. 检查 `clientsByDevice[deviceKey]` 是否还有活跃连接
+5. 若无活跃连接：调用 `CancelDeviceWithReason(userID, deviceID, "device disconnected")`
+6. 若有活跃连接（替代连接已注册）：跳过取消
+
 ### 边缘场景
 
 | 场景 | 处理方式 |
 |------|----------|
 | 新连接的请求不会被误取消 | CancelDevice 在 Upgrade 前执行，此时新连接尚未注册，不会有属于新连接的 pending 请求 |
-| 正常断开时的 CancelDeviceWithReason | 在 removeClient 之后执行，检查 hasActiveConn 避免取消替代连接的请求 |
+| 正常断开后快速重连 | hasActiveConn 检查发现替代连接已注册，跳过 CancelDeviceWithReason |
 | 旧连接清理是异步的 | performDeviceReplacement 在独立 goroutine 中执行，不阻塞新连接的注册 |
+| removeClient 与 CancelDevice 顺序 | 正常断开时先 removeClient 再检查 hasActiveConn，确保检查的是最新状态 |
 
 ### 时序保证
 
 ```
-时间线:
+重连时间线:
   T1: 检测到旧连接存在
-  T2: CancelDevice(userID, deviceID)  ← 旧连接的 pending 被取消
+  T2: CancelDevice(userID, deviceID)  ← 旧连接的 pending 被取消 ("device replaced")
   T3: WebSocket Upgrade               ← 新连接建立
   T4: 注册新连接                      ← 新连接可用于接收请求
   T5: 异步清理旧连接                  ← 不阻塞主流程
+
+正常断开时间线:
+  T1: client.Run() 返回
+  T2: ConnectionStore.Remove(connID)
+  T3: removeClient(connID)            ← 从本地映射表删除
+  T4: 检查 hasActiveConn
+  T5: CancelDeviceWithReason(...)     ← 仅在无替代连接时执行 ("device disconnected")
 ```
 
-**关键保证**：T2 发生在 T4 之前，确保 CancelDevice 只取消属于旧连接的 pending，不会误取消新连接的 pending。
+**关键保证**：
+- 重连时 T2 发生在 T4 之前，确保 CancelDevice 只取消属于旧连接的 pending
+- 正常断开时 T3 发生在 T4 之前，hasActiveConn 检查基于最新状态
 
 ---
 
@@ -771,11 +912,14 @@ sequenceDiagram
 |--------|--------|----------|
 | ServerRequest | DispatchResponse | 通过 respCh 连接，reqID 匹配 |
 | ServerRequest | CancelDevice | 通过 respCh 连接，userID+deviceID 匹配 |
-| ServerRequest | 超时 | 通过 ctx.Done() 触发 |
+| ServerRequest | 超时 | 通过 ctx.Done() 触发，仅 DeadlineExceeded 触发持久化 |
 | CancelDevice | 超时 | 竞态关系，respCh 优先 |
 | ReplayRequest | CancelDevice | ReplayRequest 的 pending 同样会被 CancelDevice 取消 |
 | CancelAll | ServerRequest | 快照语义，CancelAll 不影响后续注册 |
-| 持久化 | ReplayRequest | PendingStore 连接，超时保存 -> 重连重放 |
+| 持久化 | reconnectHandler | PendingStore 连接，超时保存 -> system.reconnect 触发重放 |
+| reconnectHandler | ReplayRequest | reconnectHandler 过滤后调用 ReplayRequest，管理 RetryCount |
+| 设备重连 | CancelDevice | Upgrade 前调用，reason="device replaced" |
+| 设备断开 | CancelDeviceWithReason | removeClient 后调用，hasActiveConn 守卫，reason="device disconnected" |
 
 ## 附录：状态码约定
 
@@ -793,6 +937,7 @@ sequenceDiagram
 | `send request` | sendFunc 发送请求失败（设备离线等） |
 | `marshal request` | json.Marshal 请求体失败 |
 | `send replay request` | ReplayRequest 的 sendFunc 失败 |
+| `marshal replay request` | ReplayRequest 的 json.Marshal 失败 |
 | `device replaced` | CancelDevice 合成响应 |
 | `device disconnected` | CancelDeviceWithReason (断开场景) |
 | `reverse rpc cancelled` | CancelAll 合成响应 |
