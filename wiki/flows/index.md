@@ -122,6 +122,21 @@ graph TB
 
 ## 子系统列表
 
+### 0. 新增独立流程文档
+
+以下流程已从各子系统文档中提取为独立文档，便于单独查阅：
+
+| 流程 | 文件 | 说明 |
+| --- | --- | --- |
+| [Set Typing](set-typing.md) | `set-typing.md` | 输入指示器广播（Seq=0, Rate-limited） |
+| [Stream Text](stream-text.md) | `stream-text.md` | 流式文本广播（Seq=0, Rate-limited） |
+| [Heartbeat](heartbeat.md) | `heartbeat.md` | 连接心跳保活（被动续期） |
+| [Sync Updates](sync-updates.md) | `sync-updates.md` | 增量更新拉取（Gap-filling） |
+| [Reload Agents](reload-agents.md) | `reload-agents.md` | Agent 配置热重载 |
+| [Background Cleanup](background-cleanup.md) | `background-cleanup.md` | 后台清理任务（UserUpdate/HITL/缓存） |
+
+---
+
 ### 1. WebSocket 连接管理 (websocket)
 
 **职责**：管理 WebSocket 连接的生命周期，包括连接建立、心跳保活、连接池管理、设备替换和跨节点路由。
