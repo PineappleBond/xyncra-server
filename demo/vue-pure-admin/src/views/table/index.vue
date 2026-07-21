@@ -8,55 +8,16 @@ defineOptions({
 });
 
 const selected = ref(0);
-const tableRefs = ref<any[]>([])
-
-function setTableRef(index: number, el: any) {
-  tableRefs.value[index] = el
-}
 
 function tabClick({ index }) {
   selected.value = index;
 }
 
-defineTestHelpers('pure-table', {
-  search: {
-    name: 'search',
-    description: 'Search table with keyword',
-    parameters: {
-      type: 'object',
-      properties: { keyword: { type: 'string', description: 'Search keyword' } },
-    },
-    handler: (args) => {
-      for (const instance of tableRefs.value) {
-        if (instance?.setSearch) { instance.setSearch(args.keyword); break }
-        if (instance?.search) { instance.search(args.keyword); break }
-        if (instance?.handleSearch) { instance.handleSearch(args.keyword); break }
-      }
-    },
-  },
-  refresh: {
-    name: 'refresh',
-    description: 'Refresh table data',
-    parameters: { type: 'object', properties: {} },
-    handler: () => {
-      for (const instance of tableRefs.value) {
-        if (instance?.refresh) { instance.refresh(); break }
-        if (instance?.reload) { instance.reload(); break }
-      }
-    },
-  },
-  addRow: {
-    name: 'addRow',
-    description: 'Add new row to table',
-    parameters: { type: 'object', properties: {} },
-    handler: () => {
-      for (const instance of tableRefs.value) {
-        if (instance?.addRow) { instance.addRow(); break }
-        if (instance?.handleAdd) { instance.handleAdd(); break }
-      }
-    },
-  },
-})
+// Note: search/refresh/addRow helpers were removed because none of the base
+// table components (base.vue, stripe.vue, etc.) expose these methods via
+// defineExpose. The base tables are display-only demo components. If CRUD
+// table pages are added in the future, helpers can be re-introduced here.
+defineTestHelpers('pure-table', {})
 </script>
 
 <template>
@@ -112,7 +73,7 @@ defineTestHelpers('pure-table', {
               {{ item.title }}
             </span>
           </template>
-          <component :is="item.component" v-if="selected == index" :ref="(el) => setTableRef(index, el)" />
+          <component :is="item.component" v-if="selected == index" />
         </el-tab-pane>
       </template>
     </el-tabs>
