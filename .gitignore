@@ -98,3 +98,10 @@ demo/web/.claude/skills/*
 .superpowers/
 logs/
 dump.rdb
+
+# === E2E 测试产物 ===
+e2e-test*.js
+node_modules/
+package-lock.json
+package.json
+test-results/
