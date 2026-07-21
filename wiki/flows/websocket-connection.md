@@ -2,6 +2,8 @@
 
 > WebSocket 连接的完整生命周期：建立、心跳、消息路由、设备替换、断开、优雅关闭。
 >
+> **关联文档**: `websocket.md` 提供相同流程的高层概览（flowchart 视图），本文档提供详细的 sequence diagram 和边缘场景分析。两文档内容有重叠，以本文档为权威来源。
+>
 > **可观测性**: 全流程使用 OpenTelemetry 追踪，关键 span 包括：
 > `ws.connection`（连接生命周期）、`ws.message.receive`（消息接收）、
 > `handler.invoke`（方法处理）、`handler.broadcast`（广播）、
@@ -37,9 +39,7 @@ sequenceDiagram
     HTTP->>HTTP: upgrader.Upgrade(w, r)
     HTTP->>HTTP: startConnectionSpan(ctx, userID, deviceID, connID)
     HTTP->>HTTP: NewClient(conn, ..., WithContext(connCtx))
-    HTTP->>WS: 原子注册新连接到 clients/clientsByUser/clientsByDevice
-    HTTP->>WS: 从 clientsByDevice 删除旧连接引用
-    HTTP->>WS: cancelPendingFuncCleanup(userID, deviceID)
+    HTTP->>WS: 原子操作 (单次锁获取):<br/>1. 从 clientsByDevice 删除旧引用<br/>2. 注册新连接到 clients<br/>3. 注册新连接到 clientsByUser<br/>4. cancelPendingFuncCleanup<br/>5. 注册新连接到 clientsByDevice
 
     alt 存在旧连接
         HTTP->>WS: performDeviceReplacement(oldClients) [异步]
@@ -67,6 +67,7 @@ sequenceDiagram
 - 触发条件: authenticate 函数返回错误或空 userID
 - 处理逻辑: 返回 HTTP 401 "authentication failed" 或 "missing user id"
 - 最终结果: 连接不建立，客户端收到 401 响应
+- 备注: 默认实现 (`defaultAuthenticate`) 从 `user_id` query 参数提取用户 ID；生产环境应通过 `WSWithAuthenticate` 注入 JWT 或 cookie 认证
 
 #### 2. device_id 过长
 
@@ -215,6 +216,12 @@ sequenceDiagram
 - 处理逻辑: readPump 的 ReadMessage 返回错误（gorilla/websocket 内部检查）
 - 最终结果: 连接断开
 
+#### 4. readPump 错误分类日志
+
+- 触发条件: ReadMessage 返回任何错误
+- 处理逻辑: 使用 `websocket.IsUnexpectedCloseError` 区分意外关闭（如协议错误、异常断开）和正常关闭（CloseGoingAway、CloseNormalClosure）。意外关闭记录 Error 级别日志，正常关闭记录 Debug 级别日志
+- 最终结果: 便于运维区分异常断开和正常断开
+
 ### 涉及文件
 
 - `websocket_client.go`: readPump (PongHandler、SetReadDeadline)、writePump (Ping ticker)
@@ -340,6 +347,8 @@ sequenceDiagram
 
 ## 场景 5: 反向 RPC (服务端主动请求客户端)
 
+> **前置条件**: `NewWebSocketServer` 在初始化时自动将 `ReverseRPC` 实例注入到 `DefaultMessageHandler`（通过 `dmh.SetReverseRPC(s.reverseRPC)`），使客户端返回的 `PackageTypeResponse` 能被自动路由到对应的 pending 请求（参见场景 4）。
+
 ### 主流程
 
 ```mermaid
@@ -423,42 +432,54 @@ sequenceDiagram
 
 ## 场景 6: 待处理请求重放 (设备重连后)
 
-> **注意**: 此场景描述的是设计意图。`ReplayRequest` 方法和 `PendingStore` 接口已实现，
-> 但 `handleWebSocket` 中尚未编排重连后的自动重放逻辑。
-> 上层应用需要自行在设备重连时调用 `PendingStore.List` + `ReverseRPC.ReplayRequest`。
+> 重放通过客户端发送 `system.reconnect` RPC 请求触发，由 `reconnectHandler`（`internal/handler/reconnect.go`）编排。
+> `handleWebSocket` 本身不直接编排重放——重放是客户端重连握手的一部分（详见 [reconnection.md](./reconnection.md) 第 1、3 节）。
 
-### 主流程（设计）
+### 主流程（system.reconnect 触发）
 
 ```mermaid
 sequenceDiagram
-    participant Device as 重连设备
-    participant WS as WebSocketServer
-    participant PS as PendingStore
+    participant Client as 重连客户端
+    participant DMH as DefaultMessageHandler
+    participant RH as reconnectHandler
+    participant PS as PendingStore (Redis)
     participant RR as ReverseRPC
 
-    Device->>WS: WebSocket 连接建立
-    Note over WS: 设备注册成功
+    Client->>DMH: system.reconnect {last_seen_seq}
+    DMH->>RH: HandleRequest(ctx, client, req)
 
-    WS->>PS: List(userID, deviceID)
-    PS-->>WS: []*PendingRequest (按 seq 排序)
+    RH->>RH: 解析 last_seen_seq（默认 0）
 
-    loop 每个 PendingRequest
-        alt RetryCount < MaxRetries
-            WS->>RR: ReplayRequest(ctx, preq, timeout)
-            RR->>RR: 生成新 replayID ("s-replay-{uuid}")，保留原始 IdempotencyKey
-            RR->>Device: sendFunc(userID, deviceID, pkg)
+    alt PendingStore 为 nil
+        RH-->>Client: 返回 {status:ok, replayed:0, total:0}
+    end
 
-            alt 收到响应
-                Device-->>RR: Response
-                RR-->>WS: 成功
-                WS->>PS: Remove(userID, deviceID, requestID)
-            else 超时
-                RR-->>WS: error
-                WS->>PS: Update(req) [RetryCount++]
+    RH->>PS: List(ctx, userID, deviceID)
+    alt List 失败
+        RH-->>Client: fail-open 返回 {status:ok, replayed:0, total:0}
+    end
+
+    RH->>RH: 过滤: Seq > last_seen_seq 且 RetryCount < MaxRetries
+
+    RH-->>Client: 立即返回 {status:ok, replayed:N, total:M}
+
+    par 每个过滤后的请求（独立 goroutine）
+        RH->>RR: ReplayRequest(ctx.Background(), preq, 10s)
+        RR->>RR: 生成新 replayID ("s-replay-{uuid}")，保留原始 IdempotencyKey
+        RR->>Client: sendFunc(userID, deviceID, pkg)
+
+        alt 收到成功响应 (err==nil && resp!=nil && Code==0)
+            Client-->>RR: Response
+            RR-->>RH: 成功
+            RH->>PS: Remove(ctx, preq.ID)
+        else 失败 (err!=nil || resp==nil || Code!=0)
+            RR-->>RH: 错误
+            RH->>RH: preq.RetryCount++
+            alt RetryCount >= MaxRetries
+                RH->>PS: Remove(ctx, preq.ID) -- 超限丢弃
+            else RetryCount < MaxRetries
+                RH->>PS: Update(ctx, preq) -- 更新 RetryCount
             end
-        else RetryCount >= MaxRetries
-            WS->>PS: Remove(userID, deviceID, requestID)
-            Note over WS: 超过最大重试次数，丢弃
         end
     end
 ```
@@ -468,10 +489,10 @@ sequenceDiagram
 #### 1. PendingStore 查询失败
 
 - 触发条件: Redis 不可达
-- 处理逻辑: fail-open，记录错误日志，不阻塞连接建立
+- 处理逻辑: fail-open，记录错误日志，返回零计数
 - 最终结果: 待处理请求不重放，但连接正常使用
 
-#### 2. 重放请求超时且超过最大重试次数
+#### 2. 重放失败且超过最大重试次数
 
 - 触发条件: RetryCount >= MaxRetries (默认 3)
 - 处理逻辑: 从 PendingStore 中移除该请求
@@ -483,12 +504,30 @@ sequenceDiagram
 - 处理逻辑: List 中跳过损坏条目，Remove/Update 中跳过
 - 最终结果: 其他正常请求继续处理
 
+#### 4. PendingStore 为 nil
+
+- 触发条件: 未配置 PendingStore
+- 处理逻辑: reconnectHandler 直接返回零计数
+- 最终结果: 无重放，连接正常使用
+
+#### 5. 重放使用 context.Background()
+
+- 触发条件: 所有重放请求
+- 处理逻辑: `replayOne` 使用 `context.Background()` 而非派生自客户端连接的 context，确保客户端断连不会取消正在进行的重放
+- 最终结果: 重放在客户端断连后仍可完成（最多 10 秒超时）
+
+#### 6. 重放失败日志标签
+
+- 触发条件: 任何重放失败（sendFunc 错误、超时、非零 Code）
+- 处理逻辑: 代码中日志标签为 "replay timeout"，实际涵盖所有失败类型
+- 最终结果: 日志标签具有误导性但不影响功能
+
 ### 涉及文件
 
-- `reverse_rpc.go`: ReplayRequest（已实现但未在 handleWebSocket 中调用）
-- `pending_store.go`: PendingRequest 模型、PendingStore 接口
-- `redis_pending_store.go`: Save、List、Remove、Update（均已实现）
-- `websocket_server.go`: **注意**：handleWebSocket 中暂无重放编排逻辑
+- `internal/handler/reconnect.go`: reconnectHandler.HandleRequest、replayOne
+- `internal/server/reverse_rpc.go`: ReplayRequest
+- `internal/server/pending_store.go`: PendingRequest 模型、PendingStore 接口
+- `internal/server/redis_pending_store.go`: Save、List、Remove、Update
 
 ---
 
@@ -716,12 +755,14 @@ sequenceDiagram
 sequenceDiagram
     participant Client as 客户端
     participant DMH as DefaultMessageHandler
+    participant RFH as registerFunctionsHandler
     participant FR as FunctionRegistry
 
     Client->>DMH: Request: system.register_functions
-    Note over DMH: params: {device_id, device_info, functions[]}
+    DMH->>RFH: HandleRequest(ctx, client, req)
+    Note over RFH: 解析 RegisterFunctionsParams<br/>使用 client.DeviceID() 覆盖客户端提供的 deviceID (D-093)
 
-    DMH->>FR: RegisterFunctions(ctx, userID, deviceID, params)
+    RFH->>FR: RegisterFunctions(ctx, userID, client.DeviceID(), params)
 
     FR->>FR: 校验函数数量 <= MaxFunctionsPerDevice (500)
     FR->>FR: 校验每个函数名非空且长度 <= 255
@@ -730,11 +771,11 @@ sequenceDiagram
     alt 校验通过
         FR->>FR: 深拷贝 functions 和 deviceInfo
         FR->>FR: 存储 DeviceFunctions 记录
-        FR-->>DMH: nil (成功)
-        DMH-->>Client: Success Response
+        FR-->>RFH: nil (成功)
+        RFH-->>Client: {"status":"ok", "count": N, "device_id": "..."}
     else 校验失败
-        FR-->>DMH: ErrMaxFunctionsPerDevice / ErrFunctionNameEmpty / ...
-        DMH-->>Client: Error Response
+        FR-->>RFH: ErrMaxFunctionsPerDevice / ErrFunctionNameEmpty / ...
+        RFH-->>Client: HandlerError (ValidationError)
     end
 ```
 
@@ -758,9 +799,16 @@ sequenceDiagram
 - 处理逻辑: functionRegistry 为 nil，所有方法调用安全跳过（nil-safe）
 - 最终结果: 函数注册功能完全禁用
 
+#### 4. 客户端提供的 deviceID 被覆盖
+
+- 触发条件: 客户端在 params 中提供了 device_id 字段
+- 处理逻辑: registerFunctionsHandler 使用连接的 `client.DeviceID()` 覆盖客户端提供的 deviceID（D-093：连接的 deviceID 是权威来源）
+- 最终结果: 注册始终使用连接建立时的 deviceID，忽略客户端 params 中的值
+
 ### 涉及文件
 
 - `function_registry.go`: FunctionRegistry 接口、MemoryFunctionRegistry、RegisterFunctions、OnDeviceDisconnect
+- `handler/register_functions.go`: registerFunctionsHandler.HandleRequest（解析参数、覆盖 deviceID、调用 Registry）
 - `websocket_server.go`: handleWebSocket 中的断开清理
 
 ---

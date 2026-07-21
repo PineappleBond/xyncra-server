@@ -43,7 +43,8 @@ flowchart TD
     H --> I[gorm.Open dialector 建立连接]
     I -->|失败| J[返回 failed to open database 错误]
     I -->|成功| K[获取底层 sql.DB]
-    K --> L{是否 SQLite?}
+    K -->|失败| K1[返回 failed to get underlying db 错误]
+    K -->|成功| L{是否 SQLite?}
     L -->|是| M[MaxOpen=1 MaxIdle=1]
     L -->|否| N[MaxOpen=25 MaxIdle=5]
     M --> O[可选设置 ConnMaxLifetime]
@@ -67,6 +68,7 @@ flowchart TD
 | 不支持的 driver 名称 | `openDriver` 返回 `fmt.Errorf("store: unsupported database driver: %s")` |
 | driver 别名 | `postgresql` 等同 `postgres`，`sqlite3` 等同 `sqlite` |
 | 连接失败 | GORM Open 失败返回 `fmt.Errorf("store: failed to open database: %w")` |
+| 获取底层 DB 失败 | `db.DB()` 失败返回 `fmt.Errorf("store: failed to get underlying db: %w")` |
 | SQLite 并发限制 | MaxOpen 强制为 1，防止 shared-cache 死锁 |
 | SlowQueryThreshold | 默认 200ms，超过阈值的查询被记录为慢查询 |
 | GORM Logger | IgnoreRecordNotFoundError=true，避免 NotFound 错误的噪声日志 |
@@ -532,6 +534,7 @@ flowchart TD
 | 连接断开 | PingContext 失败，返回 classifyError 后的错误 |
 | Schema 损坏 | Ping 成功但 SELECT 1 失败，捕获查询路径问题 |
 | 与 Ping 的区别 | Ping 仅验证连接存活；HealthCheck 额外验证查询路径可用 |
+| 客户端 Ping | `ClientDB.Ping` 同时执行 `PingContext` 和 `SELECT 1`，等同于服务端 HealthCheck 的双重验证 |
 
 ---
 
@@ -729,11 +732,13 @@ erDiagram
 
 ```mermaid
 flowchart TD
-    A[New dbPath] --> B[构建 SQLite DSN 含 WAL foreign_keys busy_timeout PRAGMAs]
+    A[New dbPath] --> B[构建 SQLite DSN 含 WAL busy_timeout cache_size synchronous foreign_keys PRAGMAs]
     B --> C[gorm.Open gsqlite.Open]
     C --> D[配置连接池 MaxOpen=1 MaxIdle=1]
     D --> E[newClientDB]
-    E --> F[创建 9 个子 Store]
+    E --> E1[获取底层 sql.DB]
+    E1 -->|失败| E2[返回 failed to get underlying db 错误]
+    E1 -->|成功| F[创建 9 个子 Store]
     F --> G[AutoMigrate 9 个模型]
     G --> H[返回 ClientDB]
 
@@ -883,6 +888,8 @@ flowchart TD
 |------|------|
 | SQLite WAL 模式 | DSN 含 `_pragma=journal_mode(WAL)` 支持并发读+单写 |
 | SQLite busy_timeout | 5000ms，写冲突时等待而非立即失败 |
+| SQLite cache_size | -8000（约 8MB 页缓存），提升读性能 |
+| SQLite synchronous | NORMAL，WAL 模式下比 FULL 更快且仍安全 |
 | SQLite foreign_keys=ON | 启用外键约束，级联删除需在事务内手动处理 |
 | MaxOpen=1 强制串行写 | SQLite 文件级锁下多写连接无收益，单连接避免死锁 |
 | Upsert TOCTOU 处理 | SELECT + INSERT 之间可能发生并发插入，捕获 ErrDuplicateKey 后重试为 UPDATE |
@@ -976,7 +983,7 @@ erDiagram
 | AnsweredDeviceID | 有 | 无 | 仅服务端 |
 | AnsweredAt | 有 | 无 | 仅服务端 |
 | DeletedAt | 有 | 无 | 客户端无软删除 |
-| Conversation FK | 有 | 无 | 客户端无外键约束 |
+| Conversation FK | `foreignKey:ConversationID` | 无 | 客户端无外键约束 |
 
 ### 常量定义（客户端额外）
 

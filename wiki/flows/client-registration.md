@@ -82,8 +82,8 @@ sequenceDiagram
         RL-->>WS: 完成
     end
 
-    WS->>WS: 原子注册到三个映射
-    Note over WS: clients[connID]<br/>clientsByUser[userID][connID]<br/>clientsByDevice[deviceKey][connID]
+    WS->>WS: 在单次锁获取中执行以下操作
+    Note over WS: 1. 从 clientsByDevice 删除旧连接引用<br/>2. 注册新连接到 clients/clientsByUser/clientsByDevice<br/>3. cancelPendingFuncCleanup(userID, deviceID)
 
     alt 存在旧连接
         WS->>WS: performDeviceReplacement 协程
@@ -91,6 +91,8 @@ sequenceDiagram
         Note over WS: 2. 等待 10ms 刷新 TCP
         Note over WS: 3. 关闭旧客户端
         Note over WS: 4. 等待最多 500ms 让协程退出
+        Note over WS: 5. removeClient 清理旧连接本地映射
+        Note over WS: 注意：ConnectionStore.Remove 由旧连接自身清理
     end
 
     WS->>CM: 注册 ConnectionInfo
@@ -133,17 +135,18 @@ sequenceDiagram
    - 调用 `reverseRPC.CancelDevice()` 立即失败所有挂起的请求
 
 6. **原子注册新客户端**
-   - 在三个本地映射中原子注册：
-     - `clients[connID]`
-     - `clientsByUser[userID][connID]`
-     - `clientsByDevice[deviceKey][connID]`
-   - 旧条目从 `clientsByDevice` 中移除
+   - 在单次锁获取中执行以下操作：
+     - 从 `clientsByDevice[deviceKey]` 中删除旧连接引用
+     - 注册新连接到三个映射：`clients[connID]`、`clientsByUser[userID][connID]`、`clientsByDevice[deviceKey][connID]`
+     - 调用 `cancelPendingFuncCleanup(userID, deviceID)` 取消可能存在的函数清理定时器
 
 7. **设备替换协程**
    - `performDeviceReplacement` 协程发送 `4001` 关闭帧给旧连接
    - 等待 10ms 刷新 TCP
    - 关闭旧客户端
    - 等待最多 500ms 让协程退出
+   - 调用 `removeClient` 清理旧连接的本地映射
+   - 注意：`ConnectionStore.Remove` 不在此处调用，由旧连接自身的 `handleWebSocket` 在 `client.Run()` 返回后执行
 
 8. **存储连接信息**
    - 在 `ConnectionStore`（Redis 或内存）中注册 `ConnectionInfo`
@@ -169,7 +172,7 @@ sequenceDiagram
 | 查询参数中无 `device_id` | 服务器自动生成 UUID v4 | D-094：确保每个连接有唯一标识 |
 | `device_id` 超过 255 个字符 | 返回 400 Bad Request | 防止存储溢出 |
 | `ConnectionStore.Add` 失败 | 客户端立即被关闭，不执行函数清理 | 连接未完全建立，避免清理不一致状态 |
-| 设备替换竞态 | 旧连接的异步清理协程与新连接的注册并发运行 | `hasActiveConn` 检查防止清理属于替换连接的函数 |
+| 设备替换竞态 | 新连接注册时调用 `cancelPendingFuncCleanup`；旧连接断开时 `hasActiveConn` 为 true 跳过清理 | 双重保护：主动取消 + 被动检查 |
 | 清理期间 Redis 不可达 | 5 秒有界上下文防止无限阻塞 | 最终一致性保证 |
 | `4001` 关闭帧 | 旧客户端收到关闭码 4001 | D-111：触发优雅退出而非重连 |
 | 服务器 GracefulStop | `closeAllClients()` 运行 | 所有连接被清理 |
@@ -296,15 +299,19 @@ sequenceDiagram
             alt grace period 内设备重连
                 WS->>WS: cancelPendingFuncCleanup(userID, deviceID)
                 Note over WS: 取消清理, 函数保留
-            else grace period 超时且无活跃连接
-                WS->>FR: OnDeviceDisconnect(ctx, userID, deviceID)
-                FR->>FR: 从 devices[userID][deviceID] 移除
-                FR->>FR: 清理用户级映射条目 (如果无其他设备)
+            else grace period 超时
+                WS->>WS: 再次检查 hasActiveConn (竞态防护)
+                alt 仍无活跃连接
+                    WS->>FR: OnDeviceDisconnect(ctx, userID, deviceID)
+                    FR->>FR: 从 devices[userID][deviceID] 移除
+                    FR->>FR: 清理用户级映射条目 (如果无其他设备)
+                end
             end
         end
     end
 
-    alt !hasActiveConn
+    Note over WS: 独立检查，不嵌套在函数清理中
+    alt reverseRPC != nil 且 !hasActiveConn
         WS->>RR: CancelDeviceWithReason(userID, deviceID, "device disconnected")
         RR-->>WS: 挂起的反向 RPC 请求失败
     end
@@ -330,15 +337,16 @@ sequenceDiagram
    - 查找 `clientsByDevice[deviceKey]`
 
 5. **延迟清理函数注册**
-   - 如果 `!hasActiveConn`（该设备无其他连接）：
+   - 如果 `functionRegistry != nil` 且 `!hasActiveConn`（该设备无其他连接）：
      - 调用 `scheduleFuncCleanup(userID, deviceID)` 启动 grace period 定时器（默认 10 秒）
      - 如果设备在 grace period 内重连，`cancelPendingFuncCleanup` 取消清理，函数注册保留
-     - 如果 grace period 超时且仍无活跃连接，调用 `OnDeviceDisconnect(ctx, userID, deviceID)`
+     - 如果 grace period 超时，goroutine 再次检查 `hasActiveConn`（竞态防护）
+     - 如果仍无活跃连接，调用 `OnDeviceDisconnect(ctx, userID, deviceID)`
      - 从 `devices[userID][deviceID]` 中移除设备条目
      - 如果该用户不再有设备，清理用户级映射条目以防止内存泄漏
 
-6. **取消挂起请求**
-   - 如果 `!hasActiveConn`：
+6. **取消挂起请求**（独立于函数清理）
+   - 如果 `reverseRPC != nil` 且 `!hasActiveConn`：
      - `reverseRPC.CancelDeviceWithReason(userID, deviceID, "device disconnected")`
      - 使挂起的反向 RPC 请求失败
 
@@ -346,10 +354,12 @@ sequenceDiagram
 
 | 场景 | 处理方式 | 设计决策 |
 |------|---------|---------|
-| 设备替换（旧连接断开清理之前新连接已建立） | `cancelPendingFuncCleanup` 取消 grace period 定时器；若已超时则 `hasActiveConn` 为 true 跳过清理 | 双重保护：grace period 内重连取消清理 + `hasActiveConn` 防止替换连接的函数被删除的竞态 |
+| 设备替换（旧连接断开清理之前新连接已建立） | 新连接注册时调用 `cancelPendingFuncCleanup` 取消 grace period 定时器；若已超时则 `hasActiveConn` 为 true 跳过清理 | 双重保护：grace period 内重连取消清理 + `hasActiveConn` 防止替换连接的函数被删除的竞态 |
 | 对未知设备调用 `OnDeviceDisconnect` | 幂等，返回 `(nil, nil)` | 无副作用 |
 | `ConnectionStore.Remove` 期间 Redis 不可达 | 5 秒超时，错误被记录但清理继续 | 清理不因存储故障阻塞 |
-| `functionRegistry` 为 nil | 整个清理块被跳过 | D-063：nil-safe 设计 |
+| `functionRegistry` 为 nil | 整个函数清理块被跳过 | D-063：nil-safe 设计 |
+| `reverseRPC` 为 nil | `CancelDeviceWithReason` 调用被跳过 | D-063：nil-safe 设计 |
+| 设备替换时 `ConnectionStore.Remove` | `performDeviceReplacement` 不调用 `ConnectionStore.Remove`，由旧连接自身的 `handleWebSocket` 在 `client.Run()` 返回后执行 | 避免冗余 Redis 调用 |
 | 服务器关闭 | `closeAllClients()` 关闭所有连接 | 不触发逐设备的函数清理（批量清理路径） |
 | 同一设备的多个连接 | 最后一次断开触发 `scheduleFuncCleanup` | D-095 替换逻辑后不应发生，但防御性处理 |
 | Grace period 内设备重连 | `cancelPendingFuncCleanup` 取消定时器，函数保留 | 避免页面导航期间（短暂断开后立即重连）函数被误删 |
@@ -575,7 +585,7 @@ sequenceDiagram
     RH->>MH: RegisterMethod("create_conversation", handler)
     RH->>MH: RegisterMethod("get_messages", handler)
     RH->>MH: RegisterMethod("agent_resume", handler)
-    Note over RH,MH: ... 共 18 个无条件方法处理器
+    Note over RH,MH: ... 共 16 个无条件方法处理器
 
     alt deps.FunctionRegistry != nil
         RH->>MH: RegisterMethod("system.register_functions", handler)

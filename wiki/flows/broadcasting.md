@@ -57,9 +57,9 @@ sequenceDiagram
 
 ### 详细步骤
 
-1. **AgentExecutor 调用 BroadcastHelper**：调用 `SendStreamUpdate` / `SendTyping` / `BroadcastMessageUpdate` 等方法，BroadcastHelper 将 payload 序列化为 `protocol.PackageDataUpdates`，调用 `wsServer.BroadcastUpdates(userID, updates)`。
+1. **AgentExecutor 调用 BroadcastHelper**：调用 `SendStreamUpdate(ctx, ...)` / `SendTyping(ctx, ...)` / `BroadcastMessageUpdate(ctx, ...)` 等方法（所有 BroadcastHelper 方法均接受 `context.Context` 作为第一个参数，当前保留用于未来取消支持），BroadcastHelper 将 payload 序列化为 `protocol.PackageDataUpdates`，调用 `wsServer.BroadcastUpdates(userID, updates)`。
 
-2. **本地广播**：`WebSocketServer.BroadcastUpdates` 创建 broadcast span，调用 `broadcastLocal`，在 `mu.RLock` 下从 `clientsByUser[userID]` 取出所有本地 Client，逐个调用 `client.SendPackage` 发送 `PackageTypeUpdates` 包。
+2. **本地广播**：`WebSocketServer.BroadcastUpdates`（不接受 caller context，内部使用 `context.Background()` 作为 broadcast span 的 parent context）创建 broadcast span，调用 `broadcastLocal`，在 `mu.RLock` 下从 `clientsByUser[userID]` 取出所有本地 Client，逐个调用 `client.SendPackage` 发送 `PackageTypeUpdates` 包。
 
 3. **跨节点发布**：调用 `nodeBroadcaster.Publish(ctx, userID, updates, s.nodeID)`，`s.nodeID` 是每个 WebSocketServer 实例启动时生成的 UUID。
 
@@ -73,6 +73,7 @@ sequenceDiagram
 
 | 场景 | 行为 |
 |------|------|
+| **updates 参数为 nil** | `BroadcastUpdates` 开头检查 `updates == nil`，若为 nil 直接返回 error（`"websocket: updates is nil"`），不执行本地广播和跨节点发布。这是唯一 `BroadcastUpdates` 返回非 nil error 的路径。 |
 | **Redis Pub/Sub 发布失败** | `BroadcastUpdates` 调用 `nodeBroadcaster.Publish` 后若返回 error，仅 `logger.Error` 记录，`BroadcastUpdates` 仍返回 nil，符合 fire-and-forget 策略 (D-007)。数据已持久化，客户端可通过 `sync_updates` 拉取。 |
 | **Redis 连接断开 / 网络分区** | `Subscribe` 的 `PSubscribe` 底层 channel 会关闭（`ok==false`），`Subscribe` 返回 nil。因为 `Subscribe` 在独立 goroutine 中运行且仅记录日志，不会导致节点崩溃。节点失去 Pub/Sub 能力但本地广播仍正常。 |
 | **消息体畸形（JSON 反序列化失败）** | `Subscribe` 循环中反序列化失败直接 `continue` 跳过该消息，不中断订阅循环。 |
@@ -206,11 +207,13 @@ flowchart TD
 
 3. **查询待处理请求**：`RedisPendingStore.List` 通过 `LRange(key, 0, -1)` 读取所有条目逐条 JSON 反序列化，损坏条目跳过不报错，返回 `[]*PendingRequest` 按插入序（Seq 升序）。
 
-4. **删除已处理请求**：`RedisPendingStore.Remove` 执行 `LRange` 读取全部，过滤掉目标 requestID，`Del` + `RPush` 重写整个 List。非原子操作（Pipeline 而非 Transaction），采用 fail-open 语义 (D-103)。
+4. **删除已处理请求**：`RedisPendingStore.Remove` 执行 `LRange` 读取全部，过滤掉目标 requestID，`Del` + `RPush` 重写整个 List。非原子操作（Pipeline 而非 Transaction），采用 fail-open 语义 (D-103)。若过滤后无剩余条目，仅执行 `Del` 删除 key，不设置 `Expire`（key 直接消失）。
 
-5. **更新请求状态**：`RedisPendingStore.Update` 与 Remove 相同的 read-filter-rewrite 模式，找到匹配 ID 的条目替换为新版本，其余保留。
+5. **更新请求状态**：`RedisPendingStore.Update` 与 Remove 相同的 read-filter-rewrite 模式，找到匹配 ID 的条目替换为新版本，其余保留。与 Remove 相同，若过滤后无剩余条目，仅 `Del` 不设 `Expire`。
 
 6. **清空设备所有待处理请求**：`RedisPendingStore.RemoveByDevice` 直接 `DEL` 整个 key，用于设备断开或重新注册时清理。
+
+> **注意**：`RemoveByDevice` 已实现，但 WebSocketServer 层尚未自动在设备断开/重连时调用此方法。上层应用需自行在设备生命周期事件中调用 `RemoveByDevice` 清理残留请求。
 
 ### 边缘场景
 
@@ -220,7 +223,7 @@ flowchart TD
 | **List 中存在损坏的 JSON 条目** | `List` 和 `Remove/Update` 中反序列化失败的条目被 skip（`continue`），不影响其他正常条目。 |
 | **MaxPendingPerDevice 超限** | `Save` 使用 `LTrim` 保留最后 N 条，最旧的请求被静默丢弃，不返回错误。 |
 | **RequestTTL 过期** | Redis key 过期后整个 List 被删除，设备上线后 `List` 返回空，请求丢失。这是设计意图——过期请求不再有意义。 |
-| **设备重新上线但 pending 请求已被 RemoveByDevice 清理** | 设备断开时 `CancelDevice` 取消所有 pending reverse-RPC，随后 `RemoveByDevice` 清理。重新上线后不会有残留请求，新请求从零开始。 |
+| **设备重新上线但 pending 请求已被 RemoveByDevice 清理** | 设备断开时 `CancelDevice` 取消所有 pending reverse-RPC。若上层应用调用了 `RemoveByDevice`，则 pending List 被清空；重新上线后不会有残留请求，新请求从零开始。 |
 | **并发 Save 和 Remove 操作同一设备的 List** | Redis 单线程保证命令串行执行，但 read-then-write 的 `Remove/Update` 不是原子的。两个并发 Remove 可能各自读到完整列表后分别重写，导致其中一个的删除被覆盖。注释标注为可接受（fail-open）。 |
 
 ---

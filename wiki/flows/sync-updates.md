@@ -65,13 +65,13 @@ sequenceDiagram
     H->>H: 构建 seq -> update lookup map
     H->>H: 遍历 [afterSeq+1, expectedEnd], 填充 gaps
 
-    H->>H: 计算 has_more = afterSeq + rawLimit < latestSeq
+    H->>H: 计算 has_more = afterSeq + limit < latestSeq
 
     H-->>WS: 返回 {updates, has_more, latest_seq}
     WS-->>C: 成功响应
 ```
 
-> **注意**：`has_more` 使用原始 limit 值（非规范化后的值）计算。当客户端发送 `limit > 500` 时，`expectedEnd` 使用规范化后的 500，但 `has_more` 使用原始值。这在极少数情况下可能导致 `has_more` 返回 `false` 但实际还有未返回的更新。详见 [has_more 与 expectedEnd 不一致](#7-has_more-与-expectedend-不一致)。
+> **注意**：`has_more` 和 `expectedEnd` 使用相同的规范化后 limit 值计算（默认 100，上限 500）。
 
 ### 详细步骤
 
@@ -181,21 +181,22 @@ flowchart TD
 | `afterSeq + limit` 溢出 uint32 上限 | `expectedEnd` 计算可能回绕，导致查询范围错误。在约 43 亿序列号后实际可能发生 |
 | `latestSeq <= afterSeq` 在回绕后 | 当 `afterSeq` 接近 uint32 最大值而 `latestSeq` 已回绕时，比较结果不正确 |
 
-### 7. has_more 与 expectedEnd 不一致
+### 7. has_more 与 expectedEnd 一致性
 
-代码中 `has_more` 和 `expectedEnd` 使用不同的 limit 值：
+`has_more` 和 `expectedEnd` 均使用同一规范化后的 limit 值（默认 100，上限 500）：
 
-- `expectedEnd` 使用**规范化后**的 limit（最大 500）
-- `has_more` 使用**原始** limit 值（`params.AfterSeq + uint32(limit)`，limit 为原始入参）
+```go
+// 规范化
+limit := params.Limit
+if limit <= 0 { limit = 100 }
+if limit > 500 { limit = 500 }
 
-当客户端发送 `limit > 500` 时（例如 `limit=1000`）：
+// 两者使用同一个 limit 变量
+expectedEnd := params.AfterSeq + uint32(limit)
+hasMore := params.AfterSeq + uint32(limit) < latestSeq
+```
 
-- `expectedEnd = afterSeq + 500`（规范化后）
-- `has_more = afterSeq + 1000 < latestSeq`
-
-这意味着如果 `latestSeq` 在 `afterSeq + 500` 和 `afterSeq + 1000` 之间，`has_more` 会返回 `false`，但实际还有未返回的更新。这是已知的行为差异，客户端不应依赖 `has_more=false` 作为"已拉取全部数据"的唯一信号，应同时检查 `latestSeq`。
-
-> **实际影响**：由于 limit 上限为 500，客户端正常情况下不会发送 `limit > 500` 的请求。此问题仅在客户端绕过规范化逻辑时出现。
+因此不存在不一致问题。客户端发送 `limit > 500` 时，两者都使用上限 500。
 
 ---
 
@@ -327,7 +328,7 @@ flowchart TD
 | 1 | `NotificationLogs.SaveTx` | 写入去重记录（Seq uniqueIndex） |
 | 2 | `dispatchUpdateTx` | 按类型执行 DB 写入（message/conversation/mark_read 等） |
 | 3 | `SyncStates.SetLocalMaxSeqTx` | 推进本地序列号 |
-| 去重 | `ErrDuplicateKey` 跳过 | 重复 update 跳过并推进 seq |
+| 去重 | `ErrDuplicateKey` 跳过 | 重复 update 跳过 dispatch，仅推进 seq，然后返回 nil 继续处理下一条 |
 | 并发保护 | `applyMu` 互斥锁 | 串行化 `ApplyUpdates` 调用（H-3） |
 
 ### 错误处理

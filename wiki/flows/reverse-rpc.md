@@ -599,7 +599,7 @@ sequenceDiagram
 3. 过滤：仅保留 `Seq > last_seen_seq` 且 `RetryCount < MaxRetries` 的请求
 4. 立即返回响应 `{status:"ok", replayed: N, total: M}` 给客户端（不等待重放完成）
 5. 每个待重放请求启动独立 goroutine 执行 `replayOne`
-6. `replayOne` 调用 `ReplayRequest`（10 秒超时），生成新 replayID，保留原始 IdempotencyKey 和 Seq
+6. `replayOne` 使用 `context.Background()` 调用 `ReplayRequest`（10 秒超时），确保客户端断连不会取消正在进行的重放；生成新 replayID，保留原始 IdempotencyKey 和 Seq
 7. 重放成功（`err == nil && resp != nil && Code == 0`）：调用 `ps.Remove` 从 Redis 删除
 8. 重放失败（`err != nil || resp == nil || Code != 0`，包括 sendFunc 错误、超时、客户端返回非零 Code）：递增 `RetryCount`，若未超限调用 `ps.Update` 更新计数，若超限调用 `ps.Remove` 丢弃
 
@@ -758,19 +758,23 @@ sequenceDiagram
     Client->>Handler: 新 WebSocket 连接请求
     Handler->>Handler: 检测到 (userID, deviceID) 已有旧连接
 
-    Note over Handler: 关键：在 Upgrade 之前
+    alt len(oldClients) > 0 && reverseRPC != nil
+        Note over Handler: 关键：在 Upgrade 之前
 
-    Handler->>CD: CancelDevice(userID, deviceID)
-    Note over CD: 取消旧连接的所有 pending 请求
-    Note over CD: reason = "device replaced"
-    CD-->>Handler: 返回
+        Handler->>CD: CancelDevice(userID, deviceID)
+        Note over CD: 取消旧连接的所有 pending 请求
+        Note over CD: reason = "device replaced"
+        CD-->>Handler: 返回
+    end
 
     Handler->>Handler: WebSocket Upgrade
     Handler->>WS: 注册新连接
     Note over WS: clients/clientsByUser/clientsByDevice
 
-    Handler->>Handler: go performDeviceReplacement()
-    Note over Handler: 异步清理旧连接
+    alt 存在旧连接
+        Handler->>Handler: go performDeviceReplacement()
+        Note over Handler: 异步清理旧连接
+    end
 
     Handler-->>Client: 连接建立完成
 
@@ -787,6 +791,7 @@ sequenceDiagram
     participant Handler as handleWebSocket
     participant CS as ConnectionStore
     participant RC as removeClient
+    participant FR as FunctionRegistry
     participant CD as CancelDeviceWithReason
 
     Client->>Handler: 连接断开 (client.Run() 返回)
@@ -795,12 +800,24 @@ sequenceDiagram
     Handler->>RC: removeClient(connID, userID, deviceID)
     Note over RC: 从 clients/clientsByUser/clientsByDevice 删除
 
-    Handler->>Handler: 检查 hasActiveConn
-    alt hasActiveConn == false (无替代连接)
-        Handler->>CD: CancelDeviceWithReason(userID, deviceID, "device disconnected")
-        Note over CD: 取消该设备的所有 pending 请求
-    else hasActiveConn == true (已有替代连接)
-        Note over Handler: 跳过取消，避免误取消新连接的请求
+    alt FunctionRegistry 已配置
+        Handler->>Handler: 检查 hasActiveConn (第一次)
+        alt hasActiveConn == false
+            Handler->>Handler: scheduleFuncCleanup(userID, deviceID)
+            Note over Handler: 延迟清理（宽限期默认 10s）<br/>使用 context.Background() 避免立即取消
+        else hasActiveConn == true
+            Note over Handler: 跳过函数清理，新连接会重新注册
+        end
+    end
+
+    alt ReverseRPC 已配置
+        Handler->>Handler: 检查 hasActiveConn (第二次)
+        alt hasActiveConn == false
+            Handler->>CD: CancelDeviceWithReason(userID, deviceID, "device disconnected")
+            Note over CD: 取消该设备的所有 pending 请求
+        else hasActiveConn == true
+            Note over Handler: 跳过取消，避免误取消新连接的请求
+        end
     end
 ```
 
@@ -809,50 +826,56 @@ sequenceDiagram
 **重连路径**：
 1. 客户端发起新的 WebSocket 连接请求
 2. handleWebSocket 检测到该 (userID, deviceID) 已有旧连接
-3. **在 Upgrade 之前**调用 `reverseRPC.CancelDevice(userID, deviceID)`
+3. **在 Upgrade 之前**，若 `len(oldClients) > 0 && reverseRPC != nil`，调用 `reverseRPC.CancelDevice(userID, deviceID)`
 4. 所有旧连接的 pending 请求收到 "device replaced" 合成响应
 5. 执行 WebSocket Upgrade
-6. 注册新连接到 clients/clientsByUser/clientsByDevice 映射表
-7. 异步清理旧连接（发送 4001 close frame，关闭旧 client）
+6. 注册新连接到 clients/clientsByUser/clientsByDevice 映射表，同时从 clientsByDevice 删除旧连接引用
+7. 取消该设备的待执行函数清理（`cancelPendingFuncCleanup`）
+8. 异步清理旧连接（发送 4001 close frame，关闭旧 client，removeClient）
 
 **正常断开路径**：
+
 1. 客户端连接断开，`client.Run()` 返回
 2. 从 ConnectionStore 删除连接记录（带 5 秒超时 context，避免 Redis 不可达时无限阻塞）
 3. 调用 `removeClient` 从本地映射表删除
-4. 检查 `clientsByDevice[deviceKey]` 是否还有活跃连接
-5. 若无活跃连接：调用 `CancelDeviceWithReason(userID, deviceID, "device disconnected")`
-6. 若有活跃连接（替代连接已注册）：跳过取消
+4. **第一次 hasActiveConn 检查**（函数注册清理）：若 FunctionRegistry 已配置且无替代连接，调用 `scheduleFuncCleanup` 启动延迟清理（宽限期默认 10 秒）；若有替代连接则跳过
+5. **第二次 hasActiveConn 检查**（反向 RPC 取消）：若 ReverseRPC 已配置且无替代连接，调用 `CancelDeviceWithReason(userID, deviceID, "device disconnected")`；若有替代连接则跳过
 
 ### 边缘场景
 
 | 场景 | 处理方式 |
 |------|----------|
 | 新连接的请求不会被误取消 | CancelDevice 在 Upgrade 前执行，此时新连接尚未注册，不会有属于新连接的 pending 请求 |
-| 正常断开后快速重连 | hasActiveConn 检查发现替代连接已注册，跳过 CancelDeviceWithReason |
+| 无旧连接时跳过 CancelDevice | 仅当 `len(oldClients) > 0 && reverseRPC != nil` 时才调用 CancelDevice |
+| 正常断开后快速重连 | hasActiveConn 检查发现替代连接已注册，跳过 CancelDeviceWithReason 和 scheduleFuncCleanup |
 | 旧连接清理是异步的 | performDeviceReplacement 在独立 goroutine 中执行，不阻塞新连接的注册 |
 | removeClient 与 CancelDevice 顺序 | 正常断开时先 removeClient 再检查 hasActiveConn，确保检查的是最新状态 |
+| 函数注册延迟清理 | 正常断开时若无替代连接，scheduleFuncCleanup 启动 10 秒宽限期；若设备在宽限期内重连，cancelPendingFuncCleanup 取消清理 |
+| 两次 hasActiveConn 检查 | 正常断开路径有两次独立检查：第一次决定是否清理函数注册，第二次决定是否取消反向 RPC；两者独立，可能一个触发另一个不触发 |
 
 ### 时序保证
 
 ```
 重连时间线:
   T1: 检测到旧连接存在
-  T2: CancelDevice(userID, deviceID)  ← 旧连接的 pending 被取消 ("device replaced")
+  T2: CancelDevice(userID, deviceID)  ← 旧连接的 pending 被取消 ("device replaced")，仅当 oldClients 非空且 reverseRPC 已配置
   T3: WebSocket Upgrade               ← 新连接建立
-  T4: 注册新连接                      ← 新连接可用于接收请求
-  T5: 异步清理旧连接                  ← 不阻塞主流程
+  T4: 注册新连接 + 从 clientsByDevice 删除旧引用  ← 新连接可用于接收请求
+  T5: cancelPendingFuncCleanup        ← 取消待执行的函数清理
+  T6: 异步清理旧连接                  ← 不阻塞主流程
 
 正常断开时间线:
   T1: client.Run() 返回
   T2: ConnectionStore.Remove(connID, 5s timeout)  ← 从 Redis 删除
   T3: removeClient(connID)            ← 从本地映射表删除
-  T4: 检查 hasActiveConn
-  T5: CancelDeviceWithReason(...)     ← 仅在无替代连接时执行 ("device disconnected")
+  T4: 第一次 hasActiveConn 检查       ← 决定是否 scheduleFuncCleanup
+  T5: 第二次 hasActiveConn 检查       ← 决定是否 CancelDeviceWithReason ("device disconnected")
 ```
 
 **关键保证**：
 - 重连时 T2 发生在 T4 之前，确保 CancelDevice 只取消属于旧连接的 pending
-- 正常断开时 T3 发生在 T4 之前，hasActiveConn 检查基于最新状态
+- 正常断开时 T3 发生在 T4/T5 之前，hasActiveConn 检查基于最新状态
+- 重连时 T5 在 T4 之后，确保新连接注册后才取消待执行的函数清理
 
 ---
 

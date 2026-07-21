@@ -21,8 +21,8 @@
 ### 触发条件
 
 - 运维人员修改了 Agent 配置文件后，需要热更新
-- CLI 调用 `reload-agents` 命令
-- API 调用 `reload_agents` RPC 方法
+- CLI 调用 `reload-agents` 命令（IPC → Daemon → WebSocket 转发到服务端）
+- WebSocket 客户端直接调用 `reload_agents` RPC 方法（handler 注册在 `DefaultMessageHandler` 上）
 
 ### 关键特性
 
@@ -35,35 +35,43 @@
 
 ## 主流程
 
+`reload_agents` 是守护进程专属命令（D-036/D-076），CLI 通过 IPC（Unix 域套接字）调用守护进程，守护进程再通过 WebSocket 转发到服务端执行。不支持 standalone WebSocket 降级。
+
 ```mermaid
 sequenceDiagram
-    participant C as CLI/API
+    participant C as CLI Client
+    participant D as Daemon (IPC Server)
     participant WS as WebSocket Server
     participant H as ReloadAgentsHandler
     participant R as AgentRegistry
     participant FS as 文件系统
 
-    C->>WS: reload_agents {}
+    C->>D: reload_agents {}（IPC，socket 超时 5s，context 超时 10s）
+    D->>WS: xc.Call(ctx, "reload_agents", nil)（WebSocket 转发）
     WS->>H: HandleRequest(ctx, client, req)
 
     alt AgentRegistry 为 nil
         H-->>WS: 返回 {count: 0}
-        WS-->>C: 成功响应
+        WS-->>D: 成功响应
+        D-->>C: IPC 成功响应
     end
 
     H->>R: Reload()
-    R->>R: 清空旧配置，更新 dir
+    R->>R: RLock 读取 dir，释放锁
+    R->>R: Load(dir)，Lock 清空旧配置，更新 dir
     R->>FS: os.ReadDir 扫描 agents 目录
     FS-->>R: 返回目录条目或错误
 
     alt 目录级错误（权限不足等）
         R-->>H: 返回 error
         H-->>WS: 返回错误（含目录路径）
-        WS-->>C: 错误响应
+        WS-->>D: 错误响应
+        D-->>C: IPC 错误响应
     else 目录不存在（IsNotExist）
         R-->>H: 返回 nil
         H-->>WS: 返回 {count: 0}
-        WS-->>C: 成功响应
+        WS-->>D: 成功响应
+        D-->>C: IPC 成功响应
     else 目录正常
         loop 每个 .md 文件
             R->>FS: os.ReadFile 读取文件
@@ -76,14 +84,31 @@ sequenceDiagram
         R-->>H: 返回 []*AgentConfig
         H->>H: len(ListAll())
         H-->>WS: 返回 {count: N}
-        WS-->>C: 成功响应
+        WS-->>D: 成功响应
+        D-->>C: "Successfully reloaded N agent configuration(s)"
     end
 ```
 
 ### 详细步骤
 
+**CLI 侧（IPC 调用）**：
+
+- **CLI 入口**：`runReloadAgents()` 解析 CLIContext，创建 `IPCClient`（socket 超时 5s），设置 context 超时 10s，通过 Unix 域套接字发送 `reload_agents` IPC 请求
+  - 守护进程未运行：IPC 连接失败，输出 `Error: daemon not running.` 到 stderr，提示启动命令，`os.Exit(2)`（D-036/D-042）
+  - 服务端返回错误：`resp.Error` 非 nil，返回 `reload-agents: {message}`
+  - 结果反序列化失败：返回 `reload-agents: unmarshal result: {error}`
+  - 成功：输出 `Successfully reloaded N agent configuration(s)` 到 stdout
+
+**Daemon 侧（IPC → WebSocket 转发）**：
+
+- **IPC Handler**：`registerIPCHandlers()` 中注册的 `reload_agents` handler 调用 `xc.Call(ctx, "reload_agents", nil)`，通过 WebSocket 转发到服务端
+  - WebSocket 调用失败：返回 IPC 错误响应（code -300 或 `*client.ClientError` 的 code/message）
+  - 结果反序列化失败：返回 IPC 错误响应（code -300）
+
+**服务端侧（Handler + Registry）**：
+
 1. **检查 AgentRegistry**：如果为 nil，直接返回 `{count: 0}`（json.Marshal 序列化），**不调用 Reload()**
-2. **调用 Reload()**：用 `RLock` 读取 `dir` 字段，释放锁后调用 `Load(dir)`
+2. **调用 Reload()**：用 `RLock` 读取 `dir` 字段，释放锁后调用 `Load(dir)`。释放 RLock 后到获取 Lock 之间有短暂窗口，但安全——`dir` 仅在 `Load()` 内部（持有 Lock 时）被修改，不存在并发写入风险
 3. **Load() 加写锁**：`Lock()` 保护整个加载过程
 4. **清空旧配置**：`r.agents = make(map[string]*AgentConfig)`，同时更新 `r.dir`
 5. **扫描目录**：`os.ReadDir(dir)` 遍历目录
@@ -215,6 +240,16 @@ flowchart TD
 
 **注意**：此场景仅在直接调用 `Reload()` 时发生。通过 handler 调用时，nil registry 检查会先拦截（返回 `{count: 0}`），不会到达 `Reload()`。
 
+### 8. CLI 侧错误处理
+
+| 场景 | 处理方式 |
+| ---- | ---- |
+| 守护进程未运行（IPC 连接失败） | 输出 `Error: daemon not running.` 到 stderr，提示启动命令，`os.Exit(2)` |
+| IPC socket 连接超时（5s） | 返回 `ipc client dial: ...` 错误 |
+| context 超时（10s） | 请求被取消，返回 context deadline exceeded |
+| 服务端返回业务错误 | 返回 `reload-agents: {resp.Error.Message}` |
+| 结果反序列化失败 | 返回 `reload-agents: unmarshal result: {error}` |
+
 ---
 
 ## 依赖关系
@@ -224,12 +259,15 @@ flowchart TD
 | 组件 | 用途 |
 |------|------|
 | `agent.AgentRegistry` | 管理 Agent 配置 |
+| `cli.IPCClient` | CLI 通过 Unix 域套接字调用守护进程 |
+| `cli.IPCServer` | 守护进程 IPC 服务端，分发请求到 handler |
 
 ### 外部依赖
 
 | 组件 | 用途 |
 |------|------|
 | 文件系统 | 读取 Agent 配置文件 |
+| Unix 域套接字 | IPC 通信（`~/.xyncra/{user_id}/{device_id}/xyncra.sock`） |
 
 ### 文件系统操作
 

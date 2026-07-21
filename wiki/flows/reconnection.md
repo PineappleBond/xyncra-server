@@ -119,14 +119,16 @@ sequenceDiagram
 
     H-->>C: 立即返回 {status:ok, replayed:N, total:M}
 
-    par 每个过滤后的请求
-        H->>RRPC: ReplayRequest() 新 reqID
-        alt 重放成功 (code=0)
-            RRPC->>PS: Remove(req)
-        else 重放失败
-            RRPC->>PS: 更新 RetryCount++
+    par 每个过滤后的请求（replayOne goroutine）
+        H->>RRPC: ReplayRequest(ctx.Background(), preq, 10s)
+        alt 重放成功 (err==nil && resp!=nil && Code==0)
+            H->>PS: Remove(preq.ID)
+        else 重放失败 (err!=nil || resp==nil || Code!=0)
+            H->>H: preq.RetryCount++
             alt RetryCount >= MaxRetries
-                RRPC->>PS: 丢弃请求
+                H->>PS: Remove(preq.ID) -- 超限丢弃
+            else RetryCount < MaxRetries
+                H->>PS: Update(preq) -- 更新 RetryCount
             end
         end
     end
@@ -181,6 +183,8 @@ sequenceDiagram
 | **前一次连接的延迟响应** | DispatchResponse 静默忽略未知 reqID（响应通道已被清理） | 无影响 |
 | **并发重连 + 正常反向 RPC** | 重放使用新 reqID（`s-replay-*`）避免与进行中的正常请求冲突 | 无冲突 |
 | **重放后 PendingStore Remove/Update 错误** | 记录日志但非致命，下次重连时可能再次重放 | 最终一致 |
+| **PendingStore 请求 TTL 过期** | `RedisPendingStore` 为每个设备列表设置 `RequestTTL`（Redis Expire）。设备长时间离线时，PendingStore 中的请求可能在重连前被 Redis 自动过期清理 | 客户端永远不会收到已过期的反向 RPC 请求，但可通过 `sync_updates` 最终同步数据 |
+| **PendingStore 超出 MaxPendingPerDevice** | `RedisPendingStore.Save` 使用 `RPush` + `LTrim` 限制每个设备的列表长度（`MaxPendingPerDevice`），超出时最旧的条目被丢弃 | 最旧的反向 RPC 请求可能丢失，客户端需依赖 `sync_updates` 补偿 |
 | **RedisPendingStore 非原子 Remove** | 读-过滤-重写管道非事务性，Del 和 RPush 之间的崩溃可能丢失条目 | 按 fail-open 语义记录为可接受 |
 | **设备替换（4001 Close Frame）** | 服务端对同一设备的新连接发送 4001 关闭帧，客户端设置 `replaced=true` 并取消上下文，不尝试重连，daemon 优雅退出（D-111） | 被替换的设备实例终止 |
 | **reconnect 与 FullSync 的顺序** | 客户端在 reconnect handshake 完成后总是执行 FullSync，即使 reconnect 失败也会执行；两者运行在异步 goroutine 中，不阻塞彼此 | 确保数据最终一致 |

@@ -42,7 +42,7 @@ flowchart TD
     B --> C[构建 sendMessageTaskPayload<br/>包含 sendMessageRecipient 列表]
     C --> D[将 payload 序列化为 json.RawMessage]
     D --> E[创建 mq.Task<br/>Type = mq.TypeSendMessage]
-    E --> F[创建 OpenTelemetry broker.enqueue Span]
+    E --> F[创建 OpenTelemetry handler.broker.enqueue Span]
     F --> G[调用 broker.Enqueue]
     G --> H{检查 broker 是否关闭}
     H -->|已关闭| I[返回 ErrQueueClosed]
@@ -72,10 +72,10 @@ flowchart TD
 | 2 | 构建 `sendMessageTaskPayload`，包含 `[]sendMessageRecipient` 列表，每个接收方有 UserID 和对应的 Updates |
 | 3 | 将 payload 序列化为 `json.RawMessage` |
 | 4 | 创建 `mq.Task`，设置 `Type = mq.TypeSendMessage` |
-| 5 | 调用 `startBrokerEnqueueSpan(ctx, taskType)` 创建 OpenTelemetry `broker.enqueue` Span 用于分布式追踪 |
+| 5 | 调用 `startBrokerEnqueueSpan(ctx, taskType)` 创建 OpenTelemetry `handler.broker.enqueue` Span 用于分布式追踪 |
 | 6 | 调用 `broker.Enqueue(ctx, task)` 进入 `AsynqBroker.Enqueue` |
 | 7 | Enqueue 检查 broker 未关闭（`b.closed`），验证 task 非空且有 Type |
-| 8 | 通过优先级链解析选项：`With...` option > Task field > broker 级默认值（默认重试次数 `DefaultRetryCount = 3`） |
+| 8 | 通过优先级链解析选项：`With...` option > Task field > broker 级默认值（默认重试次数 `DefaultRetryCount = 3`）。实现上先设置 broker 默认值（`defaultEnqueueOptions`，`maxRetry = -1` 哨兵值），再由 `applyTaskDefaults` 仅在当前值仍为默认时覆盖 Task 字段，最后应用 `With...` 函数选项。由于 `With...` 选项在 `applyTaskDefaults` 之后执行，它们始终覆盖 Task 字段 |
 | 9 | 通过 `tracing.InjectTraceContext(ctx)` 注入 W3C Trace Context 到 `task.Metadata` |
 | 10 | 序列化 `asynqTaskPayload` 信封（`{type, payload, metadata}`）包裹领域任务 |
 | 11 | 调用 `buildAsynqOptions` 将解析后的选项转换为 `asynq.Option`（Queue, MaxRetry, Timeout, TaskID, Retention, ProcessIn, Deadline, Unique/UniqueTTL） |
@@ -162,10 +162,10 @@ flowchart TD
 | 场景 | 处理方式 |
 |------|----------|
 | **未注册的处理器** | `TaskHandler.ProcessTask` 返回 `ErrHandlerNotRegistered`。Asynq 视为失败并重试（最多 MaxRetry 次），之后归档 |
-| **格式错误的 payload 信封** | `decodeAsynqTask` 在 JSON 无效或 Type 为空时返回错误，传播到 Asynq 作为任务失败 |
+| **格式错误的 payload 信封** | `decodeAsynqTask` 在 JSON 无效或 Type 为空时返回错误，传播到 Asynq 作为任务失败并触发重试。注意：这与"无效的 task payload JSON"（见下文）是不同的错误路径——信封解码错误由 Asynq 包装器返回 error，而 payload 反序列化错误由业务处理器内部处理 |
 | **ProcessTask 中的 nil Task** | 返回 `ErrInvalidTask` |
 | **单个接收方广播失败** | `send_message` 处理器记录错误并继续处理下一个接收方。返回 nil（不重试），因为数据已持久化，下次 pull 时通过 `sync_updates` 投递 |
-| **无效的 task payload JSON** | `send_message` 处理器返回 nil（不重试），因为重试无法修复格式错误的 JSON |
+| **无效的 task payload JSON** | `send_message` 处理器内部 `json.Unmarshal` 失败时记录错误并返回 nil（不触发 Asynq 重试），因为重试无法修复格式错误的 JSON。注意：这与信封解码错误不同——信封错误由 `decodeAsynqTask` 返回 error，会触发 Asynq 重试 |
 | **空接收方列表** | 处理器遍历零次并返回 nil |
 | **并发处理器注册** | `TaskHandler` 使用 `sync.RWMutex`；`Register` 获取写锁，`ProcessTask` 获取读锁。覆盖已有处理器时记录警告日志 |
 | **多次调用 Start** | 如果 `b.running` 已为 true，返回错误 `'server is already running'` |
@@ -263,7 +263,7 @@ flowchart LR
 |------|------|
 | 1 | WebSocket 发送失败时，响应入队到 `ResponseRetryQueue` |
 | 2 | `Drain(now)` 返回所有 `nextRetry <= now` 且未超过 `maxRetry` 的条目 |
-| 3 | 失败条目通过 `EnqueueWithBackoff` 重新入队，使用指数退避：`baseDelay * 2^attempts`，上限 16 秒 |
+| 3 | 失败条目通过 `EnqueueWithBackoff` 重新入队，使用指数退避：`baseDelay * 2^attempts`（`baseDelay = 1 秒`），上限 16 秒（`maxBackoff`） |
 | 4 | 队列满时（`maxSize`），最旧的条目被丢弃 |
 
 #### 数据库持久化重试（客户端）
@@ -344,7 +344,7 @@ flowchart TD
 |------|----------|
 | **Start 前调用 Close** | Close 设置 `b.closed = true` 并取消 context（无 cancel func 则为空操作）。Client 和 inspector 被关闭。后续 Start 会失败，因为底层 Asynq 组件已关闭 |
 | **重复 Close** | 由于 `sync.Once` 安全。仅第一次调用执行清理 |
-| **关闭期间 Enqueue** | 如果 Close 设置 `b.closed = true` 但 Enqueue 在 closed 检查和 Redis 调用之间执行，入队可能成功或失败取决于时序。`mu` 锁在 closed 检查上提供 happens-before 保证 |
+| **关闭期间 Enqueue** | `Enqueue` 中 `b.mu` 锁仅保护 `b.closed` 检查，释放锁后到调用 `b.client.EnqueueContext` 之间存在竞态窗口。如果 Close 在此窗口内设置 `b.closed = true` 并关闭底层 client，入队可能返回连接错误。由于是 fire-and-forget，调用方仅记录日志 |
 | **无 Stop/Close 的 Start** | Start 在 `<-ctx.Done()` 上永久阻塞。调用方必须取消 context 或调用 Stop |
 | **部分构造的资源泄漏** | `NewAsynqBroker` 文档说明：如果 client 成功但 server/inspector 构造失败，client 不会被关闭。这是可接受的，因为这些构造函数不执行网络 I/O |
 

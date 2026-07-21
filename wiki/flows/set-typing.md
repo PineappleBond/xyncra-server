@@ -86,8 +86,12 @@ sequenceDiagram
 4. **身份验证**：从 `Conversation.UserID1` / `UserID2` 提取成员列表，验证调用者在其中
 5. **Rate limiting**：检查每个用户每个会话的 rate limiter（1 秒 1 次）
    - Key 格式：`userID:conversationID`
-   - 超限时静默返回 OK（不报错），同时刷新 `lastAccess`
-6. **构建 payload**：`typingBroadcastPayload` 包含 `user_id`、`conversation_id`、`is_typing`、`is_agent`（固定 `false`）、`timestamp`（Unix 秒）
+   - 超限时静默返回 OK（不报错），不广播
+   - 注意：`allow()` 在每次调用时（包括被限流的调用）都会更新 `lastAccess`，防止条目被 cleanup 提前清理
+6. **构建 update**：
+   - 内层 payload（`typingBroadcastPayload`）：`user_id`、`conversation_id`、`is_typing`、`is_agent`（固定 `false`，D-054 revised）、`timestamp`（Unix 秒）
+   - 外层 `PackageDataUpdate`：`Seq=0`（ephemeral）、`Type="typing"`、`CreatedAt` 省略（omitempty）
+   - 包装为 `PackageDataUpdates{Updates: [update]}`
 7. **广播**：遍历所有会话成员，调用 `broadcastFn` 广播（内部先本地 WebSocket 推送，再通过 Redis Pub/Sub 发送到其他节点，D-018）
 8. **返回成功**：返回 `{status: ok}`
 
@@ -149,9 +153,11 @@ flowchart TD
 ```
 
 | 场景 | 处理方式 |
-|------|----------|
+| --- | --- |
 | 1 秒内重复发送 | 静默返回 OK，不广播（不是错误） |
+| 被限流的调用 | `allow()` 仍更新 `lastAccess`，防止条目被 cleanup 提前清理 |
 | Rate limiter entry 过期 | 后台 cleanup goroutine 每 5 分钟清理 10 分钟未访问的条目 |
+| cleanup goroutine 生命周期 | 无关闭机制，Handler 构造时启动后永久运行 |
 
 ### 5. Payload 序列化失败
 
@@ -226,8 +232,8 @@ Handler 自身不直接操作 Redis。Redis 操作发生在 `broadcastFn` 的跨
 采用 per-user-per-conversation 的 time-based rate limiter：
 - **速率**：1 秒 1 次（检查距上次允许时间是否 >= 1 秒）
 - **Key**：`userID:conversationID`
-- **超限行为**：静默返回 OK（不是错误）
-- **实现**：`sync.Map` 存储每个 key 的 `typingRateLimiter`，记录 `lastTime` 和 `lastAccess`
+- **超限行为**：静默返回 OK（不是错误），不广播
+- **实现**：`sync.Map` 存储每个 key 的 `typingRateLimiter`，记录 `lastTime` 和 `lastAccess`；`allow()` 每次调用（包括被限流时）都更新 `lastAccess`，防止条目被 cleanup 提前清理
 - **清理**：后台 goroutine 每 5 分钟清理 10 分钟未访问的条目
 
 ### 3. Broadcast to All Members

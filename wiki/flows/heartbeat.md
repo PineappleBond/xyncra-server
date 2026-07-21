@@ -55,27 +55,32 @@ sequenceDiagram
 
     H->>CS: Refresh(ctx, connID)
     CS->>CS: 1. GET infoKey → 读取连接 JSON（获取 TTL 配置和 UserID）
-    CS->>CS: 2. Lua 脚本（原子执行）:
-    Note over CS: EXISTS infoKey（不存在则返回 0）
-    Note over CS: PEXPIRE infoKey（重置连接 TTL）
-    Note over CS: PTTL userKey（读取当前 TTL）
-    Note over CS: PEXPIRE userKey（仅当新 TTL > 当前 TTL）
 
-    alt 连接不存在
+    alt infoKey 不存在（redis.Nil）
         CS-->>H: ErrConnectionNotFound
         H-->>WS: NotFoundError("connection expired")
         WS-->>C: 错误响应
-    end
-
-    alt JSON 反序列化失败
+    else JSON 反序列化失败
         CS-->>H: unmarshal error
         H-->>WS: InternalError
         WS-->>C: 错误响应
-    end
+    else GET 成功
+        CS->>CS: 2. Lua 脚本（原子执行）:
+        Note over CS: EXISTS infoKey（不存在则返回 0）
+        Note over CS: PEXPIRE infoKey（重置连接 TTL）
+        Note over CS: PTTL userKey（读取当前 TTL）
+        Note over CS: PEXPIRE userKey（仅当新 TTL > 当前 TTL）
 
-    CS-->>H: 成功
-    H-->>WS: 返回 {status: ok}
-    WS-->>C: 成功响应
+        alt Lua 返回 0（连接已过期）
+            CS-->>H: ErrConnectionNotFound
+            H-->>WS: NotFoundError("connection expired")
+            WS-->>C: 错误响应
+        else Lua 返回 1（成功）
+            CS-->>H: 成功
+            H-->>WS: 返回 {status: ok}
+            WS-->>C: 成功响应
+        end
+    end
 ```
 
 ### 详细步骤
@@ -84,17 +89,20 @@ sequenceDiagram
 2. **记录设备信息**：如果 `device_info` 存在，以 Debug 级别记录到日志（仅可观测性，不持久化）
 3. **刷新连接 TTL**：调用 `ConnectionStore.Refresh(ctx, connID)`，内部流程：
    - **GET infoKey**：读取连接 info key 的 JSON 数据，获取 TTL 配置和 UserID
-   - **Lua 脚本**（原子执行）：
-     - `EXISTS infoKey`：检查连接是否存在，不存在则返回 0
+     - 若 key 不存在（`redis.Nil`），立即返回 `ErrConnectionNotFound`
+     - 若 JSON 反序列化失败，立即返回错误
+   - **Lua 脚本**（原子执行，仅在 GET 成功后执行）：
+     - `EXISTS infoKey`：再次检查连接是否存在（防止 GET 与 Lua 之间 key 被淘汰），不存在则返回 0
      - `PEXPIRE infoKey`：重置连接 info key 的 TTL（毫秒精度）
-     - `PTTL userKey`：读取 user SET key 的当前剩余 TTL
+     - `PTTL userKey`：读取 user SET key 的当前剩余 TTL（-1 = 无过期，-2 = key 不存在）
      - `PEXPIRE userKey`：仅当新 TTL > 当前 TTL 时才更新（MAX 语义）
+   - 若 Lua 返回 0：连接在 GET 与 Lua 之间过期，返回 `ErrConnectionNotFound`
 4. **TTL 解析**：使用连接自身的 `TTL` 字段；若为零或负数，回退到 ConnectionStore 的 `defaultTTL`（默认 30 分钟）
 5. **处理结果**：
    - 成功：返回 `{status: ok}`
-   - 连接不存在：返回 `NotFoundError("connection expired")`
+   - 连接不存在（GET 时 key 不存在或 Lua 返回 0）：返回 `NotFoundError("connection expired")`
    - JSON 反序列化失败：返回 `InternalError`
-   - 其他错误：返回 `InternalError`
+   - 其他错误（Redis 不可达等）：返回 `InternalError`
 
 ---
 
@@ -112,7 +120,7 @@ flowchart TD
 ```
 
 | 场景 | 处理方式 |
-|------|----------|
+| --- | --- |
 | JSON 格式错误 | 忽略错误，继续处理 heartbeat |
 | 参数字段类型错误 | 忽略错误，继续处理 heartbeat |
 
@@ -128,8 +136,9 @@ flowchart TD
 ```
 
 | 场景 | 处理方式 |
-|------|----------|
-| 连接已过期（info key 被 Redis 淘汰） | 返回 `NotFoundError('connection expired')` |
+| --- | --- |
+| 连接已过期（GET 时 info key 已被 Redis 淘汰） | 返回 `NotFoundError('connection expired')`（GET 返回 `redis.Nil`） |
+| 连接在 GET 与 Lua 之间过期（竞态） | 返回 `NotFoundError('connection expired')`（Lua 的 `EXISTS` 返回 0） |
 | 连接已被 Remove 清理 | 返回 `NotFoundError('connection expired')` |
 | Redis 不可达或超时 | 返回 `InternalError`（含分类后的错误：`ErrRedisTimeout` 或 `ErrRedisConnectionFailed`） |
 | info key 数据损坏（JSON 反序列化失败） | 返回 `InternalError` |
@@ -146,13 +155,13 @@ flowchart TD
 ```
 
 | 场景 | 处理方式 |
-|------|----------|
+| --- | --- |
 | 同一连接多个 heartbeat 并发 | Lua 脚本内 EXISTS + PEXPIRE 原子执行，安全并发 |
 
 ### 4. 空 connID
 
 | 场景 | 处理方式 |
-|------|----------|
+| --- | --- |
 | connID 为空字符串 | `Refresh` 在发起 Redis 调用前返回 `fmt.Errorf("server: connection ID is required")`，handler 包装为 `InternalError` |
 
 ### 5. 用户 SET TTL MAX 语义
@@ -169,6 +178,37 @@ flowchart TD
 
 心跳基于 connID 而非 userID，每个连接独立拥有自己的 TTL。多个连接的心跳互不影响，user SET key 的 TTL 采用 MAX 语义（见场景 5）。
 
+### 8. Lua 脚本 PTTL 返回值
+
+Lua 脚本中 `PTTL userKey` 的返回值有三种情况：
+
+| PTTL 返回值 | 含义 | 处理方式 |
+| --- | --- | --- |
+| >= 0 | key 存在，剩余 TTL（毫秒） | 仅当新 TTL > 当前 TTL 时才更新（MAX 语义） |
+| -1 | key 存在，但未设置过期时间 | `setPTTL < 0` 为 true，执行 PEXPIRE 设置 TTL |
+| -2 | key 不存在 | `setPTTL < 0` 为 true，执行 PEXPIRE（Redis 会忽略对不存在的 key 的 PEXPIRE） |
+
+### 9. GET 阶段的 Redis 错误
+
+`Refresh` 的 GET 步骤可能返回非 `redis.Nil` 的错误（如网络超时、连接断开）。此时错误通过 `classifyRedisError` 分类后返回，handler 将其包装为 `InternalError` 返回给客户端。
+
+| GET 错误类型 | classifyRedisError 分类 | handler 返回 |
+| --- | --- | --- |
+| context deadline exceeded | `ErrRedisTimeout` | `InternalError` |
+| i/o timeout | `ErrRedisTimeout` | `InternalError` |
+| connection refused | `ErrRedisConnectionFailed` | `InternalError` |
+| connection reset | `ErrRedisConnectionFailed` | `InternalError` |
+| 其他错误 | 原样返回 | `InternalError` |
+
+### 10. 客户端关闭后的 heartbeat
+
+客户端 `heartbeatLoop` 在 `ctx.Done()` 时退出。如果客户端在 heartbeat RPC 进行中调用 `Stop()`：
+
+1. `Stop()` 取消 context
+2. `Call` 中的 `select` 检测到 `ctx.Done()`，返回 `TimeoutError`
+3. heartbeatLoop 在下一个 ticker 周期检测到 `ctx.Done()` 并退出
+4. `Call` 同时会将失败的 heartbeat 入队到 retry manager（best-effort），但客户端关闭后 retry manager 也会停止
+
 ---
 
 ## 依赖关系
@@ -176,7 +216,7 @@ flowchart TD
 ### 内部依赖
 
 | 组件 | 用途 |
-|------|------|
+| --- | --- |
 | `server.ConnectionStore` | 刷新连接 TTL |
 | `protocol.NewNotFoundError` | 构造连接过期错误响应 |
 | `protocol.NewInternalError` | 构造内部错误响应 |
@@ -185,17 +225,26 @@ flowchart TD
 ### 外部依赖
 
 | 组件 | 用途 |
-|------|------|
+| --- | --- |
 | Redis | ConnectionStore 的后端存储（仅 Redis 实现） |
 
 ### 数据库操作
 
-**无数据库操作**：heartbeat 仅操作 Redis，不涉及任何持久化数据库。
+**服务端无数据库操作**：heartbeat 仅操作 Redis，不涉及任何持久化数据库。
+
+**客户端有 IndexedDB 操作**：客户端通过 `Call` 方法发送 heartbeat，`Call` 内部会对每次 RPC 调用写入 `RPCLog`（best-effort）：
+
+| 操作 | 存储 | 说明 |
+| --- | --- | --- |
+| RPCLogs.Save | IndexedDB（客户端） | heartbeat RPC 发送前写入初始记录（status=0，in-flight） |
+| RPCLogs.Update | IndexedDB（客户端） | heartbeat RPC 完成后更新记录（写入 duration、status code） |
+
+> 注：这些写入是 best-effort 的，失败不影响 heartbeat 流程。Go 客户端通过 `c.db.RPCLogs.Save/Update` 执行；TypeScript 客户端使用 IndexedDB 存储。
 
 ### Redis 操作
 
 | 操作 | 存储 | 说明 |
-|------|------|------|
+| --- | --- | --- |
 | GET | Redis | 读取连接 info key 的 JSON 数据，获取 TTL 配置和 UserID；若 key 不存在则返回 ErrConnectionNotFound |
 | EXISTS | Redis（Lua） | 检查 info key 是否存在 |
 | PEXPIRE | Redis（Lua） | 重置连接 info key 的 TTL（毫秒精度） |
@@ -211,7 +260,7 @@ flowchart TD
 ### OpenTelemetry
 
 | Span | 属性 | 说明 |
-|------|------|------|
+| --- | --- | --- |
 | `redis.connection.refresh` | `connID` | Redis 实现的 Refresh 操作会创建 OpenTelemetry span，记录连接 ID 和操作结果 |
 
 ---

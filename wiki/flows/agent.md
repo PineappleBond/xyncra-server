@@ -125,7 +125,13 @@ flowchart TD
     end
 
     subgraph resume_phase [Resume 阶段]
-        M[用户回答] --> N[客户端调用 agent_resume RPC]
+        M[用户回答] --> M1[客户端调用 agent_resume RPC]
+        M1 --> M2[RPC Handler 校验参数]
+        M2 --> M3[QuestionStore.UpdateAnswer 持久化答案]
+        M3 --> M4{所有问题已回答?}
+        M4 -->|否| M5[返回 partial 状态, 等待下一个问题]
+        M4 -->|是| M6[入队 TypeAgentResume MQ 任务]
+        M6 --> N[MQ 消费 TypeAgentResume]
         N --> O[NewAgentResumeHandler 处理]
         O --> P[反序列化 AgentResumePayload]
         P --> Q[两阶段幂等检查]
@@ -162,6 +168,8 @@ flowchart TD
 | **resume transient 失败** | 不自动 MQ 重试，而是通知用户自行决定是否重试 |
 | **并发 resume** | 幂等检查确保同一 checkpoint 只 resume 一次 |
 | **questionStore 为 nil** | 初始中断时 Question 创建被跳过 (nil-safe)；resume 时中止恢复流程并释放锁（非 nil-safe，需配置 questionStore） |
+| **多设备并发回答同一问题** | QuestionStore.UpdateAnswer 使用 `WHERE status='pending'` 幂等更新，后到者返回 409 |
+| **多个 Question 需要依次回答** | 每次 RPC 只回答一个 Question，返回 "partial" 状态；全部回答完毕后入队 MQ 任务 |
 
 ---
 
@@ -585,11 +593,13 @@ flowchart TD
 
 处理 HITL 恢复任务，从 DB 读取用户答案，通过 Eino 的 `ResumeWithParams` 恢复被中断的 Agent 执行。
 
+> **前置步骤**: 客户端调用 `agent_resume` RPC 时，由 `handler/agent_resume.go` 处理：校验参数、持久化用户答案到 Question 表、统计剩余待回答问题。只有当所有问题都已回答时，才入队 `TypeAgentResume` MQ 任务。多 Question 场景下，每次 RPC 只回答一个问题，返回 `partial` 状态。
+
 ### 流程图
 
 ```mermaid
 flowchart TD
-    A[agent_resume RPC 调用] --> B[反序列化 AgentResumePayload]
+    A[MQ 消费 TypeAgentResume 任务] --> B[反序列化 AgentResumePayload]
     B --> C[两阶段幂等检查 agent:resume:CheckpointID]
     C -->|已 resume| C1[跳过, 返回 nil]
     C -->|未 resume| D[获取会话锁]
@@ -640,6 +650,9 @@ flowchart TD
 | **成功 resume 后** | 执行完整清理：ClearAgentStatus + Delete Questions + Delete Redis checkpoint |
 | **checkpoint 过期/丢失** | 调用 `cleanupAfterResumeFailure`，发送超时提示消息 |
 | **并发 resume** | 幂等检查确保同一 checkpoint 只 resume 一次 |
+| **questionStore 为 nil** | 记录错误日志，释放锁（若拥有），直接返回 nil 给 MQ。不执行清理操作，不发送错误消息 |
+| **Agent 未注册或 Build 失败** | 调用 `cleanupAfterResumeFailure`（清状态/删问题/删 checkpoint），发送错误消息，清理幂等 key，释放锁 |
+| **GetByCheckpoint 失败** | 调用 `cleanupAfterResumeFailure`，发送错误消息，清理幂等 key，释放锁 |
 
 ---
 
@@ -686,10 +699,14 @@ graph LR
 |----------|------|----------|
 | `ErrLLMTimeout` | Transient | MQ 重试 + 用户提示"暂时无法回复" |
 | `ErrLLMRateLimited` | Transient | MQ 重试 + 用户提示"暂时无法回复" |
-| HTTP 500/502/503 | Transient | MQ 重试 |
-| `ErrAgentNotFound` | Permanent | 发送友好错误消息，标记 processed |
+| HTTP 500/502/503 | Transient | 映射为 `ErrLLMTimeout`，MQ 重试 |
+| `ErrAgentNotFound` | Permanent | 发送友好错误消息（默认"处理遇到问题"），标记 processed |
 | `ErrAPIKeyMissing` | Permanent | 发送"配置有误"消息，标记 processed |
+| `ErrUnsupportedModel` | Permanent | 发送"配置有误"消息，标记 processed |
+| `ErrContextLoad` | Permanent | 发送"无法读取对话历史"消息，标记 processed |
+| `ErrCheckpointStoreSet` | Permanent | 发送"等待时间过长"消息，标记 processed |
+| `ErrMCPUnreachable` | Permanent | 发送"外部工具服务不可用"消息，标记 processed |
 | `ErrHITLInterrupted` | Special | 不标记 processed，保留锁，等待 resume |
 | 流式中途持久化失败 | Fail-open | 日志记录，不阻断主流程（部分文本已广播） |
 | 最终消息持久化失败 | Permanent | 返回错误，发送通用错误消息给用户，标记 processed |
-| MCP 不可用 | Fail-open | 跳过该 MCP server，不阻断构建 |
+| MCP 构建阶段不可用 | Fail-open | 跳过该 MCP server，不阻断构建 |

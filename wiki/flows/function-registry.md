@@ -121,15 +121,14 @@ sequenceDiagram
     Note over Registry: 函数已存储
     Client--xWS: 连接断开 (网络异常/主动关闭)
     WS->>WS: handleWebSocket defer 清理
-    WS->>CS: Remove(connID)
+    WS->>CS: Remove(connID) [5s 超时]
     WS->>WS: removeClient(connID, userID, deviceID)
 
-    alt 设备无其他活跃连接
-        WS->>RPC: CancelDeviceWithReason(userID, deviceID, "device disconnected")
+    alt functionRegistry != nil 且设备无其他活跃连接 (!hasActiveConn)
         WS->>WS: scheduleFuncCleanup(userID, deviceID)
-        Note over WS: 启动 grace period 定时器
+        Note over WS: 启动 grace period 定时器 (默认 10s)
         alt grace period 内设备重连
-            WS->>WS: cancelPendingFuncCleanup(userID, deviceID)
+            Note over WS: 新连接的 handleWebSocket 中调用 cancelPendingFuncCleanup
             Note over WS: 取消清理, 函数保留
         else grace period 超时且无活跃连接
             WS->>Registry: OnDeviceDisconnect(userID, deviceID)
@@ -137,6 +136,10 @@ sequenceDiagram
             Registry->>Registry: 若该 user 无其他设备, 删除 user 级 map entry
             Note over Registry: 函数已清理
         end
+    end
+
+    alt !hasActiveConn
+        WS->>RPC: CancelDeviceWithReason(userID, deviceID, "device disconnected")
     end
 ```
 
@@ -157,8 +160,8 @@ sequenceDiagram
 #### 3. 设备替换场景下的函数保留
 
 - 触发条件: 同一 (userID, deviceID) 的新连接建立时旧连接被踢出
-- 处理逻辑: 新连接到达时调用 `cancelPendingFuncCleanup` 取消旧连接的延迟清理，避免页面导航期间函数被误删。CancelDevice 在 Upgrade 前执行，取消旧连接的 pending RPC 请求
-- 最终结果: 函数注册保留（因为清理被取消），新连接无需重新注册函数
+- 处理逻辑: 新连接的 `handleWebSocket` 在注册新连接时调用 `cancelPendingFuncCleanup` 取消旧连接的 grace period 定时器，避免函数被误删。此外，`CancelDevice` 在 Upgrade 前执行，取消旧连接的所有 pending RPC 请求（reason: "device replaced"）。这是两个独立机制：前者保护函数注册，后者保护 RPC 请求
+- 最终结果: 函数注册在 grace period 内被保留。新连接通常会重新注册函数（通过 `system.register_functions`），即使旧连接的延迟清理先于新注册执行，`scheduleFuncCleanup` 中的 `hasActiveConn` 二次检查也会阻止清理属于新连接的函数
 
 #### 4. Grace period 机制
 
@@ -198,9 +201,9 @@ sequenceDiagram
         end
     end
 
-    alt 有 dynamicTools 配置
-        DTP->>TR: Create(dynamicTools, nil)
-        TR-->>DTP: []BaseTool
+    alt toolRegistry != nil 且 AgentConfig.DynamicTools 非空
+        DTP->>TR: Create(ctx, dynamicTools, nil)
+        TR-->>DTP: []BaseTool (按名称从注册表解析)
     end
 
     DTP->>DTP: 合并所有工具到 runCtx.Tools
@@ -217,13 +220,13 @@ sequenceDiagram
 
 #### 2. GetFunctions 失败 (fail-open)
 
-- 触发条件: 函数注册表查询出错
+- 触发条件: `FunctionRegistry.GetFunctions` 查询出错
 - 处理逻辑: 记录错误日志，跳过客户端函数注入，不阻塞 Agent 执行
 - 最终结果: Agent 继续运行，只是没有客户端工具
 
 #### 3. 单个工具创建失败 (fail-open per function)
 
-- 触发条件: 某个函数的 JSON Schema 解析失败
+- 触发条件: `buildToolInfo` 失败（JSON Marshal 参数、JSON Schema 解析、或其他构建错误）
 - 处理逻辑: 记录该函数的错误日志，continue 跳过，其他函数正常创建
 - 最终结果: 部分工具可用，不影响其他工具
 
@@ -396,7 +399,10 @@ sequenceDiagram
     Caller1->>RPC: ServerRequest (等待中)
     Caller2->>RPC: ServerRequest (等待中)
     Client--xWS: 连接断开
-    WS->>RPC: CancelDeviceWithReason(userID, deviceID, "device disconnected")
+    WS->>WS: removeClient + 检查 hasActiveConn
+    alt !hasActiveConn (无替代连接)
+        WS->>RPC: CancelDeviceWithReason(userID, deviceID, "device disconnected")
+    end
     RPC->>RPC: 遍历 pending map, 筛选该设备的所有请求
     RPC->>RPC: 从 pending map 中删除
     RPC->>Caller1: respCh 写入 {Code:-1, Msg:"device disconnected"}
@@ -465,8 +471,8 @@ sequenceDiagram
 
 #### 1. 超时优先级
 
-- 触发条件: 函数定义了 timeout_ms，同时 Agent 配置了 call_timeout
-- 处理逻辑: 函数级 timeout_ms > Agent 默认 call_timeout > 30s 硬编码兜底
+- 触发条件: 函数定义了 timeout_ms，同时 Agent 配置了 `client_tools.call_timeout`
+- 处理逻辑: 函数级 `FunctionInfo.TimeoutMs` > `ClientToolsConfig.CallTimeout` > 30s 硬编码兜底（三者均 <= 0 时取下一级）
 - 最终结果: 使用最具体的超时值
 
 #### 2. LLM 友好的错误消息

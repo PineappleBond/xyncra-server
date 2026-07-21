@@ -110,11 +110,8 @@ flowchart TD
     I --> J1{Create 是否成功?}
     J1 -- 是 --> L[事务中为双方分配递增 seq]
     L --> M[写入 UserUpdate 记录]
-    M --> N[MQ 入队 TypeSendMessage 通知双方设备]
-    N --> O{MQ 入队成功?}
-    O -- 否 --> O1[记录日志, 不影响主流程]
-    O -- 是 --> P[返回会话, duplicate=false]
-    O1 --> P
+    M --> N[MQ 入队 TypeSendMessage 通知双方设备 fire-and-forget]
+    N --> P[返回会话, duplicate=false]
     J1 -- 否 --> J{是否 ErrDuplicateKey?}
     J -- 是 --> K[TOCTOU 竞争: 重新查询 GetByUsers]
     K --> K2{重查询是否成功?}
@@ -130,6 +127,7 @@ flowchart TD
     style K1 fill:#FFC107,color:#000
     style K3 fill:#f44336,color:#fff
     style J2 fill:#f44336,color:#fff
+    style N fill:#FFC107,color:#000
     style P fill:#4CAF50,color:#fff
 ```
 
@@ -249,9 +247,9 @@ flowchart TD
     C --> D[规范化 offset: 必须 >= 0]
     D --> E[调用 GetByUser: offset, limit+1]
     E --> F[store 内部拆分两个子查询]
-    F --> G[user_id1 = callerID]
-    F --> H["user_id2 = callerID AND user_id2 != ''"]
-    G --> I[合并去重, 按 LastMessageAt 降序排序]
+    F --> G["user_id1 = callerID, LIMIT offset+limit"]
+    F --> H["user_id2 = callerID AND user_id2 != '', LIMIT offset+limit"]
+    G --> I[合并去重, 按 LastMessageAt 降序排序, 再 offset/limit 分页]
     H --> I
     I --> J{返回结果数 > limit?}
     J -- 是 --> K[截断为 limit 条, has_more = true]
@@ -318,11 +316,8 @@ flowchart TD
     J -- 否 --> K[软删除该会话所有未删除消息]
     K --> L[提交事务: 所有操作使用统一时间戳]
     L --> M[为所有成员创建 UserUpdate]
-    M --> N[MQ 广播给所有成员在线设备]
-    N --> O{广播成功?}
-    O -- 否 --> O1[记录日志]
-    O -- 是 --> P[返回 status=ok, deleted_message_count]
-    O1 --> P
+    M --> N[MQ 广播给所有成员在线设备 fire-and-forget]
+    N --> P[返回 status=ok, deleted_message_count]
 
     style A fill:#4CAF50,color:#fff
     style C1 fill:#f44336,color:#fff
@@ -330,7 +325,7 @@ flowchart TD
     style E2 fill:#f44336,color:#fff
     style F1 fill:#f44336,color:#fff
     style J1 fill:#f44336,color:#fff
-    style O1 fill:#FFC107,color:#000
+    style N fill:#FFC107,color:#000
     style P fill:#4CAF50,color:#fff
 ```
 
@@ -350,6 +345,9 @@ flowchart TD
 | `Get` 查询出错（非 `ErrNotFound`） | 返回 `InternalError` |
 | 调用者非成员 | 返回 `PermissionDeniedError('user is not a member of the conversation')` |
 | `RowsAffected == 0`（并发删除竞争） | 返回 `ErrNotFound` -> `NotFoundError` |
+| 统计未删除消息数失败 | 事务回滚，返回 `InternalError` |
+| 软删除会话 SQL 失败 | 事务回滚，返回 `InternalError` |
+| 软删除消息 SQL 失败 | 事务回滚，返回 `InternalError` |
 | `GetLatestSeq` 失败（单个成员） | 跳过该成员的 UserUpdate，其他成员不受影响 |
 | `UserUpdate` 批量创建失败 | 仅记录日志，会话已成功删除，MQ 广播仍会执行 |
 | MQ 广播失败 | 仅记录日志，更新已持久化 |
@@ -398,11 +396,8 @@ flowchart TD
     J --> K[重新计算会话元数据]
     K --> L[提交事务]
     L --> M[为所有成员创建 UserUpdate]
-    M --> N[MQ 广播给所有成员在线设备]
-    N --> O{广播成功?}
-    O -- 否 --> O1[记录日志]
-    O -- 是 --> P[重新获取恢复后的会话]
-    O1 --> P
+    M --> N[MQ 广播给所有成员在线设备 fire-and-forget]
+    N --> P[重新获取恢复后的会话]
     P --> P2{Get 是否成功?}
     P2 -- 否 --> P3[返回 InternalError]
     P2 -- 是 --> Q[返回会话, restored_message_count]
@@ -413,7 +408,7 @@ flowchart TD
     style E2 fill:#f44336,color:#fff
     style F1 fill:#f44336,color:#fff
     style G1 fill:#2196F3,color:#fff
-    style O1 fill:#FFC107,color:#000
+    style N fill:#FFC107,color:#000
     style P3 fill:#f44336,color:#fff
     style Q fill:#4CAF50,color:#fff
 ```
@@ -435,6 +430,9 @@ flowchart TD
 | 会话未被删除 | 幂等返回当前状态，`restored_message_count = 0` |
 | 调用者非成员 | 返回 `PermissionDeniedError('user is not a member of the conversation')` |
 | `RowsAffected == 0`（并发恢复竞争） | `ErrNotFound` -> `NotFoundError` |
+| 恢复会话 SQL 失败 | 事务回滚，返回 `InternalError` |
+| 恢复消息 SQL 失败 | 事务回滚，返回 `InternalError` |
+| 重算元数据失败 | 事务回滚，返回 `InternalError` |
 | `GetLatestSeq` 失败（单个成员） | 跳过该成员的 UserUpdate，其他成员不受影响 |
 | 恢复后无消息 | `LastProcessedMessageID` 和 `LastMessageAt` 保持原值 |
 | 之前已单独删除的消息 | 不受影响（通过精确时间戳匹配区分） |

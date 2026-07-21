@@ -130,7 +130,7 @@ sequenceDiagram
 - 处理逻辑:
   - 将已累积的 partialText 通过 SendStreamUpdate(isDone=true) 广播
   - 若 partialText 非空则持久化为部分响应
-  - 错误分类: context.DeadlineExceeded -> ErrLLMTimeout; 429/rate -> ErrLLMRateLimited; 500/502/503 -> ErrLLMTimeout; 其他未知错误 -> ErrLLMTimeout (兜底)
+  - 错误分类: context.DeadlineExceeded -> ErrLLMTimeout; 429/rate -> ErrLLMRateLimited; 500/502/503 -> ErrLLMTimeout; 其他未知错误 -> 不包装（直接透传原始错误，classifyError 兜底为 "处理遇到问题"）
 - 最终结果: 返回包装后的错误，由 ExecuteWithErrorMessage 发送用户友好消息
 
 #### 4. Typing 超时
@@ -438,6 +438,24 @@ sequenceDiagram
     RH->>RH: 构建 targets map (仅 status=answered 且 interruptID 非空)
 
     RH->>Runner: ResumeWithParams(checkpointID, params)
+    alt ResumeWithParams 失败 (checkpoint 过期)
+        Runner-->>RH: ErrCheckpointNotFound / "not found"
+        RH->>RH: cleanupAfterResumeFailure
+        RH->>BC: sendErrorMessage("等待时间过长")
+        RH->>Idem: DeleteKey(processingKey) + MarkProcessed(processedKey, 24h)
+        RH->>Lock: Release (若拥有)
+        RH-->>MQ: return nil
+    else ResumeWithParams 失败 (瞬态错误)
+        Runner-->>RH: ErrLLMTimeout / ErrLLMRateLimited
+        RH->>BC: sendErrorMessage("服务暂时不可用")
+        RH->>Idem: DeleteKey(processingKey)
+        RH->>Lock: Release (若拥有)
+        RH-->>MQ: return nil
+    else ResumeWithParams 失败 (其他错误)
+        Runner-->>RH: error
+        RH->>Lock: Release (若拥有)
+        RH-->>MQ: return nil (无清理、无错误消息)
+    end
 
     RH->>Bridge: BridgeWithInterrupt(iter, chunkCh, interruptCh)
 
@@ -452,6 +470,11 @@ sequenceDiagram
     alt 检测到再次中断 (multi-turn HITL)
         Bridge-->>RH: interruptCh <- InterruptInfo
         RH->>Store: UpdateAgentStatus("asking_user")
+        alt UpdateAgentStatus/Create 失败
+            Store-->>RH: error
+            RH->>Lock: Release (若拥有)
+            RH-->>MQ: return error（非 ErrHITLInterrupted，永久错误）
+        end
         RH->>QS: Create(Question)
         RH->>BC: SendConversationUpdate
         RH->>BC: SendAgentStatus("asking_user")
@@ -483,6 +506,12 @@ sequenceDiagram
 - 处理逻辑: 调用 cleanupAfterResumeFailure（清状态/删问题/删 checkpoint），发送 "等待时间过长" 错误消息，标记幂等 processed
 - 最终结果: 会话恢复到 idle 状态，用户收到提示重新发送消息
 
+#### 1b. ResumeWithParams 其他非瞬态错误
+
+- 触发条件: Runner.ResumeWithParams 返回非 checkpoint-not-found 且非瞬态的错误
+- 处理逻辑: 代码中 checkpoint-not-found 和 transient 是两个独立的 if 分支，其他错误不进入任一分支，直接 releaseLock + return nil。**不调用 cleanupAfterResumeFailure，不发送错误消息，不清理幂等 key**（processingKey 在 130s 后自然过期）
+- 最终结果: 用户看不到任何反馈，会话停留在 asking_user 状态，需要等待 HITL 超时清理兜底。task_handler 标记 processed 并释放锁
+
 #### 2. 无已回答的 Question
 - 触发条件: GetByCheckpoint 返回空或所有 Question 状态非 answered（或 InterruptID 为空）
 - 处理逻辑: targets map 为空，记录 info 日志 "no answered questions found for checkpoint"，ResumeWithParams 正常调用
@@ -506,13 +535,25 @@ sequenceDiagram
 #### 6. Multi-turn HITL (恢复后再次中断)
 - 触发条件: Resume 后 agent 再次触发 HITL 中断
 - 处理逻辑: resume handler 在内部直接处理 re-interrupt——更新会话状态为 asking_user，持久化新 Question，广播 conversation update 和 agent status，删除 processingKey 允许后续 resume，然后 return nil 给 MQ（不释放锁）
-- 注意: resume handler 对 re-interrupt 返回 nil（不是 error），task_handler 不介入。若 weOwnLock=false（初始执行的锁 TTL 未过期），锁保持不释放；若 weOwnLock=true，锁由 resume handler 的 defer releaseLock 释放（但 re-interrupt 路径在 releaseLock 之前 return，所以也不释放）
+- 注意: resume handler 对 re-interrupt 返回 nil（不是 error），task_handler 不介入。re-interrupt 路径在 releaseLock 之前直接 return，因此无论 weOwnLock 是否为 true，锁都不会被释放（defer releaseLock 不会被执行到）
 - 最终结果: 同一 checkpoint 可多次 resume 和中断，实现多轮人机交互
 
 #### 7. cleanupAfterResumeFailure 的非致命错误
 - 触发条件: ClearAgentStatus / DeleteByCheckpoint / Delete 任一操作失败
 - 处理逻辑: 每步独立执行，错误仅记录日志不影响后续步骤
 - 最终结果: 最终一致性，TTL 机制兜底清理
+
+#### 8. Re-interrupt 时 UpdateAgentStatus 或 Create Question 失败
+
+- 触发条件: multi-turn HITL re-interrupt 路径中 UpdateAgentStatus 或 questionStore.Create 返回 error
+- 处理逻辑: releaseLock() 后返回普通 error（非 ErrHITLInterrupted）给 MQ。task_handler 将其视为永久错误，标记 processed 并释放锁
+- 最终结果: 用户看不到错误提示（无 sendErrorMessage），会话可能停留在中间状态，需要等待 HITL 超时清理兜底
+
+#### 9. 流式输出错误时无部分文本持久化
+
+- 触发条件: resume handler 流式输出中 chunk.Err 非 nil
+- 处理逻辑: 广播 partialText(isDone=true) 关闭流，发送错误消息给用户，清理幂等 key，释放锁。**不持久化部分文本到 DB**（与 task_handler 的初始执行路径不同）
+- 最终结果: 用户通过 WebSocket 看到了部分流式文本，但该文本不会作为消息记录在 DB 中
 
 ### 涉及文件
 - `resume_handler.go`: 恢复处理主逻辑，cleanupAfterResumeFailure

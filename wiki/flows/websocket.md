@@ -147,9 +147,11 @@ flowchart TD
     F -->|Request| G[查找 method handler]
     F -->|Response| H[转发给 ReverseRPC]
     F -->|Updates| I[记录日志 预留]
+    F -->|未知类型| J2[记录警告日志]
     E --> A
     H --> A
     I --> A
+    J2 --> A
     G --> J{找到 handler?}
     J -->|否| K[使用 fallback handler]
     J -->|是| L[执行 handler]
@@ -192,6 +194,7 @@ flowchart TD
 | Handler 执行错误 | 区分 `HandlerError`（带自定义错误码）和普通 `error`（通用错误码） |
 | Pong 超时（默认 60s） | 读取截止时间到期，ReadMessage 返回错误，readPump 退出 |
 | 意外关闭（非正常断开） | 记录 Error 级别日志；正常断开记录 Debug 级别 |
+| Response 数据解码失败（Response 内层 JSON 无效） | 记录错误，跳过（不转发给 ReverseRPC） |
 | Response 无匹配的 pending 请求 | `DispatchResponse` 静默忽略（超时后的迟到响应） |
 
 ---
@@ -269,11 +272,17 @@ flowchart TD
     M --> O[从 clients 移除]
     O --> P[从 clientsByUser 移除]
     P --> Q[从 clientsByDevice 移除]
-    Q --> R{设备还有其他连接?}
-    R -->|否| S[scheduleFuncCleanup 延迟清理]
-    S --> T[调用 CancelDeviceWithReason]
-    R -->|是| U[完成]
-    T --> U
+    Q --> R{functionRegistry != nil?}
+    R -->|是| S{设备还有其他连接?}
+    R -->|否| T{reverseRPC != nil?}
+    S -->|否| U[scheduleFuncCleanup 延迟清理]
+    S -->|是| T
+    U --> T
+    T -->|是| V{设备还有其他连接?}
+    T -->|否| Z[完成]
+    V -->|否| W[CancelDeviceWithReason]
+    V -->|是| Z
+    W --> Z
 ```
 
 ### 详细步骤
@@ -329,18 +338,18 @@ flowchart TD
 2. `DefaultMessageHandler` 路由到 `heartbeatHandler`
 3. 解析可选的 `device_info` 参数（仅记录日志）
 4. 调用 `ConnectionStore.Refresh(connID)` 重置 TTL
-5. `Refresh` 使用 Lua 脚本原子操作：
-   - 检查 info key 是否存在
-   - 重置 info key 的 TTL
-   - 重置 user SET 的 TTL（MAX 语义）
-6. 返回 `{"status": "ok"}` 响应
+5. `Refresh` 使用 Lua 脚本原子操作（`luaRefresh`）：
+   - 检查 info key 是否存在，若不存在返回 0（触发 `ErrConnectionNotFound`）
+   - 重置 info key 的 TTL（PEXPIRE）
+   - 重置 user SET 的 TTL（MAX 语义：仅当新 TTL 大于当前剩余 TTL 时才刷新）
+6. 返回 `PackageDataResponse{ID, Code: ResponseCodeOK, Msg: "ok", Data: {"status": "ok"}}` 响应
 
 ### 边缘场景
 
 | 场景 | 处理方式 |
 |------|----------|
-| 连接已过期/被清除 | 返回 `NotFoundError("connection expired")`，客户端应重新连接 |
-| Redis 不可达 | 返回内部错误 |
+| 连接已过期/被清除（Lua 脚本 info key 不存在，返回 0） | 返回 `NotFoundError("connection expired")`，客户端应重新连接 |
+| Redis 不可达（连接失败或超时） | 返回 `InternalError`，由 `classifyRedisError` 分类（`ErrRedisConnectionFailed` 或 `ErrRedisTimeout`） |
 | `device_info` 解析失败 | 忽略，不影响心跳处理（宽容解析） |
 | 心跳参数缺失 | 有效心跳，无参数也正常处理 |
 

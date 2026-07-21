@@ -122,17 +122,17 @@ sequenceDiagram
 
 **请求**:
 ```json
-{"jsonrpc": "2.0", "id": 1, "method": "send_message", "params": {...}}
+{"jsonrpc": "2.0", "id": "a1b2c3d4-...", "method": "send_message", "params": {...}}
 ```
 
 **成功响应**:
 ```json
-{"jsonrpc": "2.0", "id": 1, "result": {...}}
+{"jsonrpc": "2.0", "id": "a1b2c3d4-...", "result": {...}}
 ```
 
 **错误响应**:
 ```json
-{"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "Method not found"}}
+{"jsonrpc": "2.0", "id": "a1b2c3d4-...", "error": {"code": -32601, "message": "Method not found"}}
 ```
 
 ### 错误码
@@ -183,8 +183,8 @@ flowchart TD
     D -->|是| F["打开 SQLite (WAL mode,<br>busy_timeout=5000ms, cache_size=-8000,<br>synchronous=NORMAL, foreign_keys=ON)"]
     F --> G["创建 IPCServer"]
     G --> H["创建 cliUpdateHandler<br>(推送事件输出到 stdout)"]
-    H --> I["创建 cliLogger<br>(结构化日志写入 stderr)"]
-    I --> J["构建 client options:<br>server URL, userID, deviceID,<br>DB, updateHandler, logger,<br>deviceInfo, functions"]
+    H --> I["创建 cliLogger<br>(结构化日志写入 stderr,<br>XYNCRA_DEBUG=1 启用 Debug 级别)"]
+    I --> J["构建 client options:<br>server URL, userID, deviceID,<br>DB, updateHandler, logger,<br>--device-info, functions"]
     J --> K["创建 XyncraClient"]
     K --> L["注册内置反向 RPC handlers<br>(ping, get_device_info, get_time)"]
     L --> M["注册 11 个 IPC method handlers"]
@@ -198,6 +198,35 @@ flowchart TD
     T --> S
     S --> U["清理流程:<br>unlock → close DB →<br>stop IPC → remove socket"]
 ```
+
+### Update Handler 回调
+
+`cliUpdateHandler` 实现 `client.UpdateHandler` 接口，将服务器推送的事件格式化输出到 stdout：
+
+| 回调方法 | 输出格式 | 说明 |
+|----------|----------|------|
+| `OnMessage` | `[new message] seq=%d from=%s conv=%s %q` | 新消息或更新消息 |
+| `OnDeleteMessage` | `[delete message] conv=%s msg=%s` | 消息删除事件 |
+| `OnMarkRead` | `[mark read] conv=%s msg_id=%d` | 已读游标推进事件 |
+| `OnConversation` | `[conversation] id=%s title=%q` | 会话状态变更；当 `agent_status == "asking_user"` 时额外显示 HITL 待回答问题 |
+| `OnGap` | `[gap] seq=%d` | 序列号间隙通知 |
+| `OnTyping` | `[typing] user=%s conv=%s started/stopped typing` | 输入指示器；agent 显示为 `[thinking]` |
+| `OnStreaming` | `[streaming/agent] user=%s conv=%s stream=%s status=%s text=%q` | 流式文本事件；agent 来源显示为 `[agent]` |
+| `OnAgentStatus` | `[agent_status] agent=%s conv=%s status=%s` | Agent 状态变更（如 running、asking_user、idle） |
+| `OnAgentTimeout` | `[agent_timeout] agent=%s conv=%s reason=%q` | Agent 超时事件 |
+
+### HITL 问题显示
+
+当 `OnConversation` 收到 `agent_status == "asking_user"` 的会话更新时，handler 从本地 `QuestionStore` 查询该会话的 pending 问题并格式化输出：
+
+```
+[hitl] conv=<id> agent=<agent_id> checkpoint_id=<cp_id>
+  [1] interrupt_id=<id> question="..." (pending)
+```
+
+### 日志级别控制
+
+`cliLogger` 默认仅输出 Info/Warn/Error 到 stderr。设置环境变量 `XYNCRA_DEBUG=1` 或 `XYNCRA_DEBUG=true` 启用 Debug 级别日志。
 
 ### 边缘场景
 
@@ -236,8 +265,9 @@ flowchart TD
     J --> K
     K --> L{"standalone 成功?"}
     L -->|是| M["持久化消息到本地 DB<br>更新会话 LastMessage 指针"]
-    M --> N["打印提示: 启动守护进程"]
-    N --> F
+    M --> N["clearDraft(convID)<br>清除本地草稿"]
+    N --> O2["输出结果"]
+    O2 --> F
     L -->|否| O["打印两个错误原因<br>提示启动守护进程"]
 ```
 
@@ -245,6 +275,7 @@ flowchart TD
 
 | 场景 | 行为 |
 |------|------|
+| 整体命令超时 (15s) | `runSend` 使用 `context.WithTimeout(15s)`，IPC 和 standalone 均受此约束 |
 | clientMsgID 为空 | IPC 路径：`XyncraClient` 自动生成 UUID v4；standalone 路径：显式生成 |
 | content 为空字符串 | 允许（`--content` 必须通过 `--content` 显式提供，`--content ""` 合法；未提供则 `cmd.Flags().Changed("content")` 返回 false 并报错） |
 | reply_to 为 0 | 不设置回复上下文 |
@@ -288,9 +319,15 @@ flowchart TD
         EB --> EC{"IPC 成功?"}
         EC -->|是| ED["级联恢复本地 DB"]
         EC -->|否| EE["standaloneRPC 降级"]
+        EE --> EJ{"standalone 成功?"}
+        EJ -->|是| EK["级联恢复本地 DB"]
+        EJ -->|否| EL["返回错误"]
         ED --> EF{"本地 Restore() 返回 ErrNotFound?"}
         EF -->|是| EG["直接 xc.Call('get_conversation')<br>从服务器获取并 upsert"]
         EF -->|否| EH["正常恢复"]
+        EK --> EM{"本地 Restore() 返回 ErrNotFound?"}
+        EM -->|是| EN["仅记录警告<br>(standalone 无法从服务器回填)"]
+        EM -->|否| EO["正常恢复"]
     end
 
     subgraph 列出会话
@@ -504,7 +541,7 @@ flowchart TD
 | 锁文件移除竞态 | 另一个进程在 stale 检测和重试之间获取锁，重试 `TryLock` 失败 |
 | PID 复用 | 理论上可能，但 flock 保护：新进程不会持有 flock |
 | `writeLockInfo` 在获取 flock 后失败 | 解锁 flock 并返回错误 |
-| unlock 函数 | 先尝试 `Unlock()` 再尝试 `Remove()`；两者都尝试执行。`Unlock()` 失败时函数提前返回错误（此时 `Remove()` 仍执行但其错误被忽略）。`Remove()` 返回 `ErrNotExist` 时视为正常 |
+| unlock 函数 | 先调用 `Unlock()` 再调用 `Remove()`；两者都无条件执行。返回第一个遇到的错误（`Unlock` 优先级高于 `Remove`）。`Remove()` 返回 `ErrNotExist` 时视为正常 |
 
 ---
 

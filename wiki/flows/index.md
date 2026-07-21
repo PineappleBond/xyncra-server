@@ -194,6 +194,7 @@ graph TB
 | [Client Registration](client-registration.md) | `client-registration.md` | 客户端注册与函数管理（连接注册/函数注册/动态工具注入） |
 | [Message Queue](message-queue.md) | `message-queue.md` | 消息队列业务流程（入队/消费/重试/优雅关闭） |
 | [Agent Execution](agent-execution.md) | `agent-execution.md` | Agent 执行引擎与 LLM 交互（MQ 消费/LLM 调用/流式输出） |
+| [CLI Observability](cli-observability.md) | `cli-observability.md` | CLI 操作与可观测性（LLM 日志/Prometheus 指标/OpenTelemetry） |
 
 ---
 

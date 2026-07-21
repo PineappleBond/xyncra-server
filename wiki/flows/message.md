@@ -396,9 +396,10 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[开始事务] --> A1{上下文已过期?}
+    A[调用 SendMessage] --> A1{上下文已过期?}
     A1 -->|是| A2[返回错误]
-    A1 -->|否| B[读取 conversation.LastProcessedMessageID]
+    A1 -->|否| A3[开始事务]
+    A3 --> B[读取 conversation.LastProcessedMessageID]
     B --> C[分配 MessageID = LastProcessedMessageID + 1]
     C --> D[序列化消息为 JSON payload]
     D --> E[遍历成员列表]
@@ -441,8 +442,6 @@ flowchart TD
 | **上下文已过期** | `Transaction()` 在开始事务前检查 `ctx.Err()`，若已过期直接返回错误，避免无意义的数据库操作 |
 | **并发 MessageID 分配** | 事务内 SELECT conversation 获取 `LastProcessedMessageID` 再分配，事务隔离级别保证原子性；handler 层通过 `client_message_id + sender_id` 唯一索引捕获重复键实现幂等 |
 | **软删除查询** | GORM DeletedAt 插件自动在 WHERE 中排除已删除记录 |
-| **Restore 操作** | `Unscoped()` 查询 + 设置 `deleted_at = nil` |
-| **CountUnread 负数防御** | 结果 < 0 时强制归零 |
 
 ---
 

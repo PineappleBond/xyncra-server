@@ -62,7 +62,17 @@ sequenceDiagram
 
 ### 其他 TypeSendMessage 生产者
 
-`delete_message` RPC 也通过 `broadcastDeleteMessageUpdates` 入队 TypeSendMessage 任务，将消息删除更新广播给所有对话成员。
+除 `send_message` 外，以下 RPC handler 也通过相同的 `sendMessageTaskPayload` 结构和 `TypeSendMessage` 任务类型入队广播任务（均为 fire-and-forget 模式）。详细流程见各自文档：
+
+| 生产者 | 广播函数 | 广播内容 |
+| --- | --- | --- |
+| `delete_message` | `broadcastDeleteMessageUpdates` | 消息删除更新 |
+| `mark_as_read` | `broadcastMarkReadUpdate` | 已读状态更新（仅广播给操作用户自己的其他设备） |
+| `create_conversation` | `broadcastCreateConversationUpdates` | 新会话创建通知 |
+| `delete_conversation` | `broadcastDeleteConversationUpdates` | 会话删除通知 |
+| `restore_conversation` | `broadcastRestoreConversationUpdates` | 会话恢复通知 |
+
+以下详细描述 `delete_message` 流程作为代表示例：
 
 #### delete_message 流程
 
@@ -92,6 +102,10 @@ sequenceDiagram
 
 - `internal/handler/send_message.go`: 消息持久化 + 入队 TypeSendMessage 和 TypeAgentProcess 任务
 - `internal/handler/delete_message.go`: 消息软删除 + 入队 TypeSendMessage 广播删除更新
+- `internal/handler/mark_as_read.go`: 已读状态更新 + 入队 TypeSendMessage
+- `internal/handler/create_conversation.go`: 创建会话 + 入队 TypeSendMessage
+- `internal/handler/delete_conversation.go`: 删除会话 + 入队 TypeSendMessage
+- `internal/handler/restore_conversation.go`: 恢复会话 + 入队 TypeSendMessage
 - `internal/handler/mq_send_message.go`: TypeSendMessage 消费者，广播给各 recipient
 - `internal/mq/mq.go`: Broker 接口定义、队列常量、Task 类型
 - `internal/mq/asynq.go`: AsynqBroker 实现
@@ -194,8 +208,8 @@ sequenceDiagram
 #### 6. HITL 中断 (人机交互暂停)
 
 - 触发条件: Agent 执行返回 ErrHITLInterrupted
-- 处理逻辑: 不释放会话锁（让锁自然过期），不标记 processedKey，return nil
-- 最终结果: Agent 暂停等待用户回答，后续由 resume 流程接管
+- 处理逻辑: 不释放会话锁（D-084：有意持有锁，防止并发 agent 任务干扰暂停状态），不标记 processedKey（允许 resume 流程使用），不删除 processingKey（130s 后自然过期），return nil
+- 最终结果: Agent 暂停等待用户回答，后续由 resume 流程接管。锁的 130s TTL 是安全网——如果 resume 在 TTL 内到达，锁仍被持有（expected）；如果 TTL 过期，resume handler 会重新获取锁
 
 ### 涉及文件
 
@@ -277,7 +291,8 @@ sequenceDiagram
     Worker->>Lock: Acquire(conversationID, 130s)
     Note over Worker: HITL 初始锁可能仍持有，acquired=false 是预期行为
     Worker->>Exec: registry.Get(agentID)
-    Worker->>Exec: agentBuilder.Build(config)
+    Worker->>Worker: ContextWithCallerDevice(ctx, userID, deviceID) (D-102)
+    Worker->>Exec: agentBuilder.Build(ctx, config)
     Worker->>QStore: GetByCheckpoint(checkpointID)
     QStore-->>Worker: answered questions
     Worker->>Worker: 构建 targets map (interruptID -> answer)
@@ -315,6 +330,18 @@ sequenceDiagram
 - 触发条件: Agent resume 后又返回新的 interrupt
 - 处理逻辑: 更新会话状态为 asking_user，持久化新 Question 到 DB，广播 conversation update（pull notification），广播 agent status（"asking_user"），不释放锁（D-084），删除 `agent:resume:processing:{checkpointID}` 允许后续 resume
 - 最终结果: Agent 再次暂停等待用户回答，可循环多轮
+
+##### UpdateAgentStatus 失败
+
+- 触发条件: `ConversationStore.UpdateAgentStatus` 返回 error（DB 连接断开等）
+- 处理逻辑: 释放锁（仅当 weOwnLock=true），return error 给 Asynq 触发重试（与其他 resume 错误路径不同，此处返回 error 而非 nil）
+- 最终结果: Asynq 指数退避重试，等待 DB 恢复后重新执行
+
+##### QuestionStore.Create 失败
+
+- 触发条件: 持久化新 Question 到 DB 失败
+- 处理逻辑: 释放锁（仅当 weOwnLock=true），return error 给 Asynq 触发重试
+- 最终结果: Asynq 指数退避重试
 
 #### 3. Resume 期间 LLM 瞬态错误
 
@@ -381,6 +408,7 @@ sequenceDiagram
 - `internal/agent/task_handler.go`: 共享锁和幂等模式
 - `internal/agent/conversation_lock.go`: 分布式锁
 - `internal/agent/broadcast.go`: 流式广播
+- `internal/agent/executor.go`: Agent 执行器（cleanupAfterResume、sendErrorMessage）
 - `internal/agent/errors.go`: 哨兵错误定义（ErrCheckpointNotFound, ErrLLMTimeout 等）
 - `internal/mq/mq.go`: TypeAgentResume 任务类型
 
@@ -681,7 +709,7 @@ sequenceDiagram
     BH->>WS: BroadcastUpdates(humanUserID)
 
     Note over Caller,BH: 函数调用广播
-    Caller->>BH: SendFunctionCall(name, args, result, isDone)
+    Caller->>BH: SendFunctionCall(name, args, result, error, durationMs, isDone)
     BH->>WS: BroadcastUpdates(humanUserID)
 
     Note over Caller,BH: 预构建消息广播 (resume handler)
