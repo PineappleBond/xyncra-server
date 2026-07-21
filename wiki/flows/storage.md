@@ -1,6 +1,6 @@
 # 存储层业务流程
 
-本文档描述 Xyncra Server 存储层的完整业务流程，涵盖数据库初始化、Store 构建、各领域 CRUD 操作、事务管理、错误分类及可观测性集成。
+本文档描述 Xyncra 存储层的完整业务流程，涵盖服务端（`internal/store`）和客户端（`pkg/store`）两个存储层：数据库初始化、Store 构建、各领域 CRUD 操作、事务管理、错误分类、可观测性集成，以及客户端专属模型和操作。
 
 ---
 
@@ -17,7 +17,9 @@
 - [9. 健康检查](#9-健康检查)
 - [10. 错误分类](#10-错误分类)
 - [11. 可观测性集成](#11-可观测性集成)
-- [12. 数据模型](#12-数据模型)
+- [12. 数据模型（服务端）](#12-数据模型服务端)
+- [13. 客户端存储架构](#13-客户端存储架构)
+- [14. 客户端额外数据模型](#14-客户端额外数据模型)
 
 ---
 
@@ -561,7 +563,9 @@ flowchart TD
     H -->|是| I[返回 ErrForeignKeyViolation]
     H -->|否| J{connection refused / reset / broken pipe / no such host?}
     J -->|是| K[返回 ErrConnectionFailed]
-    J -->|否| L{deadline exceeded / Query timed out?}
+    J -->|否| J2{dial tcp?}
+    J2 -->|是| K
+    J2 -->|否| L{deadline exceeded / Query timed out?}
     L -->|是| M[返回 ErrContextDeadlineExceeded]
     L -->|否| N[原样返回错误]
 ```
@@ -570,7 +574,7 @@ flowchart TD
 
 | 场景 | 说明 |
 |------|------|
-| 字符串匹配可能误判 | 错误消息中包含关键词但非实际错误类型（MySQL 数字错误码被故意省略以避免误判） |
+| 字符串匹配可能误判 | 错误消息中包含关键词但非实际错误类型（MySQL 数字错误码被故意省略以避免误判）；连接失败额外匹配 `dial tcp` 覆盖 TCP 拨号错误 |
 | 跨方言差异 | PostgreSQL/MySQL/SQLite 同一错误的消息文本不同，需分别匹配 |
 | 客户端版本额外错误 | `pkg/store/errors.go` 包含 `ErrDatabaseLocked`（SQLite 特有） |
 | 服务端额外错误 | `internal/store/errors.go` 包含 `ErrConflict`（业务层冲突） |
@@ -609,9 +613,9 @@ flowchart TD
 
 ---
 
-## 12. 数据模型
+## 12. 数据模型（服务端）
 
-4 个核心模型 + 1 个客户端模型，使用 GORM tag 定义索引、约束和默认值。
+4 个核心模型，使用 GORM tag 定义索引、约束和默认值。客户端共享相同的核心模型结构（见 [14. 客户端额外数据模型](#14-客户端额外数据模型)）。
 
 ### 模型关系图
 
@@ -724,3 +728,258 @@ erDiagram
 | Question.Conversation 外键 | `foreignKey:ConversationID`，服务端使用软删除避免外键约束问题 |
 | Question.TableName | 显式覆盖为 `"questions"`（GORM 默认复数规则可能不一致） |
 | Question.Status 常量 | `QuestionStatusPending="pending"` / `QuestionStatusAnswered="answered"` |
+
+---
+
+## 13. 客户端存储架构
+
+客户端存储层（`pkg/store`）使用 SQLite 单一数据库，聚合 9 个领域子 Store，通过 `ClientDB` 结构体暴露。与服务端的关键区别：仅支持 SQLite、共享核心模型但有客户端简化变体、额外支持 5 个客户端专属模型。
+
+### 流程图
+
+```mermaid
+flowchart TD
+    A[New dbPath] --> B[构建 SQLite DSN 含 WAL PRAGMAs]
+    B --> C[gorm.Open gsqlite.Open]
+    C --> D[配置连接池 MaxOpen=1 MaxIdle=1]
+    D --> E[newClientDB]
+    E --> F[创建 9 个子 Store]
+    F --> G[AutoMigrate 9 个模型]
+    G --> H[返回 ClientDB]
+
+    subgraph 子Store列表
+        S1[Conversations]
+        S2[Messages]
+        S3[UserUpdates]
+        S4[SyncStates]
+        S5[Drafts]
+        S6[Queue]
+        S7[RPCLogs]
+        S8[NotificationLogs]
+        S9[Questions]
+    end
+```
+
+### 流程图（NewInMemory 测试路径）
+
+```mermaid
+flowchart TD
+    A[NewInMemory name] --> B[构建 memory DSN shared cache]
+    B --> C[gorm.Open gsqlite.Open]
+    C --> D[newClientDB]
+    D --> E[MaxOpen=1 MaxIdle=1]
+    E --> F[创建子 Store + AutoMigrate]
+```
+
+### 与服务端的差异
+
+| 维度 | 服务端（internal/store） | 客户端（pkg/store） |
+|------|--------------------------|---------------------|
+| 数据库 | PostgreSQL / MySQL / SQLite | SQLite only |
+| 模型数量 | 4（Conversation, Message, UserUpdate, Question） | 9（+Draft, NotificationLog, RetryTask, RPCLog, SyncState） |
+| Store 数量 | 4 + SendMessage 事务 | 9 |
+| 连接池 | MaxOpen=25, MaxIdle=5（非 SQLite） | MaxOpen=1, MaxIdle=1 |
+| OTel tracing | 每个方法手动 span（startSpan） | 无 tracing |
+| classifyError | 多方言匹配 + ErrConflict | SQLite 为主 + ErrDatabaseLocked，无 ErrConflict |
+| Conversation.Delete | 仅软删除单条 | 事务内级联软删除（含消息） |
+| Conversation.Restore | 仅恢复单条 | 事务内级联恢复（含消息） |
+| Question 模型 | 完整（含 Answer, AnsweredBy, AnsweredAt 等） | 精简（仅展示字段，无回答相关字段） |
+| QuestionStore 操作 | Create, UpdateAnswer, GetPendingByCheckpoint, CountPendingByCheckpoint, DeleteByCheckpoint | Upsert, GetByConversation, DeleteByConversation, DeleteByConversationTx |
+| 额外操作 | 无 | Upsert, UpsertTx, SoftDeleteTx, RestoreTx, UpdateLastMessageTx, UpdateLastReadTx 等事务变体 |
+
+### 客户端专属 Store 操作
+
+#### DraftStore
+
+| 操作 | 说明 |
+|------|------|
+| Save | UPSERT：按 ConversationID 唯一索引，存在则更新 content + updated_at |
+| GetByConversation | 按 conversation_id 查询，不存在返回 ErrNotFound |
+| Delete | 按主键删除 |
+| DeleteByConversation | 按 conversation_id 删除 |
+| List | 按 updated_at DESC 返回所有草稿 |
+
+#### NotificationLogStore
+
+| 操作 | 说明 |
+|------|------|
+| Save | 插入通知日志记录 |
+| List | 按 StartTime/EndTime/Type 过滤，limit 1~1000 默认 100 |
+| ListBySeqRange | 按 seq 范围查询 [startSeq, endSeq] |
+| ExportCSV | 导出为 CSV 格式 |
+| ExportJSON | 导出为 JSON 格式 |
+| CleanupBefore | 硬删除指定时间前的记录 |
+| CountBefore | 统计指定时间前的记录数（不删除） |
+| GetLatestSeq | 返回最大 seq 值，空表返回 0 |
+| SaveTx | 事务内插入 |
+
+#### QueueStore（RetryTask）
+
+| 操作 | 说明 |
+|------|------|
+| Save | 插入重试任务 |
+| ListPending | 查询 status=pending 且 next_retry <= now，按 next_retry ASC |
+| Update | 保存任务变更（attempt, next_retry, last_error 等） |
+| MarkFailed | 设置 status=failed，不再出现在 ListPending 中 |
+| Delete | 按主键删除 |
+| Count | 按 status 统计数量 |
+
+#### RPCLogStore
+
+| 操作 | 说明 |
+|------|------|
+| Save | 插入 RPC 日志 |
+| Update | 更新已有记录（如收到响应后） |
+| List | 按 StartTime/EndTime/Method/StatusCode/ConversationID 过滤 |
+| GetByRequestID | 按 request_id 查询，不存在返回 ErrNotFound |
+| Aggregate | 按 method 聚合统计（count, success, error_count, avg_ms） |
+| AggregateByInterval | 按时间间隔（1m/5m/15m/1h/1d）+ method 聚合 |
+| ExportCSV / ExportJSON | 导出 |
+| CleanupBefore / CleanupOlderThan | 硬删除过期记录 |
+| CountBefore | 统计指定时间前的记录数 |
+
+#### SyncStateStore
+
+| 操作 | 说明 |
+|------|------|
+| Get | 按 key 查询，不存在返回 ErrNotFound |
+| Set | UPSERT：按 key 唯一索引，存在则更新 value + updated_at |
+| GetLocalMaxSeq / SetLocalMaxSeq | 便捷方法，操作 `local_max_seq` 键 |
+| GetLatestSeq / SetLatestSeq | 便捷方法，操作 `latest_seq` 键 |
+| SetLocalMaxSeqTx | 事务内设置 local_max_seq |
+
+### 客户端特有事务操作
+
+客户端 ConversationStore 和 MessageStore 提供 `*Tx` 变体，接受外部 `*gorm.DB` 事务句柄，支持在调用方控制的事务中执行：
+
+| 方法 | 说明 |
+|------|------|
+| ConversationStore.UpsertTx | 事务内创建或更新会话（含 TOCTOU 重试） |
+| ConversationStore.SoftDeleteTx | 事务内级联软删除会话+消息 |
+| ConversationStore.RestoreTx | 事务内级联恢复会话+消息 |
+| ConversationStore.UpdateLastMessageTx | 事务内更新 last_message_at |
+| ConversationStore.UpdateLastReadTx | 事务内更新 read cursor（CASE WHEN MAX） |
+| MessageStore.CreateTx | 事务内插入消息 |
+| MessageStore.SoftDeleteTx | 事务内软删除消息 |
+| QuestionStore.DeleteByConversationTx | 事务内按 conversation_id 删除问题 |
+
+### 边缘场景
+
+| 场景 | 说明 |
+|------|------|
+| SQLite WAL 模式 | DSN 含 `_pragma=journal_mode(WAL)` 支持并发读+单写 |
+| SQLite busy_timeout | 5000ms，写冲突时等待而非立即失败 |
+| SQLite foreign_keys=ON | 启用外键约束，级联删除需在事务内手动处理 |
+| MaxOpen=1 强制串行写 | SQLite 文件级锁下多写连接无收益，单连接避免死锁 |
+| Upsert TOCTOU 处理 | SELECT + INSERT 之间可能发生并发插入，捕获 ErrDuplicateKey 后重试为 UPDATE |
+| 级联删除/恢复 | 事务内先操作 Conversation 再操作 Message，保证一致性 |
+| Question 精简模型 | 客户端仅存储展示字段，回答相关字段仅在服务端存在 |
+| ErrDatabaseLocked | SQLite 特有错误，`classifyError` 匹配 `database is locked` |
+
+---
+
+## 14. 客户端额外数据模型
+
+客户端在服务端 4 个核心模型之外，额外使用 5 个模型用于本地状态管理、日志记录和重试队列。
+
+### 模型关系图
+
+```mermaid
+erDiagram
+    DRAFTS {
+        uuid id PK
+        string conversation_id "size:36 唯一索引 每会话最多一个草稿"
+        text content
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    NOTIFICATION_LOGS {
+        uuid id PK
+        uint32 seq "唯一索引"
+        string type "size:20 带索引"
+        bytes payload "blob"
+        timestamp created_at "带索引 硬删除清理"
+    }
+
+    RETRY_TASKS {
+        uuid id PK
+        string method "size:64 带索引"
+        bytes params "blob"
+        int attempt "默认 0"
+        int max_attempts "默认 5"
+        timestamp next_retry "带索引"
+        string status "size:20 默认 pending 带索引"
+        text last_error
+        timestamp created_at "带索引"
+    }
+
+    RPC_LOGS {
+        uuid id PK
+        string type "size:16 request/response 带索引"
+        string request_id "size:64 带索引"
+        string method "size:64 带索引"
+        bytes params "blob"
+        bytes response "blob"
+        int status_code "带索引"
+        string conversation_id "size:36 带索引"
+        duration duration
+        text error_msg
+        timestamp created_at "带索引 硬删除清理"
+    }
+
+    SYNC_STATES {
+        string key "size:64 PK"
+        text value
+        timestamp updated_at
+    }
+```
+
+### 模型说明
+
+| 模型 | 表名 | 主键 | 关键索引 | 软删除 | 说明 |
+|------|------|------|----------|--------|------|
+| Draft | drafts | UUID | `uniqueIndex(conversation_id)` | 否 | 每会话最多一个草稿，Save 使用 UPSERT |
+| NotificationLog | notification_logs | UUID | `uniqueIndex(seq)`，`index(type)`，`index(created_at)` | 否 | 记录接收的推送通知用于去重和审计，过期后硬删除 |
+| RetryTask | retry_tasks | UUID | `index(method)`，`index(next_retry)`，`index(status)`，`index(created_at)` | 否 | RPC 重试任务队列，指数退避，status=pending/failed |
+| RPCLog | rpc_logs | UUID | `index(type)`，`index(request_id)`，`index(method)`，`index(status_code)`，`index(conversation_id)`，`index(created_at)` | 否 | RPC 调用日志用于可观测性，支持按时间间隔聚合统计 |
+| SyncState | sync_states | String Key | PK(key) | 否 | 键值对存储客户端同步状态（local_max_seq, latest_seq） |
+
+### 客户端 Question 模型差异
+
+客户端 Question 模型是服务端的精简版本，仅包含展示所需字段：
+
+| 字段 | 服务端 | 客户端 | 说明 |
+|------|--------|--------|------|
+| ID | 有 | 有 | 主键 |
+| ConversationID | 有 | 有 | 外键 |
+| CheckpointID | 有 | 有 | |
+| InterruptID | 有 | 有 | |
+| QuestionText | 有 | 有 | |
+| Status | 有 | 有 | 默认 pending |
+| Answer | 有 | 无 | 仅服务端 |
+| AnsweredBy | 有 | 无 | 仅服务端 |
+| AnsweredDeviceID | 有 | 无 | 仅服务端 |
+| AnsweredAt | 有 | 无 | 仅服务端 |
+| DeletedAt | 有 | 无 | 客户端无软删除 |
+| Conversation FK | 有 | 无 | 客户端无外键约束 |
+
+### 常量定义（客户端额外）
+
+| 常量 | 值 | 说明 |
+|------|------|------|
+| syncKeyLocalMaxSeq | `"local_max_seq"` | SyncState 键：本地最大已处理 seq |
+| syncKeyLatestSeq | `"latest_seq"` | SyncState 键：服务端报告的最新 seq |
+
+### 边缘场景
+
+| 场景 | 说明 |
+|------|------|
+| Draft 唯一约束 | ConversationID 唯一索引保证每会话最多一个草稿，Save 使用 clause.OnConflict UPSERT |
+| NotificationLog seq 唯一 | seq 唯一索引防止重复记录同一条推送通知 |
+| RetryTask 指数退避 | next_retry 字段控制下次重试时间，ListPending 仅返回 next_retry <= now 的任务 |
+| RPCLog 聚合 | Aggregate 使用 SQL CASE WHEN 区分成功（status_code >= 0）和失败（status_code < 0） |
+| RPCLog 时间桶 | AggregateByInterval 仅支持 SQLite 的 strftime 函数，不兼容 PostgreSQL/MySQL |
+| SyncState UPSERT | Set 使用 clause.OnConflict 按 key 做 UPSERT |
+| SyncState 值为字符串 | GetLocalMaxSeq/SetLocalMaxSeq 使用 strconv 做 uint32 <-> string 转换 |
+| 客户端 Question 无回答字段 | 客户端 QuestionStore.Upsert 使用 Save（全字段覆盖），不支持部分更新 |

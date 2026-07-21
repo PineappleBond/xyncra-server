@@ -36,7 +36,7 @@
 | `last_message_at` | time.Time | | 最后消息时间 |
 | `last_read_message_id1` | uint32 | | 用户1 的已读游标（D-012） |
 | `last_read_message_id2` | uint32 | | 用户2 的已读游标（D-012） |
-| `agent_status` | string(32) | NOT NULL, DEFAULT 'idle', INDEX | HITL Agent 状态机状态 |
+| `agent_status` | string(32) | NOT NULL, DEFAULT 'idle', INDEX | HITL Agent 状态机状态（见下方枚举值） |
 | `agent_id` | string(64) | | 当前执行的 Agent ID |
 | `checkpoint_id` | string(36) | | Agent 检查点 ID |
 | `agent_last_activity` | time.Time | | Agent 最后活动时间 |
@@ -56,6 +56,19 @@
 | `idx_conversations_agent_status` | `agent_status` | 普通 | HITL 状态查询 |
 | `idx_conversations_deleted_at` | `deleted_at` | 普通 | 软删除过滤 |
 
+### Agent 状态枚举
+
+`agent_status` 字段的合法取值：
+
+| 值 | 说明 |
+| --- | --- |
+| `idle` | Agent 空闲（默认值） |
+| `thinking` | Agent 思考中 |
+| `tool_calling` | Agent 调用工具中 |
+| `generating` | Agent 生成回复中 |
+| `asking_user` | Agent 等待用户回答 HITL 问题 |
+| `timeout` | Agent 超时 |
+
 ---
 
 ## 1. 创建会话 (create_conversation)
@@ -65,6 +78,8 @@
 创建 1-on-1 会话。采用 find-or-create 幂等模型，若已存在则直接返回。创建后通过 MQ 向双方设备推送实时通知。
 
 `GetByUsers` 查询同时检查 `(user1, user2)` 和 `(user2, user1)` 两种排序，因此无论哪一方发起创建都能正确检测到已存在的会话。创建时会将用户 ID 按字典序规范化为 `user_id1 < user_id2`，配合唯一索引 `idx_conversation_users_unique` 防止并发重复。
+
+注意：`GetByUsers` 使用 GORM 默认作用域，不返回软删除记录。若两个用户之间已存在软删除的会话，`GetByUsers` 查不到，但 `Create` 会因唯一索引冲突失败。此时应先恢复旧会话而非创建新会话。
 
 #### 响应结构
 
@@ -85,27 +100,36 @@ flowchart TD
     C -- 否 --> D{user_id == callerID?}
     D -- 是 --> D1[返回 ValidationError: 不能与自己创建会话]
     D -- 否 --> E[调用 GetByUsers 检查是否已存在]
-    E --> F{已存在?}
+    E --> E2{查询是否成功?}
+    E2 -- 否 --> E3[返回 InternalError]
+    E2 -- 是 --> F{已存在?}
     F -- 是 --> F1[返回已有会话, duplicate=true]
     F -- 否 --> G[规范化用户排序: user1 < user2 字典序]
     G --> H[生成 UUID, 构造 Conversation 记录]
     H --> I[调用 Create]
-    I --> J{是否 ErrDuplicateKey?}
-    J -- 是 --> K[TOCTOU 竞争: 重新查询 GetByUsers]
-    K --> K1[返回已有会话, duplicate=true]
-    J -- 否 --> L[事务中为双方分配递增 seq]
+    I --> J1{Create 是否成功?}
+    J1 -- 是 --> L[事务中为双方分配递增 seq]
     L --> M[写入 UserUpdate 记录]
     M --> N[MQ 入队 TypeSendMessage 通知双方设备]
     N --> O{MQ 入队成功?}
     O -- 否 --> O1[记录日志, 不影响主流程]
     O -- 是 --> P[返回会话, duplicate=false]
     O1 --> P
+    J1 -- 否 --> J{是否 ErrDuplicateKey?}
+    J -- 是 --> K[TOCTOU 竞争: 重新查询 GetByUsers]
+    K --> K2{重查询是否成功?}
+    K2 -- 是 --> K1[返回已有会话, duplicate=true]
+    K2 -- 否 --> K3[返回 InternalError]
+    J -- 否 --> J2[返回 InternalError]
 
     style A fill:#4CAF50,color:#fff
     style C1 fill:#f44336,color:#fff
     style D1 fill:#f44336,color:#fff
+    style E3 fill:#f44336,color:#fff
     style F1 fill:#FFC107,color:#000
     style K1 fill:#FFC107,color:#000
+    style K3 fill:#f44336,color:#fff
+    style J2 fill:#f44336,color:#fff
     style P fill:#4CAF50,color:#fff
 ```
 
@@ -118,7 +142,10 @@ flowchart TD
 | `user_id == callerID` | 返回 `ValidationError('cannot create conversation with yourself')` |
 | 已存在相同用户对的会话 | 幂等返回已有会话，`duplicate=true` |
 | `GetByUsers` 查询出错（非 `ErrNotFound`） | 返回 `InternalError` |
+| `Create` 返回非 `ErrDuplicateKey` 错误 | 返回 `InternalError` |
 | 并发创建竞争（TOCTOU） | 唯一索引触发 `ErrDuplicateKey`，重新查询返回已有会话 |
+| TOCTOU 重查询也失败 | `GetByUsers` 返回错误，落入 `InternalError` |
+| 已存在软删除的相同用户对会话 | `GetByUsers` 不返回软删除记录，`Create` 因唯一索引冲突返回 `ErrDuplicateKey`，重查询仍不返回软删除记录，最终返回 `InternalError`。需先恢复旧会话 |
 | `UserUpdate` 事务失败 | 仅记录日志，MQ 广播跳过，不影响会话创建（fire-and-forget 精神） |
 | MQ 入队失败 | 仅记录日志，更新已持久化，下次 `sync_updates` 可拉取 |
 

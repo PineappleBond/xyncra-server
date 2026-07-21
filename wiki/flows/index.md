@@ -28,7 +28,7 @@ last_updated: 2026-07-21
  | 12 | `sync_updates` | [sync-updates.md](sync-updates.md) | 增量拉取用户更新 (Gap-filling) |
  | 13 | `set_typing` | [set-typing.md](set-typing.md) | 输入指示器广播 (Seq=0, 1/s 限流) |
  | 14 | `stream_text` | [stream-text.md](stream-text.md) | 流式文本广播 (Seq=0, 20/s 限流) |
- | 15 | `agent_resume` | [agent-execution.md](agent-execution.md) 场景 2B | HITL 恢复：持久化答案，全部回答后入队 resume |
+ | 15 | `agent_resume` | [agent.md](agent.md#11-agent-resume-流程) | HITL 恢复：持久化答案，全部回答后入队 resume |
  | 16 | `reload_agents` | [reload-agents.md](reload-agents.md) | Agent 配置热重载 |
  | 17 | `system.register_functions` | [function-registry.md](function-registry.md) | 注册客户端函数能力 (全量替换) |
  | 18 | `system.reconnect` | [reconnection.md](reconnection.md) | 断线重连握手 + 请求重放 |
@@ -38,8 +38,8 @@ last_updated: 2026-07-21
  | # | 任务类型 | 流程文档 | 说明 |
  | --- | --- | --- | --- |
  | 1 | `mq:send_message` | [mq-async.md](mq-async.md) | 广播实时 Updates 给接收方在线设备 |
- | 2 | `mq:agent_process` | [agent-execution.md](agent-execution.md) 场景 1 | Agent AI 处理：LLM 调用 + 流式输出 + 持久化 |
- | 3 | `mq:agent_resume` | [agent-execution.md](agent-execution.md) 场景 3 | HITL 恢复后继续 Agent 执行 |
+ | 2 | `mq:agent_process` | [agent.md](agent.md#1-agent-完整执行流程) | Agent AI 处理：LLM 调用 + 流式输出 + 持久化 |
+ | 3 | `mq:agent_resume` | [agent.md](agent.md#11-agent-resume-流程) | HITL 恢复后继续 Agent 执行 |
 
 ### 后台任务
 

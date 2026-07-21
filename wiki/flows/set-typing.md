@@ -188,6 +188,16 @@ flowchart TD
 |------|-----|------|
 | SELECT | conversations | `ConversationStore.Get` 获取会话，成员从 `UserID1`/`UserID2` 提取 |
 
+> 注：`ConversationStore.Get` 是接口调用，底层实现由存储层决定。
+
+### Redis 操作
+
+| 操作 | 用途 | 场景 |
+|------|------|------|
+| PUBLISH | `xyncra:broadcast:{userID}` | 仅多节点部署，通过 `RedisNodeBroadcaster.Publish` |
+
+Handler 自身不直接操作 Redis。Redis 操作发生在 `broadcastFn` 的跨节点路径中。
+
 ---
 
 ## 关键设计决策

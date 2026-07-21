@@ -192,10 +192,30 @@ sequenceDiagram
     participant WS as WebSocket Server
     participant Store as Store (DB)
 
-    Client->>Handler: agent_resume RPC (conversationID, checkpointID)
-    Handler->>Handler: 持久化用户回答到 Question 表
-    Handler->>Broker: Enqueue TypeAgentResume
-    Handler-->>Client: ack
+    Client->>Handler: agent_resume RPC (conversationID, checkpointID?, interruptID?, answer, agentID)
+    Handler->>Handler: 校验必填字段 (conversation_id, answer, agent_id)
+    Handler->>Store: GetConversation (校验存在 + 推断 checkpointID)
+    Handler->>QStore: GetPendingByCheckpoint(checkpointID)
+    Handler->>Handler: 按 interruptID 过滤，选取首个匹配
+    alt 无匹配的 pending question
+        Handler->>QStore: GetByCheckpoint (检查是否已回答)
+        alt 已回答 (多设备竞态)
+            Handler-->>Client: 409 question_already_answered
+        else 未找到
+            Handler-->>Client: 404 no pending question
+        end
+    end
+    Handler->>QStore: UpdateAnswer (idempotent WHERE status='pending')
+    alt 冲突 (已被其他设备回答)
+        Handler-->>Client: 409 question_already_answered
+    end
+    Handler->>QStore: CountPendingByCheckpoint
+    alt 仍有未回答问题 (partial)
+        Handler-->>Client: {status:"partial", answered, total, pending}
+    else 全部已回答
+        Handler->>Broker: Enqueue TypeAgentResume (QueueDefault)
+        Handler-->>Client: {status:"queued", answered, total}
+    end
     Broker->>Worker: 出队 TypeAgentResume
     Worker->>Worker: 解码 AgentResumePayload
     Worker->>Idem: CheckProcessed (processedKey / processingKey)
@@ -270,13 +290,38 @@ sequenceDiagram
 - 处理逻辑: 记录错误日志，释放锁，return nil 跳过执行
 - 最终结果: 任务静默完成，Agent 不会恢复执行。由于 questionStore 为 nil 意味着 HITL 功能不完整，这是一个防御性检查
 
+#### 7. Question 查询失败 (GetByCheckpoint)
+
+- 触发条件: `executor.questionStore.GetByCheckpoint` 返回 error（DB 连接断开等）
+- 处理逻辑: `cleanupAfterResumeFailure` 清理状态 + 发送错误消息 + 标记 processedKey（24h）+ 删除 processingKey + 释放锁
+- 最终结果: 用户看到"恢复执行失败，请重新发送消息"
+
+#### 8. 无已回答的 Question (空 targets map)
+
+- 触发条件: GetByCheckpoint 返回的 questions 中没有 status=answered 且 interruptID 非空的记录
+- 处理逻辑: 记录 info 日志（"no answered questions found for checkpoint"），继续执行 ResumeWithParams（targets 为空 map）
+- 最终结果: Agent 以空 targets 恢复执行，行为取决于 Eino 框架对空 targets 的处理
+
+#### 9. RPC Handler: 部分回答 (Partial Response)
+
+- 触发条件: `agent_resume` RPC 调用时，checkpoint 下仍有未回答的 Question
+- 处理逻辑: Handler 返回 `{status:"partial", answered, total, pending}`，不入队 TypeAgentResume
+- 最终结果: 客户端收到 partial 状态，需等待所有问题回答完毕后才触发 agent 恢复
+
+#### 10. RPC Handler: 问题已回答 (409 冲突)
+
+- 触发条件: 问题已被其他设备回答（UpdateAnswer 返回 ErrConflict），或 GetPendingByCheckpoint 无匹配但 GetByCheckpoint 发现已回答的同 interruptID 问题
+- 处理逻辑: 返回 409 `question_already_answered` 错误
+- 最终结果: 客户端收到冲突错误，可选择刷新状态
+
 ### 涉及文件
 
-- `internal/handler/agent_resume.go`: agent_resume RPC handler，持久化回答 + 入队 TypeAgentResume 任务
+- `internal/handler/agent_resume.go`: agent_resume RPC handler，部分回答逻辑 + 409 冲突处理 + 入队 TypeAgentResume 任务
 - `internal/agent/resume_handler.go`: TypeAgentResume 消费者
 - `internal/agent/task_handler.go`: 共享锁和幂等模式
 - `internal/agent/conversation_lock.go`: 分布式锁
 - `internal/agent/broadcast.go`: 流式广播
+- `internal/agent/errors.go`: 哨兵错误定义（ErrCheckpointNotFound, ErrLLMTimeout 等）
 - `internal/mq/mq.go`: TypeAgentResume 任务类型
 
 ---
@@ -333,10 +378,19 @@ flowchart TD
 - 处理逻辑: asynq.Server.Shutdown 等待所有 in-flight 任务完成
 - 最终结果: 不丢失正在执行的任务
 
+### Broker 接口方法
+
+| 方法 | 说明 |
+| --- | --- |
+| Enqueue(ctx, task, opts...) | 入队任务，返回 taskID |
+| Start(ctx, handler) | 启动 worker pool，阻塞至 ctx 取消 |
+| Stop() | 优雅停机，等待 in-flight 任务完成 |
+| GetTaskState(ctx, taskID) | 查询任务状态（pending/active/completed/retry/archived/scheduled） |
+
 ### 涉及文件
 
 - `internal/mq/asynq.go`: AsynqBroker 完整生命周期管理
-- `internal/mq/mq.go`: Broker 接口、ErrQueueClosed
+- `internal/mq/mq.go`: Broker 接口、TaskState 常量、ErrQueueClosed
 - `internal/mq/options.go`: 默认配置
 
 ---
@@ -382,6 +436,8 @@ flowchart LR
 - 处理逻辑: 新 handler 替换旧 handler，记录 warn 日志
 - 最终结果: 最后注册的 handler 生效
 
+> TaskHandler 还提供 `Unregister(taskType)` 和 `HasHandler(taskType)` 方法，分别用于移除已注册的 handler 和检查 handler 是否存在。`RegisteredTypes()` 返回所有已注册的 task type 列表。
+
 #### 3. 延迟任务 (ProcessIn)
 
 - 触发条件: Enqueue 时指定 WithProcessIn(duration)
@@ -390,9 +446,15 @@ flowchart LR
 
 #### 4. 任务去重 (Unique)
 
-- 触发条件: Enqueue 时指定 WithUnique()
-- 处理逻辑: Asynq 检查是否有相同类型和 payload 的 pending 任务，有则拒绝入队
+- 触发条件: Enqueue 时指定 WithUnique() 或 WithUniqueTTL(ttl)
+- 处理逻辑: Asynq 检查是否有相同类型和 payload 的 pending 任务，有则拒绝入队。WithUnique 使用默认 TTL（DefaultUniqueTTL=5min），WithUniqueTTL 允许自定义 TTL
 - 最终结果: 防止短时间内重复入队相同任务
+
+#### 5. 绝对截止时间 (Deadline)
+
+- 触发条件: Enqueue 时指定 WithDeadline(time)
+- 处理逻辑: Asynq 在截止时间过后将任务标记为失败，即使尚未开始处理
+- 最终结果: 过期任务不会被消费，适用于有时效性的任务
 
 ### Task 类型常量
 

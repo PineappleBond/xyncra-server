@@ -464,6 +464,6 @@ HITL 清理使用分布式锁：
 ## 相关文档
 
 - [Agent 执行流程](agent-execution.md)
-- [Agent Resume (HITL)](agent-resume.md)
+- [Agent Resume (HITL)](agent.md#11-agent-resume-流程)
 - [WebSocket 连接管理](websocket-connection.md)
 - [存储层](storage.md)

@@ -335,7 +335,7 @@ sequenceDiagram
 ## 相关文档
 
 - [Set Typing 业务流程](set-typing.md)
-- [Agent 执行流程](agent-execution.md)
+- [Agent 执行流程](agent.md)
 - [消息处理业务流程](message.md)
 - [WebSocket 连接管理](websocket-connection.md)
 - [广播机制](broadcasting.md)
