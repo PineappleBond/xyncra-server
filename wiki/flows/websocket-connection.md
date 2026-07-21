@@ -407,8 +407,8 @@ sequenceDiagram
 #### 1. 目标设备离线
 
 - 触发条件: sendToDevice 找不到目标设备连接
-- 处理逻辑: 返回 ErrDeviceOffline
-- 最终结果: ServerRequest 返回错误，请求不持久化
+- 处理逻辑: 返回 ErrDeviceOffline；若 PendingStore 已配置，调用 `persistAsync` 将请求持久化到 Redis 供设备重连后重放（与超时持久化共用同一路径）
+- 最终结果: ServerRequest 返回错误（格式: `"send request: device offline, request persisted for replay: ..."`），请求不持久化（除非 PendingStore 已配置）
 
 #### 2. 所有用户连接发送失败
 
@@ -532,8 +532,8 @@ sequenceDiagram
 #### 6. 重放失败日志标签
 
 - 触发条件: 任何重放失败（sendFunc 错误、超时、resp==nil、非零 Code）
-- 处理逻辑: 代码中日志标签为 "replay timeout"，实际涵盖所有失败类型（`err != nil || resp == nil || resp.Code != 0`）
-- 最终结果: 日志标签具有误导性但不影响功能
+- 处理逻辑: 失败分为两类日志标签：(1) 重试次数未耗尽时标签为 "replay timeout"（实际可能为任何失败类型，`err != nil || resp == nil || resp.Code != 0`），(2) 重试次数耗尽时标签为 "replay discarded"
+- 最终结果: "replay timeout" 标签具有误导性（涵盖所有未耗尽重试的失败类型），但不影响功能
 
 #### 7. PendingStore 为 nil 但有待处理请求
 

@@ -234,7 +234,7 @@ flowchart TD
 2. 检查 `closed` 状态（`mu.Lock` 保护），若已关闭返回 `ErrClientClosed`
 3. 将消息放入带缓冲的 send channel（默认容量 256，`defaultSendBufSize = 256`），channel 满时返回 `ErrSendBufferFull`
 4. `writePump` 运行 select 循环，三路分支：
-   - **send channel（消息到达）**：读取消息，设置写入截止时间（默认 10s），调用 `conn.NextWriter` 获取写入器，写入内容并关闭写入器。若 `ok` 为 false（channel 关闭），直接返回（不发送 close frame）
+   - **send channel（消息到达）**：读取消息，设置写入截止时间（默认 10s），调用 `conn.NextWriter` 获取写入器，写入内容并关闭写入器。若 `ok` 为 false（channel 关闭），发送 close frame 后返回
    - **ticker.C**：发送 Ping 消息（默认 54s 间隔 = `pongWait * 9 / 10`）
    - **ctx.Done**：发送 close frame 后退出
 5. send channel 设计为不关闭：`Close()` 仅调用 `cancel()` 和 `conn.Close()`，不关闭 channel，避免与并发 `Send` 产生 send-on-closed-channel panic
@@ -247,7 +247,7 @@ flowchart TD
 | 写入超时（NextWriter/Write 失败） | `writePump` 退出，defer 关闭底层连接 |
 | 连接已关闭但 channel 未清空 | `writePump` 通过 ctx 取消退出，不读取残留消息 |
 | `Close()` 和 `writePump` 并发写入 | 通过 context 取消协调，`writePump` 在 ctx.Done 分支发送 close frame 后退出 |
-| send channel 关闭 | 设计决策：send channel 永不关闭，`writePump` 仅通过 ctx 退出 |
+| send channel 关闭 | 防御性代码：`ok=false` 分支发送 close frame 后退出。生产环境中 send channel 永不关闭，`writePump` 正常仅通过 ctx 取消退出 |
 
 ---
 
@@ -292,15 +292,14 @@ flowchart TD
 ### 详细步骤
 
 1. `readPump` 检测到读取错误后退出
-2. `readPump` 的 defer 调用 `client.Close()`
-3. `client.Close()` 取消 context，关闭底层 WebSocket 连接
-4. `writePump` 检测到 context 取消，发送 close frame 后退出
-5. `Run()` 中的 WaitGroup 等待两个 pump 退出，关闭 done channel
-6. `handleWebSocket` 从 `client.Run()` 返回
-7. 使用 5s 超时 context 调用 `ConnectionStore.Remove` 清理 Redis（3 次 round-trip：`Get` 查找 UserID → `luaRemove` 原子删除 infoKey + SREM userKey connID → `luaCleanupEmptySet` 原子清理空 SET 防止孤儿 key）
-8. 调用 `removeClient` 从 `clients`、`clientsByUser`、`clientsByDevice` 中移除
-9. 检查设备是否还有其他连接，若无则调用 `scheduleFuncCleanup` 延迟清理 `FunctionRegistry`（宽限期默认 10s，期间重连则取消清理）
-10. 检查设备是否还有其他连接，若无则调用 `reverseRPC.CancelDeviceWithReason`
+2. `readPump` 的 defer 调用 `client.Close()`：取消 context，调用 `conn.Close()` 关闭底层 WebSocket 连接
+3. `conn.Close()` 导致 `writePump` 的 `conn.WriteMessage` 等操作立即失败，`writePump` 通过错误退出（defer 中尝试发送 close frame 但连接已关闭，实际不会发送）
+4. `Run()` 中的 WaitGroup 等待两个 pump 退出，关闭 done channel
+5. `handleWebSocket` 从 `client.Run()` 返回
+6. 使用 5s 超时 context 调用 `ConnectionStore.Remove` 清理 Redis（3 次 round-trip：`Get` 查找 UserID → `luaRemove` 原子删除 infoKey + SREM userKey connID → `luaCleanupEmptySet` 原子清理空 SET 防止孤儿 key）
+7. 调用 `removeClient` 从 `clients`、`clientsByUser`、`clientsByDevice` 中移除
+8. 检查设备是否还有其他连接，若无则调用 `scheduleFuncCleanup` 延迟清理 `FunctionRegistry`（宽限期默认 10s，期间重连则取消清理）
+9. 检查设备是否还有其他连接，若无则调用 `reverseRPC.CancelDeviceWithReason`
 
 ### 边缘场景
 
@@ -309,7 +308,7 @@ flowchart TD
 | Redis 不可达 | `ConnectionStore.Remove` 超时（5s），记录错误 |
 | 旧连接的 `performDeviceReplacement` 协程仍在运行 | 通过 `connID` 隔离，不影响新连接 |
 | `Close()` 被多次调用 | 幂等，`closed` 标志防止重复操作 |
-| send channel 不被关闭 | 设计决策：避免与并发 `Send` 产生 panic |
+| send channel 不被关闭 | 设计决策：避免与并发 `Send` 产生 panic。代码中有 `ok=false` 的防御性处理（发送 close frame），但生产路径不会触发 |
 | 设备断开后 10s 内重连 | `cancelPendingFuncCleanup` 取消待执行的清理，避免误删函数注册 |
 | 设备替换后旧连接断开 | `hasActiveConn` 为 true，跳过 `scheduleFuncCleanup` 和 `CancelDeviceWithReason` |
 
