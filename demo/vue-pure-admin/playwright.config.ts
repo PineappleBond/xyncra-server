@@ -9,7 +9,7 @@ export default defineConfig({
   reporter: 'html',
   timeout: 60000, // 单个测试 60s 超时
   use: {
-    baseURL: 'http://localhost:8848',
+    baseURL: 'http://localhost:8851',
     trace: 'on-first-retry',
     viewport: { width: 1280, height: 720 },
     headless: !!process.env.CI, // CI 环境 headless，本地调试有头
