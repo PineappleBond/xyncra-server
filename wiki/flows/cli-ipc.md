@@ -76,7 +76,7 @@ flowchart TD
 | standalone WebSocket 连接超时 (5s) | 返回 `dial: context deadline exceeded` |
 | standalone WebSocket 读取超时 | 返回 `standalone read: server timed out`，附带 `net.Error` 检测 |
 | isMutationMethod 为 true 且 standalone 成功 | 打印提示：本地 DB 将在守护进程启动时更新 |
-| device-id 未指定 | `NewCLIContext` 返回错误（必填）。`defaultDeviceID()`（`SHA256(hostname)[:8]`）已实现但未接入主流程，目前仅在测试中使用 |
+| device-id 未指定 | `NewCLIContext` 返回错误（必填）。`defaultDeviceID()`（`hex(SHA256(hostname)[:4])`，8 个十六进制字符）已实现但未接入主流程，目前仅在测试中使用 |
 
 ---
 
@@ -210,7 +210,7 @@ flowchart TD
 | `OnMarkRead` | `[mark read] conv=%s msg_id=%d` | 已读游标推进事件 |
 | `OnConversation` | `[conversation] id=%s title=%q` | 会话状态变更；当 `agent_status == "asking_user"` 时额外显示 HITL 待回答问题 |
 | `OnGap` | `[gap] seq=%d` | 序列号间隙通知 |
-| `OnTyping` | `[typing] user=%s conv=%s started/stopped typing` | 输入指示器；agent 显示为 `[thinking]` |
+| `OnTyping` | `[typing] user=%s conv=%s started/stopped typing` 或 `[thinking] user=%s conv=%s started/stopped thinking` | 输入指示器；前缀和动词根据来源动态切换：人类为 `[typing] ... typing`，Agent 为 `[thinking] ... thinking` |
 | `OnStreaming` | `[streaming] user=%s conv=%s stream=%s status=%s text=%q` 或 `[agent] user=%s conv=%s stream=%s status=%s text=%q` | 流式文本事件；前缀根据来源动态切换：人类为 `[streaming]`，Agent 为 `[agent]` |
 | `OnAgentStatus` | `[agent_status] agent=%s conv=%s status=%s` | Agent 状态变更（如 running、asking_user、idle） |
 | `OnAgentTimeout` | `[agent_timeout] agent=%s conv=%s reason=%q` | Agent 超时事件 |

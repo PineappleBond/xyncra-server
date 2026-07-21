@@ -294,7 +294,7 @@ flowchart TD
         C1[humanUserID + agentUserID<br/>（C7 设计决策）]
         C2[targetUserID<br/>（通常是人类用户）]
         C3[humanUserID]
-        C4[逐条广播<br/>每条带真实 DB seq]
+        C4[逐条广播 u.UserID<br/>每条带真实 DB seq]
         C5[pull-on-notification<br/>客户端收到后通过 RPC 拉取]
         C6[humanUserID]
         C7[humanUserID]
@@ -323,7 +323,7 @@ flowchart TD
 
 3. **SendAgentStatus**：广播 Agent 状态，构造 `AgentStatusPayload{Status: thinking/tool_calling/generating/idle/asking_user}`，通过 `broadcastEphemeral` 发送给 `humanUserID`。
 
-4. **BroadcastMessageUpdate**：广播持久化消息。`store.SendMessage` 返回的 `UserUpdate` 列表每条带真实 DB seq 号，BroadcastHelper 逐条构造 `PackageDataUpdate{Seq: realSeq, Type:UpdateTypeMessage}` 广播。这些有真实 seq，客户端会纳入 sync state。
+4. **BroadcastMessageUpdate**：广播持久化消息。`store.SendMessage` 返回的 `UserUpdate` 列表每条带真实 DB seq 号，BroadcastHelper 逐条构造 `PackageDataUpdate{Seq: realSeq, Type:UpdateTypeMessage}` 广播给对应的 `u.UserID`（群聊场景下每个成员各自收到带自己 seq 的更新）。这些有真实 seq，客户端会纳入 sync state。
 
 5. **SendConversationUpdate**：广播对话变更通知，构造轻量通知 `{conversation_id, action:'update', updated_at}`。`updatedAt` 参数（`time.Time`）非零时序列化为 Unix 秒写入 `updated_at` 字段，客户端可据此检测过期通知 (D-124)。采用 pull-on-notification 模式，客户端收到通知后通过 `get_conversation` RPC 拉取完整状态。
 
@@ -348,27 +348,38 @@ flowchart TD
 
 ### 概述
 
-除直接调用 `BroadcastUpdates` 外，`send_message` handler 通过 MQ broker 异步广播消息更新。消息持久化后，handler 将 `PackageDataUpdates` 封装为 `TypeSendMessage` MQ task 入队（fire-and-forget），broker 出队后调用 `NewSendMessageTaskHandler` 逐个 recipient 调用 `broadcastFn`（即 `WebSocketServer.BroadcastUpdates`）广播。
+除直接调用 `BroadcastUpdates` 外，多个 handler 通过 MQ broker 异步广播更新。数据持久化后，handler 将 `PackageDataUpdates` 封装为 `TypeSendMessage` MQ task 入队（fire-and-forget），broker 出队后调用 `NewSendMessageTaskHandler` 逐个 recipient 调用 `broadcastFn`（即 `WebSocketServer.BroadcastUpdates`）广播。
+
+所有使用此路径的 handler 共享相同的 `sendMessageTaskPayload` 结构和 `TypeSendMessage` task 类型：
+
+| Handler | 触发操作 | 广播的 UpdateType |
+|---------|---------|-------------------|
+| `sendMessageHandler` | `send_message` RPC | `UpdateTypeMessage`（带真实 DB seq） |
+| `deleteMessageHandler` | `delete_message` RPC | `UpdateTypeMessage`（删除标记） |
+| `markAsReadHandler` | `mark_as_read` RPC | `UpdateTypeMarkRead` |
+| `deleteConversationHandler` | `delete_conversation` RPC | `UpdateTypeConversation` |
+| `restoreConversationHandler` | `restore_conversation` RPC | `UpdateTypeConversation` |
+| `createConversationHandler` | `create_conversation` RPC | `UpdateTypeConversation` |
 
 ### 流程图
 
 ```mermaid
 sequenceDiagram
     participant Client as 客户端
-    participant Handler as sendMessageHandler
+    participant Handler as Handler (send/delete/mark 等)
     participant Store as Store (DB)
     participant Broker as MQ Broker
     participant TaskHandler as SendMessageTaskHandler
     participant WS as WebSocketServer
     participant Redis as Redis Pub/Sub
 
-    Client->>Handler: send_message RPC
-    Handler->>Store: SendMessage(msg, members) 原子持久化
-    Store-->>Handler: SendMessageResult{Message, Updates[]}
+    Client->>Handler: RPC 调用
+    Handler->>Store: 原子持久化
+    Store-->>Handler: 结果 (Updates[])
 
     Handler->>Handler: 构建 sendMessageTaskPayload{Recipients[]}
     Handler->>Broker: Enqueue(TypeSendMessage, payload)
-    Handler-->>Client: 返回 sendMessageResponse
+    Handler-->>Client: 返回响应
 
     Broker->>TaskHandler: 出队调用
     loop 每个 Recipient
@@ -380,9 +391,9 @@ sequenceDiagram
 
 ### 详细步骤
 
-1. **消息持久化**：`sendMessageHandler.HandleRequest` 调用 `store.SendMessage(msg, members)` 原子持久化消息并分配 per-user seq，返回 `SendMessageResult{Message, Updates[]}`。
+1. **数据持久化**：各 handler 调用对应的 store 方法原子持久化数据并分配 per-user seq，返回包含 `Updates` 的结果。以 `sendMessageHandler` 为例，调用 `store.SendMessage(msg, members)` 返回 `SendMessageResult{Message, Updates[]}`。
 
-2. **构建 MQ task**：handler 将 `Updates` 按 recipient 分组为 `sendMessageTaskPayload{Recipients[]}`，每个 recipient 包含 `UserID` 和 `Updates`（带真实 DB seq）。JSON 序列化后入队 `mq.Task{Type: TypeSendMessage}`。
+2. **构建 MQ task**：handler 将 `Updates` 按 recipient 分组为 `sendMessageTaskPayload{Recipients[]}`，每个 recipient 包含 `UserID` 和 `Updates`（带真实 DB seq）。JSON 序列化后入队 `mq.Task{Type: TypeSendMessage}`。所有 handler 复用相同的 payload 结构和 task 类型。
 
 3. **MQ 出队广播**：`NewSendMessageTaskHandler` 出队后遍历 `Recipients`，对每个 recipient 调用 `broadcastFn(userID, updates)` 即 `WebSocketServer.BroadcastUpdates`，触发本地广播和跨节点发布。
 
@@ -392,7 +403,7 @@ sequenceDiagram
 
 | 场景 | 行为 |
 |------|------|
-| **MQ 入队失败** | `logger.Info` 记录，不阻塞 `send_message` 响应返回。数据已持久化。 |
+| **MQ 入队失败** | `logger.Info` 记录，不阻塞响应返回。数据已持久化。 |
 | **MQ payload 反序列化失败** | `logger.Error` 记录，return nil 不重试（数据已持久化，重试无意义）。 |
 | **部分 recipient 广播失败** | 失败的 recipient 仅记录日志，继续处理剩余 recipient。 |
 

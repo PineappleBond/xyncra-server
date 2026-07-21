@@ -89,6 +89,7 @@ flowchart TD
 |------|----------|
 | **信号量满** | Acquire 阻塞等待，context 取消时返回 `ctx.Err()` |
 | **会话锁被占用** | 返回 error，由 Asynq 以指数退避重试 |
+| **会话锁获取失败 (Redis 错误)** | fail-open，记录错误日志后继续执行（不持有锁） |
 | **幂等命中** | 静默跳过，释放锁，返回 nil |
 | **Agent 未注册** | 返回 `ErrAgentNotFound`，走 `classifyError` 发送友好错误消息 |
 | **LLM 超时** | 映射为 `ErrLLMTimeout`，发送"暂时无法回复"消息，作为 transient error 返回给 MQ 重试 |
@@ -99,6 +100,7 @@ flowchart TD
 | **API Key 缺失** | 返回 `ErrAPIKeyMissing`，发送"配置有误"消息，并广播 `conversation_update` |
 | **MCP 服务不可用** | 跳过该 MCP server 的工具 (fail-open)，不阻断构建 |
 | **context 超时** | 总超时 120s 后所有操作被取消 |
+| **部分工具创建失败** | toolRegistry.Create 部分失败时记录日志，成功创建的工具正常注入 |
 
 ---
 
@@ -351,7 +353,8 @@ flowchart TD
 | **无设备上下文** | 跳过客户端函数注入，注册表工具仍可注入 |
 | **GetFunctions 失败** | 日志跳过 (fail-open) |
 | **单个函数创建失败** | 跳过该函数，其他函数继续 |
-| **设备离线** | SoftFailure 返回 "device is offline"，LLM 可感知并调整 |
+| **设备离线** | 检测到 "device offline"/"no connections" 错误后，等待 3 秒重试一次（设备可能正在重连）。重试仍失败则 SoftFailure 返回 "device is offline"，LLM 可感知并调整 |
+| **设备离线 (persisted for replay)** | 设备离线但请求已持久化等待重连后重放时，SoftFailure 返回 "device is temporarily offline. The request has been queued..." |
 | **请求超时** | SoftFailure 返回 "request timed out" |
 | **客户端返回业务错误** | SoftFailure 返回错误码和消息 |
 | **空参数 schema** | 自动补全为 `{"type":"object","properties":{}}`，防止 LLM 格式层产生非法 schema |
@@ -523,8 +526,8 @@ flowchart TD
 | 场景 | 处理方式 |
 |------|----------|
 | **信号量 nil** | Acquire/Release 均为 no-op |
-| **Redis 不可用** | 会话锁获取失败时 fail-open，继续执行（与锁被占用不同） |
-| **锁被占用** | 返回 error，由 Asynq 重试 |
+| **Redis 不可用** | lock.Acquire 返回 error 时 fail-open，记录错误日志后继续执行（不持有锁，失去并发保护） |
+| **锁被占用** | lock.Acquire 返回 acquired=false，返回 error，由 Asynq 以指数退避重试 |
 | **锁过期 (TTL)** | 自然释放，不阻塞后续任务 |
 | **非 owner 释放锁** | Lua 脚本检查 token，非 owner 的 DEL 被忽略 |
 
@@ -560,7 +563,7 @@ flowchart TD
     M -->|HITL 中断| P[不标记 processed]
     P --> Q[保留 processing key 自然过期]
 
-    M -->|永久失败| R[标记 processed 防止重试]
+    M -->|永久失败| R[标记 processed, TTL=24h + 删除 processing key]
 
     M -->|transient 失败| S[不标记 processed, 允许 MQ 重试]
 
@@ -647,6 +650,8 @@ flowchart TD
 | **Eino 的 resume 路径** | 会用原 checkpointID 保存 re-interrupt 的 checkpoint |
 | **成功 resume 后** | 执行完整清理：ClearAgentStatus + Delete Questions + Delete Redis checkpoint + 广播 conversation_update 通知客户端清理完成 |
 | **checkpoint 过期/丢失** | 调用 `cleanupAfterResumeFailure`，发送超时提示消息 |
+| **ResumeWithParams 其他非瞬态错误** | 不进入 checkpoint-not-found 或 transient 分支，直接释放锁并返回 nil 给 MQ。不调用 `cleanupAfterResumeFailure`，不发送错误消息，不清理幂等 key（processingKey 130s 后自然过期）。用户无反馈，会话停留在 `asking_user` 状态，需等待 HITL 超时清理兜底 |
+| **流式输出错误 (非瞬态)** | 广播 partialText(isDone=true) 关闭流，不发送错误消息给用户，不清理幂等 key，释放锁。用户通过 WebSocket 看到部分文本但无错误提示 |
 | **并发 resume** | 幂等检查确保同一 checkpoint 只 resume 一次 |
 | **questionStore 为 nil** | 记录错误日志，释放锁（若拥有），直接返回 nil 给 MQ。不执行清理操作（ClearAgentStatus / Delete Questions / Delete checkpoint），不发送错误消息给用户。与 `GetByCheckpoint` 失败不同，此路径不调用 `cleanupAfterResumeFailure` |
 | **Agent 未注册或 Build 失败** | 调用 `cleanupAfterResumeFailure`（清状态/删问题/删 checkpoint），发送错误消息，清理幂等 key，释放锁 |

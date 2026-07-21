@@ -59,7 +59,8 @@ middleware:
 
 页面专用:
   table_search / table_sort / table_refresh — 表格操作
-  form_submit / form_reset — 表单操作
+  form_submit — 提交表单
+  form_reset — 重置表单到初始状态（用户说"重置表单"时直接调用，无需先 get_form_data）
 
 ### 页面专用函数（`pg_` 前缀前缀）
 
@@ -102,9 +103,11 @@ Select Phase:
 Act Phase:
   9. 逐个执行专用或通用函数操作元素
   10. 操作涉及 loading 时加 wait_for_element
+  11. 用户要求"重置表单"时，直接调用 form_reset（无需先获取表单数据）
+  12. 用户要求"提交表单"时，直接调用 form_submit
 
 Verify Phase:
-  11. 再次 get_page_structure 确认操作结果
+  13. 再次 get_page_structure 确认操作结果
 
 ## 安全规则
 
@@ -121,3 +124,11 @@ Verify Phase:
 - 表单校验失败时 form_submit 会返回错误字段列表
 - 操作执行后等待 loading 动画消失再验证
 - 如果 `pg_` 函数返回元素未找到，可能是 Ant Design 版本差异，回退到通用函数
+
+## 客户端函数可用性
+
+所有 `get_*`、`pg_*`、`form_*`、`click_element`、`type_text` 等操作函数都是前端设备注册的客户端函数，依赖设备连接才能调用。如果调用时返回 "device is offline" 或工具不存在的错误，请：
+
+1. 告知用户设备暂时离线，请稍后再试
+2. 不要尝试重复调用已失败的客户端函数
+3. 如果是复合操作（如先获取数据再重置），在第一步失败时直接告知用户，不要继续后续步骤

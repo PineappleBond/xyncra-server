@@ -204,15 +204,15 @@ cliUpdateHandler 实现 `client.UpdateHandler` 接口，将服务端推送的事
 
 | 方法 | 输出格式 | 说明 |
 |------|----------|------|
-| OnMessage | `[new message] seq=%d from=%s conv=%s "%s"` | 新消息或更新消息 |
+| OnMessage | `[new message] seq=%d from=%s conv=%s %q` | 新消息或更新消息（Content 使用 `%q` 转义） |
 | OnDeleteMessage | `[delete message] conv=%s msg=%s` | 消息删除事件 |
 | OnMarkRead | `[mark read] conv=%s msg_id=%d` | 已读游标推进 |
-| OnConversation | `[conversation] id=%s title="%s"` | 会话状态变更；当 AgentStatus 为 "asking_user" 时额外显示 HITL 待回答问题 (D-125) |
+| OnConversation | `[conversation] id=%s title=%q` | 会话状态变更；当 AgentStatus 为 "asking_user" 时额外显示 HITL 待回答问题 (D-125) |
 | OnGap | `[gap] seq=%d` | 序列号间隙通知 |
-| OnTyping | `[typing/thinking] user=%s conv=%s started/stopped` | 输入指示器；isAgent=true 时显示 "thinking" (D-065) |
-| OnStreaming | `[streaming/agent] user=%s conv=%s stream=%s status=%s text="%s"` | 流式文本事件；isAgent=true 时前缀为 "agent" (D-051) |
+| OnTyping | `[%s] user=%s conv=%s %s` | 输入指示器；label 为 "typing" 或 "thinking" (isAgent=true)；action 为 "started typing"/"stopped typing"/"stopped thinking" (D-065) |
+| OnStreaming | `[%s] user=%s conv=%s stream=%s status=%s text=%q` | 流式文本事件；prefix 为 "streaming" 或 "agent" (isAgent=true)；status 为 "streaming"/"done" (D-051) |
 | OnAgentStatus | `[agent_status] agent=%s conv=%s status=%s` | Agent 状态变更 (D-087) |
-| OnAgentTimeout | `[agent_timeout] agent=%s conv=%s reason="%s"` | Agent 超时事件 (D-087) |
+| OnAgentTimeout | `[agent_timeout] agent=%s conv=%s reason=%q` | Agent 超时事件 (D-087) |
 
 ### cliLogger 调试模式
 
@@ -606,7 +606,7 @@ flowchart TD
     D --> E[立即执行一次 collectRuntime]
     E --> F[每 10 秒执行 collectRuntime]
     F --> G[runtime.ReadMemStats 采集内存]
-    G --> H[更新 Goroutines / MemoryAlloc / MemoryInuse / GCCount / GCDuration]
+    G --> H[更新 Goroutines / MemoryAlloc / MemoryInuse / GCCount / GCDuration (per-pause average)]
     H --> I[countOpenFDs 采集文件描述符]
     I --> J[更新 OpenFDs Gauge]
 
@@ -646,6 +646,7 @@ flowchart TD
 - 触发条件: 首次 collectRuntime 时 m.NumGC == 0
 - 处理逻辑: 跳过 GCDuration.Observe，避免除零
 - 最终结果: GCDuration 在首次 GC 完成前无数据点
+- 注意: GCDuration 记录的是 GC 暂停时间的 per-pause average（PauseTotalNs / NumGC / 1e9），而非单次最新暂停时间
 
 ### 涉及文件
 

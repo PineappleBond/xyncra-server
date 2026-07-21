@@ -1,5 +1,6 @@
 ---
 last_updated: 2026-07-21
+reviewed: 2026-07-21
 ---
 
 # 客户端注册与函数管理
@@ -101,10 +102,10 @@ sequenceDiagram
     WS->>WS: client.Run() 阻塞运行
     Note over WS: 读写泵开始工作
 
-    Note over CS: 顺序执行重连握手（完成后再执行 FullSync）
-    CS->>WS: system.register_functions (顺序, fail-open, 10s 超时)
-    CS->>WS: system.reconnect (顺序, fail-open, 携带 last_seen_seq)
-    CS->>CS: syncMgr.FullSync (分页拉取增量更新)
+    Note over CS: 异步执行重连握手（与 FullSync 并发）
+    CS-)WS: system.register_functions (异步, fail-open, 10s 超时)
+    CS-)WS: system.reconnect (异步, fail-open, 携带 last_seen_seq)
+    CS->>CS: syncMgr.FullSync (分页拉取增量更新, 与握手并发)
 
     Note over WS: 连接断开时
     WS->>CM: ConnectionStore.Remove()
@@ -162,15 +163,15 @@ sequenceDiagram
      - 函数注册表清理
 
 10. **客户端侧握手与同步**
-    - 连接后顺序执行 `performReconnectHandshake`（被 await，完成后再继续）：
+    - 连接后异步执行 `performReconnectHandshake`（Go 客户端在新 goroutine 中运行，与 `FullSync` 并发；TypeScript 客户端则 await 后再继续）：
       - 先发送 `system.register_functions`（确保服务端在 PendingStore 重放前有 handler；10 秒超时，fail-open）
       - 再发送 `system.reconnect`（携带 `last_seen_seq`；fail-open）
-    - 握手完成后执行 `syncMgr.FullSync`（分页拉取增量更新，从本地 `localMaxSeq` 开始）
+    - 与握手并发执行 `syncMgr.FullSync`（分页拉取增量更新，从本地 `localMaxSeq` 开始）
 
 ### 边缘场景
 
 | 场景 | 处理方式 | 设计决策 |
-|------|---------|---------|
+| --- | --- | --- |
 | 认证失败（`authenticate` 返回错误） | 返回 HTTP 401 "authentication failed" | 连接不建立 |
 | 认证成功但 `userID` 为空 | 返回 HTTP 401 "missing user id" | 连接不建立 |
 | 查询参数中无 `device_id` | 服务器自动生成 UUID v4 | D-094：确保每个连接有唯一标识 |
@@ -261,7 +262,7 @@ sequenceDiagram
 ### 边缘场景
 
 | 场景 | 处理方式 | 设计决策 |
-|------|---------|---------|
+| --- | --- | --- |
 | 空函数列表 | 有效，清除设备之前注册的函数 | 全量替换语义 |
 | 函数名称验证失败 | 返回对应的验证错误 | ErrFunctionNameEmpty/ErrFunctionNameTooLong/ErrFunctionNameDuplicate/ErrMaxFunctionsPerDevice |
 | 同一设备的并发注册 | 在互斥锁下后写入者获胜 | 无冲突检测 |
@@ -361,7 +362,7 @@ sequenceDiagram
 ### 边缘场景
 
 | 场景 | 处理方式 | 设计决策 |
-|------|---------|---------|
+| --- | --- | --- |
 | 设备替换（旧连接断开清理之前新连接已建立） | 新连接注册时调用 `cancelPendingFuncCleanup` 取消 grace period 定时器；若已超时则 `hasActiveConn` 为 true 跳过清理 | 双重保护：grace period 内重连取消清理 + `hasActiveConn` 防止替换连接的函数被删除的竞态 |
 | 对未知设备调用 `OnDeviceDisconnect` | 幂等，返回 `(nil, nil)` | 无副作用 |
 | `ConnectionStore.Remove` 期间 Redis 不可达 | 5 秒超时，错误被记录但清理继续 | 清理不因存储故障阻塞 |
@@ -463,7 +464,7 @@ sequenceDiagram
 ### 边缘场景
 
 | 场景 | 处理方式 | 设计决策 |
-|------|---------|---------|
+| --- | --- | --- |
 | `registry` 为 nil | 返回 `{count: 0}` 且无错误 | D-063：nil-safe 设计 |
 | 目录不存在 | agents 映射已被清空（Load 先清空再读目录），目录不存在返回 nil | D-063：可选模块，所有代理被卸载 |
 | `dir` 为空字符串（从未加载） | `os.ReadDir("")` 失败 | 错误被包装并返回 |
@@ -543,7 +544,14 @@ sequenceDiagram
    - 对每个过滤后的函数：`newClientFunctionTool(fn, caller, userID, deviceID, timeout)`
    - `buildToolInfo` 从 `FunctionInfo` 构建 `schema.ToolInfo`；如果 `Parameters` 为空，自动规范化为有效的 object schema（防止 OpenAI 兼容端点返回 400）
    - 创建一个 `InvokableTool`，当被代理调用时，向客户端设备发送 `ServerRequest`（反向 RPC）
-   - `executeClientFunction` 支持每个函数的 `TimeoutMs` 覆盖默认超时；错误通过 `formatClientToolError` 映射为 LLM 友好消息（超时 → "request timed out"，设备离线 → "device is offline"，其他 → "unable to reach the device"），作为 soft failure 返回而非 Go error，让 LLM 可以自行重试或通知用户
+   - `executeClientFunction` 支持每个函数的 `TimeoutMs` 覆盖默认超时
+   - 设备离线重试：首次调用失败且 `isDeviceOfflineError` 为 true 时，等待 3 秒后重试一次（设备可能正在重连）；重试仍失败则进入错误映射
+   - 错误通过 `formatClientToolError` 映射为 LLM 友好消息，作为 soft failure 返回而非 Go error，让 LLM 可以自行重试或通知用户：
+     - 超时（"deadline exceeded" 或 "timeout"）→ "tool call failed: request timed out. The client device may be slow or unresponsive."
+     - 已持久化待重放（"persisted for replay"）→ "tool call failed: device is temporarily offline. The request has been queued and will be executed when the device reconnects. Please inform the user to wait a moment."
+     - 设备离线（"no connections" 或 "device"）→ "tool call failed: device is offline. The client device is not currently connected."
+     - 其他 → "tool call failed: unable to reach the device. Connection may have been lost."
+   - 客户端返回业务错误（`resp.Code < 0`）→ "client returned error (code N): msg" 作为 soft failure
 
 6. **注入静态工具**
    - 如果 `toolRegistry` 和 `dynamicTools` 已配置：`toolRegistry.Create(ctx, dynamicTools, nil)`
@@ -559,7 +567,7 @@ sequenceDiagram
 ### 边缘场景
 
 | 场景 | 处理方式 | 设计决策 |
-|------|---------|---------|
+| --- | --- | --- |
 | ctx 中无设备上下文 | 客户端函数注入完全跳过 | 仅注入基于注册表的动态工具（如果有） |
 | `GetFunctions` 返回错误 | 记录日志，客户端函数被跳过 | 代理在没有它们的情况下继续 |
 | `GetFunctions` 返回空列表 | 不注入客户端工具 | 代理仅使用其静态 + 动态注册表工具运行 |
@@ -571,9 +579,10 @@ sequenceDiagram
 | `FunctionInfo.Parameters` 为空 | `buildToolInfo` 自动规范化为 `{type: "object", properties: {}}` | 防止 OpenAI 兼容端点将空 schema 转为 `parameters: true` 导致 400 错误 |
 | `runCtx.Tools` 为 nil | 分配新切片 | 注入无论初始状态如何都能工作 |
 | Eino 框架 0->非零工具转换 | 运行时从注册表解析的动态工具触发图重建 | Eino 架构要求 |
-| 客户端函数调用超时 | `formatClientToolError` 返回 "request timed out" 作为 soft failure | LLM 可自行决定重试或通知用户 |
-| 客户端设备离线 | 检测到 `isDeviceOfflineError` 后等待 3 秒再重试一次（设备可能正在重连）。若重试仍失败或 ctx 取消，返回 "device is offline" 作为 soft failure | LLM 可自行决定通知用户 |
+| 客户端函数调用超时 | `formatClientToolError` 返回 "tool call failed: request timed out. The client device may be slow or unresponsive." 作为 soft failure | LLM 可自行决定重试或通知用户 |
+| 客户端设备离线 | 首次请求失败且 `isDeviceOfflineError` 为 true 时，等待 3 秒后重试一次（设备可能正在重连）。若重试仍失败或 ctx 取消，通过 `formatClientToolError` 返回 soft failure | LLM 可自行决定通知用户 |
 | 客户端返回业务错误（`resp.Code < 0`） | 返回 "client returned error (code N): msg" 作为 soft failure | LLM 可看到具体错误原因并适配 |
+| 请求已持久化待重放 | `formatClientToolError` 检测 "persisted for replay" 后返回 "tool call failed: device is temporarily offline. The request has been queued and will be executed when the device reconnects. Please inform the user to wait a moment." 作为 soft failure | 告知 LLM 请求已排队，设备重连后会自动执行 |
 
 ---
 
@@ -635,7 +644,7 @@ sequenceDiagram
 ### 边缘场景
 
 | 场景 | 处理方式 | 设计决策 |
-|------|---------|---------|
+| --- | --- | --- |
 | `FunctionRegistry` 为 nil | `system.register_functions` 未注册 | 客户端对此方法的 RPC 返回 method not found |
 | `AgentRegistry` 为 nil | `reload_agents` 处理器仍被注册（返回 `{count: 0}`） | 但 `send_message` 跳过代理检测 |
 | `ReverseRPC` 为 nil 或 `PendingStore` 为 nil | `system.reconnect` 未注册 | 无法处理断线重连 |
@@ -698,7 +707,7 @@ graph TD
 ## 关键设计决策
 
 | 编号 | 决策 | 理由 |
-|------|------|------|
+| --- | --- | --- |
 | D-063 | nil-safe 可选模块设计 | Agent、FunctionRegistry 等组件可选注入，nil 即禁用，避免强制依赖 |
 | D-093 | 客户端提供的 deviceID 被忽略 | 安全措施，防止客户端伪造设备身份 |
 | D-094 | 服务器自动生成 UUID v4 作为 deviceID | 确保每个连接有唯一标识 |
