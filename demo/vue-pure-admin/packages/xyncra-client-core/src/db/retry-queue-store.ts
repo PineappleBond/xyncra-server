@@ -40,7 +40,10 @@ export class RetryQueueStore {
 
   /**
    * Increments the retry count and updates next_retry_at with exponential backoff.
-   * Backoff: min(2^(retryCount-1), 16) seconds. First retry = 1s.
+   * Backoff formula: min(2^(retryCount-1), 16) seconds.
+   * retry_count starts from 0 when enqueued and is incremented before backoff calculation,
+   * so after the first increment retry_count=1, yielding 2^0=1s backoff.
+   * Sequence: 1s, 2s, 4s, 8s, 16s, 16s, ... (capped at 16s).
    */
   async incrementRetry(id: number): Promise<void> {
     const item = await this.db.retryQueue.get(id);

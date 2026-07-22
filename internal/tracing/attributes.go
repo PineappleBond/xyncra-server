@@ -63,6 +63,7 @@ const (
 	SpanDBRemoteCallingCountPendingByCheckpoint = "db.remote_calling.count_pending_by_checkpoint"
 	SpanDBRemoteCallingListExpired              = "db.remote_calling.list_expired"
 	SpanDBRemoteCallingMarkExpired              = "db.remote_calling.mark_expired"
+	SpanDBRemoteCallingMarkExpiredByCheckpoint  = "db.remote_calling.mark_expired_by_checkpoint"
 	SpanDBStoreSendMessage                 = "db.store.send_message"
 	SpanDBStoreTransaction                 = "db.store.transaction"
 	SpanDBStoreBeginTx                     = "db.store.begin_tx"

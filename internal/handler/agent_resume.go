@@ -147,8 +147,19 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 		}
 	}
 
-	// 7. Check if all RemoteCallings for this checkpoint are resolved (D-138).
-	// Known limitation: resolve (step 6) and count (step 7) are not atomic.
+	// 7. Expire any overdue sibling RemoteCallings for this checkpoint before
+	// counting pending. This handles the case where some RemoteCallings have
+	// passed their expires_at but haven't been cleaned up by the periodic task
+	// yet (which runs every 5 minutes). Without this, the conversation would be
+	// stuck in tool_calling status until the next cleanup tick.
+	if _, err := rcs.MarkExpiredByCheckpoint(ctx, rc.CheckpointID); err != nil {
+		// Non-fatal: log and continue with the pending count.
+		// The periodic cleanup task will eventually expire them.
+		fmt.Printf("agent_resume: mark expired by checkpoint failed (non-fatal): %v\n", err)
+	}
+
+	// 8. Check if all RemoteCallings for this checkpoint are resolved (D-138).
+	// Known limitation: resolve (step 6) and count (step 8) are not atomic.
 	// Two concurrent requests may both see pending=0 and both enqueue agent resume.
 	// The resume handler's idempotency key (D-121) provides a safety net:
 	// only the first resume task will execute; subsequent duplicates are skipped.
@@ -157,7 +168,7 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 		return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: count pending: %w", err))
 	}
 
-	// 8. If still pending, return partial status.
+	// 9. If still pending, return partial status.
 	if pending > 0 {
 		return json.Marshal(map[string]interface{}{
 			"status":        "partial",
@@ -165,7 +176,7 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 		})
 	}
 
-	// 9. All resolved → enqueue TypeAgentResume MQ task.
+	// 10. All resolved → enqueue TypeAgentResume MQ task.
 	senderID := ""
 	deviceID := ""
 	if client != nil {

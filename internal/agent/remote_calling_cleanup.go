@@ -170,6 +170,10 @@ func (t *RemoteCallingCleanupTask) cleanupStaleConversations(ctx context.Context
 
 // cleanupExpiredRemoteCallings scans individual RemoteCallings with expires_at < NOW()
 // and marks them as expired. If no pending remain for a checkpoint, triggers conversation cleanup.
+//
+// Optimization: expired RCs are grouped by checkpointID so that the pending count
+// query (CountPendingByCheckpoint) is executed once per checkpoint instead of once
+// per expired RC, reducing redundant database queries.
 func (t *RemoteCallingCleanupTask) cleanupExpiredRemoteCallings(ctx context.Context) {
 	if t.remoteCallingStore == nil {
 		return
@@ -186,50 +190,72 @@ func (t *RemoteCallingCleanupTask) cleanupExpiredRemoteCallings(ctx context.Cont
 
 	t.logger.Info("found expired remote callings", "count", len(expired))
 
+	// Mark all as expired first (batch operation).
 	for _, rc := range expired {
+		if err := t.remoteCallingStore.MarkExpired(ctx, rc.ID); err != nil {
+			t.logger.Error("mark remote calling expired failed (non-fatal)",
+				"id", rc.ID, "error", err)
+		}
+	}
+
+	// Group by checkpointID to avoid redundant CountPendingByCheckpoint queries.
+	type checkpointGroup struct {
+		RCs []*model.RemoteCalling
+	}
+	groups := make(map[string]*checkpointGroup)
+	for _, rc := range expired {
+		g, ok := groups[rc.CheckpointID]
+		if !ok {
+			g = &checkpointGroup{}
+			groups[rc.CheckpointID] = g
+		}
+		g.RCs = append(g.RCs, rc)
+	}
+
+	t.logger.Info("grouped expired remote callings by checkpoint",
+		"checkpoints", len(groups))
+
+	// Process each checkpoint group once.
+	for checkpointID, g := range groups {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					t.logger.Error("panic recovered for remote calling", "id", rc.ID, "error", r)
+					t.logger.Error("panic recovered for checkpoint group",
+						"checkpoint_id", checkpointID, "error", r)
 				}
 			}()
-			t.cleanupExpiredRemoteCalling(ctx, rc)
+			// Use the first RC as representative for the group.
+			t.cleanupExpiredCheckpoint(ctx, checkpointID, g.RCs[0])
 		}()
 	}
 }
 
-// cleanupExpiredRemoteCalling marks a single RemoteCalling as expired and checks
-// if the conversation needs cleanup.
-func (t *RemoteCallingCleanupTask) cleanupExpiredRemoteCalling(ctx context.Context, rc *model.RemoteCalling) {
-	// Mark as expired.
-	if err := t.remoteCallingStore.MarkExpired(ctx, rc.ID); err != nil {
-		t.logger.Error("mark remote calling expired failed (non-fatal)",
-			"id", rc.ID, "error", err)
-		return
-	}
-
+// cleanupExpiredExpiredCheckpoint checks if all RemoteCallings for a checkpoint
+// are resolved/expired and handles cleanup or agent resume accordingly.
+// This consolidates the per-checkpoint logic to avoid redundant pending count queries.
+func (t *RemoteCallingCleanupTask) cleanupExpiredCheckpoint(ctx context.Context, checkpointID string, representativeRC *model.RemoteCalling) {
 	// Check if there are still pending RemoteCallings for this checkpoint.
-	pending, err := t.remoteCallingStore.CountPendingByCheckpoint(ctx, rc.CheckpointID)
+	pending, err := t.remoteCallingStore.CountPendingByCheckpoint(ctx, checkpointID)
 	if err != nil {
 		t.logger.Error("count pending remote callings failed (non-fatal)",
-			"checkpoint_id", rc.CheckpointID, "error", err)
+			"checkpoint_id", checkpointID, "error", err)
 		return
 	}
 
 	// If no more pending, determine whether to resume the agent or clean up.
 	if pending == 0 {
 		t.logger.Info("all remote callings resolved/expired for checkpoint",
-			"checkpoint_id", rc.CheckpointID, "conversation_id", rc.ConversationID)
+			"checkpoint_id", checkpointID, "conversation_id", representativeRC.ConversationID)
 
 		// Check if any RemoteCallings were resolved (client reported results).
 		// If some were resolved, enqueue agent resume so it can process the results.
 		// If ALL are expired (none resolved), clean up the conversation to break
 		// the infinite loop where: expire → resume → agent re-calls function →
 		// new RemoteCalling → expire again (BUG-002).
-		allRCs, listErr := t.remoteCallingStore.GetByCheckpoint(ctx, rc.CheckpointID)
+		allRCs, listErr := t.remoteCallingStore.GetByCheckpoint(ctx, checkpointID)
 		if listErr != nil {
 			t.logger.Error("get remote callings by checkpoint failed (non-fatal)",
-				"checkpoint_id", rc.CheckpointID, "error", listErr)
+				"checkpoint_id", checkpointID, "error", listErr)
 			return
 		}
 
@@ -245,14 +271,14 @@ func (t *RemoteCallingCleanupTask) cleanupExpiredRemoteCalling(ctx context.Conte
 			// Some callings were resolved — enqueue agent resume to process results.
 			if t.broker != nil {
 				payload := AgentResumePayload{
-					ConversationID: rc.ConversationID,
-					CheckpointID:   rc.CheckpointID,
-					AgentID:        rc.AgentID,
+					ConversationID: representativeRC.ConversationID,
+					CheckpointID:   checkpointID,
+					AgentID:        representativeRC.AgentID,
 				}
 				raw, marshalErr := json.Marshal(payload)
 				if marshalErr != nil {
 					t.logger.Error("marshal agent resume payload failed (non-fatal)",
-						"checkpoint_id", rc.CheckpointID, "error", marshalErr)
+						"checkpoint_id", checkpointID, "error", marshalErr)
 				} else {
 					task := &mq.Task{
 						Type:    mq.TypeAgentResume,
@@ -261,17 +287,21 @@ func (t *RemoteCallingCleanupTask) cleanupExpiredRemoteCalling(ctx context.Conte
 					}
 					if _, enqueueErr := t.broker.Enqueue(ctx, task); enqueueErr != nil {
 						t.logger.Error("enqueue agent resume after all expired failed (non-fatal)",
-							"checkpoint_id", rc.CheckpointID, "error", enqueueErr)
+							"checkpoint_id", checkpointID, "error", enqueueErr)
 					}
 				}
 			}
 		} else {
 			// All callings expired with none resolved — clean up conversation
 			// instead of re-triggering agent execution.
-			t.cleanupExpiredConversation(ctx, rc)
+			t.cleanupExpiredConversation(ctx, representativeRC)
 		}
 	}
 }
+
+// NOTE: cleanupExpiredRemoteCalling was removed in favor of the grouped
+// approach in cleanupExpiredRemoteCallings + cleanupExpiredCheckpoint,
+// which reduces redundant CountPendingByCheckpoint queries.
 
 // cleanupExpiredConversation performs full conversation cleanup when all
 // RemoteCallings for a checkpoint have expired without any being resolved.

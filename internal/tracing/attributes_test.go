@@ -38,7 +38,7 @@ func TestSpanNames_NotEmpty(t *testing.T) {
 		SpanDBRemoteCallingResolveError, SpanDBRemoteCallingCancelByCheckpoint,
 		SpanDBRemoteCallingDeleteByConversation, SpanDBRemoteCallingDeleteByCheckpoint,
 		SpanDBRemoteCallingCountPendingByCheckpoint, SpanDBRemoteCallingListExpired,
-		SpanDBRemoteCallingMarkExpired,
+		SpanDBRemoteCallingMarkExpired, SpanDBRemoteCallingMarkExpiredByCheckpoint,
 		SpanDBStoreSendMessage, SpanDBStoreTransaction, SpanDBStoreBeginTx,
 		SpanDBStoreAutoMigrate, SpanDBStorePing, SpanDBStoreHealthCheck,
 		// Redis layer spans
@@ -89,7 +89,7 @@ func TestSpanNames_Unique(t *testing.T) {
 		SpanDBRemoteCallingResolveError, SpanDBRemoteCallingCancelByCheckpoint,
 		SpanDBRemoteCallingDeleteByConversation, SpanDBRemoteCallingDeleteByCheckpoint,
 		SpanDBRemoteCallingCountPendingByCheckpoint, SpanDBRemoteCallingListExpired,
-		SpanDBRemoteCallingMarkExpired,
+		SpanDBRemoteCallingMarkExpired, SpanDBRemoteCallingMarkExpiredByCheckpoint,
 		SpanDBStoreSendMessage, SpanDBStoreTransaction, SpanDBStoreBeginTx,
 		SpanDBStoreAutoMigrate, SpanDBStorePing, SpanDBStoreHealthCheck,
 		// Redis layer spans

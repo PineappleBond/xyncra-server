@@ -387,9 +387,13 @@ docker logs deploy-xyncra-server-e2e-1 2>&1 | grep -i "register_functions" | tai
 ### 步骤 3.1: 发送消息触发 Agent 调用客户端函数
 
 **操作**：
-1. 在 Vue 客户端的 FloatingAssistant 中输入消息
-2. 发送消息："请使用 ping 工具发送消息 hello"
-3. 点击发送按钮
+
+1. 先导航到有 pg_* 函数的页面（如 `/form/index`），确保函数已注册
+2. 在 Vue 客户端的 FloatingAssistant 中打开聊天面板，创建新会话
+3. 发送消息："请帮我填写标题为'测试任务'"
+4. 点击发送按钮
+
+> **注意**: Agent 会先调用 `get_page_description`、`get_current_page` 等探索函数，再调用 `pg_*` 执行函数。测试脚本需要逐个 resolve 每个 RemoteCalling Dialog。
 
 **验证（数据库 -- SQLite）**：
 
@@ -398,7 +402,7 @@ DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 # 查看最近的 RemoteCalling 记录
 $DB "SELECT id, conversation_id, method, device_id, status FROM remote_callings ORDER BY created_at DESC LIMIT 5;"
-# 预期: 至少一条记录，method 为 pg_* 函数名或 ping，status=pending
+# 预期: 多条记录，method 包含 get_page_description、get_current_page、pg_* 等，status=pending
 ```
 
 **验证（Redis Checkpoint）**：
@@ -707,8 +711,11 @@ $DB "SELECT sender_id, SUBSTR(content, 1, 50) FROM messages WHERE conversation_i
 ### 步骤 5.1.1: 创建会话并触发多函数调用
 
 **操作**：
+
 1. 在 Vue 客户端创建新会话
-2. 发送消息："请同时使用 ping、get_device_info、get_time 三个工具"
+2. 发送消息："请帮我获取当前页面信息，然后填写表单标题为'测试'并点击提交按钮"
+
+> **注意**: Agent 会并行或串行调用多个函数（如 get_current_page、get_page_description、pg_form_index_fillTitle、pg_form_index_clickSubmit 等）。实际调用的函数取决于 Agent 的 LLM 决策和页面注册的 pg_* 函数。
 
 ### 步骤 5.1.2: 验证多个 RemoteCalling 被创建
 

@@ -501,7 +501,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 
 		// 2. Persist RemoteCalling to DB (D-063: nil-safe, skip when remoteCallingStore is nil).
 		if e.remoteCallingStore != nil {
-			expiresAt := time.Now().Add(24 * time.Hour) // D-137: 24h default timeout
+			expiresAt := time.Now().Add(DefaultHITLTimeout) // D-137: 24h default timeout
 			rc := &model.RemoteCalling{
 				ID:             uuid.New().String(),
 				ConversationID: payload.ConversationID,

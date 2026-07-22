@@ -225,8 +225,17 @@ func NewAgentResumeHandler(
 
 		targets := make(map[string]any)
 		for _, rc := range rcList {
-			if rc.Status == model.RemoteCallingStatusResolved && rc.InterruptID != "" {
-				targets[rc.InterruptID] = rc.Result
+			if rc.Status == model.RemoteCallingStatusResolved {
+				if rc.InterruptID == "" {
+					// Defensive: InterruptID should always be set for resolved RCs.
+					// Log warning to aid debugging data inconsistencies.
+					logger.Info("agent resume: resolved remote calling has empty InterruptID (possible data inconsistency)",
+						"remote_calling_id", rc.ID,
+						"checkpoint_id", payload.CheckpointID,
+						"conversation_id", payload.ConversationID)
+				} else {
+					targets[rc.InterruptID] = rc.Result
+				}
 			}
 		}
 		if len(targets) == 0 {
@@ -422,7 +431,7 @@ func NewAgentResumeHandler(
 				}
 
 				if executor.remoteCallingStore != nil {
-					expiresAt := time.Now().Add(24 * time.Hour) // D-137: 24h default timeout
+					expiresAt := time.Now().Add(DefaultHITLTimeout) // D-137: 24h default timeout
 					rc := &model.RemoteCalling{
 						ID:             uuid.New().String(),
 						ConversationID: payload.ConversationID,

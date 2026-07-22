@@ -21,7 +21,10 @@ type RemoteCalling struct {
 	Params         string         `gorm:"type:text" json:"params"`          // JSON parameters
 	InterruptID    string         `gorm:"size:64" json:"interrupt_id"`      // Eino interrupt ID (ask_user only)
 	DeviceID       string         `gorm:"size:64;index" json:"device_id"`   // empty = any device, non-empty = specific device
-	Status         string         `gorm:"size:16;not null;default:'pending';index;index:idx_rc_checkpoint_status;index:idx_rc_conversation_status,priority:2;index:idx_rc_status_expires,priority:1" json:"status"` // pending | resolved | cancelled | expired
+	// NOTE: standalone index on Status removed — compound indexes
+	// (idx_rc_checkpoint_status, idx_rc_conversation_status, idx_rc_status_expires)
+	// already cover status-based queries, making a standalone index redundant.
+	Status         string         `gorm:"size:16;not null;default:'pending';index:idx_rc_checkpoint_status;index:idx_rc_conversation_status,priority:2;index:idx_rc_status_expires,priority:1" json:"status"` // pending | resolved | cancelled | expired
 	Result         string         `gorm:"type:text" json:"result"`          // result on success
 	ErrorMessage   string         `gorm:"type:text" json:"error_message"`   // error on failure
 	Success        bool           `json:"success"`                          // whether the call succeeded

@@ -92,7 +92,7 @@ func executeClientFunction(
 		return data, nil
 	}
 	if isResumeTarget && !hasData {
-		return agenttools.SoftFailure("client function call timed out or was cancelled"), nil
+		return agenttools.SoftFailure("客户端函数调用超时或已被取消"), nil
 	}
 
 	// First call: build interrupt data and trigger interrupt.
@@ -117,7 +117,7 @@ func executeClientFunction(
 		"timeout_ms": timeoutMs,
 	})
 	if err != nil {
-		return agenttools.SoftFailure("failed to marshal interrupt data"), nil
+		return agenttools.SoftFailure("构建中断数据失败"), nil
 	}
 
 	return "", tool.Interrupt(ctx, string(interruptData))

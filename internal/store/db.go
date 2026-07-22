@@ -88,16 +88,19 @@ func NewDatabase(cfg DatabaseConfig) (*Database, error) {
 	}
 
 	// Apply connection pool defaults (reduced from 100/10 to 25/5).
-	// SQLite uses a single connection to prevent deadlocks in shared-cache
-	// mode, since SQLite serializes writes at the file level regardless.
 	maxIdle := cfg.MaxIdleConns
 	maxOpen := cfg.MaxOpenConns
 	if cfg.Driver == "sqlite" || cfg.Driver == "sqlite3" {
+		// Use multiple connections for SQLite to prevent blocking when a long-running
+		// write (e.g., agent executor) holds a connection. With WAL mode enabled,
+		// SQLite supports concurrent reads while writes are serialized at file level.
+		// MaxOpenConns=1 was causing get_conversation RPC timeouts when the single
+		// connection was held by another operation.
 		if maxOpen == 0 {
-			maxOpen = 1
+			maxOpen = 5
 		}
 		if maxIdle == 0 {
-			maxIdle = 1
+			maxIdle = 2
 		}
 	} else {
 		if maxIdle == 0 {

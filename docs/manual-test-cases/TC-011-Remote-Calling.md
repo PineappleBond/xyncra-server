@@ -2,10 +2,10 @@
 
 > **测试编号**: TC-011
 > **测试类型**: 端到端集成测试
-> **覆盖范围**: RemoteCalling 统一模型 (D-137)、客户端函数注册 (D-115)、函数调用链路、DeviceID 路由、状态流转 (pending/resolved/cancelled/expired)、幂等性、CancelledBy 持久化、锁释放、复合索引、并行执行、断线重连、服务器重启恢复、上报失败重试、超时清理防无限循环、HITL 统一 (ask_user / ask_user_choice)、失败上报、过期后上报幂等
+> **覆盖范围**: RemoteCalling 统一模型 (D-137)、客户端函数注册 (D-115)、函数调用链路、DeviceID 路由、状态流转 (pending/resolved/cancelled/expired)、幂等性、CancelledBy 持久化、锁释放、复合索引、并行执行、断线重连、服务器重启恢复、上报失败重试、超时清理防无限循环、HITL 统一 (ask_user / ask_user_choice)、失败上报、过期后上报幂等、自定义超时、多轮 HITL 中断、重试队列持久化、软删除后幂等、内置函数验证
 > **环境**: Docker E2E (D-043)
 > **最后更新**: 2026-07-22
-> **版本**: v1.1
+> **版本**: v1.2
 
 ---
 
@@ -24,6 +24,11 @@
 - 验证超时清理防无限循环（BUG-002 修复验证）
 - 验证边缘场景：并行执行、断线重连、服务器重启恢复、上报失败重试
 - 验证 HITL 统一：`ask_user` 和 `ask_user_choice` 作为 RemoteCalling 的特殊 method
+- 验证自定义超时：LLM 指定的函数级超时覆盖全局默认超时
+- 验证多轮 HITL：Agent resume 后再次触发 ask_user（re-interrupt）
+- 验证重试队列持久化：客户端重启后继续重试未完成的上报
+- 验证软删除后幂等：cleanup 软删除后的 RemoteCalling 重复上报返回 ErrConflict
+- 验证内置函数：`list_functions` 和 `ask_user_question` 必须函数
 
 **覆盖的关键决策**：
 
@@ -208,9 +213,13 @@ flowchart TD
         P5B --> P5C[服务器重启后恢复]
         P5C --> P5D[上报失败重试]
         P5D --> P5E[超时清理防无限循环]
+        P5E --> P5F[自定义超时]
+        P5F --> P5G[重试队列持久化]
+        P5G --> P5H[软删除后幂等]
+        P5H --> P5I[多轮 HITL 中断]
     end
 
-    P5E --> PartVI
+    P5I --> PartVI
 
     subgraph PartVI [阶段 6: HITL 统一]
         direction TB
@@ -534,6 +543,8 @@ $DB "SELECT id, device_id FROM remote_callings WHERE conversation_id='$NEW_CONV_
 
 ## 4.1 pending -> resolved（成功）
 
+> **注意**: 4.1.1 是 4.1 的子节，覆盖"失败上报"变体。4.2-4.6 是与 4.1 平级的状态流转场景。
+
 ### 步骤 4.1.1: 发送消息触发 RemoteCalling
 
 ```bash
@@ -827,13 +838,13 @@ $DB "SELECT id, status, result FROM remote_callings WHERE id='$IDEMPOTENT_RC_ID'
 
 **判定**: 已 resolved 的调用重复上报返回幂等成功，数据不被修改。
 
-## 4.5 过期后上报（幂等性扩展）
+## 4.6 过期后上报（幂等性扩展）
 
 > **测试目标**: 验证客户端在 RemoteCalling 过期后上报结果时，服务端正确处理并返回幂等响应。
 > **源代码依据**: `ResolveResult` 和 `ResolveError` 方法会检查 status，如果 status 不是 pending，会返回 ErrConflict。
 > **修复说明**: 即使 RemoteCalling 已被 cleanup 任务软删除（`deleted_at` 非空），`Unscoped()` 查询仍能找到记录并返回 ErrConflict。
 
-### 步骤 4.5.1: 创建会话并触发 RemoteCalling
+### 步骤 4.6.1: 创建会话并触发 RemoteCalling
 
 ```bash
 EXPIRE_REPORT_CONV_ID=$(./bin/xyncra-client create-conversation \
@@ -1208,6 +1219,317 @@ $DB "SELECT sender_id, SUBSTR(content, 1, 50) FROM messages WHERE conversation_i
 
 **判定**: 超时清理不会触发新的 agent 执行，直接清理对话并发送超时消息，无限循环已修复。
 
+## 5.6 自定义超时（LLM 函数级超时覆盖全局默认）
+
+> **测试目标**: 验证 LLM 调用工具时指定的自定义超时（TimeoutMs）正确覆盖全局默认超时，
+> RemoteCalling 的 expires_at 按自定义超时计算。
+> **源代码依据**: `resume_handler.go` 中 `interruptInfo.TimeoutMs` 覆盖 `DefaultClientFunctionCallTimeoutMs`，
+> 且受 `MinClientFunctionCallTimeoutMs` 下限保护。
+
+### 步骤 5.6.1: 创建会话并触发带自定义超时的函数调用
+
+```bash
+TIMEOUT_CONV_ID=$(./bin/xyncra-client create-conversation \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --peer-id "agent/weather-bot" | grep "Conversation ID:" | awk '{print $3}')
+
+# 提示 LLM 使用较长超时的函数调用
+./bin/xyncra-client send \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --conversation-id "$TIMEOUT_CONV_ID" \
+  --content "请使用 get_device_info 工具获取设备信息"
+
+sleep 20
+```
+
+### 步骤 5.6.2: 验证 RemoteCalling 的 expires_at 字段
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+$DB "SELECT id, method, created_at, expires_at, \
+  CAST((julianday(expires_at) - julianday(created_at)) * 86400 AS INTEGER) AS timeout_seconds \
+  FROM remote_callings WHERE conversation_id='$TIMEOUT_CONV_ID' ORDER BY created_at DESC LIMIT 3;"
+# 预期: timeout_seconds 反映实际超时配置（全局默认或 LLM 自定义）
+```
+
+### 步骤 5.6.3: 验证最小超时保护
+
+```bash
+# MinClientFunctionCallTimeoutMs 保护：即使 LLM 指定极短超时，也不会低于最小值
+# 检查服务端日志确认超时值被修正
+docker compose -f deploy/docker-compose.e2e.yml logs xyncra-server-e2e --tail 50 2>&1 | grep -i "timeout\|expires"
+# 预期: 如果 LLM 指定了低于最小值的超时，应看到修正日志
+```
+
+**判定**: 自定义超时正确覆盖全局默认，最小超时保护生效。
+
+## 5.7 重试队列持久化（客户端重启后继续重试）
+
+> **测试目标**: 验证客户端上报失败后，重试任务持久化到本地 DB，客户端重启后继续重试。
+> **源代码依据**: `RetryQueueStore` 使用 IndexedDB `retryQueue` store 持久化重试项，
+> `incrementRetry` 实现指数退避（1s, 2s, 4s, 8s, 16s 上限）。
+> **注意**: 此测试需要模拟服务端不可用场景，较难在 E2E 环境中自动验证。
+> 建议通过检查客户端 DB 中的 retry_tasks 表结构和 daemon 日志来间接验证。
+
+### 步骤 5.7.1: 验证客户端 DB 重试队列表结构
+
+```bash
+ALICE_DB="$E2E_HOME/alice/test-device-alice/xyncra.db"
+
+# 检查 retry_tasks 表是否存在
+sqlite3 "$ALICE_DB" ".tables" | grep -i retry
+# 预期: 包含 retry_tasks 表
+
+# 检查表结构
+sqlite3 "$ALICE_DB" ".schema retry_tasks"
+# 预期: 包含 id, remote_calling_id, method, params, result, error_message, attempt, max_attempts, status, next_retry_at 等字段
+```
+
+### 步骤 5.7.2: 验证重试日志
+
+```bash
+grep -i "retry\|backoff\|enqueue.*retry" "$E2E_HOME/agent-daemon.log" | tail -10
+# 预期: 如果有重试任务，会看到相关日志
+```
+
+### 步骤 5.7.3: 模拟验证（手动注入重试任务）
+
+```bash
+# 在客户端 DB 中手动插入一条重试任务，验证 daemon 重启后会处理
+sqlite3 "$ALICE_DB" "INSERT INTO retry_tasks (id, remote_calling_id, method, attempt, max_attempts, status, next_retry_at, created_at) \
+  VALUES ('test-retry-1', 'non-existent-rc', 'ping', 0, 10, 'pending', datetime('now'), datetime('now'));"
+
+# 重启 daemon
+./bin/xyncra-client kill --user-id alice --device-id test-device-alice 2>/dev/null
+sleep 1
+./bin/xyncra-client listen \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  > "$E2E_HOME/alice-daemon-retry.log" 2>&1 &
+sleep 5
+
+# 检查 daemon 是否尝试处理重试任务
+grep -i "retry\|process.*retry" "$E2E_HOME/alice-daemon-retry.log" | tail -5
+# 预期: 看到重试处理日志
+```
+
+**判定**: 重试队列持久化到本地 DB，客户端重启后能继续处理重试任务。
+
+## 5.8 软删除后幂等性（cleanup 后重复上报）
+
+> **测试目标**: 验证 RemoteCalling 被 cleanup 任务软删除后（`deleted_at` 非空），
+> 客户端重复上报时服务端返回 ErrConflict（"already processed"）而非 ErrNotFound（"not found"）。
+> **源代码依据**: `ResolveResult` 和 `ResolveError` 使用 `Unscoped()` 查询来检查软删除记录。
+
+### 步骤 5.8.1: 创建会话并触发 RemoteCalling
+
+```bash
+SOFTDEL_CONV_ID=$(./bin/xyncra-client create-conversation \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --peer-id "agent/weather-bot" | grep "Conversation ID:" | awk '{print $3}')
+
+./bin/xyncra-client send \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --conversation-id "$SOFTDEL_CONV_ID" \
+  --content "请使用 ping 工具发送消息 softdel-test"
+
+sleep 20
+```
+
+### 步骤 5.8.2: 获取 RemoteCalling ID 并完成正常流程
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+SOFTDEL_RC_ID=$($DB "SELECT id FROM remote_callings WHERE conversation_id='$SOFTDEL_CONV_ID' ORDER BY created_at DESC LIMIT 1;")
+echo "SOFTDEL_RC_ID=$SOFTDEL_RC_ID"
+
+# 等待 daemon 自动处理（resolved 后 cleanup 会软删除）
+sleep 30
+
+# 验证记录已被软删除
+$DB "SELECT id, deleted_at FROM remote_callings WHERE id='$SOFTDEL_RC_ID';"
+# 预期: deleted_at 非空（已被 cleanup 软删除）
+```
+
+### 步骤 5.8.3: 对软删除的记录重复上报
+
+```bash
+python3 -c "
+import json, asyncio, websockets
+
+async def resume():
+    async with websockets.connect('$SERVER_URL') as ws:
+        req = {
+            'type': 0,
+            'data': {
+                'id': 'resume-softdel-1',
+                'method': 'agent_resume',
+                'params': {
+                    'id': '$SOFTDEL_RC_ID',
+                    'agent_id': 'agent/weather-bot',
+                    'success': True,
+                    'result': 'softdel_duplicate_test'
+                }
+            }
+        }
+        await ws.send(json.dumps(req))
+        resp = await asyncio.wait_for(ws.recv(), timeout=5)
+        print(resp)
+
+asyncio.run(resume())
+"
+# 预期: 返回 "already processed"（ErrConflict），而非 "not found"（ErrNotFound）
+```
+
+### 步骤 5.8.4: 验证软删除记录未被修改
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+# 使用 Unscoped() 查看软删除记录
+$DB "SELECT id, status, result, deleted_at FROM remote_callings WHERE id='$SOFTDEL_RC_ID';"
+# 预期: result 不是 "softdel_duplicate_test"（原值不变），deleted_at 仍非空
+```
+
+**判定**: 软删除后的 RemoteCalling 重复上报返回 ErrConflict，客户端收到 "already processed" 响应。
+
+## 5.9 多轮 HITL 中断（Agent resume 后再次触发 ask_user）
+
+> **测试目标**: 验证 Agent resume 后再次触发 HITL 中断（re-interrupt）时，
+> 新的 RemoteCalling 正确创建，对话状态正确更新为 asking_user。
+> **源代码依据**: `resume_handler.go` 中的 re-interrupt 检测逻辑（步骤 10）。
+
+### 步骤 5.9.1: 配置多轮确认 Agent
+
+```bash
+cat > "$E2E_HOME/multi-hitl-bot.md" << 'EOF'
+---
+id: agent/multi-hitl-bot
+name: 多轮确认助手
+description: 需要多次用户确认的测试 Agent
+model: qwen3.7-plus
+api_key_env: XYNCRA_TEST_REAL_API_KEY
+base_url: https://coding.dashscope.aliyuncs.com/v1
+parameters:
+  temperature: 0.3
+  max_tokens: 500
+context:
+  max_tokens: 4000
+  max_messages: 20
+middleware:
+  enable_client_tools: false
+tools:
+  - ask_user
+---
+
+你是一个谨慎的助手。当用户请求执行敏感操作时，你需要：
+1. 第一次询问: "确认要执行此操作吗？请回复 确认 或 取消"
+2. 如果用户回复"确认"，再次询问: "最后确认：此操作不可撤销，真的要继续吗？请回复 最终确认 或 取消"
+3. 只有用户回复"最终确认"后才执行操作
+EOF
+
+docker cp "$E2E_HOME/multi-hitl-bot.md" deploy-xyncra-server-e2e-1:/app/agents/multi-hitl-bot.md
+curl -s -X POST http://localhost:18080/rpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"reload_agents","id":1}'
+```
+
+### 步骤 5.9.2: 创建会话并触发第一轮 HITL
+
+```bash
+MULTI_CONV_ID=$(./bin/xyncra-client create-conversation \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --peer-id "agent/multi-hitl-bot" | grep "Conversation ID:" | awk '{print $3}')
+
+./bin/xyncra-client send \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --conversation-id "$MULTI_CONV_ID" \
+  --content "删除所有数据"
+
+sleep 20
+```
+
+### 步骤 5.9.3: 验证第一轮 RemoteCalling 创建
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+MULTI_RC1=$($DB "SELECT id FROM remote_callings WHERE conversation_id='$MULTI_CONV_ID' AND status='pending' AND method='ask_user' ORDER BY created_at DESC LIMIT 1;")
+echo "MULTI_RC1=$MULTI_RC1"
+
+$DB "SELECT agent_status FROM conversations WHERE id='$MULTI_CONV_ID';"
+# 预期: agent_status=asking_user
+```
+
+### 步骤 5.9.4: 回答第一轮，触发第二轮 HITL
+
+```bash
+./bin/xyncra-client agent-resume \
+  --user-id alice \
+  --device-id test-device-alice \
+  --id "$MULTI_RC1" \
+  --agent-id "agent/multi-hitl-bot" \
+  --success \
+  --result "确认"
+
+sleep 20
+```
+
+### 步骤 5.9.5: 验证第二轮 RemoteCalling 创建（re-interrupt）
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+# 应有新的 pending ask_user RemoteCalling
+$DB "SELECT id, method, status, created_at FROM remote_callings WHERE conversation_id='$MULTI_CONV_ID' AND method='ask_user' ORDER BY created_at DESC;"
+# 预期: 至少两条记录 — 第一条 resolved，第二条 pending
+
+MULTI_RC2=$($DB "SELECT id FROM remote_callings WHERE conversation_id='$MULTI_CONV_ID' AND status='pending' AND method='ask_user' ORDER BY created_at DESC LIMIT 1;")
+echo "MULTI_RC2=$MULTI_RC2"
+
+$DB "SELECT agent_status FROM conversations WHERE id='$MULTI_CONV_ID';"
+# 预期: agent_status=asking_user（再次中断）
+```
+
+### 步骤 5.9.6: 回答第二轮，验证最终完成
+
+```bash
+./bin/xyncra-client agent-resume \
+  --user-id alice \
+  --device-id test-device-alice \
+  --id "$MULTI_RC2" \
+  --agent-id "agent/multi-hitl-bot" \
+  --success \
+  --result "最终确认"
+
+sleep 15
+
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+$DB "SELECT agent_status FROM conversations WHERE id='$MULTI_CONV_ID';"
+# 预期: idle（不再中断）
+
+$DB "SELECT sender_id, SUBSTR(content, 1, 100) FROM messages WHERE conversation_id='$MULTI_CONV_ID' AND sender_id LIKE 'agent/%' ORDER BY created_at DESC LIMIT 3;"
+# 预期: Agent 最终回复
+```
+
+**判定**: 多轮 HITL 中断正确工作 — Agent resume 后再次触发 ask_user，新的 RemoteCalling 正确创建，对话状态正确更新。
+
 ---
 
 # 阶段 6: HITL 统一
@@ -1546,6 +1868,15 @@ sqlite3 "$ALICE_DB" "SELECT id, method, status_code, error_msg FROM rpc_logs ORD
 | 步骤 5.4.2 | 上报失败有重试机制 | ✅ / INCONCLUSIVE | |
 | 步骤 5.5.4 | 超时清理不创建新 RemoteCalling | ✅ | 检查 cleanup 逻辑 |
 | 步骤 5.5.5 | 超时后对话被清理 | ✅ | |
+| 步骤 5.6.2 | 自定义超时正确覆盖全局默认 | ✅ | 检查 TimeoutMs 传递 |
+| 步骤 5.6.3 | 最小超时保护生效 | ✅ | 检查 MinClientFunctionCallTimeoutMs |
+| 步骤 5.7.1 | 重试队列表结构存在 | ✅ | 检查客户端 DB schema |
+| 步骤 5.7.3 | 客户端重启后处理重试任务 | ✅ | 检查 daemon 日志 |
+| 步骤 5.8.3 | 软删除后重复上报返回 ErrConflict | ✅ | 检查 Unscoped() 查询 |
+| 步骤 5.8.4 | 软删除记录未被修改 | ✅ | |
+| 步骤 5.9.3 | 第一轮 HITL RemoteCalling 创建 | ✅ | |
+| 步骤 5.9.5 | re-interrupt 创建新 RemoteCalling | ✅ | 检查 resume_handler re-interrupt 逻辑 |
+| 步骤 5.9.6 | 多轮 HITL 最终完成 | ✅ | |
 | **阶段 6: HITL 统一** | | | |
 | 步骤 6.1.3 | ask_user 创建 RemoteCalling | ✅ | |
 | 步骤 6.1.7 | ask_user 通过 agent_resume 恢复 | ✅ | |
@@ -1580,6 +1911,10 @@ sqlite3 "$ALICE_DB" "SELECT id, method, status_code, error_msg FROM rpc_logs ORD
 | 锁未释放 | resume_handler 锁释放逻辑错误 | 检查 releaseLock() 调用和 Lua 脚本 token 校验 |
 | 失败上报 success 仍为 true | ResolveError 未被调用 | 检查 agent_resume handler 中 success=false 的分支是否正确调用 ResolveError |
 | 过期后上报修改了数据 | status 检查缺失 | 检查 ResolveResult/ResolveError 的 WHERE status='pending' 条件 |
+| 自定义超时未生效 | TimeoutMs 未传递到 RemoteCalling | 检查 client_function_tool.go 中的 TimeoutMs 解析 |
+| 多轮 HITL 不触发第二轮 | resume_handler re-interrupt 检测失败 | 检查 interruptCh 是否正确接收 |
+| 软删除后返回 not found | Unscoped() 未使用 | 检查 ResolveResult/ResolveError 中的 Unscoped() 调用 |
+| 重试队列未持久化 | IndexedDB 事务失败 | 检查客户端浏览器控制台错误 |
 
 ---
 
@@ -1589,7 +1924,7 @@ sqlite3 "$ALICE_DB" "SELECT id, method, status_code, error_msg FROM rpc_logs ORD
 # 停止所有 daemon
 ./bin/xyncra-client kill --user-id alice --device-id test-device-alice 2>/dev/null || true
 ./bin/xyncra-client kill --user-id alice --device-id device-b 2>/dev/null || true
-./bin/xyncra-client kill --user-id "agent/weather-bot" --device-id "agent-device-1" 2>/dev/null || true
+./bin/xyncra-client kill --user-id "agent" --device-id "agent-device-1" 2>/dev/null || true
 
 # 停止 Docker E2E
 docker compose -f deploy/docker-compose.e2e.yml down
@@ -1600,6 +1935,11 @@ rm -rf "$E2E_HOME"
 # 清理 ~/.xyncra 中的测试数据
 rm -rf ~/.xyncra/alice
 rm -rf ~/.xyncra/agent
+
+# 清理临时 Agent 配置（如果使用了 docker cp）
+# docker exec deploy-xyncra-server-e2e-1 rm -f /app/agents/hitl-bot.md
+# docker exec deploy-xyncra-server-e2e-1 rm -f /app/agents/hitl-choice-bot.md
+# docker exec deploy-xyncra-server-e2e-1 rm -f /app/agents/multi-hitl-bot.md
 
 # 清理 Redis（可选）
 redis-cli -p 16379 -n 15 FLUSHDB
@@ -1644,12 +1984,16 @@ cp .env.example .env
 | 阶段 5.3 (服务器重启) | 是* | 环境准备（独立会话） |
 | 阶段 5.4 (上报重试) | 是* | 环境准备（独立会话） |
 | 阶段 5.5 (防无限循环) | 是* | 环境准备（独立会话 + 等待 cleanup） |
+| 阶段 5.6 (自定义超时) | 是* | 环境准备（独立会话） |
+| 阶段 5.7 (重试队列持久化) | 是* | 环境准备（独立会话） |
+| 阶段 5.8 (软删除后幂等) | 是* | 环境准备（独立会话 + 等待 cleanup） |
+| 阶段 5.9 (多轮 HITL) | 是* | 环境准备（独立会话 + Agent 配置） |
 | 阶段 6.1 (ask_user) | 是* | 环境准备（独立会话 + Agent 配置） |
 | 阶段 6.2 (ask_user_choice) | 否 | 阶段 6.1（Agent 配置复用） |
 
 > 标记 * 的阶段可在环境准备完成后独立执行（使用独立会话），但建议按顺序执行以避免干扰。
 
-**推荐执行顺序**: 1 → 2 → 3 → 4.1 → 4.1.1 → 4.2 → 4.3 → 4.4 → 4.5 → 5.1 → 5.2 → 5.3 → 5.4 → 5.5 → 6.1 → 6.2
+**推荐执行顺序**: 1 → 2 → 3 → 4.1 → 4.1.1 → 4.2 → 4.3 → 4.4 → 4.5 → 5.1 → 5.2 → 5.3 → 5.4 → 5.5 → 5.6 → 5.7 → 5.8 → 5.9 → 6.1 → 6.2
 
 ---
 
@@ -1713,6 +2057,14 @@ cp .env.example .env
 | 步骤 5.4.2: 上报重试 | ✅ / ❌ / INCONCLUSIVE | |
 | 步骤 5.5.4: 防无限循环 | ✅ / ❌ | BUG-002 修复验证 |
 | 步骤 5.5.5: 超时后对话清理 | ✅ / ❌ | |
+| 步骤 5.6.2: 自定义超时覆盖 | ✅ / ❌ | |
+| 步骤 5.6.3: 最小超时保护 | ✅ / ❌ | |
+| 步骤 5.7.1: 重试队列表结构 | ✅ / ❌ | |
+| 步骤 5.7.3: 重启后处理重试 | ✅ / ❌ | |
+| 步骤 5.8.3: 软删除后幂等 | ✅ / ❌ | Unscoped() |
+| 步骤 5.9.3: 第一轮 HITL | ✅ / ❌ | |
+| 步骤 5.9.5: re-interrupt | ✅ / ❌ | |
+| 步骤 5.9.6: 多轮 HITL 完成 | ✅ / ❌ | |
 
 #### 阶段 6: HITL 统一
 

@@ -18,6 +18,12 @@ const DefaultClientFunctionCallTimeoutMs = 120000 // 120 seconds
 // See: Vue测试问题 - LLM超时时间设置问题
 const MinClientFunctionCallTimeoutMs = 30000 // 30 seconds
 
+// DefaultHITLTimeout is the default expiration timeout for HITL (ask_user) RemoteCallings.
+// Used when the agent interrupts to ask the user a question without a client function.
+// This value is intentionally long (24h) to allow users to respond at their convenience.
+// Both executor.go and resume_handler.go use this constant for consistency.
+const DefaultHITLTimeout = 24 * time.Hour
+
 // MiddlewareConfig controls which Eino middleware to enable per agent.
 // All fields are optional; when the middleware block is absent from YAML,
 // no middleware is applied (backward compatible with Phase 1-7).

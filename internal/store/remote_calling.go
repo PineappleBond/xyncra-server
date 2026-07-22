@@ -42,7 +42,11 @@ func (rs *RemoteCallingStore) GetByID(ctx context.Context, id string) (result *m
 	defer func() { finish(err) }()
 
 	var rc model.RemoteCalling
-	if err = rs.db.WithContext(ctx).Where("id = ?", id).First(&rc).Error; err != nil {
+	// Use Unscoped() to also find soft-deleted records, consistent with
+	// ResolveResult/ResolveError which use Unscoped() for idempotency checks.
+	// After cleanup (DeleteByCheckpoint), resolved RemoteCallings are soft-deleted
+	// but GetByID should still find them so callers get a consistent view.
+	if err = rs.db.WithContext(ctx).Unscoped().Where("id = ?", id).First(&rc).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
@@ -274,6 +278,25 @@ func (rs *RemoteCallingStore) ListExpired(ctx context.Context, limit int) (resul
 		return nil, classifyError(fmt.Errorf("store: list expired remote callings: %w", err))
 	}
 	return rcs, nil
+}
+
+// MarkExpiredByCheckpoint batch-marks all pending RemoteCallings for a checkpoint
+// that have passed their expires_at as expired. Returns the count of newly expired RCs.
+// This is called by the agent_resume handler to immediately expire overdue siblings
+// before checking pending count, avoiding the need to wait for the periodic cleanup task.
+func (rs *RemoteCallingStore) MarkExpiredByCheckpoint(ctx context.Context, checkpointID string) (count int64, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBRemoteCallingMarkExpiredByCheckpoint)
+	defer func() { finish(err) }()
+
+	result := rs.db.WithContext(ctx).
+		Model(&model.RemoteCalling{}).
+		Where("checkpoint_id = ? AND status = ? AND expires_at IS NOT NULL AND expires_at < ?",
+			checkpointID, model.RemoteCallingStatusPending, time.Now()).
+		Update("status", model.RemoteCallingStatusExpired)
+	if result.Error != nil {
+		return 0, classifyError(fmt.Errorf("store: mark expired by checkpoint: %w", result.Error))
+	}
+	return result.RowsAffected, nil
 }
 
 // MarkExpired marks a pending RemoteCalling as expired.

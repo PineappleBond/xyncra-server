@@ -70,6 +70,15 @@ export class RemoteCallingRetryManager {
   private running = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Retry statistics for observability (D-137). */
+  private stats = {
+    totalRetries: 0,
+    successfulRetries: 0,
+    failedRetries: 0,
+    lastPollAt: 0,
+    lastQueueSize: 0,
+  };
+
   constructor(options: RemoteCallingRetryManagerOptions) {
     this.db = options.db;
     this.rpcFn = options.rpcFn;
@@ -99,6 +108,13 @@ export class RemoteCallingRetryManager {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
     }
+  }
+
+  /**
+   * Returns current retry statistics for observability.
+   */
+  getStats(): Readonly<typeof this.stats> {
+    return { ...this.stats };
   }
 
   /**
@@ -144,6 +160,8 @@ export class RemoteCallingRetryManager {
     while (this.running) {
       try {
         const items = await this.db.retryQueueStore.getReady();
+        this.stats.lastPollAt = Date.now();
+        this.stats.lastQueueSize = items.length;
 
         for (const item of items) {
           if (!this.running) break;
@@ -177,6 +195,8 @@ export class RemoteCallingRetryManager {
       return;
     }
 
+    this.stats.totalRetries++;
+
     try {
       const params = {
         id: item.remote_calling_id,
@@ -190,11 +210,13 @@ export class RemoteCallingRetryManager {
 
       // Success: remove from queue.
       await this.db.retryQueueStore.remove(itemId);
+      this.stats.successfulRetries++;
       this.logger.info('Agent resume retry succeeded', {
         remote_calling_id: item.remote_calling_id,
         retry_count: item.retry_count,
       });
     } catch (error) {
+      this.stats.failedRetries++;
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.logger.warn('Agent resume retry failed', {
         remote_calling_id: item.remote_calling_id,
