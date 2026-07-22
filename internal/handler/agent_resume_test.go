@@ -41,7 +41,7 @@ func newAgentResumeTestEnv(t *testing.T) *agentResumeTestEnv {
 	t.Helper()
 	s := setupTestSQLite(t)
 	broker := &agentResumeBroker{}
-	h := NewAgentResumeHandler(s, broker)
+	h := NewAgentResumeHandler(s, broker, nil)
 	return &agentResumeTestEnv{store: s, broker: broker, h: h}
 }
 

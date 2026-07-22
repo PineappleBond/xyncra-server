@@ -99,6 +99,13 @@ func NewAgentResumeHandler(
 			}
 
 			// Mark as in-progress with lock-matching TTL (130s, D-075).
+			// KNOWN LIMITATION: The 130s TTL matches the conversation lock TTL.
+			// If the agent execution exceeds 130s (e.g. long-running tool calls),
+			// the processingKey expires and a duplicate resume task could slip through.
+			// This is acceptable because:
+			//   1. The conversation lock (also 130s) provides the primary guard.
+			//   2. The processedKey (24h) prevents replay after completion.
+			//   3. Agent executions rarely exceed 130s in practice.
 			if _, err := idempotency.MarkProcessed(ctx, processingKey, 130*time.Second); err != nil {
 				logger.Error("agent resume: processing mark failed (non-fatal)", "error", err)
 			}

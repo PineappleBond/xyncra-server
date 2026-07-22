@@ -73,7 +73,7 @@ export class RemoteCallingStore {
    * Removes all remote callings for a conversation within the given transaction.
    */
   async deleteByConversationTx(tx: Transaction, convID: string): Promise<void> {
-    const table = tx.table('remote_callings') as Dexie.Table<
+    const table = tx.table('remoteCallings') as Dexie.Table<
       RemoteCalling,
       string
     >;

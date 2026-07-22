@@ -147,7 +147,7 @@ export interface RemoteCalling {
   /** Device ID (empty = any device, non-empty = specific device). */
   device_id: string;
   /** Status: "pending", "resolved", "cancelled", "expired". Default "pending". */
-  status: string;
+  status: 'pending' | 'resolved' | 'cancelled' | 'expired';
   /** Result on success. */
   result: string;
   /** Error message on failure. */

@@ -20,7 +20,7 @@ type RemoteCalling struct {
 	Method         string         `gorm:"size:128;not null" json:"method"`  // e.g. ask_user, pg_chatai_sendMessage
 	Params         string         `gorm:"type:text" json:"params"`          // JSON parameters
 	InterruptID    string         `gorm:"size:64" json:"interrupt_id"`      // Eino interrupt ID (ask_user only)
-	DeviceID       string         `gorm:"size:64;index" json:"device_id"`   // empty = any device, non-empty = specific device
+	DeviceID       string         `gorm:"size:64" json:"device_id"`          // empty = any device, non-empty = specific device
 	// NOTE: standalone index on Status removed — compound indexes
 	// (idx_rc_checkpoint_status, idx_rc_conversation_status, idx_rc_status_expires)
 	// already cover status-based queries, making a standalone index redundant.

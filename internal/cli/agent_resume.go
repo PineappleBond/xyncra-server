@@ -30,6 +30,11 @@ ask_user tool call.
 This command is IPC-only (D-036, D-114) — it requires the listen daemon
 to be running. Start the daemon with 'xyncra-client listen' first.
 
+Flag usage notes:
+  --success defaults to true (success case). For failure, use --success=false
+  (with equals sign). --success false (with space) does NOT work as expected
+  due to cobra boolean flag parsing.
+
 Typical workflow:
   1. Run 'xyncra-client listen' to receive HITL notifications
   2. Note the remote_calling_id from the notification

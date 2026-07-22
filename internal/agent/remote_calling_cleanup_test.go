@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 
+	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
@@ -782,4 +783,265 @@ func TestHITLCleanup_ContinuesAfterCheckpointDeleteFails(t *testing.T) {
 	// Verify broadcast was still sent.
 	assert.GreaterOrEqual(t, len(mockBS.calls), 1,
 		"broadcast should still fire when checkpoint delete fails")
+}
+
+// ---------------------------------------------------------------------------
+// Layer 2: cleanupExpiredRemoteCallings tests (D-137)
+// ---------------------------------------------------------------------------
+
+// mockCleanupBroker is a mock mq.Broker that records enqueued tasks for
+// inspection in cleanup tests.
+type mockCleanupBroker struct {
+	enqueued []*mq.Task
+}
+
+func (b *mockCleanupBroker) Enqueue(_ context.Context, task *mq.Task, _ ...mq.EnqueueOption) (string, error) {
+	b.enqueued = append(b.enqueued, task)
+	return "cleanup-task-1", nil
+}
+
+func (b *mockCleanupBroker) Start(_ context.Context, _ mq.Handler) error { return nil }
+func (b *mockCleanupBroker) Stop()                                       {}
+func (b *mockCleanupBroker) GetTaskState(_ context.Context, _ string) (mq.TaskState, error) {
+	return mq.TaskStateUnknown, nil
+}
+
+// newCleanupTaskWithBroker creates a RemoteCallingCleanupTask wired to a mock broker.
+func newCleanupTaskWithBroker(t *testing.T, cfg RemoteCallingCleanupConfig, broker mq.Broker) (
+	task *RemoteCallingCleanupTask,
+	testStore *store.Store,
+	mockBS *mockBroadcastServer,
+	mockStore *mockStoreAPI,
+	redisClient *redis.Client,
+	cleanup func(),
+) {
+	t.Helper()
+
+	testStore = setupTestStore(t)
+	client, redisCleanup := newTestRedisClient(t)
+	mockBS = &mockBroadcastServer{}
+	broadcaster := NewBroadcastHelper(mockBS, noopLogger{})
+	mockStore = &mockStoreAPI{}
+	cpStore := newFakeDeletableStore()
+
+	task = NewRemoteCallingCleanupTask(
+		cfg,
+		testStore.Conversations,
+		testStore.RemoteCallings,
+		cpStore,
+		broadcaster,
+		mockStore,
+		broker,
+		client,
+		noopLogger{},
+	)
+
+	return task, testStore, mockBS, mockStore, client, func() { redisCleanup() }
+}
+
+// TestCleanupExpiredRemoteCallings_AllExpired_CleansUpConversation verifies that
+// when all RemoteCallings for a checkpoint have expired without any being resolved,
+// the conversation is cleaned up (agent status reset, timeout message sent).
+func TestCleanupExpiredRemoteCallings_AllExpired_CleansUpConversation(t *testing.T) {
+	task, testStore, mockBS, mockStore, _, cleanupFn := newCleanupTaskWithBroker(
+		t,
+		RemoteCallingCleanupConfig{Interval: time.Minute, MaxAge: 24 * time.Hour, BatchSize: 100, LockTTL: 30 * time.Second},
+		nil, // broker nil — no agent resume expected
+	)
+	defer cleanupFn()
+
+	ctx := context.Background()
+
+	// Create a conversation in tool_calling status.
+	conv := &model.Conversation{
+		ID: "conv-exp-1", UserID1: "alice", UserID2: "agent/bot",
+		Type: "1-on-1", Title: "Test", CreatedAt: time.Now(), UpdatedAt: time.Now(), LastMessageAt: time.Now(),
+	}
+	require.NoError(t, testStore.Conversations.Create(ctx, conv))
+	_, err := testStore.Conversations.UpdateAgentStatus(ctx, "conv-exp-1", model.AgentStatusToolCalling, "agent/bot", "cp-exp-1")
+	require.NoError(t, err)
+
+	// Create two expired RemoteCallings for the same checkpoint.
+	pastTime := time.Now().Add(-1 * time.Hour)
+	require.NoError(t, testStore.RemoteCallings.Create(ctx, &model.RemoteCalling{
+		ID: "rc-exp-1", ConversationID: "conv-exp-1", CheckpointID: "cp-exp-1",
+		AgentID: "agent/bot", Method: "test_func", InterruptID: "int-1",
+		Status: model.RemoteCallingStatusPending, ExpiresAt: &pastTime,
+	}))
+	require.NoError(t, testStore.RemoteCallings.Create(ctx, &model.RemoteCalling{
+		ID: "rc-exp-2", ConversationID: "conv-exp-1", CheckpointID: "cp-exp-1",
+		AgentID: "agent/bot", Method: "test_func", InterruptID: "int-2",
+		Status: model.RemoteCallingStatusPending, ExpiresAt: &pastTime,
+	}))
+
+	task.cleanupExpiredRemoteCallings(ctx)
+
+	// Verify both RCs were marked as expired.
+	for _, id := range []string{"rc-exp-1", "rc-exp-2"} {
+		rc, getErr := testStore.RemoteCallings.GetByID(ctx, id)
+		require.NoError(t, getErr)
+		assert.Equal(t, model.RemoteCallingStatusExpired, rc.Status,
+			"RC %s should be marked as expired", id)
+	}
+
+	// Verify conversation was cleaned up (agent status reset to idle).
+	conv, err = testStore.Conversations.Get(ctx, "conv-exp-1")
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusIdle, conv.AgentStatus,
+		"conversation should be reset to idle when all RCs expired")
+
+	// Verify timeout message was sent.
+	require.Len(t, mockStore.sendMessageCalls, 1, "SendMessage should be called once")
+	assert.Contains(t, mockStore.sendMessageCalls[0].msg.Content, "超时",
+		"timeout message should contain Chinese timeout indication")
+
+	// Verify broadcast was sent.
+	assert.GreaterOrEqual(t, len(mockBS.calls), 1, "broadcast should be sent")
+}
+
+// TestCleanupExpiredRemoteCallings_SomeResolved_EnqueuesAgentResume verifies that
+// when some RemoteCallings are resolved and the rest expire, an agent resume task
+// is enqueued so the agent can process the resolved results.
+func TestCleanupExpiredRemoteCallings_SomeResolved_EnqueuesAgentResume(t *testing.T) {
+	broker := &mockCleanupBroker{}
+	task, testStore, _, _, _, cleanupFn := newCleanupTaskWithBroker(
+		t,
+		RemoteCallingCleanupConfig{Interval: time.Minute, MaxAge: 24 * time.Hour, BatchSize: 100, LockTTL: 30 * time.Second},
+		broker,
+	)
+	defer cleanupFn()
+
+	ctx := context.Background()
+
+	// Create a conversation in tool_calling status.
+	conv := &model.Conversation{
+		ID: "conv-exp-2", UserID1: "alice", UserID2: "agent/bot",
+		Type: "1-on-1", Title: "Test", CreatedAt: time.Now(), UpdatedAt: time.Now(), LastMessageAt: time.Now(),
+	}
+	require.NoError(t, testStore.Conversations.Create(ctx, conv))
+	_, err := testStore.Conversations.UpdateAgentStatus(ctx, "conv-exp-2", model.AgentStatusToolCalling, "agent/bot", "cp-exp-2")
+	require.NoError(t, err)
+
+	// Create one expired and one resolved RemoteCalling for the same checkpoint.
+	pastTime := time.Now().Add(-1 * time.Hour)
+	require.NoError(t, testStore.RemoteCallings.Create(ctx, &model.RemoteCalling{
+		ID: "rc-exp-3", ConversationID: "conv-exp-2", CheckpointID: "cp-exp-2",
+		AgentID: "agent/bot", Method: "test_func", InterruptID: "int-1",
+		Status: model.RemoteCallingStatusPending, ExpiresAt: &pastTime,
+	}))
+	require.NoError(t, testStore.RemoteCallings.Create(ctx, &model.RemoteCalling{
+		ID: "rc-resolved-1", ConversationID: "conv-exp-2", CheckpointID: "cp-exp-2",
+		AgentID: "agent/bot", Method: "test_func", InterruptID: "int-2",
+		Status: model.RemoteCallingStatusResolved, Result: "ok", Success: true,
+	}))
+
+	task.cleanupExpiredRemoteCallings(ctx)
+
+	// Verify the expired RC was marked as expired.
+	rc, getErr := testStore.RemoteCallings.GetByID(ctx, "rc-exp-3")
+	require.NoError(t, getErr)
+	assert.Equal(t, model.RemoteCallingStatusExpired, rc.Status)
+
+	// Verify agent resume task was enqueued.
+	require.Len(t, broker.enqueued, 1, "should enqueue one agent resume task")
+	var payload AgentResumePayload
+	require.NoError(t, json.Unmarshal(broker.enqueued[0].Payload, &payload))
+	assert.Equal(t, "conv-exp-2", payload.ConversationID)
+	assert.Equal(t, "cp-exp-2", payload.CheckpointID)
+	assert.Equal(t, "agent/bot", payload.AgentID)
+}
+
+// TestCleanupExpiredRemoteCallings_NilRemoteCallingStore_NoOp verifies that
+// cleanupExpiredRemoteCallings is a no-op when remoteCallingStore is nil (D-063).
+func TestCleanupExpiredRemoteCallings_NilRemoteCallingStore_NoOp(t *testing.T) {
+	testStore := setupTestStore(t)
+	client, redisCleanup := newTestRedisClient(t)
+	defer redisCleanup()
+
+	task := NewRemoteCallingCleanupTask(
+		RemoteCallingCleanupConfig{Interval: time.Minute, MaxAge: 24 * time.Hour, BatchSize: 100, LockTTL: 30 * time.Second},
+		testStore.Conversations,
+		nil, // remoteCallingStore is nil
+		nil, nil, nil, nil,
+		client,
+		noopLogger{},
+	)
+
+	assert.NotPanics(t, func() {
+		task.cleanupExpiredRemoteCallings(context.Background())
+	})
+}
+
+// TestCleanupExpiredRemoteCallings_NoExpired_NoOp verifies that
+// cleanupExpiredRemoteCallings is a no-op when there are no expired RCs.
+func TestCleanupExpiredRemoteCallings_NoExpired_NoOp(t *testing.T) {
+	task, testStore, mockBS, mockStore, _, cleanupFn := newCleanupTaskWithBroker(
+		t,
+		RemoteCallingCleanupConfig{Interval: time.Minute, MaxAge: 24 * time.Hour, BatchSize: 100, LockTTL: 30 * time.Second},
+		nil,
+	)
+	defer cleanupFn()
+
+	ctx := context.Background()
+
+	// Create a pending RC that has NOT expired yet.
+	futureTime := time.Now().Add(1 * time.Hour)
+	require.NoError(t, testStore.RemoteCallings.Create(ctx, &model.RemoteCalling{
+		ID: "rc-not-expired", ConversationID: "conv-noop", CheckpointID: "cp-noop",
+		AgentID: "agent/bot", Method: "test_func", InterruptID: "int-1",
+		Status: model.RemoteCallingStatusPending, ExpiresAt: &futureTime,
+	}))
+
+	task.cleanupExpiredRemoteCallings(ctx)
+
+	// Verify no cleanup was performed.
+	assert.Empty(t, mockStore.sendMessageCalls, "SendMessage should not be called")
+	assert.Empty(t, mockBS.calls, "no broadcasts should be sent")
+}
+
+// TestCleanupExpiredRemoteCallings_AgentResumeGuardPreventsDuplicate verifies that
+// the cleanup resume guard (Redis SETNX) prevents duplicate agent resume enqueues
+// within the same cleanup window.
+func TestCleanupExpiredRemoteCallings_AgentResumeGuardPreventsDuplicate(t *testing.T) {
+	broker := &mockCleanupBroker{}
+	task, testStore, _, _, redisClient, cleanupFn := newCleanupTaskWithBroker(
+		t,
+		RemoteCallingCleanupConfig{Interval: time.Minute, MaxAge: 24 * time.Hour, BatchSize: 100, LockTTL: 30 * time.Second},
+		broker,
+	)
+	defer cleanupFn()
+
+	ctx := context.Background()
+
+	// Create conversation and resolved+expired RCs.
+	conv := &model.Conversation{
+		ID: "conv-guard", UserID1: "alice", UserID2: "agent/bot",
+		Type: "1-on-1", Title: "Test", CreatedAt: time.Now(), UpdatedAt: time.Now(), LastMessageAt: time.Now(),
+	}
+	require.NoError(t, testStore.Conversations.Create(ctx, conv))
+	_, err := testStore.Conversations.UpdateAgentStatus(ctx, "conv-guard", model.AgentStatusToolCalling, "agent/bot", "cp-guard")
+	require.NoError(t, err)
+
+	pastTime := time.Now().Add(-1 * time.Hour)
+	require.NoError(t, testStore.RemoteCallings.Create(ctx, &model.RemoteCalling{
+		ID: "rc-guard-exp", ConversationID: "conv-guard", CheckpointID: "cp-guard",
+		AgentID: "agent/bot", Method: "test_func", InterruptID: "int-1",
+		Status: model.RemoteCallingStatusPending, ExpiresAt: &pastTime,
+	}))
+	require.NoError(t, testStore.RemoteCallings.Create(ctx, &model.RemoteCalling{
+		ID: "rc-guard-resolved", ConversationID: "conv-guard", CheckpointID: "cp-guard",
+		AgentID: "agent/bot", Method: "test_func", InterruptID: "int-2",
+		Status: model.RemoteCallingStatusResolved, Result: "ok", Success: true,
+	}))
+
+	// Pre-set the cleanup resume guard key.
+	guardKey := "cleanup:resume:cp-guard"
+	ok, setErr := redisClient.SetNX(ctx, guardKey, "1", 5*time.Minute).Result()
+	require.NoError(t, setErr)
+	require.True(t, ok)
+
+	task.cleanupExpiredRemoteCallings(ctx)
+
+	// Verify no agent resume was enqueued (guard prevented it).
+	assert.Empty(t, broker.enqueued, "should NOT enqueue agent resume when guard key exists")
 }

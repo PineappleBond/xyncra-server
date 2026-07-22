@@ -669,7 +669,9 @@ export class SyncManager {
 
     // Clean up remote callings and retry queue entries outside the transaction
     // (retry queue is not part of the transaction tables).
-    setTimeout(async () => {
+    // queueMicrotask runs after the current task (transaction commit) but before
+    // the next macrotask, which is more predictable than setTimeout(fn, 0).
+    queueMicrotask(async () => {
       try {
         // Get remote callings before deleting to clean up retry queue.
         const rcs = await this.options.db.remoteCallingsStore.getByConversation(convID);
@@ -692,7 +694,7 @@ export class SyncManager {
           error,
         });
       }
-    }, 0);
+    });
   }
 
   /**
@@ -923,7 +925,7 @@ export class SyncManager {
     // Handle remote callings (D-137): clear stale and upsert new ones.
     // When remote_callings is defined (even if empty), sync local state to match server.
     if (result.remote_callings) {
-      const rcTable = tx.table('remote_callings');
+      const rcTable = tx.table('remoteCallings');
       // Clear stale remote callings when agent_status is neither asking_user nor tool_calling
       // (both states use RemoteCalling mechanism — D-137).
       if (result.conversation.agent_status !== 'asking_user' && result.conversation.agent_status !== 'tool_calling') {
