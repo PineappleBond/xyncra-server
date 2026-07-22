@@ -146,7 +146,7 @@ export class XyncraDatabase extends Dexie {
       messages:
         'id, &[client_message_id+sender_id], conversation_id, [conversation_id+message_id], sender_id, created_at, message_id',
       remoteCallings:
-        '++id, conversation_id, status, checkpoint_id, [conversation_id+status]',
+        'id, conversation_id, status, checkpoint_id, [conversation_id+status]',
       retryQueue: '++id, remote_calling_id, next_retry_at',
       syncStates: 'key',
       drafts: 'id, &conversation_id',

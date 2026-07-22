@@ -64,7 +64,13 @@ func (h *cancelRemoteCallsHandler) HandleRequest(ctx context.Context, client *se
 		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: RemoteCallingStore not available"))
 	}
 
-	cancelledCount, convID, rcAgentID, err := rcs.CancelByCheckpoint(ctx, params.CheckpointID, params.Reason)
+	// Get the caller's user ID for cancelled_by field.
+	cancelledBy := ""
+	if client != nil {
+		cancelledBy = client.UserID()
+	}
+
+	cancelledCount, convID, rcAgentID, err := rcs.CancelByCheckpoint(ctx, params.CheckpointID, params.Reason, cancelledBy)
 	if err != nil {
 		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: cancel: %w", err))
 	}
@@ -81,12 +87,6 @@ func (h *cancelRemoteCallsHandler) HandleRequest(ctx context.Context, client *se
 
 	// 5. If no pending remain, enqueue TypeAgentResume MQ task.
 	if pending == 0 && convID != "" {
-		// Get the caller's user ID for CancelledBy.
-		cancelledBy := ""
-		if client != nil {
-			cancelledBy = client.UserID()
-		}
-
 		deviceID := ""
 		if client != nil {
 			deviceID = client.DeviceID()

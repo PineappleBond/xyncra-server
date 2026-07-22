@@ -31,8 +31,8 @@ type ClientToolsConfig struct {
 	// ExcludedFunctions excludes specific function names. Exact match only.
 	ExcludedFunctions []string `yaml:"excluded_functions" json:"excluded_functions"`
 	// CallTimeout is the default timeout for client function calls.
-	// Individual functions may override via timeout_ms. Default: 30s.
-	// A zero value means "use default (30s)".
+	// Individual functions may override via timeout_ms. Default: 120s.
+	// A zero value means "use default (120s)".
 	CallTimeout time.Duration `yaml:"call_timeout" json:"call_timeout"`
 }
 

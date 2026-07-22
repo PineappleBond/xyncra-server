@@ -2,20 +2,9 @@
 
 > **测试编号**: TC-011
 > **测试类型**: 端到端集成测试
-> **覆盖范围**: RemoteCalling 统一模型 (D-137)、客户端函数注册 (D-115)、函数调用链路、DeviceID 路由、状态流转 (pending/resolved/cancelled/expired)、幂等性、并行执行、断线重连、服务器重启恢复、上报失败重试、HITL 统一 (ask_user / ask_user_choice)
+> **覆盖范围**: RemoteCalling 统一模型 (D-137)、客户端函数注册 (D-115)、函数调用链路、DeviceID 路由、状态流转 (pending/resolved/cancelled/expired)、幂等性、CancelledBy 持久化、锁释放、复合索引、并行执行、断线重连、服务器重启恢复、上报失败重试、超时清理防无限循环、HITL 统一 (ask_user / ask_user_choice)
 > **环境**: Docker E2E (D-043)
 > **最后更新**: 2026-07-22
-
-## 已知问题 (2026-07-22 测试发现)
-
-> **重要**: 以下问题导致大部分测试用例无法自动执行。在修复这些问题之前，需要手动干预。
->
-> 1. **BUG-001**: daemon 不会自动处理 RemoteCallings。需要手动调用 `agent-resume`。
-> 2. **BUG-002**: RemoteCalling 过期后会形成无限循环。cleanup 任务重新触发 agent 执行。
-> 3. **BUG-003**: cleanup 任务使用旧的 checkpoint_id 触发 resume。
-> 4. **commit 602b9a9**: DynamicToolProvider 现在使用 agent 自己的 userID 查找函数，而不是调用者的 userID。函数必须注册在 agent 的 userID 下。
->
-> 详细说明见测试报告: [TC-011-Remote-Calling-Test-Report.md](TC-011-Remote-Calling-Test-Report.md)
 
 ---
 
@@ -30,6 +19,8 @@
 - 验证 DeviceID 路由：指定设备拉取、任意设备拉取、客户端过滤
 - 验证状态流转：pending -> resolved、pending -> cancelled、pending -> expired
 - 验证幂等性：已 resolved 的调用重复上报不产生副作用
+- 验证 CancelledBy 持久化和锁释放逻辑
+- 验证超时清理防无限循环（BUG-002 修复验证）
 - 验证边缘场景：并行执行、断线重连、服务器重启恢复、上报失败重试
 - 验证 HITL 统一：`ask_user` 和 `ask_user_choice` 作为 RemoteCalling 的特殊 method
 
@@ -50,29 +41,21 @@
 
 ## 2. 环境拓扑
 
+| 组件 | 容器/进程 | 宿主机端口 | 容器端口 | 说明 |
+|------|----------|-----------|---------|------|
+| Redis 7 | (Docker) | 16379 | 6379 | DB 15，Checkpoint/锁/幂等性存储 |
+| xyncra-server | xyncra-server-e2e | 18080 | 8080 | WebSocket + HTTP，SQLite: xyncra-e2e.db |
+| xyncra-client (Alice) | 宿主机进程 | - | - | 测试用户 daemon，用于发送消息 |
+| xyncra-client (Agent) | 宿主机进程 | - | - | Agent daemon，注册函数并处理 RemoteCallings |
+| xyncra-client (Device B) | 宿主机进程 | - | - | 第二台设备 daemon，用于 DeviceID 路由测试 |
+
+**数据流向**：
+
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Docker E2E 网络                          │
-│                                                             │
-│  ┌──────────────┐         ┌──────────────────────┐         │
-│  │  Redis 7     │◄────────│  xyncra-server       │         │
-│  │  16379→6379  │         │  18080→8080           │         │
-│  │  (DB 15)     │         │  SQLite: xyncra-e2e.db│        │
-│  └──────────────┘         └──────────────────────┘         │
-│         ▲                        ▲                         │
-│         │ 16379                  │ 18080                   │
-└─────────┼────────────────────────┼─────────────────────────┘
-          │                        │
-┌─────────┼────────────────────────┼─────────────────────────┐
-│         ▼                        ▼                         │
-│  ┌─────────────────┐    ┌─────────────────┐               │
-│  │ xyncra-client   │    │ Agent           │               │
-│  │ User: alice     │    │ (enable_client_ │               │
-│  │ Daemon (IPC)    │    │  tools: true)   │               │
-│  └─────────────────┘    └─────────────────┘               │
-│                                                             │
-│  工作目录: $E2E_HOME (mktemp -d)                            │
-└─────────────────────────────────────────────────────────────┘
+Alice daemon --ws--> Server --mq--> Agent executor --ws--> Agent daemon
+                         |                                      |
+                         v                                      v
+                     SQLite DB                            Redis (checkpoint)
 ```
 
 ---
@@ -157,8 +140,8 @@ test -f .env && echo "OK .env exists" || echo "MISSING .env"
 | `$REDIS_ADDR` | `localhost:16379` | E2E Redis 地址 |
 | `$REDIS_DB` | `15` | E2E Redis DB 编号 |
 | `$ALICE` | `alice` | 测试用户 Alice |
-| `$DEVICE_A` | `device-a` | 设备 A |
-| `$DEVICE_B` | `device-b` | 设备 B |
+| `$DEVICE_A` | `test-device-alice` | Alice 的设备 |
+| `$DEVICE_B` | `device-b` | 第二台设备 |
 | `$E2E_HOME` | `/tmp/xe2e-XXXXXX` | 临时测试目录 |
 | `$CONV_ID` | (运行时获取) | Agent 会话 ID |
 | `$RC_ID` | (运行时获取) | RemoteCalling ID |
@@ -170,9 +153,9 @@ test -f .env && echo "OK .env exists" || echo "MISSING .env"
 
 ```mermaid
 flowchart TD
-    Start([开始]) --> EnvPrep[环境准备]
+    Start([开始]) --> EnvPrep
 
-    subgraph EnvSetup [环境准备]
+    subgraph EnvSetup [🟢 环境准备]
         EnvPrep --> BuildBin[构建二进制]
         BuildBin --> DockerUp[启动 Docker E2E]
         DockerUp --> HealthCheck[健康检查]
@@ -183,27 +166,27 @@ flowchart TD
 
     subgraph PartI [阶段 1: 函数注册验证]
         direction TB
-        P1A[启动 Alice daemon] --> P1B[验证内置函数自动注册]
+        P1A[🔵 启动 Agent daemon] --> P1B[🟡 验证内置函数自动注册]
     end
 
     P1B --> PartII
 
     subgraph PartII [阶段 2: 端到端调用链路]
         direction TB
-        P2A[创建 Agent 会话] --> P2B[发送消息触发函数调用]
-        P2B --> P2C[验证 RemoteCalling 创建]
-        P2C --> P2D[验证客户端拉取]
-        P2D --> P2E[验证 agent_resume 上报]
-        P2E --> P2F[验证 Agent 恢复执行]
+        P2A[🔵 创建 Agent 会话] --> P2B[🔵 发送消息触发函数调用]
+        P2B --> P2C[🟡 验证 RemoteCalling 创建]
+        P2C --> P2D[🟡 验证 daemon 自动拉取并执行]
+        P2D --> P2E[🟡 验证 agent_resume 上报]
+        P2E --> P2F[🔴 验证 Agent 恢复执行]
     end
 
     P2F --> PartIII
 
     subgraph PartIII [阶段 3: DeviceID 路由]
         direction TB
-        P3A[指定 DeviceID 的调用] --> P3B[目标设备拉取]
-        P3B --> P3C[非目标设备过滤]
-        P3C --> P3D[空 DeviceID 任意设备拉取]
+        P3A[🔵 指定 DeviceID 的调用] --> P3B[🟡 目标设备拉取]
+        P3B --> P3C[🟡 非目标设备过滤]
+        P3C --> P3D[🟡 空 DeviceID 任意设备拉取]
     end
 
     P3D --> PartIV
@@ -211,20 +194,22 @@ flowchart TD
     subgraph PartIV [阶段 4: 状态流转]
         direction TB
         P4A[pending->resolved 正常完成] --> P4B[pending->cancelled 用户取消]
-        P4B --> P4C[pending->expired 超时过期]
-        P4C --> P4D[幂等性验证]
+        P4B --> P4C[🟡 CancelledBy 持久化验证]
+        P4C --> P4D[pending->expired 超时过期]
+        P4D --> P4E[幂等性验证]
     end
 
-    P4D --> PartV
+    P4E --> PartV
 
     subgraph PartV [阶段 5: 边缘场景]
         direction TB
         P5A[多个 RemoteCalling 并行] --> P5B[断线重连后拉取]
         P5B --> P5C[服务器重启后恢复]
         P5C --> P5D[上报失败重试]
+        P5D --> P5E[超时清理防无限循环]
     end
 
-    P5D --> PartVI
+    P5E --> PartVI
 
     subgraph PartVI [阶段 6: HITL 统一]
         direction TB
@@ -233,7 +218,7 @@ flowchart TD
 
     PartVI --> Cleanup
 
-    subgraph Cleanup [环境清理]
+    subgraph Cleanup [⚪ 环境清理]
         CL1[停止所有 daemon] --> CL2[停止 Docker]
         CL2 --> CL3[清理临时目录 + Redis]
     end
@@ -247,17 +232,28 @@ flowchart TD
 
 # 阶段 1: 函数注册验证 (D-115)
 
-> **重要变更 (commit 602b9a9)**: DynamicToolProvider 现在使用 agent 自己的 userID 查找函数，
-> 而不是调用者的 userID。因此函数必须注册在 agent 的 userID 下，而不是 human 用户下。
+> **重要变更 (commit 602b9a9)**: DynamicToolProvider 现在使用 agent 的 **base userID** 查找函数，
+> 而不是调用者的 userID。DynamicToolProvider 会从 agentID 中提取 base userID（例如 `agent/weather-bot` -> `agent`），
+> 然后调用 `GetFunctionsByUser(ctx, baseUserID)` 查找函数。因此函数必须注册在 agent 的 **base userID** 下，
+> 而不是完整的 agentID。
+>
+> **广播修复 (已验证)**: 广播（SendConversationUpdate）现在使用 `extractBaseUserID()` 发送到 base userID（`agent`），
+> 而不是完整的 agentID（`agent/weather-bot`）。daemon 可以正确接收到广播通知。
+>
+> **已知问题**: daemon 接收到广播后调用 `get_conversation` 时可能遇到 RPC 超时。
+> 这可能与多个 WebSocket 连接或响应路由有关。如果自动处理失败，
+> 可以使用 `agent-resume` 命令手动触发 daemon 处理 RemoteCallings。
 
 ### 步骤 1.1: 启动 Agent daemon（内置函数自动注册）
 
-函数必须注册在 agent 的 userID 下，因为 DynamicToolProvider 使用 agent 的 userID 查找函数。
+函数必须注册在 agent 的 base userID 下，因为 DynamicToolProvider 使用 base userID 查找函数。
+对于 agentID `agent/weather-bot`，base userID 是 `agent`。
 
 ```bash
-# Agent daemon - 注册函数在 agent/weather-bot 下
+# Agent daemon - 注册函数在 agent（base userID）下
+# DynamicToolProvider 从 agentID "agent/weather-bot" 提取 base userID "agent" 来查找函数
 ./bin/xyncra-client listen \
-  --user-id "agent/weather-bot" \
+  --user-id "agent" \
   --device-id "agent-device-1" \
   --server ws://localhost:18080/ws \
   --device-info '{"name":"weather-bot-agent","os":"linux","type":"agent"}' \
@@ -276,7 +272,7 @@ ps -p $AGENT_PID
 **验证（Redis）**：
 
 ```bash
-redis-cli -p 16379 -n 15 SMEMBERS "xyncra:conn:user:agent/weather-bot"
+redis-cli -p 16379 -n 15 SMEMBERS "xyncra:conn:user:agent"
 # 预期: 包含至少一个 connID
 ```
 
@@ -285,6 +281,7 @@ redis-cli -p 16379 -n 15 SMEMBERS "xyncra:conn:user:agent/weather-bot"
 ```bash
 docker compose -f deploy/docker-compose.e2e.yml logs xyncra-server-e2e --tail 50 2>&1 | grep -i "functions registered"
 # 预期: 看到 "functions registered" 且 count>=3
+# 注意: userID 应为 "agent"（base userID），不是 "agent/weather-bot"
 ```
 
 ```bash
@@ -388,52 +385,35 @@ $R TTL "agent:checkpoint:$CHECKPOINT_ID"
 # 预期: > 0（TTL 24h）
 ```
 
-### 步骤 2.7: 验证客户端拉取 RemoteCallings
+### 步骤 2.7: 验证客户端自动拉取 RemoteCallings
 
-> **已知问题 (BUG-001)**: daemon 不会自动拉取和处理 RemoteCallings。
-> 当前需要手动调用 `agent-resume` 来上报结果。
-> 参见测试报告中的 BUG-001 详细说明。
+> daemon 收到 `SendConversationUpdate` 广播后，自动调用 `get_remote_callings` 拉取并执行。
 
 ```bash
-# 检查 daemon 日志，确认收到 RemoteCalling 通知
-grep -i "remote.calling\|get_remote_callings" "$E2E_HOME/agent-daemon.log" | tail -5
-# 预期: 看到 get_remote_callings 调用或 RemoteCalling 处理日志
-# 实际: 可能看不到，因为自动处理未实现
+# 检查 daemon 日志，确认收到 RemoteCalling 通知并自动处理
+grep -i "remote.calling\|get_remote_callings\|agent.resume" "$E2E_HOME/agent-daemon.log" | tail -10
+# 预期: 看到 get_remote_callings 调用和 agent_resume 上报日志
 ```
 
-### 步骤 2.8: 手动调用 agent_resume 上报结果
-
-> **注意**: 由于自动处理未实现，需要手动调用 agent-resume。
-> RemoteCalling 有 30 秒超时，需要在超时前完成。
+**验证（数据库）**：
 
 ```bash
-# 记录 RemoteCalling ID
-RC_ID=$(docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db \
-  "SELECT id FROM remote_callings WHERE conversation_id='$CONV_ID' AND status='pending' ORDER BY created_at DESC LIMIT 1;")
-echo "RC_ID=$RC_ID"
-
-# 手动调用 agent-resume
-./bin/xyncra-client agent-resume \
-  --user-id alice \
-  --device-id test-device-alice \
-  --id "$RC_ID" \
-  --agent-id "agent/weather-bot" \
-  --success \
-  --result "pong: hello"
-
-# 检查 RemoteCalling 状态已变为 resolved
 DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
-$DB "SELECT id, status, success, result FROM remote_callings WHERE id='$RC_ID';"
-# 预期: status=resolved, success=1
+
+# RemoteCalling 应已被 daemon 自动处理
+$DB "SELECT id, status, success FROM remote_callings WHERE conversation_id='$CONV_ID' ORDER BY created_at DESC LIMIT 5;"
+# 预期: status=resolved（daemon 已自动上报）
 ```
 
-### 步骤 2.9: 验证 Agent 恢复执行
+### 步骤 2.8: 验证 Agent 恢复执行
 
 ```bash
 sleep 15
 
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
 $DB "SELECT agent_status FROM conversations WHERE id='$CONV_ID';"
-# 预期: 不再为 tool_calling（恢复为 idle 或有新的 agent_status）
+# 预期: 不再为 tool_calling（恢复为 idle）
 
 $DB "SELECT sender_id, SUBSTR(content, 1, 100) FROM messages WHERE conversation_id='$CONV_ID' AND sender_id LIKE 'agent/%' ORDER BY created_at DESC LIMIT 3;"
 # 预期: 包含 Agent 的最终回复
@@ -452,7 +432,31 @@ $DB "SELECT sender_id, SUBSTR(content, 1, 100) FROM messages WHERE conversation_
 # 预期: 包含 Agent 的最终回复消息
 ```
 
-**判定**: Agent 调用客户端函数 -> RemoteCalling 创建 -> 客户端拉取 -> 上报结果 -> Agent 恢复执行，完整链路通过。
+**判定**: Agent 调用客户端函数 -> RemoteCalling 创建 -> daemon 自动拉取 -> 自动上报结果 -> Agent 恢复执行，完整链路通过。
+
+### 步骤 2.9: 手动 agent-resume 回退验证（可选）
+
+> 如果步骤 2.7 中 daemon 未自动处理（调试场景），可手动调用 agent-resume 验证链路。
+
+```bash
+# 获取 pending 的 RemoteCalling ID
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+MANUAL_RC_ID=$($DB "SELECT id FROM remote_callings WHERE conversation_id='$CONV_ID' AND status='pending' ORDER BY created_at DESC LIMIT 1;")
+echo "MANUAL_RC_ID=$MANUAL_RC_ID"
+
+# 手动调用 agent-resume（IPC，需 daemon 运行中）
+./bin/xyncra-client agent-resume \
+  --user-id alice \
+  --device-id test-device-alice \
+  --id "$MANUAL_RC_ID" \
+  --agent-id "agent/weather-bot" \
+  --success \
+  --result "pong: hello"
+
+# 验证状态变更
+$DB "SELECT id, status, success, result FROM remote_callings WHERE id='$MANUAL_RC_ID';"
+# 预期: status=resolved, success=1
+```
 
 ---
 
@@ -470,14 +474,9 @@ DEVICE_B_PID=$!
 sleep 3
 ```
 
-### 步骤 3.2: 手动创建指定 DeviceID 的 RemoteCalling
-
-> 通过服务器 API 或直接数据库插入来模拟指定设备的 RemoteCalling。
+### 步骤 3.2: 创建新会话
 
 ```bash
-DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
-
-# 获取当前 checkpoint（复用阶段 2 的会话或创建新会话）
 NEW_CONV_ID=$(./bin/xyncra-client create-conversation \
   --user-id alice \
   --device-id test-device-alice \
@@ -521,7 +520,6 @@ grep -i "remote.calling\|filter" "$E2E_HOME/device-b-daemon.log" | tail -5
 
 ```bash
 # 如果 device_id 为空，两个 daemon 都应该能看到该调用
-# 通过 RPC 直接查询验证
 DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 $DB "SELECT id, device_id FROM remote_callings WHERE conversation_id='$NEW_CONV_ID' AND device_id='';"
 # 预期: 如果存在空 device_id 的记录，说明任意设备可拉取
@@ -563,7 +561,7 @@ $DB "SELECT id, status, success, result, resolved_at FROM remote_callings WHERE 
 # 预期: status=resolved, resolved_at 非空
 ```
 
-## 4.2 pending -> cancelled（用户取消）
+## 4.2 pending -> cancelled（用户取消 + CancelledBy 持久化）
 
 ### 步骤 4.2.1: 创建新会话并触发 RemoteCalling
 
@@ -597,7 +595,6 @@ echo "CANCEL_CHECKPOINT=$CANCEL_CHECKPOINT"
 
 ```bash
 # 通过 WebSocket RPC 调用 cancel_remote_calls
-# 使用 python3 发送 WebSocket JSON-RPC 请求
 python3 -c "
 import json, asyncio, websockets
 
@@ -627,8 +624,26 @@ asyncio.run(cancel())
 ```bash
 DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
-$DB "SELECT id, status, cancelled_at, cancel_reason FROM remote_callings WHERE checkpoint_id='$CANCEL_CHECKPOINT';"
-# 预期: status=cancelled, cancelled_at 非空, cancel_reason=user_cancelled
+$DB "SELECT id, status, cancelled_at, cancelled_by, cancel_reason FROM remote_callings WHERE checkpoint_id='$CANCEL_CHECKPOINT';"
+# 预期: status=cancelled, cancelled_at 非空, cancelled_by=alice, cancel_reason=user_cancelled
+```
+
+### 步骤 4.2.5: 验证 CancelledBy 持久化
+
+```bash
+# 确认 cancelled_by 字段正确持久化了调用者的 user ID
+$DB "SELECT cancelled_by FROM remote_callings WHERE checkpoint_id='$CANCEL_CHECKPOINT' LIMIT 1;"
+# 预期: alice（执行取消操作的用户 ID）
+```
+
+### 步骤 4.2.6: 验证取消后锁释放
+
+```bash
+R="redis-cli -p 16379 -n 15"
+
+# 检查会话锁是否已释放
+$R EXISTS "agent:lock:$CANCEL_CONV_ID"
+# 预期: 0（锁已释放）
 ```
 
 ## 4.3 pending -> expired（超时过期）
@@ -666,8 +681,9 @@ $DB "UPDATE remote_callings SET expires_at = datetime('now', '-1 hour') WHERE id
 
 ### 步骤 4.3.3: 等待后台清理任务执行
 
+> 后台清理任务每 5 分钟执行一次。等待 360 秒可确保至少执行一次。
+
 ```bash
-# 后台清理任务每 5 分钟执行一次
 sleep 360
 ```
 
@@ -678,6 +694,14 @@ DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 $DB "SELECT id, status FROM remote_callings WHERE id='$EXPIRE_RC_ID';"
 # 预期: status=expired
+```
+
+### 步骤 4.3.5: 验证超时后对话清理
+
+```bash
+# 如果所有 RemoteCallings 都过期（无 resolved），对话应被清理
+$DB "SELECT agent_status FROM conversations WHERE id='$EXPIRE_CONV_ID';"
+# 预期: 不再为 tool_calling（已清理为 idle 或其他状态）
 ```
 
 ## 4.4 幂等性：已 resolved 的调用重复上报
@@ -927,7 +951,7 @@ $DB "SELECT id, status FROM remote_callings WHERE conversation_id='$RESTART_CONV
 
 ```bash
 # 检查客户端本地 DB 中的重试队列
-ALICE_DB=~/.xyncra/alice/test-device-alice/xyncra.db
+ALICE_DB="$E2E_HOME/alice/test-device-alice/xyncra.db"
 
 sqlite3 "$ALICE_DB" "SELECT id, method, attempt, max_attempts, status FROM retry_tasks ORDER BY created_at DESC LIMIT 5;"
 # 预期: 可能为空（如果没有失败的重试），或显示重试记录
@@ -941,6 +965,84 @@ grep -i "retry\|agent_resume.*fail\|exponential" "$E2E_HOME/alice-daemon.log" | 
 ```
 
 **判定**: 客户端上报失败时有重试机制。如果当前没有失败的重试任务，此场景标记为 INCONCLUSIVE（需要模拟服务端不可用来触发）。
+
+## 5.5 超时清理防无限循环（BUG-002 修复验证）
+
+> **背景**: 早期版本中，RemoteCalling 超时后 cleanup 任务会重新触发 agent 执行，
+> 导致 agent 再次调用函数 → 新 RemoteCalling → 再次超时的无限循环。
+> 修复后：如果所有 RemoteCallings 都过期（无 resolved），cleanup 直接清理对话，不触发 resume。
+
+### 步骤 5.5.1: 创建会话并触发 RemoteCalling
+
+```bash
+LOOP_CONV_ID=$(./bin/xyncra-client create-conversation \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --peer-id "agent/weather-bot" | grep "Conversation ID:" | awk '{print $3}')
+
+./bin/xyncra-client send \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --conversation-id "$LOOP_CONV_ID" \
+  --content "请使用 ping 工具发送消息 loop-test"
+
+sleep 15
+```
+
+### 步骤 5.5.2: 修改 expires_at 模拟过期
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+LOOP_RC_ID=$($DB "SELECT id FROM remote_callings WHERE conversation_id='$LOOP_CONV_ID' AND status='pending' ORDER BY created_at DESC LIMIT 1;")
+echo "LOOP_RC_ID=$LOOP_RC_ID"
+
+# 将 expires_at 设置为 1 小时前
+$DB "UPDATE remote_callings SET expires_at = datetime('now', '-1 hour') WHERE id='$LOOP_RC_ID';"
+```
+
+### 步骤 5.5.3: 等待 cleanup 任务执行
+
+```bash
+# 记录当前 RemoteCalling 数量
+BEFORE_COUNT=$($DB "SELECT COUNT(*) FROM remote_callings WHERE conversation_id='$LOOP_CONV_ID';")
+echo "BEFORE_COUNT=$BEFORE_COUNT"
+
+sleep 360
+```
+
+### 步骤 5.5.4: 验证没有创建新的 RemoteCalling
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+AFTER_COUNT=$($DB "SELECT COUNT(*) FROM remote_callings WHERE conversation_id='$LOOP_CONV_ID';")
+echo "AFTER_COUNT=$AFTER_COUNT"
+
+# 验证没有新的 RemoteCalling 被创建（防无限循环）
+# 如果 BEFORE_COUNT == AFTER_COUNT，说明 cleanup 没有触发新的 agent 执行
+echo "=== 验证 ==="
+if [ "$BEFORE_COUNT" -eq "$AFTER_COUNT" ]; then
+  echo "PASS: 没有创建新的 RemoteCalling，无限循环已修复"
+else
+  echo "FAIL: 创建了新的 RemoteCalling，可能仍有无限循环问题"
+fi
+```
+
+### 步骤 5.5.5: 验证对话已被清理
+
+```bash
+$DB "SELECT agent_status FROM conversations WHERE id='$LOOP_CONV_ID';"
+# 预期: 不再为 tool_calling（已清理为 idle）
+
+# 验证发送了超时消息
+$DB "SELECT sender_id, SUBSTR(content, 1, 50) FROM messages WHERE conversation_id='$LOOP_CONV_ID' AND content LIKE '%超时%' ORDER BY created_at DESC LIMIT 1;"
+# 预期: 包含 "远程函数调用超时" 的消息
+```
+
+**判定**: 超时清理不会触发新的 agent 执行，直接清理对话并发送超时消息，无限循环已修复。
 
 ---
 
@@ -1070,6 +1172,9 @@ $DB "SELECT agent_status FROM conversations WHERE id='$HITL_CONV_ID';"
 
 ## 6.2 ask_user_choice 作为 RemoteCalling 的一种
 
+> **注意**: `ask_user_choice` 在实现中与 `ask_user` 共用同一个 method (`ask_user`)，
+> 通过 params 中的选项信息区分。LLM 会在 question 中提供多个选项让用户选择。
+
 ### 步骤 6.2.1: 配置支持 ask_user_choice 的 Agent
 
 ```bash
@@ -1175,11 +1280,16 @@ $DB "SELECT sender_id, SUBSTR(content, 1, 100) FROM messages WHERE conversation_
 ```bash
 DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
-# RemoteCallings 表
-$DB "SELECT id, conversation_id, method, device_id, status, success FROM remote_callings WHERE conversation_id='<conv-id>' ORDER BY created_at;"
+# RemoteCallings 表 — 完整字段
+$DB "SELECT id, conversation_id, checkpoint_id, agent_id, method, device_id, status, success FROM remote_callings WHERE conversation_id='<conv-id>' ORDER BY created_at;"
 $DB "SELECT status, COUNT(*) FROM remote_callings GROUP BY status;"
 $DB "SELECT id, status, result, error_message, resolved_at FROM remote_callings WHERE id='<rc-id>';"
-$DB "SELECT id, status, cancelled_at, cancel_reason FROM remote_callings WHERE checkpoint_id='<checkpoint-id>';"
+$DB "SELECT id, status, cancelled_at, cancelled_by, cancel_reason FROM remote_callings WHERE checkpoint_id='<checkpoint-id>';"
+$DB "SELECT id, interrupt_id, method FROM remote_callings WHERE conversation_id='<conv-id>';"
+
+# 复合索引验证
+$DB ".indices remote_callings"
+# 预期: 包含 idx_rc_conversation_status, idx_rc_checkpoint_status, idx_rc_status_expires
 
 # Conversation agent_status
 $DB "SELECT agent_status, agent_id, checkpoint_id FROM conversations WHERE id='<conv-id>';"
@@ -1208,6 +1318,7 @@ $R KEYS "agent:resume:processing:*"
 
 # 连接信息
 $R SMEMBERS "xyncra:conn:user:alice"
+$R SMEMBERS "xyncra:conn:user:agent/weather-bot"
 
 # 清理
 $R FLUSHDB
@@ -1216,6 +1327,8 @@ $R FLUSHDB
 ### 7.3 Client DB SQLite 验证命令速查
 
 ```bash
+# 注意: 客户端 DB 路径格式为 ~/.xyncra/{user_id}/{device_id}/xyncra.db
+# 在 E2E 测试中，daemon 使用宿主机路径
 ALICE_DB=~/.xyncra/alice/test-device-alice/xyncra.db
 
 # Conversations
@@ -1223,6 +1336,9 @@ sqlite3 "$ALICE_DB" "SELECT id, agent_status FROM conversations WHERE id='<conv-
 
 # Messages
 sqlite3 "$ALICE_DB" "SELECT sender_id, SUBSTR(content, 1, 100) FROM messages WHERE conversation_id='<conv-id>' ORDER BY created_at DESC LIMIT 5;"
+
+# Remote Callings (客户端本地)
+sqlite3 "$ALICE_DB" "SELECT id, method, status FROM remote_callings WHERE conversation_id='<conv-id>';"
 
 # Retry tasks
 sqlite3 "$ALICE_DB" "SELECT id, method, attempt, status FROM retry_tasks ORDER BY created_at DESC LIMIT 5;"
@@ -1243,15 +1359,16 @@ sqlite3 "$ALICE_DB" "SELECT id, method, status_code, error_msg FROM rpc_logs ORD
 | 步骤 2.4 | RemoteCalling 记录创建到 DB | ✅ | 检查 Agent 配置、LLM 调用 |
 | 步骤 2.5 | Conversation agent_status 更新 | ✅ | |
 | 步骤 2.6 | Redis Checkpoint 存在 | ✅ | |
-| 步骤 2.7 | 客户端拉取 RemoteCallings | ✅ | |
-| 步骤 2.8 | agent_resume 上报成功 | ✅ | |
-| 步骤 2.9 | Agent 恢复执行 | ✅ | |
+| 步骤 2.7 | daemon 自动拉取并处理 RemoteCallings | ✅ | 检查广播是否发送给 agentUserID |
+| 步骤 2.8 | Agent 恢复执行 | ✅ | |
 | **阶段 3: DeviceID 路由** | | | |
 | 步骤 3.5 | 指定 DeviceID 只被目标设备拉取 | ✅ | |
 | 步骤 3.6 | 空 DeviceID 任意设备可拉取 | ✅ | |
 | **阶段 4: 状态流转** | | | |
 | 步骤 4.1.2 | pending -> resolved | ✅ | |
 | 步骤 4.2.4 | pending -> cancelled | ✅ | |
+| 步骤 4.2.5 | CancelledBy 持久化 | ✅ | 检查 CancelByCheckpoint 实现 |
+| 步骤 4.2.6 | 取消后锁释放 | ✅ | 检查 resume_handler 锁释放逻辑 |
 | 步骤 4.3.4 | pending -> expired | ✅ | |
 | 步骤 4.4.3 | 幂等性：重复上报不修改数据 | ✅ | |
 | **阶段 5: 边缘场景** | | | |
@@ -1261,6 +1378,8 @@ sqlite3 "$ALICE_DB" "SELECT id, method, status_code, error_msg FROM rpc_logs ORD
 | 步骤 5.3.4 | 服务器重启后数据存活 | ✅ | |
 | 步骤 5.3.5 | 重启后客户端重新处理 | ✅ | |
 | 步骤 5.4.2 | 上报失败有重试机制 | ✅ / INCONCLUSIVE | |
+| 步骤 5.5.4 | 超时清理不创建新 RemoteCalling | ✅ | 检查 cleanup 逻辑 |
+| 步骤 5.5.5 | 超时后对话被清理 | ✅ | |
 | **阶段 6: HITL 统一** | | | |
 | 步骤 6.1.3 | ask_user 创建 RemoteCalling | ✅ | |
 | 步骤 6.1.7 | ask_user 通过 agent_resume 恢复 | ✅ | |
@@ -1275,11 +1394,11 @@ sqlite3 "$ALICE_DB" "SELECT id, method, status_code, error_msg FROM rpc_logs ORD
 |------|---------|---------|
 | RemoteCalling 表为空 | Agent 未触发函数调用 | 检查 LLM 日志、Agent 配置中 tools 列表 |
 | RemoteCalling 停在 pending | 客户端未拉取 | 检查 daemon 日志、WS 连接状态 |
-| RemoteCalling 停在 pending | daemon 不会自动处理 (BUG-001) | 手动调用 agent-resume |
+| RemoteCalling 停在 pending | SendConversationUpdate 未广播给 agent | 检查 executor.go 和 resume_handler.go 中的广播逻辑 |
 | agent_resume 返回 not found | RemoteCalling ID 不存在或已过期 | 检查 DB 中的记录状态 |
 | agent_resume 返回 expired | expires_at 已过期 | 检查 RemoteCalling 的 expires_at 字段 |
 | Agent 未恢复执行 | Checkpoint 过期或丢失 | 检查 Redis 中的 checkpoint key |
-| Agent 未恢复执行 | cleanup 任务使用旧 checkpoint_id (BUG-003) | 检查 DB 中的 checkpoint_id |
+| Agent 未恢复执行 | 所有 RemoteCallings 已过期/取消 | 检查 DB 中的 status 字段，确认是否有 resolved 记录 |
 | 客户端未收到通知 | WS 断开或 Update 未发送 | 检查 daemon 连接状态和服务器日志 |
 | DeviceID 路由不正确 | 客户端过滤逻辑错误 | 检查 daemon 日志中的过滤信息 |
 | 并行调用只处理了一个 | D-138 部分回答机制 | 检查 CountPendingByCheckpoint 逻辑 |
@@ -1289,8 +1408,10 @@ sqlite3 "$ALICE_DB" "SELECT id, method, status_code, error_msg FROM rpc_logs ORD
 | HITL 会话卡在 asking_user | 后台清理任务未启动 | 检查 D-123 清理 goroutine |
 | cancel_remote_calls 无效果 | checkpoint_id 不匹配 | 检查 DB 中的 checkpoint_id |
 | 重复上报未被幂等拒绝 | status 检查逻辑错误 | 检查 ResolveResult/ResolveError 的 WHERE 条件 |
-| RemoteCalling 无限循环 | cleanup 任务重新触发 agent (BUG-002) | 检查 cleanup 任务逻辑 |
+| RemoteCalling 无限循环 | cleanup 任务重新触发 agent | 检查 cleanupExpiredRemoteCalling 中的 hasResolved 逻辑 |
 | Agent 看不到注册的函数 | 函数注册在错误的 userID 下 | 确保函数注册在 agent 的 userID 下 (commit 602b9a9) |
+| cancelled_by 字段为空 | CancelByCheckpoint 未传递 cancelledBy | 检查 cancel_remote_calls handler 中的 cancelledBy 参数 |
+| 锁未释放 | resume_handler 锁释放逻辑错误 | 检查 releaseLock() 调用和 Lua 脚本 token 校验 |
 
 ---
 
@@ -1300,6 +1421,7 @@ sqlite3 "$ALICE_DB" "SELECT id, method, status_code, error_msg FROM rpc_logs ORD
 # 停止所有 daemon
 ./bin/xyncra-client kill --user-id alice --device-id test-device-alice 2>/dev/null || true
 ./bin/xyncra-client kill --user-id alice --device-id device-b 2>/dev/null || true
+./bin/xyncra-client kill --user-id "agent/weather-bot" --device-id "agent-device-1" 2>/dev/null || true
 
 # 停止 Docker E2E
 docker compose -f deploy/docker-compose.e2e.yml down
@@ -1309,6 +1431,7 @@ rm -rf "$E2E_HOME"
 
 # 清理 ~/.xyncra 中的测试数据
 rm -rf ~/.xyncra/alice
+rm -rf ~/.xyncra/agent
 
 # 清理 Redis（可选）
 redis-cli -p 16379 -n 15 FLUSHDB
@@ -1339,23 +1462,24 @@ cp .env.example .env
 
 | 测试阶段 | 可独立执行 | 依赖 |
 |---------|-----------|------|
-| 阶段 1 (函数注册) | ✅ | 环境准备 |
-| 阶段 2 (端到端链路) | ❌ | 阶段 1 |
-| 阶段 3 (DeviceID 路由) | ✅* | 环境准备（独立会话） |
-| 阶段 4.1 (resolved) | ✅* | 环境准备（独立会话） |
-| 阶段 4.2 (cancelled) | ✅* | 环境准备（独立会话） |
-| 阶段 4.3 (expired) | ✅* | 环境准备（独立会话） |
-| 阶段 4.4 (幂等性) | ❌ | 阶段 2（需要已 resolved 的记录） |
-| 阶段 5.1 (并行) | ✅* | 环境准备（独立会话） |
-| 阶段 5.2 (断线重连) | ✅* | 环境准备（独立会话） |
-| 阶段 5.3 (服务器重启) | ✅* | 环境准备（独立会话） |
-| 阶段 5.4 (上报重试) | ✅* | 环境准备（独立会话） |
-| 阶段 6.1 (ask_user) | ✅* | 环境准备（独立会话 + Agent 配置） |
-| 阶段 6.2 (ask_user_choice) | ❌ | 阶段 6.1（Agent 配置复用） |
+| 阶段 1 (函数注册) | 是 | 环境准备 |
+| 阶段 2 (端到端链路) | 否 | 阶段 1 |
+| 阶段 3 (DeviceID 路由) | 是* | 环境准备（独立会话） |
+| 阶段 4.1 (resolved) | 是* | 环境准备（独立会话） |
+| 阶段 4.2 (cancelled) | 是* | 环境准备（独立会话） |
+| 阶段 4.3 (expired) | 是* | 环境准备（独立会话 + 等待 cleanup） |
+| 阶段 4.4 (幂等性) | 否 | 阶段 2（需要已 resolved 的记录） |
+| 阶段 5.1 (并行) | 是* | 环境准备（独立会话） |
+| 阶段 5.2 (断线重连) | 是* | 环境准备（独立会话） |
+| 阶段 5.3 (服务器重启) | 是* | 环境准备（独立会话） |
+| 阶段 5.4 (上报重试) | 是* | 环境准备（独立会话） |
+| 阶段 5.5 (防无限循环) | 是* | 环境准备（独立会话 + 等待 cleanup） |
+| 阶段 6.1 (ask_user) | 是* | 环境准备（独立会话 + Agent 配置） |
+| 阶段 6.2 (ask_user_choice) | 否 | 阶段 6.1（Agent 配置复用） |
 
 > 标记 * 的阶段可在环境准备完成后独立执行（使用独立会话），但建议按顺序执行以避免干扰。
 
-**推荐执行顺序**: 1 → 2 → 3 → 4.1 → 4.2 → 4.3 → 4.4 → 5.1 → 5.2 → 5.3 → 5.4 → 6.1 → 6.2
+**推荐执行顺序**: 1 → 2 → 3 → 4.1 → 4.2 → 4.3 → 4.4 → 5.1 → 5.2 → 5.3 → 5.4 → 5.5 → 6.1 → 6.2
 
 ---
 
@@ -1385,9 +1509,8 @@ cp .env.example .env
 | 步骤 2.4: RemoteCalling 创建 | ✅ / ❌ | D-137 |
 | 步骤 2.5: agent_status 更新 | ✅ / ❌ | |
 | 步骤 2.6: Redis Checkpoint | ✅ / ❌ | D-083 |
-| 步骤 2.7: 客户端拉取 | ✅ / ❌ | |
-| 步骤 2.8: agent_resume 上报 | ✅ / ❌ | D-085 |
-| 步骤 2.9: Agent 恢复 | ✅ / ❌ | |
+| 步骤 2.7: daemon 自动拉取处理 | ✅ / ❌ | BUG-001 修复验证 |
+| 步骤 2.8: Agent 恢复 | ✅ / ❌ | |
 
 #### 阶段 3: DeviceID 路由
 
@@ -1402,6 +1525,8 @@ cp .env.example .env
 |------|------|------|
 | 步骤 4.1.2: resolved | ✅ / ❌ | |
 | 步骤 4.2.4: cancelled | ✅ / ❌ | |
+| 步骤 4.2.5: CancelledBy 持久化 | ✅ / ❌ | |
+| 步骤 4.2.6: 取消后锁释放 | ✅ / ❌ | |
 | 步骤 4.3.4: expired | ✅ / ❌ | D-123 |
 | 步骤 4.4.3: 幂等性 | ✅ / ❌ | D-121 |
 
@@ -1414,6 +1539,8 @@ cp .env.example .env
 | 步骤 5.3.4: 服务器重启 | ✅ / ❌ | |
 | 步骤 5.3.5: 重启后恢复 | ✅ / ❌ | |
 | 步骤 5.4.2: 上报重试 | ✅ / ❌ / INCONCLUSIVE | |
+| 步骤 5.5.4: 防无限循环 | ✅ / ❌ | BUG-002 修复验证 |
+| 步骤 5.5.5: 超时后对话清理 | ✅ / ❌ | |
 
 #### 阶段 6: HITL 统一
 
@@ -1443,6 +1570,8 @@ cp .env.example .env
 - [PRODUCT_DECISIONS.md](../../docs/decisions/PRODUCT_DECISIONS.md) — D-137, D-138, D-115, D-116, D-083, D-085, D-121, D-123
 - [TC-003-HITL完整流程测试.md](TC-003-HITL完整流程测试.md) — HITL 基础流程参考
 - [TC-007-DynamicToolProvider客户端工具测试.md](TC-007-DynamicToolProvider客户端工具测试.md) — 客户端函数注册参考
+- [TC-011-Remote-Calling-Test-Report.md](TC-011-Remote-Calling-Test-Report.md) — 测试报告
+- [TC-011-Remote-Calling-Fix-Report.md](TC-011-Remote-Calling-Fix-Report.md) — Bug 修复报告
 - [internal/store/model/remote_calling.go](../../internal/store/model/remote_calling.go) — RemoteCalling 数据模型
 - [internal/store/remote_calling.go](../../internal/store/remote_calling.go) — RemoteCallingStore 实现
 - [internal/handler/agent_resume.go](../../internal/handler/agent_resume.go) — agent_resume RPC handler

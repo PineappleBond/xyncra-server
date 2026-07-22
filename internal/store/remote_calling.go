@@ -167,7 +167,7 @@ func (rs *RemoteCallingStore) ResolveError(ctx context.Context, id, errorMessage
 // CancelByCheckpoint cancels all pending RemoteCallings for a checkpoint.
 // Returns the cancelled count, conversation ID, and agent ID from the first cancelled record.
 // The conversation ID and agent ID are needed to enqueue the agent resume task.
-func (rs *RemoteCallingStore) CancelByCheckpoint(ctx context.Context, checkpointID, reason string) (count int64, conversationID string, agentID string, err error) {
+func (rs *RemoteCallingStore) CancelByCheckpoint(ctx context.Context, checkpointID, reason, cancelledBy string) (count int64, conversationID string, agentID string, err error) {
 	ctx, finish := startSpan(ctx, tracing.SpanDBRemoteCallingCancelByCheckpoint)
 	defer func() { finish(err) }()
 
@@ -189,6 +189,7 @@ func (rs *RemoteCallingStore) CancelByCheckpoint(ctx context.Context, checkpoint
 		Updates(map[string]interface{}{
 			"status":        model.RemoteCallingStatusCancelled,
 			"cancelled_at":  now,
+			"cancelled_by":  cancelledBy,
 			"cancel_reason": reason,
 		})
 	if result.Error != nil {

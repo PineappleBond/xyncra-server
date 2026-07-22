@@ -152,12 +152,30 @@ export interface RemoteCalling {
   method: string;
   /** JSON parameters. */
   params: string;
+  /** Eino interrupt ID. */
+  interrupt_id: string;
   /** Device ID (empty = any device, non-empty = specific device). */
   device_id: string;
   /** Status: "pending", "resolved", "cancelled", "expired". Default "pending". */
   status: string;
+  /** Result on success. */
+  result: string;
+  /** Error message on failure. */
+  error_message: string;
+  /** Whether the call succeeded. */
+  success: boolean;
   /** Record creation time. */
   created_at: Date;
+  /** Resolution timestamp. */
+  resolved_at: Date | null;
+  /** Expiration timestamp. */
+  expires_at: Date | null;
+  /** Cancellation timestamp. */
+  cancelled_at: Date | null;
+  /** User ID that cancelled this remote calling. */
+  cancelled_by: string;
+  /** Reason for cancellation. */
+  cancel_reason: string;
 }
 
 // ---------------------------------------------------------------------------

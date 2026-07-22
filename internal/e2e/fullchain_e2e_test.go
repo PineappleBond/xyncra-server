@@ -262,7 +262,7 @@ middleware:
   client_tools:
     function_tags: []
     excluded_functions: []
-    call_timeout: 30s
+    call_timeout: 120s
 ---
 You are a helpful assistant with access to the user's todo list functions and a confirmation tool.
 

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 
@@ -86,18 +87,24 @@ func (d *DynamicToolProvider) BeforeAgent(ctx context.Context, runCtx *adk.ChatM
 			d.logger.Error("DynamicToolProvider: GetFunctionsByUser failed", "agent", agentID, "error", err)
 		} else if len(deviceFuncs) > 0 {
 			// Deduplicate across devices: when multiple devices register the same
-			// function name, prefer the last registered device (most recent).
-			// This prevents stale devices from creating RemoteCallings that the
-			// current client cannot resolve.
-			// Build a map: funcName -> (deviceID, FunctionInfo) from last device.
+			// function name, prefer the lexicographically smallest deviceID for
+			// deterministic behavior (map iteration order is non-deterministic).
 			type funcEntry struct {
 				deviceID string
 				info     protocol.FunctionInfo
 			}
 			seenFuncs := make(map[string]funcEntry)
-			for deviceID, funcs := range deviceFuncs {
-				for _, fn := range funcs {
-					seenFuncs[fn.Name] = funcEntry{deviceID: deviceID, info: fn}
+			// Sort deviceIDs for deterministic iteration.
+			deviceIDs := make([]string, 0, len(deviceFuncs))
+			for deviceID := range deviceFuncs {
+				deviceIDs = append(deviceIDs, deviceID)
+			}
+			sort.Strings(deviceIDs)
+			for _, deviceID := range deviceIDs {
+				for _, fn := range deviceFuncs[deviceID] {
+					if existing, exists := seenFuncs[fn.Name]; !exists || deviceID < existing.deviceID {
+						seenFuncs[fn.Name] = funcEntry{deviceID: deviceID, info: fn}
+					}
 				}
 			}
 

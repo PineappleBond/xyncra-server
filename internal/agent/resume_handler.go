@@ -284,7 +284,7 @@ func NewAgentResumeHandler(
 					SenderID:       payload.SenderID,
 					DeviceID:       payload.DeviceID,
 				}, "抱歉，等待时间过长，请重新发送消息。")
-				markResumeFailed(ctx, idempotency, payload.CheckpointID, nil, logger)
+				markResumeFailed(ctx, idempotency, payload.CheckpointID, releaseLock, logger)
 			}
 			// HITL resume: transient error notifies user rather than auto-retrying via MQ,
 			// because the user has invested interaction cost and should decide whether to retry.
@@ -398,7 +398,8 @@ func NewAgentResumeHandler(
 				}
 
 				executor.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, resumeHitlUpdatedAt)
-				executor.broadcaster.SendConversationUpdate(ctx, payload.AgentID, payload.ConversationID, resumeHitlUpdatedAt)
+				// Use base userID for the agent's daemon (e.g. "agent" from "agent/weather-bot").
+				executor.broadcaster.SendConversationUpdate(ctx, extractBaseUserID(payload.AgentID), payload.ConversationID, resumeHitlUpdatedAt)
 				executor.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "tool_calling")
 			} else {
 				// --- HITL (ask_user) re-interrupt path ---
@@ -431,7 +432,8 @@ func NewAgentResumeHandler(
 				}
 
 				executor.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, resumeHitlUpdatedAt)
-				executor.broadcaster.SendConversationUpdate(ctx, payload.AgentID, payload.ConversationID, resumeHitlUpdatedAt)
+				// Use base userID for the agent's daemon (e.g. "agent" from "agent/weather-bot").
+				executor.broadcaster.SendConversationUpdate(ctx, extractBaseUserID(payload.AgentID), payload.ConversationID, resumeHitlUpdatedAt)
 				executor.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")
 			}
 
@@ -525,8 +527,9 @@ func NewAgentResumeHandler(
 		// This triggers the pull-on-notification pattern: clients will fetch the latest
 		// conversation state via get_conversation RPC and see that questions are empty.
 		// Broadcast to both participants (BUG-001).
+		// Use base userID for the agent's daemon (e.g. "agent" from "agent/weather-bot").
 		executor.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, time.Now())
-		executor.broadcaster.SendConversationUpdate(ctx, payload.AgentID, payload.ConversationID, time.Now())
+		executor.broadcaster.SendConversationUpdate(ctx, extractBaseUserID(payload.AgentID), payload.ConversationID, time.Now())
 
 		releaseLock()
 		return nil

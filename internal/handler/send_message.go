@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -272,6 +273,23 @@ func conversationMembers(conv *model.Conversation) []string {
 func containsUser(members []string, userID string) bool {
 	for _, m := range members {
 		if m == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// containsUserOrAgentBase reports whether userID is present in the slice, or if
+// userID is the base of an agent member (e.g., userID="agent" matches member
+// "agent/weather-bot"). This allows agent daemons (which connect with their base
+// userID) to access conversations where they are a member via their full agentID.
+func containsUserOrAgentBase(members []string, userID string) bool {
+	for _, m := range members {
+		if m == userID {
+			return true
+		}
+		// Check if userID is the base of an agent member (e.g., "agent" matches "agent/weather-bot")
+		if strings.HasPrefix(m, userID+"/") {
 			return true
 		}
 	}

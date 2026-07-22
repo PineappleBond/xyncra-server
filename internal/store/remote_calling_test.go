@@ -288,7 +288,7 @@ func TestRemoteCallingStore_CancelByCheckpoint(t *testing.T) {
 		require.NoError(t, s.RemoteCallings.Create(ctx, rc3))
 		require.NoError(t, s.RemoteCallings.ResolveResult(ctx, "rc-3", "done"))
 
-		count, _, _, err := s.RemoteCallings.CancelByCheckpoint(ctx, "cp-1", "user cancelled")
+		count, _, _, err := s.RemoteCallings.CancelByCheckpoint(ctx, "cp-1", "test-user", "user cancelled")
 		require.NoError(t, err)
 		assert.Equal(t, int64(2), count, "should cancel 2 pending remote callings")
 

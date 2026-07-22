@@ -119,16 +119,18 @@ export interface SearchMessagesResult {
   has_more: boolean;
 }
 
-/** Result of the GetConversation query (local DB + unread + questions, D-125). */
+/** Result of the GetConversation query (local DB + unread + remote callings, D-137). */
 export interface GetConversationResult {
   conversation: DBConversation;
   unread_count: number;
-  questions: Array<{
+  remoteCallings: Array<{
     id: string;
     conversation_id: string;
     checkpoint_id: string;
-    interrupt_id: string;
-    question_text: string;
+    agent_id: string;
+    method: string;
+    params: string;
+    device_id: string;
     status: string;
     created_at: Date;
   }>;
@@ -787,13 +789,13 @@ export class XyncraClient {
       lastRead,
     );
 
-    const questions =
-      await this.db.questionsStore.getByConversation(conversationId);
+    const remoteCallings =
+      await this.db.remoteCallingsStore.getByConversation(conversationId);
 
     return {
       conversation: conv,
       unread_count: unreadCount,
-      questions,
+      remoteCallings,
     };
   }
 

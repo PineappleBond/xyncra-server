@@ -101,16 +101,19 @@ func executeClientFunction(
 		if defaultCallTimeoutMs > 0 {
 			timeoutMs = defaultCallTimeoutMs
 		} else {
-			timeoutMs = 30000 // 30s fallback default
+			timeoutMs = 120000 // 120s fallback default
 		}
 	}
 
-	interruptData, _ := json.Marshal(map[string]any{
+	interruptData, err := json.Marshal(map[string]any{
 		"method":     funcInfo.Name,
 		"params":     string(input),
 		"device_id":  deviceID,
 		"timeout_ms": timeoutMs,
 	})
+	if err != nil {
+		return agenttools.SoftFailure("failed to marshal interrupt data"), nil
+	}
 
 	return "", tool.Interrupt(ctx, string(interruptData))
 }

@@ -145,7 +145,7 @@
 // ClientToolsConfig: Per-agent configuration for dynamic client tool injection.
 // FunctionTags filters which functions are exposed (empty = all). ExcludedFunctions
 // is a deny-list checked first. CallTimeout sets the default timeout for client
-// function calls. Zero/negative CallTimeout defaults to 30 seconds.
+// function calls. Zero/negative CallTimeout defaults to 120 seconds.
 //
 // AgentBuilder Integration: AgentBuilder exposes SetClientFunctionProvider.
 // When configured and an agent's Middleware config has EnableClientTools=true,

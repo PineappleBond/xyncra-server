@@ -58,16 +58,20 @@ export interface Conversation {
   createdAt: string; // ISO timestamp
   updatedAt?: string; // ISO timestamp
   deletedAt?: string; // ISO timestamp (soft delete)
-  // HITL fields (D-125)
+  // HITL fields (D-125 / D-137)
   agentStatus?: string; // 'idle' | 'thinking' | 'tool_calling' | 'generating' | 'asking_user' | 'timeout'
   agentId?: string;
   checkpointId?: string;
-  questions?: Array<{
+  remoteCallings?: Array<{
     id: string;
-    question_text: string;
+    conversation_id: string;
     checkpoint_id: string;
-    interrupt_id: string;
+    agent_id: string;
+    method: string;
+    params: string;
+    device_id: string;
     status: string;
+    created_at: Date;
   }>;
 }
 

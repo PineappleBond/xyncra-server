@@ -466,10 +466,12 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 			e.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, partialText, true)
 
 			// 4. Broadcast lightweight conversation update (pull notification pattern, D-124).
-			// Broadcast to both the human user and the agent user (BUG-001) so that
-			// the agent's daemon receives the notification and can pull RemoteCallings.
+			// Broadcast to both the human user and the agent's daemon so that
+			// the daemon receives the notification and can pull RemoteCallings.
+			// Use base userID (e.g. "agent" from "agent/weather-bot") because
+			// the daemon connects with the base userID, not the full agentID.
 			e.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, hitlUpdatedAt)
-			e.broadcaster.SendConversationUpdate(ctx, payload.AgentID, payload.ConversationID, hitlUpdatedAt)
+			e.broadcaster.SendConversationUpdate(ctx, extractBaseUserID(payload.AgentID), payload.ConversationID, hitlUpdatedAt)
 
 			// 5. Broadcast agent status.
 			e.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "tool_calling")
@@ -518,8 +520,9 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 		e.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, partialText, true)
 
 		// 4. Broadcast lightweight conversation update (pull notification pattern, D-124).
+		// Use base userID for the agent's daemon (see comment in client function path above).
 		e.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, hitlUpdatedAt)
-		e.broadcaster.SendConversationUpdate(ctx, payload.AgentID, payload.ConversationID, hitlUpdatedAt)
+		e.broadcaster.SendConversationUpdate(ctx, extractBaseUserID(payload.AgentID), payload.ConversationID, hitlUpdatedAt)
 
 		// 5. Broadcast agent status (D-125: redundant agent_question and
 		// agent_checkpoint_created removed; conversation update carries the data).
@@ -648,6 +651,19 @@ func (e *AgentExecutor) sendErrorMessage(ctx context.Context, payload ExecutePay
 	}
 	// Broadcast conversation update so client pulls the error message.
 	e.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, time.Now())
+	// Also broadcast to agent's daemon using base userID.
+	e.broadcaster.SendConversationUpdate(ctx, extractBaseUserID(payload.AgentID), payload.ConversationID, time.Now())
+}
+
+// extractBaseUserID extracts the base userID from an agentID.
+// For example: "agent/weather-bot" -> "agent", "human-user" -> "human-user".
+// This is needed because daemon clients connect using the base userID,
+// while agents are registered with full agentIDs (e.g., "agent/weather-bot).
+func extractBaseUserID(agentID string) string {
+	if idx := strings.Index(agentID, "/"); idx > 0 {
+		return agentID[:idx]
+	}
+	return agentID
 }
 
 // interruptData holds parsed interrupt data distinguishing HITL vs client function.

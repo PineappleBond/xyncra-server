@@ -895,9 +895,11 @@ export class SyncManager {
     // When remote_callings is defined (even if empty), sync local state to match server.
     if (result.remote_callings) {
       const rcTable = tx.table('remote_callings');
-      // Clear stale remote callings for this conversation before upserting new ones.
-      // This ensures local state matches server state regardless of agent_status.
-      await rcTable.where('conversation_id').equals(convID).delete();
+      // Clear stale remote callings when agent_status is neither asking_user nor tool_calling
+      // (both states use RemoteCalling mechanism — D-137).
+      if (result.conversation.agent_status !== 'asking_user' && result.conversation.agent_status !== 'tool_calling') {
+        await rcTable.where('conversation_id').equals(convID).delete();
+      }
       for (const rc of result.remote_callings) {
         // Convert created_at from string to Date for IndexedDB storage.
         const dbRc = {

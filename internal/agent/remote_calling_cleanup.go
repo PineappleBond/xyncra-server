@@ -342,8 +342,9 @@ func (t *RemoteCallingCleanupTask) cleanupExpiredConversation(ctx context.Contex
 	if t.broadcaster != nil {
 		t.broadcaster.SendAgentTimeout(ctx, humanUserID, rc.AgentID, rc.ConversationID, "remote_calling_timeout")
 		// Broadcast conversation update to both participants (BUG-001).
+		// Use base userID for the agent's daemon (e.g. "agent" from "agent/weather-bot").
 		t.broadcaster.SendConversationUpdate(ctx, humanUserID, rc.ConversationID, cleanupUpdatedAt)
-		t.broadcaster.SendConversationUpdate(ctx, rc.AgentID, rc.ConversationID, cleanupUpdatedAt)
+		t.broadcaster.SendConversationUpdate(ctx, extractBaseUserID(rc.AgentID), rc.ConversationID, cleanupUpdatedAt)
 	}
 
 	t.logger.Info("cleaned up expired remote callings conversation",
@@ -354,7 +355,20 @@ func (t *RemoteCallingCleanupTask) cleanupExpiredConversation(ctx context.Contex
 // conversation. All steps are non-fatal — errors are logged but do not affect
 // subsequent steps (D-007 / D-122).
 func (t *RemoteCallingCleanupTask) cleanupConversation(ctx context.Context, conv *model.Conversation) {
-	// 1. Acquire distributed lock (Redis SETNX).
+	// 1. Check if the agent lock is held (agent:lock:{conversationID}).
+	// If an agent is actively processing, skip cleanup to avoid interference.
+	agentLockKey := "agent:lock:" + conv.ID
+	agentLockHeld, err := t.lockClient.Exists(ctx, agentLockKey).Result()
+	if err != nil {
+		t.logger.Error("agent lock check failed (non-fatal)", "conversation_id", conv.ID, "error", err)
+		return
+	}
+	if agentLockHeld > 0 {
+		t.logger.Debug("agent lock held, skipping cleanup", "conversation_id", conv.ID)
+		return
+	}
+
+	// 2. Acquire cleanup lock (Redis SETNX).
 	// Key format: hitl:cleanup:{conversationID}
 	// TTL ensures the lock is released even if this node crashes.
 	lockKey := "hitl:cleanup:" + conv.ID
@@ -428,8 +442,10 @@ func (t *RemoteCallingCleanupTask) cleanupConversation(ctx context.Context, conv
 	// 7. Broadcast agent_timeout ephemeral notification (D-087).
 	if t.broadcaster != nil {
 		t.broadcaster.SendAgentTimeout(ctx, humanUserID, fresh.AgentID, conv.ID, "hitl_timeout")
-		// Also send conversation update so clients refresh state (D-120 / D-124).
+		// Broadcast conversation update to both participants so clients refresh state (D-120 / D-124).
+		// Use base userID for the agent's daemon (e.g. "agent" from "agent/weather-bot").
 		t.broadcaster.SendConversationUpdate(ctx, humanUserID, conv.ID, cleanupUpdatedAt)
+		t.broadcaster.SendConversationUpdate(ctx, extractBaseUserID(fresh.AgentID), conv.ID, cleanupUpdatedAt)
 	}
 
 	t.logger.Info("cleaned up stale HITL conversation",

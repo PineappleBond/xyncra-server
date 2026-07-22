@@ -74,9 +74,12 @@ func (h *getConversationHandler) HandleRequest(ctx context.Context, client *serv
 	}
 
 	// 4. Verify membership (C-3).
+	// Use containsUserOrAgentBase to allow agent daemons (connected with base
+	// userID like "agent") to access conversations where they are a member via
+	// their full agentID (e.g., "agent/weather-bot").
 	userID := client.UserID()
 	members := conversationMembers(conv)
-	if !containsUser(members, userID) {
+	if !containsUserOrAgentBase(members, userID) {
 		return nil, protocol.NewPermissionDeniedError("user is not a member of the conversation")
 	}
 
