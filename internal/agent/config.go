@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+// DefaultClientFunctionCallTimeoutMs is the fallback timeout (in milliseconds)
+// for client function calls when no timeout is specified in the function info
+// or the agent config. Both client_function_tool.go and resume_handler.go use
+// this constant to ensure consistency.
+const DefaultClientFunctionCallTimeoutMs = 120000 // 120 seconds
+
 // MiddlewareConfig controls which Eino middleware to enable per agent.
 // All fields are optional; when the middleware block is absent from YAML,
 // no middleware is applied (backward compatible with Phase 1-7).

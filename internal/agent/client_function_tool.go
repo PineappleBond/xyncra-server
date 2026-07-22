@@ -101,7 +101,7 @@ func executeClientFunction(
 		if defaultCallTimeoutMs > 0 {
 			timeoutMs = defaultCallTimeoutMs
 		} else {
-			timeoutMs = 120000 // 120s fallback default
+			timeoutMs = DefaultClientFunctionCallTimeoutMs // unified fallback constant
 		}
 	}
 

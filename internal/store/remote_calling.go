@@ -167,35 +167,48 @@ func (rs *RemoteCallingStore) ResolveError(ctx context.Context, id, errorMessage
 // CancelByCheckpoint cancels all pending RemoteCallings for a checkpoint.
 // Returns the cancelled count, conversation ID, and agent ID from the first cancelled record.
 // The conversation ID and agent ID are needed to enqueue the agent resume task.
+//
+// BUG-FIX: Wrap the two-step operation (fetch + update) in a transaction to
+// prevent a race window where another goroutine could modify the records
+// between the First and Updates calls.
 func (rs *RemoteCallingStore) CancelByCheckpoint(ctx context.Context, checkpointID, reason, cancelledBy string) (count int64, conversationID string, agentID string, err error) {
 	ctx, finish := startSpan(ctx, tracing.SpanDBRemoteCallingCancelByCheckpoint)
 	defer func() { finish(err) }()
 
-	// First, fetch one pending record to get conversationID and agentID before cancelling.
-	var first model.RemoteCalling
-	if err = rs.db.WithContext(ctx).
-		Where("checkpoint_id = ? AND status = ?", checkpointID, model.RemoteCallingStatusPending).
-		First(&first).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return 0, "", "", nil // nothing to cancel
+	err = rs.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// First, fetch one pending record to get conversationID and agentID before cancelling.
+		var first model.RemoteCalling
+		if err := tx.
+			Where("checkpoint_id = ? AND status = ?", checkpointID, model.RemoteCallingStatusPending).
+			First(&first).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil // nothing to cancel, count=0
+			}
+			return classifyError(fmt.Errorf("store: get first pending for cancel: %w", err))
 		}
-		return 0, "", "", classifyError(fmt.Errorf("store: get first pending for cancel: %w", err))
-	}
 
-	now := time.Now()
-	result := rs.db.WithContext(ctx).
-		Model(&model.RemoteCalling{}).
-		Where("checkpoint_id = ? AND status = ?", checkpointID, model.RemoteCallingStatusPending).
-		Updates(map[string]interface{}{
-			"status":        model.RemoteCallingStatusCancelled,
-			"cancelled_at":  now,
-			"cancelled_by":  cancelledBy,
-			"cancel_reason": reason,
-		})
-	if result.Error != nil {
-		return 0, "", "", classifyError(fmt.Errorf("store: cancel remote callings by checkpoint: %w", result.Error))
+		now := time.Now()
+		result := tx.
+			Model(&model.RemoteCalling{}).
+			Where("checkpoint_id = ? AND status = ?", checkpointID, model.RemoteCallingStatusPending).
+			Updates(map[string]interface{}{
+				"status":        model.RemoteCallingStatusCancelled,
+				"cancelled_at":  now,
+				"cancelled_by":  cancelledBy,
+				"cancel_reason": reason,
+			})
+		if result.Error != nil {
+			return classifyError(fmt.Errorf("store: cancel remote callings by checkpoint: %w", result.Error))
+		}
+		count = result.RowsAffected
+		conversationID = first.ConversationID
+		agentID = first.AgentID
+		return nil
+	})
+	if err != nil {
+		return 0, "", "", err
 	}
-	return result.RowsAffected, first.ConversationID, first.AgentID, nil
+	return count, conversationID, agentID, nil
 }
 
 // DeleteByConversation soft-deletes all RemoteCallings for a conversation.
@@ -258,6 +271,8 @@ func (rs *RemoteCallingStore) ListExpired(ctx context.Context, limit int) (resul
 }
 
 // MarkExpired marks a pending RemoteCalling as expired.
+// Returns ErrNotFound if the record does not exist.
+// Returns ErrConflict if the record is already resolved/cancelled/expired.
 func (rs *RemoteCallingStore) MarkExpired(ctx context.Context, id string) (err error) {
 	ctx, finish := startSpan(ctx, tracing.SpanDBRemoteCallingMarkExpired)
 	defer func() { finish(err) }()
@@ -268,6 +283,17 @@ func (rs *RemoteCallingStore) MarkExpired(ctx context.Context, id string) (err e
 		Update("status", model.RemoteCallingStatusExpired)
 	if result.Error != nil {
 		return classifyError(fmt.Errorf("store: mark remote calling expired: %w", result.Error))
+	}
+	if result.RowsAffected == 0 {
+		// Either the record doesn't exist, or it's already in a non-pending status.
+		var existing model.RemoteCalling
+		if err = rs.db.WithContext(ctx).Where("id = ?", id).First(&existing).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return classifyError(fmt.Errorf("store: get remote calling for expired check: %w", err))
+		}
+		return ErrConflict
 	}
 	return nil
 }

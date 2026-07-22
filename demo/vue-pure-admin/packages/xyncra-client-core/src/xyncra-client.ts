@@ -130,9 +130,18 @@ export interface GetConversationResult {
     agent_id: string;
     method: string;
     params: string;
+    interrupt_id: string;
     device_id: string;
     status: string;
+    result: string;
+    error_message: string;
+    success: boolean;
     created_at: Date;
+    resolved_at: Date | null;
+    expires_at: Date | null;
+    cancelled_at: Date | null;
+    cancelled_by: string;
+    cancel_reason: string;
   }>;
 }
 

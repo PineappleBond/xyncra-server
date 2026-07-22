@@ -1,9 +1,9 @@
-# TC-011-Vue: Remote Calling Vue 客户端联调测试
+# TC-011-Vue: Remote Calling Vue客户端联调测试
 
 > **测试编号**: TC-011-Vue
-> **测试类型**: 端到端联调测试（Vue 客户端 + Server）
-> **覆盖范围**: RemoteCalling 统一模型在 Vue 浏览器端的完整流程：函数注册、RemoteCalling 触发与弹窗、ask_user 输入、ask_user_choice 选择、客户端函数自动执行、取消操作、超时处理、重试机制
-> **环境**: Docker E2E + Vue Dev Server + Playwright
+> **测试类型**: 端到端集成测试 (Vue客户端联调)
+> **覆盖范围**: Vue客户端函数注册、RemoteCalling Dialog弹出、客户端执行函数、状态流转、边缘场景
+> **环境**: Docker E2E + Vue 浏览器客户端
 > **依赖**: [TC-011-Remote-Calling.md](TC-011-Remote-Calling.md)（Server 端测试用例）
 > **最后更新**: 2026-07-22
 
@@ -11,18 +11,25 @@
 
 ## 1. 概述
 
-本测试用例覆盖 Xyncra 的 **Remote Calling 机制在 Vue 客户端侧的完整联调流程**。与 TC-011 侧重 Server 端数据库和 RPC 验证不同，本文档聚焦于 Vue 客户端（`xyncra-client-vue`）在浏览器环境中的实际行为：WebSocket 连接、函数注册、RemoteCalling 接收、Dialog 交互、自动函数执行、取消操作、超时处理和重试机制。
+本测试用例覆盖 Xyncra 的 **Vue 客户端与服务端的 Remote Calling 联调测试**。验证 Vue 浏览器客户端能够正确处理 Remote Calling 的完整生命周期：函数注册、拉取 RemoteCallings、执行函数、上报结果。
 
 **测试目标**：
 
-- 验证 Vue 页面通过 `defineTestHelpers` 注册函数后，服务端收到 `register_functions` RPC
-- 验证 Agent 调用客户端函数时，Vue 弹窗（RemoteCallingDialog）正确显示
-- 验证 `ask_user` 类型的 RemoteCalling 弹出输入框，用户输入后 Agent 恢复
-- 验证 `ask_user_choice` 类型的 RemoteCalling 弹出选项，用户选择后 Agent 恢复
-- 验证 `pg_*` 客户端函数被 Agent 调用时，Vue 自动执行并返回结果
-- 验证用户点击取消后，服务端收到取消请求（`cancel_remote_calls`）
-- 验证 RemoteCalling 超时后，Server 标记为 expired，客户端不再显示
-- 验证网络断开后重连，客户端自动拉取未处理的 RemoteCalling
+- 验证 Vue 客户端 WebSocket 连接状态指示（FloatingAssistant）
+- 验证客户端函数注册（`defineTestHelpers`）端到端流程
+- 验证 RemoteCallingDialog 组件正确弹出并显示函数调用信息
+- 验证 useRemoteCalling composable 的拉取、过滤、resolve 逻辑
+- 验证客户端 IndexedDB 持久化（conversations, messages, remoteCallings, syncStates, retryQueue）
+- 验证状态流转：pending -> resolved（成功/失败）、pending -> cancelled、pending -> expired
+- 验证边缘场景：并行执行、断线重连、服务端重启恢复、上报失败重试
+
+**覆盖的关键组件**：
+
+- FloatingAssistant（浮动助手按钮，连接状态）
+- RemoteCallingDialog（RemoteCalling 弹窗）
+- useRemoteCalling（Composable）
+- SyncManager（同步管理器）
+- IndexedDB（Dexie）
 
 **覆盖的关键决策**：
 
@@ -36,7 +43,23 @@
 
 ---
 
-## 2. 环境拓扑
+## 2. 测试阶段划分
+
+本测试用例按以下五个阶段组织：
+
+| 阶段 | 名称 | 测试内容 | 用例数量 |
+| --- | --- | --- | --- |
+| 阶段 1 | 环境准备 | 启动服务器、Vue客户端、验证WebSocket连接 | 3 |
+| 阶段 2 | 函数注册测试 | 客户端注册函数、验证注册成功、验证函数列表 | 3 |
+| 阶段 3 | Remote Calling流程测试 | 发送触发消息、接收RemoteCalling、执行函数、上报结果、Agent恢复 | 6 |
+| 阶段 4 | 状态流转测试 | pending->resolved(成功/失败)、pending->cancelled、pending->expired | 4 |
+| 阶段 5 | 边缘场景测试 | 多个并行、断线重连、服务端重启、上报失败重试 | 4 |
+
+**总计**: 5个阶段，20个测试用例
+
+---
+
+## 3. 环境拓扑
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
@@ -329,11 +352,95 @@ flowchart TD
 
 ---
 
-# 阶段 1: 函数注册
+# 阶段 1: 环境准备
+
+> **目标**: 验证 Docker E2E 服务器、Vue 客户端启动成功，WebSocket 连接正常。
+
+### 步骤 1.1: 启动服务器并验证健康检查
+
+**操作**：
+
+```bash
+# 启动 Docker E2E 环境
+docker compose -f deploy/docker-compose.e2e.yml up -d
+sleep 5
+
+# 健康检查
+curl -s http://localhost:18080/health | jq .
+redis-cli -p 16379 ping
+```
+
+**验证（服务器）**：
+
+```bash
+# 预期: {"status":"ok"}
+# 预期: PONG
+```
+
+**判定**：Docker E2E 环境启动成功，服务器健康检查通过。
+
+---
+
+### 步骤 1.2: 启动 Vue 客户端并验证页面加载
+
+**操作**：
+
+```bash
+# 启动 Vue Dev Server
+cd demo/vue-pure-admin
+pnpm dev
+# 等待 Vite ready 输出
+```
+
+**验证（客户端）**：
+- 打开浏览器访问 Vue Dev Server 地址
+- 页面正常加载，无控制台错误
+
+**判定**：Vue 客户端启动成功，页面正常加载。
+
+---
+
+### 步骤 1.3: 验证 WebSocket 连接（FloatingAssistant 状态）
+
+**操作**：
+
+```bash
+# 执行测试脚本（登录 + 等待连接）
+cd demo/vue-pure-admin
+E2E_BASE_URL=http://localhost:5173 npx tsx e2e/tc011-remote-calling-test.ts --step 1.3
+```
+
+**验证（客户端 -- DOM）**：
+
+```bash
+# 检查 FloatingAssistant 按钮是否为绿色（已连接）
+# 在测试脚本输出中查看：
+# FloatingAssistant 状态: 已连接（绿色）
+```
+
+**验证（数据库 -- Server 日志）**：
+
+```bash
+docker logs xyncra-server-e2e 2>&1 | grep -i "websocket\|connected" | tail -5
+# 预期: 看到 WebSocket 连接建立日志
+```
+
+**验证（数据库 -- Redis）**：
+
+```bash
+redis-cli -p 16379 -n 15 SMEMBERS "xyncra:conn:user:test-user-vue"
+# 预期: 包含至少一个 connID
+```
+
+**判定**：FloatingAssistant 按钮为绿色，Redis 中有连接记录，WebSocket 连接正常。
+
+---
+
+# 阶段 2: 函数注册测试
 
 > **目标**: 验证 Vue 页面通过 `defineTestHelpers` 注册函数后，服务端收到 `register_functions` RPC 调用。
 
-### 步骤 1.1: 登录并连接 FloatingAssistant
+### 步骤 2.1: 导航到目标页面触发函数注册
 
 **操作**：
 
@@ -405,11 +512,46 @@ docker logs xyncra-server-e2e 2>&1 | grep -i "register_functions" | grep -o "pg_
 
 ---
 
-# 阶段 2: RemoteCalling 触发
+### 步骤 2.2: 验证函数命名规则
 
-> **目标**: 验证 Agent 调用客户端函数时，Vue 弹窗（RemoteCallingDialog）正确显示。
+**验证（数据库 -- Server 日志 -- 函数名格式）**：
 
-### 步骤 2.1: 发送消息触发 Agent 调用客户端函数
+```bash
+docker logs xyncra-server-e2e 2>&1 | grep -i "register_functions" | grep -o "pg_[a-z_]*" | sort -u
+# 预期: 看到符合 pg_{pageKey}_{functionName} 格式的函数名
+```
+
+**验证（客户端 -- DOM）**：
+
+```bash
+# 在测试脚本输出中查看：
+# 函数名列表: pg_chatai_sendMessage, pg_chatai_clearChat, ...
+```
+
+**判定**：函数命名规则正确，符合 `pg_{pageKey}_{functionName}` 格式。
+
+---
+
+### 步骤 2.3: 验证 Redis 中的函数注册
+
+**验证（数据库 -- Redis）**：
+
+```bash
+R="redis-cli -p 16379 -n 15"
+
+$R KEYS "xyncra:func:*"
+# 预期: 包含注册的函数 key
+```
+
+**判定**：Redis 中有函数注册记录，函数注册成功。
+
+---
+
+# 阶段 3: Remote Calling 流程测试
+
+> **目标**: 验证 Remote Calling 完整流程：发送触发消息、客户端接收 RemoteCalling、执行函数、上报结果、Agent 恢复。
+
+### 步骤 3.1: 发送消息触发 Agent 调用客户端函数
 
 **操作**：
 
@@ -463,7 +605,7 @@ $R EXISTS "agent:checkpoint:$CHECKPOINT_ID"
 
 ---
 
-### 步骤 2.2: 验证 RemoteCallingDialog 显示内容
+### 步骤 3.2: 验证 RemoteCallingDialog 显示内容
 
 **验证（客户端 -- DOM）**：
 
@@ -491,11 +633,9 @@ $DB "SELECT agent_status, agent_id, checkpoint_id FROM conversations WHERE id='$
 
 ---
 
-# 阶段 3: 用户输入 (ask_user)
+### 步骤 3.3: 客户端接收 RemoteCalling 并弹出 Dialog
 
 > **目标**: 验证 `ask_user` 类型的 RemoteCalling 弹出输入框，用户输入后 Agent 恢复执行。
-
-### 步骤 3.1: 触发 ask_user 弹窗
 
 **操作**：
 
@@ -536,7 +676,7 @@ $DB "SELECT agent_status FROM conversations WHERE id='$ASK_CONV_ID';"
 
 ---
 
-### 步骤 3.2: 用户输入回答并提交
+### 步骤 3.4: 客户端执行函数并上报结果
 
 **操作**：
 
@@ -589,12 +729,10 @@ $DB "SELECT agent_status FROM conversations WHERE id='$ASK_CONV_ID';"
 
 ---
 
-# 阶段 4: 用户选择 (ask_user_choice)
+### 步骤 3.5: Agent 恢复执行并验证最终回复
 
 > **目标**: 验证 `ask_user_choice` 类型的 RemoteCalling 弹出选项，用户选择后 Agent 恢复执行。
 > **注意**: `ask_user_choice` 在实现中与 `ask_user` 共用同一个 method (`ask_user`)，通过 params 中的选项信息区分。
-
-### 步骤 4.1: 触发 ask_user_choice 弹窗
 
 **操作**：
 
@@ -627,7 +765,7 @@ $DB "SELECT id, method, params, status FROM remote_callings WHERE method='ask_us
 
 ---
 
-### 步骤 4.2: 用户选择选项并提交
+### 步骤 3.6: 用户选择选项并提交
 
 **操作**：
 
@@ -667,11 +805,11 @@ $DB "SELECT sender_id, SUBSTR(content, 1, 100) FROM messages WHERE conversation_
 
 ---
 
-# 阶段 5: 客户端函数自动执行
+# 阶段 4: 状态流转测试
 
-> **目标**: 验证 Agent 调用 `pg_*` 函数时，Vue 客户端自动执行函数并返回结果（无需用户手动操作）。
+> **目标**: 验证 RemoteCalling 的状态流转：pending -> resolved（成功/失败）、pending -> cancelled、pending -> expired。
 
-### 步骤 5.1: 触发 Agent 调用 pg_* 函数
+### 步骤 4.1: pending -> resolved（成功）
 
 **操作**：
 
@@ -709,7 +847,7 @@ cat llm-logs-e2e/llm-calls.log | jq 'select(.phase == "tool_call") | {tool_name,
 
 ---
 
-### 步骤 5.2: 验证自动执行结果上报
+### 步骤 4.2: pending -> resolved（失败）
 
 **验证（数据库 -- SQLite -- RemoteCalling 自动 resolved）**：
 
@@ -749,11 +887,7 @@ $DB "SELECT agent_status FROM conversations WHERE id='$AUTO_CONV_ID';"
 
 ---
 
-# 阶段 6: 取消操作
-
-> **目标**: 验证用户点击取消后，客户端调用 `cancel_remote_calls` RPC，Server 标记为 cancelled。
-
-### 步骤 6.1: 触发 RemoteCalling 并点击取消
+### 步骤 4.3: pending -> cancelled（用户取消）
 
 **操作**：
 
@@ -808,11 +942,7 @@ docker logs xyncra-server-e2e 2>&1 | grep "cancel_remote_calls" | tail -5
 
 ---
 
-# 阶段 7: 超时处理
-
-> **目标**: 验证 RemoteCalling 超时后，Server 标记为 expired，客户端不再显示。
-
-### 步骤 7.1: 触发 RemoteCalling 并模拟超时
+### 步骤 4.4: pending -> expired（超时）
 
 **操作**：
 
@@ -832,7 +962,7 @@ echo "EXPIRE_RC_ID=$EXPIRE_RC_ID"
 # 预期: 非空
 ```
 
-### 步骤 7.2: 手动修改 expires_at 模拟过期
+### 步骤 4.4.2: 手动修改 expires_at 模拟过期
 
 **操作**：
 
@@ -850,14 +980,14 @@ $DB "SELECT id, expires_at FROM remote_callings WHERE id='$EXPIRE_RC_ID';"
 # 预期: expires_at 为过去时间
 ```
 
-### 步骤 7.3: 等待后台清理任务执行
+### 步骤 4.4.3: 等待后台清理任务执行
 
 ```bash
 # 后台清理任务每 5 分钟执行一次，等待 360 秒确保至少执行一次
 sleep 360
 ```
 
-### 步骤 7.4: 验证状态变为 expired
+### 步骤 4.4.4: 验证状态变为 expired
 
 **验证（数据库 -- SQLite -- 状态变更）**：
 
@@ -895,18 +1025,66 @@ $DB "SELECT sender_id, SUBSTR(content, 1, 100) FROM messages WHERE conversation_
 
 ---
 
-# 阶段 8: 重试机制（断线重连）
+# 阶段 5: 边缘场景测试
 
-> **目标**: 验证网络断开后重连，客户端自动拉取未处理的 RemoteCalling 并继续处理。
+> **目标**: 验证边缘场景：多个 RemoteCalling 并行执行、客户端断线重连、服务端重启后恢复、上报失败重试。
 
-### 步骤 8.1: 触发 RemoteCalling 后模拟断线
+### 步骤 5.1: 多个 RemoteCalling 并行执行
 
 **操作**：
 
 ```bash
-# 1. 发送消息触发 RemoteCalling
+# 发送消息触发多个函数调用
 cd demo/vue-pure-admin
-E2E_BASE_URL=http://localhost:5173 npx tsx e2e/tc011-remote-calling-test.ts --step 8.1
+E2E_BASE_URL=http://localhost:5173 npx tsx e2e/tc011-remote-calling-test.ts --step 5.1
+```
+
+**验证（数据库 -- SQLite -- 多个 RemoteCalling 创建）**：
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+$DB "SELECT id, method, status FROM remote_callings ORDER BY created_at DESC LIMIT 10;"
+# 预期: 多条记录，可能包含不同的 method
+```
+
+**验证（客户端 -- DOM -- Dialog 显示多个 tab）**：
+
+```bash
+# 在测试脚本输出中查看：
+# RemoteCallingDialog 是否弹出: true
+# Dialog 是否显示多个 tab: true
+# tab 数量: N
+```
+
+**验证（客户端 -- 逐个执行并上报）**：
+
+```bash
+# 在测试脚本输出中查看：
+# 所有 RemoteCalling 是否全部 resolved: true
+```
+
+**验证（数据库 -- SQLite -- 全部 resolved）**：
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+$DB "SELECT status, COUNT(*) FROM remote_callings GROUP BY status;"
+# 预期: 全部为 resolved
+```
+
+**判定**：多个并行 RemoteCalling 被创建，客户端逐个处理，全部 resolved 后 Agent 恢复执行。
+
+---
+
+### 步骤 5.2: 客户端断线重连
+
+**操作**：
+
+```bash
+# 1. 触发 RemoteCalling
+cd demo/vue-pure-admin
+E2E_BASE_URL=http://localhost:5173 npx tsx e2e/tc011-remote-calling-test.ts --step 5.2
 ```
 
 **验证（客户端 -- DOM -- RemoteCalling 弹出）**：
@@ -926,9 +1104,7 @@ echo "RECONNECT_RC_ID=$RECONNECT_RC_ID"
 # 预期: 非空
 ```
 
-### 步骤 8.2: 模拟网络断开
-
-**操作**：
+**操作（模拟断线）**：
 
 ```bash
 # 拦截 WebSocket 连接，模拟断线
@@ -942,9 +1118,7 @@ echo "RECONNECT_RC_ID=$RECONNECT_RC_ID"
 # 断线后 FloatingAssistant 状态: 断开连接（红色）
 ```
 
-### 步骤 8.3: 恢复网络连接
-
-**操作**：
+**操作（恢复连接）**：
 
 ```bash
 # 取消拦截，恢复 WebSocket 连接
@@ -974,9 +1148,7 @@ $DB "SELECT id, status FROM remote_callings WHERE id='$RECONNECT_RC_ID';"
 # 预期: status 仍为 pending（不因断线而消失）
 ```
 
-### 步骤 8.4: 重连后继续处理 RemoteCalling
-
-**验证（客户端 -- DOM -- 重连后可继续操作）**：
+**验证（客户端 -- 重连后继续处理）**：
 
 ```bash
 # 在测试脚本输出中查看：
@@ -997,9 +1169,148 @@ $DB "SELECT id, status FROM remote_callings WHERE id='$RECONNECT_RC_ID';"
 
 ---
 
-## 7. 数据库验证汇总
+### 步骤 5.3: 服务端重启后恢复
 
-### 7.1 Server SQLite 验证命令速查
+**操作**：
+
+```bash
+# 1. 触发 RemoteCalling
+cd demo/vue-pure-admin
+E2E_BASE_URL=http://localhost:5173 npx tsx e2e/tc011-remote-calling-test.ts --step 5.3
+```
+
+**验证（数据库 -- SQLite -- RemoteCalling 创建）**：
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+RESTART_RC_ID=$($DB "SELECT id FROM remote_callings WHERE status='pending' ORDER BY created_at DESC LIMIT 1;")
+echo "RESTART_RC_ID=$RESTART_RC_ID"
+# 预期: 非空
+```
+
+**操作（重启服务器）**：
+
+```bash
+# 重启 Docker E2E 服务器
+docker compose -f deploy/docker-compose.e2e.yml stop xyncra-server-e2e
+sleep 2
+docker compose -f deploy/docker-compose.e2e.yml start xyncra-server-e2e
+sleep 8
+
+# 健康检查
+curl -s http://localhost:18080/health
+# 预期: {"status":"ok"}
+```
+
+**验证（数据库 -- SQLite -- RemoteCalling 仍存在）**：
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+$DB "SELECT id, status FROM remote_callings WHERE id='$RESTART_RC_ID';"
+# 预期: status 仍为 pending（不因服务器重启而消失）
+```
+
+**验证（Redis -- Checkpoint 仍存在）**：
+
+```bash
+R="redis-cli -p 16379 -n 15"
+
+CHECKPOINT_ID=$(docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db "SELECT checkpoint_id FROM remote_callings WHERE id='$RESTART_RC_ID';")
+$R EXISTS "agent:checkpoint:$CHECKPOINT_ID"
+# 预期: 1（Checkpoint 仍在 Redis 中）
+```
+
+**验证（客户端 -- 重连后继续处理）**：
+
+```bash
+# 在测试脚本输出中查看：
+# 服务器重启后 FloatingAssistant 状态: 断开连接（红色）
+# 自动重连后 FloatingAssistant 状态: 已连接（绿色）
+# RemoteCallingDialog 是否重新弹出: true
+# 提交结果是否成功: true
+```
+
+**验证（数据库 -- SQLite -- RemoteCalling resolved）**：
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+$DB "SELECT id, status FROM remote_callings WHERE id='$RESTART_RC_ID';"
+# 预期: status=resolved
+```
+
+**判定**：服务端重启后，RemoteCalling 和 Checkpoint 数据存活，客户端重连后自动拉取并处理。
+
+---
+
+### 步骤 5.4: 上报失败重试
+
+**操作**：
+
+```bash
+# 1. 触发 RemoteCalling
+cd demo/vue-pure-admin
+E2E_BASE_URL=http://localhost:5173 npx tsx e2e/tc011-remote-calling-test.ts --step 5.4
+```
+
+**验证（数据库 -- SQLite -- RemoteCalling 创建）**：
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+RETRY_RC_ID=$($DB "SELECT id FROM remote_callings WHERE status='pending' ORDER BY created_at DESC LIMIT 1;")
+echo "RETRY_RC_ID=$RETRY_RC_ID"
+# 预期: 非空
+```
+
+**操作（模拟网络断开导致上报失败）**：
+
+```bash
+# 在测试脚本中通过 Playwright route.abort() 拦截 agent_resume 请求
+# 模拟上报失败
+```
+
+**验证（客户端 -- IndexedDB -- 重试队列）**：
+
+```bash
+# 在测试脚本输出中查看 IndexedDB retryQueue 表：
+# 重试队列是否有记录: true
+# 重试次数: N
+```
+
+**操作（恢复网络）**：
+
+```bash
+# 取消拦截，恢复网络
+# 在测试脚本中通过 Playwright unroute() 实现
+```
+
+**验证（客户端 -- 自动重试成功）**：
+
+```bash
+# 在测试脚本输出中查看：
+# 重试是否成功: true
+# 重试队列是否清空: true
+```
+
+**验证（数据库 -- SQLite -- RemoteCalling resolved）**：
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+$DB "SELECT id, status FROM remote_callings WHERE id='$RETRY_RC_ID';"
+# 预期: status=resolved
+```
+
+**判定**：上报失败时，客户端将结果保存到本地重试队列，网络恢复后自动重试，最终成功上报。
+
+---
+
+## 6. 数据库验证汇总
+
+### 6.1 Server SQLite 验证命令速查
 
 ```bash
 DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
@@ -1027,7 +1338,7 @@ $DB ".indices remote_callings"
 # 预期: 包含 idx_rc_conversation_status, idx_rc_checkpoint_status, idx_rc_status_expires
 ```
 
-### 7.2 Server Redis 验证命令速查
+### 6.2 Server Redis 验证命令速查
 
 ```bash
 R="redis-cli -p 16379 -n 15"
@@ -1045,7 +1356,7 @@ $R GET "agent:lock:<conversation-id>"
 $R SMEMBERS "xyncra:conn:user:test-user-vue"
 ```
 
-### 7.3 Server 日志验证命令速查
+### 6.3 Server 日志验证命令速查
 
 ```bash
 # 应用日志
@@ -1070,7 +1381,7 @@ cat llm-logs-e2e/llm-calls.log | jq 'select(.phase == "response") | {timestamp, 
 cat llm-logs-e2e/llm-calls.log | jq 'select(.phase == "error")'
 ```
 
-### 7.4 客户端 IndexedDB 验证
+### 6.4 客户端 IndexedDB 验证
 
 客户端 IndexedDB 查询通过测试脚本中的 `page.evaluate()` 执行，结果输出到控制台。
 
@@ -1084,35 +1395,39 @@ cat llm-logs-e2e/llm-calls.log | jq 'select(.phase == "error")'
 
 ---
 
-## 8. 通过/失败判定标准
+## 7. 通过/失败判定标准
 
 | 阶段 | 判定条件 | 通过 | 失败处理 |
-|------|---------|:---:|---------|
-| **阶段 1: 函数注册** | | | |
-| 步骤 1.1 | FloatingAssistant 连接成功（绿色） | pass | 检查 Vue Dev Server、Docker E2E |
-| 步骤 1.2 | Server 收到 register_functions | pass | 检查 defineTestHelpers 调用 |
-| **阶段 2: RemoteCalling 触发** | | | |
-| 步骤 2.1 | RemoteCallingDialog 弹出 | pass | 检查 Update 通知、SyncManager |
-| 步骤 2.2 | Dialog 正确显示内容 | pass | 检查 Dialog 组件渲染 |
-| **阶段 3: 用户输入** | | | |
-| 步骤 3.1 | ask_user Dialog 弹出 | pass | 检查 Agent 配置、Dialog 渲染 |
-| 步骤 3.2 | 用户输入后 Agent 恢复 | pass | 检查 agent_resume、checkpoint |
-| **阶段 4: 用户选择** | | | |
-| 步骤 4.1 | ask_user_choice Dialog 弹出 | pass | 同上 |
-| 步骤 4.2 | 用户选择后 Agent 恢复 | pass | 同上 |
-| **阶段 5: 客户端函数执行** | | | |
-| 步骤 5.1 | pg_* 函数自动执行 | pass | 检查 defineTestHelpers、函数注册 |
-| 步骤 5.2 | 执行结果上报 + Agent 恢复 | pass | 检查 agent_resume |
-| **阶段 6: 取消操作** | | | |
-| 步骤 6.1 | 取消后 Server 标记 cancelled | pass | 检查 cancel_remote_calls RPC |
-| **阶段 7: 超时处理** | | | |
-| 步骤 7.4 | 超时后 Server 标记 expired | pass | 检查后台清理任务 |
-| **阶段 8: 重试机制** | | | |
-| 步骤 8.4 | 重连后自动拉取并处理 | pass | 检查 fullSync、重连逻辑 |
+| --- | --- | :---: | --- |
+| **阶段 1: 环境准备** | | | |
+| 步骤 1.1 | Docker E2E 启动成功 | pass | 检查 docker compose 配置 |
+| 步骤 1.2 | Vue 客户端启动成功 | pass | 检查 pnpm dev |
+| 步骤 1.3 | FloatingAssistant 连接成功（绿色） | pass | 检查 WebSocket 连接 |
+| **阶段 2: 函数注册测试** | | | |
+| 步骤 2.1 | Server 收到 register_functions | pass | 检查 defineTestHelpers 调用 |
+| 步骤 2.2 | 函数命名规则正确 | pass | 检查 pg_{pageKey}_{functionName} 格式 |
+| 步骤 2.3 | Redis 中有函数注册 | pass | 检查 xyncra:func:* |
+| **阶段 3: Remote Calling 流程** | | | |
+| 步骤 3.1 | RemoteCalling 记录创建到 DB | pass | 检查 Agent 配置、LLM 调用 |
+| 步骤 3.2 | RemoteCallingDialog 弹出 | pass | 检查 useRemoteCalling 挂载 |
+| 步骤 3.3 | IndexedDB 有 RemoteCalling 记录 | pass | 检查 SyncManager、Dexie 事务 |
+| 步骤 3.4 | agent_resume 调用成功 | pass | 检查 Server 日志 |
+| 步骤 3.5 | RemoteCalling 状态更新为 resolved | pass | 检查 DB |
+| 步骤 3.6 | Agent 恢复执行并回复 | pass | 检查 Checkpoint、锁 |
+| **阶段 4: 状态流转测试** | | | |
+| 步骤 4.1 | pending -> resolved（成功） | pass | |
+| 步骤 4.2 | pending -> resolved（失败） | pass | |
+| 步骤 4.3 | pending -> cancelled | pass | 检查 cancel_remote_calls RPC |
+| 步骤 4.4 | pending -> expired | pass | 检查后台清理任务 |
+| **阶段 5: 边缘场景测试** | | | |
+| 步骤 5.1 | 多个并行 RemoteCalling 全部 resolved | pass | |
+| 步骤 5.2 | 断线重连后自动处理 | pass | 检查 fullSync、重连逻辑 |
+| 步骤 5.3 | 服务端重启后数据存活 | pass | 检查 Redis 持久化 |
+| 步骤 5.4 | 上报失败重试机制 | pass | 检查 retryQueue |
 
 ---
 
-## 9. 故障排查指南
+## 8. 故障排查指南
 
 | 症状 | 可能原因 | 排查方法 |
 |------|---------|---------|
@@ -1137,7 +1452,7 @@ cat llm-logs-e2e/llm-calls.log | jq 'select(.phase == "error")'
 | `locator.fill` strict mode violation | Dialog 有多个 tab（多个 RemoteCalling），选择器匹配多个元素 | 使用 `.first()` 或 `fillAllDialogResults` 逐个 tab 填写 |
 | 测试间状态污染 | IndexedDB/Redis/SQLite 残留数据 | 测试前执行数据库清理脚本（见 3.8 节） |
 
-### 9.1 已知问题与弯路
+### 8.1 已知问题与弯路
 
 #### 问题 1: Device ID 冲突导致 RemoteCallingDialog 不弹出
 
@@ -1177,7 +1492,7 @@ cat llm-logs-e2e/llm-calls.log | jq 'select(.phase == "error")'
 
 ---
 
-## 10. 环境清理
+## 9. 环境清理
 
 ```bash
 # 停止 Docker E2E
@@ -1192,7 +1507,7 @@ rm -rf llm-logs-e2e/
 
 ---
 
-## 11. 关键源码参考
+## 10. 关键源码参考
 
 | 文件 | 说明 |
 |------|------|
@@ -1216,7 +1531,7 @@ rm -rf llm-logs-e2e/
 
 ---
 
-## 12. 测试执行记录模板
+## 11. 测试执行记录模板
 
 ```markdown
 ### TC-011-Vue 测试执行记录
@@ -1230,58 +1545,50 @@ rm -rf llm-logs-e2e/
 | Vue Dev Server | http://localhost:<port> |
 | Device ID | test-device-<timestamp> |
 
-#### 阶段 1: 函数注册
+#### 阶段 1: 环境准备
 
 | 步骤 | 结果 | 备注 |
-|------|------|------|
-| 步骤 1.1: WebSocket 连接 | pass / fail | |
-| 步骤 1.2: 函数注册 | pass / fail | D-115 |
+| --- | --- | --- |
+| 步骤 1.1: Docker E2E 启动 | pass / fail | |
+| 步骤 1.2: Vue 客户端启动 | pass / fail | |
+| 步骤 1.3: WebSocket 连接 | pass / fail | |
 
-#### 阶段 2: RemoteCalling 触发
-
-| 步骤 | 结果 | 备注 |
-|------|------|------|
-| 步骤 2.1: RemoteCalling 弹窗 | pass / fail | D-137 |
-| 步骤 2.2: Dialog 显示内容 | pass / fail | |
-
-#### 阶段 3: 用户输入
+#### 阶段 2: 函数注册测试
 
 | 步骤 | 结果 | 备注 |
-|------|------|------|
-| 步骤 3.1: ask_user 弹窗 | pass / fail | |
-| 步骤 3.2: 用户输入后恢复 | pass / fail | |
+| --- | --- | --- |
+| 步骤 2.1: register_functions | pass / fail | D-115 |
+| 步骤 2.2: 函数命名规则 | pass / fail | |
+| 步骤 2.3: Redis 函数注册 | pass / fail | |
 
-#### 阶段 4: 用户选择
-
-| 步骤 | 结果 | 备注 |
-|------|------|------|
-| 步骤 4.1: ask_user_choice 弹窗 | pass / fail | |
-| 步骤 4.2: 用户选择后恢复 | pass / fail | |
-
-#### 阶段 5: 客户端函数执行
+#### 阶段 3: Remote Calling 流程
 
 | 步骤 | 结果 | 备注 |
-|------|------|------|
-| 步骤 5.1: pg_* 自动执行 | pass / fail | |
-| 步骤 5.2: 结果上报 + 恢复 | pass / fail | |
+| --- | --- | --- |
+| 步骤 3.1: RemoteCalling 创建 | pass / fail | D-137 |
+| 步骤 3.2: RemoteCallingDialog 弹出 | pass / fail | |
+| 步骤 3.3: IndexedDB 记录 | pass / fail | |
+| 步骤 3.4: agent_resume 调用 | pass / fail | |
+| 步骤 3.5: 状态更新 resolved | pass / fail | |
+| 步骤 3.6: Agent 恢复执行 | pass / fail | |
 
-#### 阶段 6: 取消操作
-
-| 步骤 | 结果 | 备注 |
-|------|------|------|
-| 步骤 6.1: 取消后 Server 标记 | pass / fail | |
-
-#### 阶段 7: 超时处理
+#### 阶段 4: 状态流转测试
 
 | 步骤 | 结果 | 备注 |
-|------|------|------|
-| 步骤 7.4: 超时后 expired | pass / fail | D-123 |
+| --- | --- | --- |
+| 步骤 4.1: resolved（成功） | pass / fail | |
+| 步骤 4.2: resolved（失败） | pass / fail | |
+| 步骤 4.3: cancelled | pass / fail | |
+| 步骤 4.4: expired | pass / fail | D-123 |
 
-#### 阶段 8: 重试机制
+#### 阶段 5: 边缘场景测试
 
 | 步骤 | 结果 | 备注 |
-|------|------|------|
-| 步骤 8.4: 重连后处理 | pass / fail | |
+| --- | --- | --- |
+| 步骤 5.1: 并行调用 | pass / fail | D-138 |
+| 步骤 5.2: 断线重连 | pass / fail | |
+| 步骤 5.3: 服务端重启 | pass / fail | |
+| 步骤 5.4: 上报重试 | pass / fail | |
 
 **LLM 行为观察**：
 - Agent 是否调用了客户端函数？是 / 否

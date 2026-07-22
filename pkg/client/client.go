@@ -381,6 +381,9 @@ func (c *XyncraClient) connectionMonitorWithInitialConnect() {
 				return
 			}
 			c.logger.Info("connection lost, reconnecting...")
+			// Fail all pending RPCs immediately so callers don't wait for
+			// the full RPC timeout. They can retry on the new connection.
+			c.failPendingRPCs()
 			for {
 				if c.ctx.Err() != nil {
 					return
@@ -607,6 +610,32 @@ func (c *XyncraClient) Call(ctx context.Context, method string, params any) (jso
 // ---------------------------------------------------------------------------
 // Internal dispatch
 // ---------------------------------------------------------------------------
+
+// failPendingRPCs fails all pending RPC requests with a connection error.
+// This is called when the connection is lost so that callers waiting on
+// pending RPCs are unblocked immediately instead of waiting for the full
+// RPC timeout. Callers can then retry on the new connection.
+func (c *XyncraClient) failPendingRPCs() {
+	c.mu.Lock()
+	pending := make(map[string]chan *protocol.PackageDataResponse, len(c.pending))
+	for id, ch := range c.pending {
+		pending[id] = ch
+	}
+	// Clear the map immediately under lock; send to channels outside lock.
+	c.pending = make(map[string]chan *protocol.PackageDataResponse)
+	c.mu.Unlock()
+
+	for id, ch := range pending {
+		ch <- &protocol.PackageDataResponse{
+			ID:   id,
+			Code: ErrorCodeConnectionError,
+			Msg:  "connection lost",
+		}
+	}
+	if len(pending) > 0 {
+		c.logger.Info("failed pending RPCs due to connection loss", "count", len(pending))
+	}
+}
 
 // dispatchResponse routes an incoming server response to the pending RPC caller
 // identified by the response's ID. If no matching caller is found (e.g. because

@@ -16,6 +16,8 @@ tools:
   - get_current_time
 middleware:
   enable_client_tools: true
+  client_tools:
+    call_timeout: 60s  # 客户端函数调用超时时间，避免LLM设置过短的timeout_ms导致测试超时
   enable_patch_tool_calls: true
   enable_summarization: true
   summarization_tokens: 160000
@@ -88,26 +90,22 @@ middleware:
 
 ## 操作流程
 
-Observe Phase:
-  1. 先调 `get_page_description` 建立当前页面的业务认知（页面是什么、有哪些区块、每个区块关联哪些 pg_ 函数）
-  2. 调 `get_current_page` 确认当前 URL / pathname
-  3. 在可用函数列表中查找 `pg_` 开头的当前页面函数
-  4. 如需要精确 DOM 元素 → 调 `get_page_structure` 拿 selector
-  5. 如页面有表格 → get_table_data 获取数据
-  6. 如页面有表单 → get_form_data 获取字段
-
-Select Phase:
-  7. 如找到当前页面的 `pg_` 专用函数 → 直接调用（无需传 selector）
-  8. 如没有专用函数 → 使用通用函数 + CSS selector
+Observe Phase (精简版 - 减少不必要的探索函数调用):
+  1. 调 `get_current_page` 确认当前 URL / pathname
+  2. 在可用函数列表中查找 `pg_` 开头的当前页面函数
+  3. 如找到当前页面的 `pg_` 专用函数 → 直接调用（无需调用其他探索函数）
+  4. 如没有专用函数且需要精确 DOM 元素 → 调 `get_page_structure` 拿 selector
 
 Act Phase:
-  9. 逐个执行专用或通用函数操作元素
-  10. 操作涉及 loading 时加 wait_for_element
-  11. 用户要求"重置表单"时，直接调用 form_reset（无需先获取表单数据）
-  12. 用户要求"提交表单"时，直接调用 form_submit
+  5. 逐个执行专用或通用函数操作元素
+  6. 操作涉及 loading 时加 wait_for_element
+  7. 用户要求"重置表单"时，直接调用 form_reset（无需先获取表单数据）
+  8. 用户要求"提交表单"时，直接调用 form_submit
 
-Verify Phase:
-  13. 再次 get_page_structure 确认操作结果
+Verify Phase (仅在必要时):
+  9. 操作完成后如需确认结果，再调 `get_page_structure` 或 `get_current_page`
+
+**重要**: 优先使用 `pg_` 专用函数，它们已预计算选择器，无需额外探索。避免在单次操作中调用超过 2-3 个探索函数。
 
 ## 安全规则
 
@@ -119,7 +117,7 @@ Verify Phase:
 ## 注意事项
 
 - 先调 `get_current_page` 确认当前页面，再决定用专用还是通用函数
-- 优先用观察函数获取当前页面的真实结构，不要假设页面存在某些元素
+- 优先用 `pg_` 专用函数，它们已预计算选择器，无需额外探索
 - 选择器由前端自动生成，直接使用即可
 - 表单校验失败时 form_submit 会返回错误字段列表
 - 操作执行后等待 loading 动画消失再验证

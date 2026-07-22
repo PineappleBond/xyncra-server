@@ -53,6 +53,7 @@ type Dependencies struct {
 //   - "reload_agents": reload agent configs from disk directory (D-076)
 //   - "agent_resume": resume a paused agent after HITL interrupt (Phase 8B / D-085)
 //   - "system.register_functions": register device function capabilities (D-098, nil-safe)
+//   - "system.reconnect": client reconnect handshake (D-072)
 //
 // Note: mq_send_message is a task handler (processed by the MQ worker), not a
 // method handler (invoked by client RPC), and is therefore not registered here.
@@ -79,4 +80,8 @@ func RegisterAll(h *server.DefaultMessageHandler, deps Dependencies) {
 	if deps.FunctionRegistry != nil {
 		h.RegisterMethod("system.register_functions", NewRegisterFunctionsHandler(deps.FunctionRegistry))
 	}
+	// system.reconnect: client reconnect handshake (D-072).
+	// Logs the reconnect event and returns success. Future enhancements
+	// may include PendingStore replay logic.
+	h.RegisterMethod("system.reconnect", NewSystemReconnectHandler(deps.Logger))
 }

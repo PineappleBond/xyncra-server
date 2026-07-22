@@ -18,6 +18,8 @@ tools:
   - retrieve_tool_result
 middleware:
   enable_client_tools: true
+  client_tools:
+    call_timeout: 60s  # 客户端函数调用超时时间，避免LLM设置过短的timeout_ms导致测试超时
   enable_patch_tool_calls: true
   enable_summarization: true
   summarization_tokens: 160000

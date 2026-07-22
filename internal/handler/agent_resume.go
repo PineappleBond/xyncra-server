@@ -80,6 +80,17 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 		return nil, protocol.NewValidationError("id and agent_id are required")
 	}
 
+	// BUG-FIX: Validate Result/ErrorMessage length to prevent oversized payloads.
+	// Result max 1MB, ErrorMessage max 10KB.
+	const maxResultSize = 1 * 1024 * 1024       // 1MB
+	const maxErrorMessageSize = 10 * 1024       // 10KB
+	if len(params.Result) > maxResultSize {
+		return nil, protocol.NewValidationError("result exceeds maximum size (1MB)")
+	}
+	if len(params.ErrorMessage) > maxErrorMessageSize {
+		return nil, protocol.NewValidationError("error_message exceeds maximum size (10KB)")
+	}
+
 	// 3. Fetch RemoteCalling by ID to get conversation_id and checkpoint_id.
 	rcs := h.store.RemoteCallingStore()
 	if rcs == nil {
@@ -161,10 +172,13 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 		senderID = client.UserID()
 		deviceID = client.DeviceID()
 	}
+	// BUG-FIX: Use rc.AgentID (from database record) instead of params.AgentID
+	// (from client request) to prevent a malicious client from specifying an
+	// arbitrary agent_id. The database record is the source of truth.
 	payload := agentResumeTaskPayload{
 		ConversationID: rc.ConversationID,
 		CheckpointID:   rc.CheckpointID,
-		AgentID:        params.AgentID,
+		AgentID:        rc.AgentID,
 		SenderID:       senderID,
 		DeviceID:       deviceID,
 	}

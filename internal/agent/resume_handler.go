@@ -230,6 +230,12 @@ func NewAgentResumeHandler(
 			}
 		}
 		if len(targets) == 0 {
+			// Defensive log: empty rcList indicates data inconsistency.
+			if len(rcList) == 0 {
+				logger.Info("agent resume: no remote callings found for checkpoint — possible data inconsistency",
+					"checkpoint_id", payload.CheckpointID,
+					"conversation_id", payload.ConversationID)
+			}
 			// Check if all RemoteCallings are expired/cancelled (BUG-003).
 			// If so, clean up the conversation instead of resuming with empty targets,
 			// which would cause the agent to re-call the function and create an
@@ -375,7 +381,7 @@ func NewAgentResumeHandler(
 				if executor.remoteCallingStore != nil {
 					timeoutMs := interruptInfo.TimeoutMs
 					if timeoutMs <= 0 {
-						timeoutMs = 30000
+						timeoutMs = DefaultClientFunctionCallTimeoutMs // unified fallback constant
 					}
 					expiresAt := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 					rc := &model.RemoteCalling{
