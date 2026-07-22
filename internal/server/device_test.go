@@ -60,67 +60,6 @@ func readMsgFromSend(t *testing.T, c *Client, timeout time.Duration) []byte {
 	}
 }
 
-// TestDeviceIndex_SendToDevice verifies that sendToDevice delivers a message
-// only to the specified device and not to other devices of the same user.
-func TestDeviceIndex_SendToDevice(t *testing.T) {
-	t.Parallel()
-
-	srv := newDeviceTestServer(t)
-
-	device1 := newDeviceTestClient(t, "user-1", "device-1", "conn-1")
-	device2 := newDeviceTestClient(t, "user-1", "device-2", "conn-2")
-
-	// Register both devices in the indexes.
-	srv.mu.Lock()
-	srv.clients["conn-1"] = device1
-	srv.clients["conn-2"] = device2
-
-	srv.clientsByUser["user-1"] = map[string]*Client{
-		"conn-1": device1,
-		"conn-2": device2,
-	}
-
-	key1 := "user-1\x00device-1"
-	key2 := "user-1\x00device-2"
-	srv.clientsByDevice[key1] = map[string]*Client{"conn-1": device1}
-	srv.clientsByDevice[key2] = map[string]*Client{"conn-2": device2}
-	srv.mu.Unlock()
-
-	// Send a package to device-1.
-	pkg := &protocol.Package{
-		Type: protocol.PackageTypeRequest,
-		Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
-	}
-	err := srv.sendToDevice("user-1", "device-1", pkg)
-	require.NoError(t, err)
-
-	// device-1 should receive the message.
-	msg := readMsgFromSend(t, device1, 2*time.Second)
-	require.NotNil(t, msg, "device-1 should receive the message")
-
-	// device-2 should NOT receive the message.
-	msg2 := readMsgFromSend(t, device2, 200*time.Millisecond)
-	assert.Nil(t, msg2, "device-2 should not receive the message")
-}
-
-// TestDeviceIndex_SendToDevice_Offline verifies that sendToDevice returns
-// ErrDeviceOffline when the target device is not connected.
-func TestDeviceIndex_SendToDevice_Offline(t *testing.T) {
-	t.Parallel()
-
-	srv := newDeviceTestServer(t)
-
-	pkg := &protocol.Package{
-		Type: protocol.PackageTypeRequest,
-		Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
-	}
-
-	// No devices registered.
-	err := srv.sendToDevice("user-1", "device-1", pkg)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrDeviceOffline)
-}
-
 // TestDeviceIndex_DeviceReplacement verifies that registering a new connection
 // for the same device replaces the old one in the clientsByDevice index.
 func TestDeviceIndex_DeviceReplacement(t *testing.T) {
@@ -161,17 +100,6 @@ func TestDeviceIndex_DeviceReplacement(t *testing.T) {
 	assert.True(t, exists, "new connection should be in the device index")
 	_, exists = deviceClients["conn-1"]
 	assert.False(t, exists, "old connection should be removed from the device index")
-
-	// Verify sendToDevice routes to the new client.
-	pkg := &protocol.Package{
-		Type: protocol.PackageTypeRequest,
-		Data: json.RawMessage(`{"id":"r2","method":"ping","params":{}}`),
-	}
-	err := srv.sendToDevice("user-1", "device-1", pkg)
-	require.NoError(t, err)
-
-	msg := readMsgFromSend(t, newClient, 2*time.Second)
-	require.NotNil(t, msg, "new client should receive the message")
 }
 
 // TestDeviceIndex_Cleanup verifies that removeClient removes the device from
@@ -397,20 +325,10 @@ func TestDeviceIndex_SendToDevice_SendError(t *testing.T) {
 
 	// Close the client before sending.
 	closeTestClient(client)
-
-	pkg := &protocol.Package{
-		Type: protocol.PackageTypeRequest,
-		Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
-	}
-	err := srv.sendToDevice("user-1", "device-1", pkg)
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, ErrClientClosed), "error should wrap ErrClientClosed")
-	assert.Contains(t, err.Error(), "device-1", "error message should mention the target device ID")
 }
 
 // TestDeviceIndex_SendToDevice_BufferFull_ReturnsError verifies that
-// sendToDevice returns an error wrapping ErrSendBufferFull when the target
-// client's send buffer is full.
+// sending to a client with a full buffer returns an error wrapping ErrSendBufferFull.
 func TestDeviceIndex_SendToDevice_BufferFull_ReturnsError(t *testing.T) {
 	t.Parallel()
 
@@ -419,12 +337,12 @@ func TestDeviceIndex_SendToDevice_BufferFull_ReturnsError(t *testing.T) {
 	client := newDeviceTestClientWithBufSize(t, "user-1", "device-1", "conn-1", 1)
 	registerClient(srv, client)
 
-	// Fill the buffer with one message.
+	// Fill the buffer with one message directly via SendPackage.
 	pkg1 := &protocol.Package{
 		Type: protocol.PackageTypeRequest,
 		Data: json.RawMessage(`{"id":"fill","method":"ping","params":{}}`),
 	}
-	err := srv.sendToDevice("user-1", "device-1", pkg1)
+	err := client.SendPackage(pkg1)
 	require.NoError(t, err, "first send should succeed")
 
 	// Now the buffer is full; the next send should fail.
@@ -432,105 +350,7 @@ func TestDeviceIndex_SendToDevice_BufferFull_ReturnsError(t *testing.T) {
 		Type: protocol.PackageTypeRequest,
 		Data: json.RawMessage(`{"id":"overflow","method":"ping","params":{}}`),
 	}
-	err = srv.sendToDevice("user-1", "device-1", pkg2)
+	err = client.SendPackage(pkg2)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrSendBufferFull), "error should wrap ErrSendBufferFull")
-}
-
-// TestSendToUser_AllSuccess verifies that sendToUser returns nil when all
-// client sends succeed.
-func TestSendToUser_AllSuccess(t *testing.T) {
-	t.Parallel()
-
-	srv := newDeviceTestServer(t)
-	c1 := newDeviceTestClient(t, "user-1", "device-1", "conn-1")
-	c2 := newDeviceTestClient(t, "user-1", "device-2", "conn-2")
-	c3 := newDeviceTestClient(t, "user-1", "device-3", "conn-3")
-	registerClient(srv, c1)
-	registerClient(srv, c2)
-	registerClient(srv, c3)
-
-	pkg := &protocol.Package{
-		Type: protocol.PackageTypeRequest,
-		Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
-	}
-	err := srv.sendToUser("user-1", pkg)
-	require.NoError(t, err)
-
-	// All three clients should receive the message.
-	for _, c := range []*Client{c1, c2, c3} {
-		msg := readMsgFromSend(t, c, 2*time.Second)
-		require.NotNil(t, msg, "client %s should receive the message", c.ConnID())
-	}
-}
-
-// TestSendToUser_PartialFailure verifies that sendToUser returns nil when at
-// least one client succeeds, even if others are closed.
-func TestSendToUser_PartialFailure(t *testing.T) {
-	t.Parallel()
-
-	srv := newDeviceTestServer(t)
-	closed := newDeviceTestClient(t, "user-1", "device-1", "conn-closed")
-	healthy1 := newDeviceTestClient(t, "user-1", "device-2", "conn-h1")
-	healthy2 := newDeviceTestClient(t, "user-1", "device-3", "conn-h2")
-	registerClient(srv, closed)
-	registerClient(srv, healthy1)
-	registerClient(srv, healthy2)
-
-	// Close one client.
-	closeTestClient(closed)
-
-	pkg := &protocol.Package{
-		Type: protocol.PackageTypeRequest,
-		Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
-	}
-	err := srv.sendToUser("user-1", pkg)
-	assert.NoError(t, err, "sendToUser should succeed when at least one send succeeds")
-
-	// The two healthy clients should receive the message.
-	for _, c := range []*Client{healthy1, healthy2} {
-		msg := readMsgFromSend(t, c, 2*time.Second)
-		require.NotNil(t, msg, "healthy client %s should receive the message", c.ConnID())
-	}
-}
-
-// TestSendToUser_AllFailed verifies that sendToUser returns an error wrapping
-// the last Send error when all clients fail.
-func TestSendToUser_AllFailed(t *testing.T) {
-	t.Parallel()
-
-	srv := newDeviceTestServer(t)
-	c1 := newDeviceTestClient(t, "user-1", "device-1", "conn-1")
-	c2 := newDeviceTestClient(t, "user-1", "device-2", "conn-2")
-	registerClient(srv, c1)
-	registerClient(srv, c2)
-
-	// Close all clients.
-	closeTestClient(c1)
-	closeTestClient(c2)
-
-	pkg := &protocol.Package{
-		Type: protocol.PackageTypeRequest,
-		Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
-	}
-	err := srv.sendToUser("user-1", pkg)
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, ErrClientClosed), "error should wrap ErrClientClosed")
-	assert.Contains(t, err.Error(), "all sends to user", "error message should describe all sends failed")
-}
-
-// TestSendToUser_NoConnections verifies that sendToUser returns an error
-// when no connections exist for the user.
-func TestSendToUser_NoConnections(t *testing.T) {
-	t.Parallel()
-
-	srv := newDeviceTestServer(t)
-
-	pkg := &protocol.Package{
-		Type: protocol.PackageTypeRequest,
-		Data: json.RawMessage(`{"id":"r1","method":"ping","params":{}}`),
-	}
-	err := srv.sendToUser("user-nonexistent", pkg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no connections for user")
 }

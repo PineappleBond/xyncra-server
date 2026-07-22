@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
-	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
@@ -18,13 +16,15 @@ import (
 
 // newClientFunctionTool creates a tool.InvokableTool backed by a remote
 // client function. The tool's Info() returns a schema built from the
-// FunctionInfo's JSON Schema; InvokableRun() calls ServerRequest to
-// invoke the function on the originating device (D-100).
+// FunctionInfo's JSON Schema; InvokableRun() triggers a tool.Interrupt
+// to pause execution and create a RemoteCalling for async client invocation.
+//
+// On resume, the tool detects it via tool.GetResumeContext and returns the
+// client's response directly without re-interrupting.
 func newClientFunctionTool(
 	funcInfo protocol.FunctionInfo,
-	c ClientCaller,
 	userID, deviceID string,
-	defaultTimeout time.Duration,
+	defaultCallTimeoutMs int,
 ) (tool.InvokableTool, error) {
 	toolInfo, err := buildToolInfo(funcInfo)
 	if err != nil {
@@ -34,7 +34,7 @@ func newClientFunctionTool(
 	return utils.NewTool[json.RawMessage, string](
 		toolInfo,
 		func(ctx context.Context, input json.RawMessage) (string, error) {
-			return executeClientFunction(ctx, c, userID, deviceID, funcInfo, input, defaultTimeout)
+			return executeClientFunction(ctx, funcInfo, deviceID, input, defaultCallTimeoutMs)
 		},
 	), nil
 }
@@ -73,83 +73,44 @@ func buildToolInfo(funcInfo protocol.FunctionInfo) (*schema.ToolInfo, error) {
 	}, nil
 }
 
-// executeClientFunction sends a ReverseRPC request to the client device
-// and returns the response data as a string. Errors are mapped to
-// LLM-friendly messages per D-100.
+// executeClientFunction invokes a client function via the RemoteCalling
+// interrupt-resume pattern. On first call, it triggers tool.Interrupt to
+// pause execution. On resume, it returns the client's response data.
 //
-// When the device is detected as offline, the function waits briefly (3s)
-// and retries once, since the device may be in the process of reconnecting.
+// The interrupt data JSON contains method, params, device_id, and timeout_ms.
+// The executor's interrupt handler parses this to create a RemoteCalling record.
 func executeClientFunction(
 	ctx context.Context,
-	c ClientCaller,
-	userID, deviceID string,
 	funcInfo protocol.FunctionInfo,
+	deviceID string,
 	input json.RawMessage,
-	defaultTimeout time.Duration,
+	defaultCallTimeoutMs int,
 ) (string, error) {
-	timeout := defaultTimeout
-	if funcInfo.TimeoutMs > 0 {
-		timeout = time.Duration(funcInfo.TimeoutMs) * time.Millisecond
+	// Check if we are being resumed after an interrupt.
+	isResumeTarget, hasData, data := tool.GetResumeContext[string](ctx)
+	if isResumeTarget && hasData {
+		return data, nil
 	}
-	if timeout <= 0 {
-		timeout = 30 * time.Second
+	if isResumeTarget && !hasData {
+		return agenttools.SoftFailure("client function call timed out or was cancelled"), nil
 	}
 
-	resp, err := c.ServerRequest(ctx, userID, deviceID, funcInfo.Name, input, timeout)
-	if err != nil && isDeviceOfflineError(err) {
-		// Wait 3 seconds before retrying — the device may be reconnecting.
-		select {
-		case <-time.After(3 * time.Second):
-		case <-ctx.Done():
-			return agenttools.SoftFailure("tool call cancelled"), nil
+	// First call: build interrupt data and trigger interrupt.
+	timeoutMs := funcInfo.TimeoutMs
+	if timeoutMs <= 0 {
+		if defaultCallTimeoutMs > 0 {
+			timeoutMs = defaultCallTimeoutMs
+		} else {
+			timeoutMs = 30000 // 30s fallback default
 		}
-		resp, err = c.ServerRequest(ctx, userID, deviceID, funcInfo.Name, input, timeout)
-	}
-	if err != nil {
-		// Recoverable failure: surface the reason as normal tool content so the
-		// LLM can self-correct or retry, instead of aborting the run (D-101).
-		return agenttools.SoftFailure(formatClientToolError(err)), nil
 	}
 
-	if resp.Code < 0 {
-		// Client returned a business error (e.g. unknown method, handler
-		// failure). Return it as content, not a Go error, so the LLM sees the
-		// reason and can adapt (D-101).
-		return agenttools.SoftFailure(fmt.Sprintf(
-			"client returned error (code %d): %s", resp.Code, resp.Msg,
-		)), nil
-	}
+	interruptData, _ := json.Marshal(map[string]any{
+		"method":     funcInfo.Name,
+		"params":     string(input),
+		"device_id":  deviceID,
+		"timeout_ms": timeoutMs,
+	})
 
-	return string(resp.Data), nil
-}
-
-// isDeviceOfflineError returns true if the error indicates the target device
-// is not connected. It checks for known offline-related error strings that
-// cross the agent/server package boundary via fmt.Errorf wrapping.
-func isDeviceOfflineError(err error) bool {
-	errStr := err.Error()
-	return strings.Contains(errStr, "device offline") ||
-		strings.Contains(errStr, "no connections") ||
-		strings.Contains(errStr, "device is offline")
-}
-
-// formatClientToolError maps low-level errors to LLM-friendly messages
-// per D-100. The returned string is used as the tool error shown to the
-// LLM, allowing it to decide on retry or user notification.
-func formatClientToolError(err error) string {
-	errStr := err.Error()
-
-	if strings.Contains(errStr, "deadline exceeded") || strings.Contains(errStr, "timeout") {
-		return "tool call failed: request timed out. The client device may be slow or unresponsive."
-	}
-
-	if strings.Contains(errStr, "persisted for replay") {
-		return "tool call failed: device is temporarily offline. The request has been queued and will be executed when the device reconnects. Please inform the user to wait a moment."
-	}
-
-	if strings.Contains(errStr, "no connections") || strings.Contains(errStr, "device") {
-		return "tool call failed: device is offline. The client device is not currently connected."
-	}
-
-	return "tool call failed: unable to reach the device. Connection may have been lost."
+	return "", tool.Interrupt(ctx, string(interruptData))
 }

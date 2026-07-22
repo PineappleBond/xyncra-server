@@ -405,6 +405,11 @@ export class XyncraClient {
     return this.connMgr.getDeviceID();
   }
 
+  /** Returns the underlying database instance for direct store access. */
+  getDb(): XyncraDatabase {
+    return this.db;
+  }
+
   /** No-op retained for API compatibility (mirrors Go's Reconnect). */
   reconnect(): void {
     // no-op
@@ -676,21 +681,12 @@ export class XyncraClient {
     offset?: number,
     limit?: number,
   ): Promise<ListConversationsResult> {
-    console.log('[XyncraClient] listConversations called with userID:', this.options.userID);
     const effectiveLimit = limit ?? 20;
     const convs = await this.db.conversationsStore.getByUser(
       this.options.userID,
       offset ?? 0,
       effectiveLimit + 1,
     );
-    console.log('[XyncraClient] listConversations found:', convs.length, 'conversations');
-    if (convs.length > 0) {
-      console.log('[XyncraClient] First conversation:', {
-        id: convs[0].id,
-        user_id1: convs[0].user_id1,
-        user_id2: convs[0].user_id2,
-      });
-    }
     const hasMore = convs.length > effectiveLimit;
     const result = hasMore ? convs.slice(0, effectiveLimit) : convs;
     return { conversations: result, has_more: hasMore };

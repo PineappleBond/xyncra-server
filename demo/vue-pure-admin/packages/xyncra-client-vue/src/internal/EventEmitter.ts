@@ -54,14 +54,13 @@ export type UpdateHandlerEventMap = {
     durationMs: number;
     isDone: boolean;
   };
-  'hitl:question': {
+  'remote_calling': {
     userId: string;
     conversationId: string;
-    reason: string;
-    /** Optional recovery metadata sourced from the local question store. */
-    questionId?: string;
-    checkpointId?: string;
-    interruptId?: string;
+    remoteCallingId: string;
+    method: string;
+    params: string;
+    deviceId: string;
   };
   'error:rpc': {
     method: string;

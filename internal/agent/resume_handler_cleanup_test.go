@@ -334,19 +334,20 @@ func TestCleanupAfterResumeFailure_CallsAllSteps(t *testing.T) {
 		model.AgentStatusAskingUser, "agent/bot", "cp-cleanup")
 	require.NoError(t, err)
 
-	// Seed a Question for the checkpoint.
-	questionStore := testStore.Questions
-	require.NoError(t, questionStore.Create(ctx, &model.Question{
-		ID:             "q-cleanup-1",
+	// Seed a RemoteCalling for the checkpoint.
+	remoteCallingStore := testStore.RemoteCallings
+	require.NoError(t, remoteCallingStore.Create(ctx, &model.RemoteCalling{
+		ID:             "rc-cleanup-1",
 		ConversationID: convID,
 		CheckpointID:   "cp-cleanup",
+		AgentID:        "agent/bot",
+		Method:         "ask_user",
 		InterruptID:    "intr-1",
-		QuestionText:   "Are you sure?",
-		Status:         model.QuestionStatusPending,
+		Status:         model.RemoteCallingStatusPending,
 	}))
 
-	// Verify question exists before cleanup.
-	qCount, err := questionStore.CountPendingByCheckpoint(ctx, "cp-cleanup")
+	// Verify remote calling exists before cleanup.
+	qCount, err := remoteCallingStore.CountPendingByCheckpoint(ctx, "cp-cleanup")
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), qCount)
 
@@ -356,7 +357,7 @@ func TestCleanupAfterResumeFailure_CallsAllSteps(t *testing.T) {
 
 	executor := &AgentExecutor{
 		store:           testStore,
-		questionStore:   questionStore,
+		remoteCallingStore:   remoteCallingStore,
 		checkpointStore: fs,
 		logger:          noopLogger{},
 	}
@@ -370,7 +371,7 @@ func TestCleanupAfterResumeFailure_CallsAllSteps(t *testing.T) {
 		"ClearAgentStatus should reset agent_status to idle")
 
 	// 2. DeleteByCheckpoint: questions should be soft-deleted.
-	qCountAfter, err := questionStore.CountPendingByCheckpoint(ctx, "cp-cleanup")
+	qCountAfter, err := remoteCallingStore.CountPendingByCheckpoint(ctx, "cp-cleanup")
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), qCountAfter,
 		"DeleteByCheckpoint should remove all questions for the checkpoint")
@@ -383,11 +384,11 @@ func TestCleanupAfterResumeFailure_CallsAllSteps(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// R-02: cleanupAfterResumeFailure with nil questionStore/checkpointStore
+// R-02: cleanupAfterResumeFailure with nil remoteCallingStore/checkpointStore
 // ---------------------------------------------------------------------------
 
 // TestCleanupAfterResumeFailure_NilOptionalStores verifies that
-// cleanupAfterResumeFailure does not panic when optional stores (questionStore,
+// cleanupAfterResumeFailure does not panic when optional stores (remoteCallingStore,
 // checkpointStore) are nil. Note: executor.store must be non-nil as the
 // function calls store.ConversationStore() unconditionally.
 func TestCleanupAfterResumeFailure_NilOptionalStores(t *testing.T) {
@@ -401,7 +402,7 @@ func TestCleanupAfterResumeFailure_NilOptionalStores(t *testing.T) {
 
 	executor := &AgentExecutor{
 		store:           testStore,
-		questionStore:   nil, // optional, should not panic
+		remoteCallingStore:   nil, // optional, should not panic
 		checkpointStore: nil, // optional, should not panic
 		logger:          noopLogger{},
 	}

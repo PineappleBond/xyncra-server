@@ -6,11 +6,6 @@ import type { Router } from 'vue-router'
  */
 export function setupRouteIntegration(router: Router): void {
   window.__vue_router = router
-
-  router.afterEach((to) => {
-    const pageKey = routeNameToPageKey(to.name)
-    console.log('[xyncra] Route changed:', pageKey, to.path)
-  })
 }
 
 function routeNameToPageKey(name: string | symbol | null | undefined): string {

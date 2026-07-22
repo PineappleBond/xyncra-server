@@ -114,11 +114,7 @@
 //	    server.WSWithNodeBroadcaster(nodeBroadcaster),
 //	)
 //
-// # Reverse RPC & Error Propagation
-//
-// The WebSocketServer supports server-initiated RPC requests to connected
-// clients via the ReverseRPC component (D-092). The component is always
-// configured (never nil) and is automatically wired to the message handler.
+// # Error Propagation
 //
 // Client.Send() and Client.SendPackage() return one of two errors on failure:
 //
@@ -129,71 +125,22 @@
 //
 //   - broadcastLocal: logs and skips failed sends; does not return an error
 //     (broadcast is best-effort, consistent with D-007 fire-and-forget).
-//   - sendToUser: returns nil if at least one send succeeds; returns the last
-//     error wrapped as "reverse_rpc: all sends to user %s failed: %w" only
-//     when all sends fail. Returns "reverse_rpc: no connections for user %s"
-//     when the user has no active connections.
-//   - sendToDevice: returns ErrDeviceOffline when the device is not connected;
-//     otherwise wraps the Send error as "reverse_rpc: send to device %s: %w".
 //
-// ReverseRPC.ServerRequest() blocks until a response arrives, the context
-// expires, or the timeout elapses. Basic usage:
+// # Client Function Calls (RemoteCalling)
 //
-//	resp, err := srv.ServerRequest(ctx, userID, deviceID, "method", params, 30*time.Second)
-//	// resp.Msg / resp.Code contain the client's response.
-//	// err is non-nil on timeout, cancellation, or send failure.
+// Client function calls use the RemoteCalling interrupt-resume pattern (D-137,
+// D-140). The agent's tool triggers tool.Interrupt, the executor creates a
+// RemoteCalling record, the client processes it asynchronously, and the agent
+// resumes with the result. See internal/agent/client_function_tool.go.
 //
-// When deviceID is empty, the request is broadcast to all connections of the
-// user (first response wins). When deviceID is non-empty, it is routed to
-// that specific device via sendToDevice.
+// # Protocol Fields (D-104)
 //
-// Pending ServerRequest calls are cancelled in two scenarios:
-//
-//  1. Device replacement (D-095): when a new connection replaces an existing
-//     one for the same (userID, deviceID), the old connection's pending
-//     requests are failed with reason "device replaced" via CancelDevice.
-//  2. Normal disconnect: when a client disconnects and no replacement
-//     connection has registered (checked via the hasActiveConn guard on
-//     clientsByDevice), all pending requests for that device are failed with
-//     reason "device disconnected". If a replacement has already registered,
-//     the guard prevents the old connection's cleanup from cancelling the
-//     replacement's pending requests.
-//
-// Both paths use CancelDeviceWithReason, which writes a synthetic response
-// (Code=-1, Msg=reason) into the pending respCh. The ServerRequest's select
-// picks up the respCh response deterministically; context cancellation is
-// handled by the deferred cancel() after ServerRequest returns.
-//
-// # Pending Store (Phase 4)
-//
-// The PendingStore interface (D-103) enables timed-out reverse-RPC requests to
-// be persisted for later replay. The Redis-backed implementation,
-// RedisPendingStore, stores requests as JSON in per-device Redis lists under
-// the key "pending:{userID}\x00{deviceID}".
-//
-// When ServerRequest's context expires with DeadlineExceeded and a PendingStore
-// is configured, the request is saved asynchronously via persistAsync. The
-// goroutine uses a 5-second background context so that slow Redis does not
-// block the caller. Errors during Save are logged but never propagated to the
-// ServerRequest caller (fail-open semantics, D-103).
-//
-// The PackageDataRequest protocol message gained two new fields (D-104):
+// The PackageDataRequest protocol message has two additional fields:
 //
 //   - IdempotencyKey: set to the request UUID (D-097) for exactly-once replay.
 //   - Seq: per-device monotonically increasing sequence number (D-106).
 //
 // Both fields use `omitempty` so older clients ignore them without error.
-//
-// Per-device Seq counters are held in memory (ReverseRPC.deviceSeq). In Phase 5
-// they may be upgraded to Redis INCR for cross-node durability (D-106).
-//
-// Pass a PendingStore via WSWithPendingStore to enable persistence:
-//
-//	ps, _ := server.NewRedisPendingStore(redisClient, server.PendingStoreConfig{})
-//	srv, _ := server.NewWebSocketServer(
-//	    server.WSWithPendingStore(ps),
-//	    // ... other options
-//	)
 //
 // The WebSocketServer automatically subscribes to Pub/Sub on Start and
 // publishes updates via BroadcastUpdates.

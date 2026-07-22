@@ -229,11 +229,9 @@
 
 ---
 
-## D-092: ReverseRPC 双向请求能力
+## D-092: ~~ReverseRPC 双向请求能力~~（已废弃）
 
-**决策**：服务端通过 ReverseRPC 向用户所有活跃连接发起 RPC 请求并同步等待响应。可选组件（nil-safe）。Request ID 使用 "s-" 前缀 + UUID。用户级广播，第一个到达的响应被接受，后续静默丢弃。
-
-**原因**：HITL 基础设施需要服务端主动获取结构化响应、复用 WebSocket 双向通道、与 D-050 互补（不替代 ephemeral push）。超时后请求持久化到 Redis PendingStore（D-103）。
+**废弃原因**：被 D-137 RemoteCalling 统一模型替代。客户端函数调用从同步 RPC 改为 RemoteCalling 异步中断-恢复模式（D-140）。
 
 ---
 
@@ -247,9 +245,9 @@
 
 ## D-095: 设备替换策略
 
-**决策**：同 (userID, deviceID) 新连接到来时，先 Upgrade 新连接并原子注册，异步向旧连接发送 Close Frame（code: 4001）并清理。旧连接 pending ReverseRPC 立即 fail。
+**决策**：同 (userID, deviceID) 新连接到来时，先 Upgrade 新连接并原子注册，异步向旧连接发送 Close Frame（code: 4001）并清理。
 
-**原因**：防止消息重复投递（同设备多连接导致路由不确定）、快速失败（pending 请求立即 fail 不等超时）、确定性行为（新替旧无歧义）。
+**修订**（D-140）：RemoteCalling 模式下设备替换无需特殊处理——设备重连后客户端会重新拉取 pending RemoteCalling，无需取消旧连接的 pending 请求。
 
 ---
 
@@ -269,19 +267,15 @@
 
 ---
 
-## D-103: ReverseRPC Pending Store
+## D-103: ~~ReverseRPC Pending Store~~（已废弃）
 
-**决策**：ServerRequest 超时（DeadlineExceeded）后请求异步持久化到 Redis。key 格式 pending:{userID}\x00{deviceID}，使用 Redis List。仅 DeadlineExceeded 触发持久化。Fail-open。
-
-**原因**：超时后的请求数据不应丢失、零新依赖（复用现有 Redis）、Phase 5 补发基础设施。TTL 24h，每设备最多 50 条 pending。
+**废弃原因**：随 ReverseRPC 一起删除（D-140）。RemoteCalling 使用数据库持久化，不再需要 Redis PendingStore。
 
 ---
 
-## D-108: system.reconnect RPC 规范
+## D-108: ~~system.reconnect RPC 规范~~（已废弃）
 
-**决策**：客户端重连后调用 system.reconnect 触发服务端补发断连期间超时的请求。参数 last_seen_seq，服务端从 PendingStore 查询并过滤 Seq > last_seen_seq 的请求，异步补发。Fail-open、Nil-safe、无鉴权。
-
-**原因**：设备重连后自动恢复断连期间丢失的反向请求。Redis 错误仅记日志，PendingStore 不可用时跳过。
+**废弃原因**：随 PendingStore 一起删除（D-140）。RemoteCalling 模式下客户端通过 `get_remote_callings` RPC 拉取 pending 记录，无需 reconnect 补发机制。
 
 ---
 
@@ -453,10 +447,38 @@
 
 ---
 
+## D-140: ReverseRPC 废弃，客户端函数调用统一为 RemoteCalling
+
+**决策**：废弃 D-092（ReverseRPC）、D-103（PendingStore）、D-108（system.reconnect）。客户端函数调用从同步 RPC 改为 RemoteCalling 异步中断-恢复模式。
+
+**实现**：
+- 客户端函数 tool 使用 `tool.Interrupt(ctx, interruptData)` 触发中断（与 `ask_user` 一致）
+- executor 中断处理器解析 interruptData JSON，区分 HITL（method="ask_user"）和客户端函数调用
+- 客户端函数中断设置 `agent_status="tool_calling"`（而非 `asking_user`）
+- RemoteCalling 记录包含 method、params（原始 JSON）、device_id、timeout_ms
+- resume 时 tool 通过 `tool.GetResumeContext[string](ctx)` 检测并直接返回客户端响应结果
+- cleanup 任务同时覆盖 `asking_user` 和 `tool_calling` 两种状态
+
+**原因**：
+- 统一所有远程调用为单一模型（D-137）
+- 消除 ReverseRPC 同步阻塞（异步模式更灵活）
+- 简化基础设施（删除 PendingStore、system.reconnect）
+- 与 HITL 流程一致（相同的中断-恢复模式）
+
+**删除的代码**：
+- `internal/server/reverse_rpc.go`、`reverse_rpc_test.go`
+- `internal/server/pending_store.go`、`redis_pending_store.go`、`redis_pending_store_test.go`
+- `internal/handler/reconnect.go`、`reconnect_test.go`
+- `ClientCaller` 接口、`sendToUser`/`sendToDevice` 方法
+- `ErrDeviceOffline`、`WSWithPendingStore`、`ReverseRPC()`、`ServerRequest()`
+
+---
+
 ## 版本历史
 
 | 日期       | 版本  | 变更                                                                                           |
 | ---------- | ----- | ---------------------------------------------------------------------------------------------- |
+| 2026-07-22 | v3.29 | D-140（ReverseRPC 废弃，客户端函数统一为 RemoteCalling）；D-092/D-103/D-108 标记废弃；修订 D-095、D-123 |
 | 2026-07-20 | v3.28 | D-136 已实现声明式注册模式 defineTestHelpers，全量迁移 89 个页面组件                              |
 | 2026-07-19 | v3.27 | D-054 更新为 Registry 精确匹配模型、D-055/D-062 去除前缀依赖描述                                |
 | 2026-07-17 | v3.26 | D-128（/metrics 端点在同一 HTTP 端口暴露，WSWithExtraRoutes）                                   |

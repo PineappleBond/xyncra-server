@@ -124,12 +124,12 @@
       </div>
     </Teleport>
 
-    <HITLDialog
+    <RemoteCallingDialog
       :visible="hitlVisible"
-      :questions="hitlQuestions"
-      :is-submitting="hitlSubmitting"
-      @submit="handleSubmitHITL"
-      @dismiss="handleDismissHITL"
+      :callings="pendingCallings"
+      :is-submitting="isSubmitting"
+      @submit="handleSubmitRemoteCalling"
+      @dismiss="handleDismissRemoteCalling"
       @update:visible="hitlVisible = $event"
     />
   </div>
@@ -139,18 +139,18 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { Close, Plus, User, ChatDotRound } from '@element-plus/icons-vue'
 import { useXyncra } from '../composables/useXyncra'
-import { useHITL } from '../composables/useHITL'
+import { useRemoteCalling } from '../composables/useRemoteCalling'
 import { useConversations } from '../composables/useConversations'
 import { getAgentName } from '../constants/agents'
 import ConnectionStatus from './ConnectionStatus.vue'
 import ChatPanel from './ChatPanel.vue'
-import HITLDialog from './HITLDialog.vue'
+import RemoteCallingDialog from './RemoteCallingDialog.vue'
 import AgentSelector from './AgentSelector.vue'
 import ConversationList from './ConversationList.vue'
 
 const { connectionStatus, reconnect } = useXyncra()
 const { conversations, currentConversationId, selectConversation, createConversation, createConversationWithAgent } = useConversations()
-const { pendingQuestions: hitlQuestions, currentQuestion: currentHITLQuestion, answerAll, dismiss: dismissHITL, isSubmitting: hitlSubmitting } = useHITL(currentConversationId)
+const { pendingCallings, currentCalling, resolveCalling, dismiss, isSubmitting } = useRemoteCalling(currentConversationId)
 
 const panelVisible = ref(false)
 const slideIn = ref(false)
@@ -160,7 +160,7 @@ const hitlVisible = ref(false)
 const sidebarRef = ref<HTMLElement | null>(null)
 const selectedAgentID = ref<string | null>(null)
 
-const hasQuestions = computed(() => hitlQuestions.value.length > 0)
+const hasQuestions = computed(() => pendingCallings.value.length > 0)
 
 const buttonType = computed(() => {
   switch (connectionStatus.value) {
@@ -229,23 +229,25 @@ function handleReconnect() {
   reconnect()
 }
 
-watch(hitlQuestions, (questions) => {
-  if (questions.length > 0) {
+watch(pendingCallings, (callings) => {
+  if (callings.length > 0) {
     hitlVisible.value = true
   }
 })
 
-async function handleSubmitHITL(answers: Map<string, string>) {
+async function handleSubmitRemoteCalling(resolutions: Map<string, { success: boolean; result?: string; errorMessage?: string }>) {
   try {
-    await answerAll(answers)
+    for (const [id, { success, result, errorMessage }] of resolutions) {
+      await resolveCalling(id, success, result, errorMessage)
+    }
     hitlVisible.value = false
   } catch (error) {
-    console.error('[FloatingAssistant] Failed to submit HITL answers:', error)
+    console.error('[FloatingAssistant] Failed to submit remote calling answers:', error)
   }
 }
 
-function handleDismissHITL() {
-  dismissHITL()
+function handleDismissRemoteCalling() {
+  dismiss()
   hitlVisible.value = false
 }
 

@@ -288,7 +288,6 @@ func TestListStaleHITLConversations_ExcludesNonAskingUser(t *testing.T) {
 		statuses := []string{
 			model.AgentStatusIdle,
 			model.AgentStatusThinking,
-			model.AgentStatusToolCalling,
 			model.AgentStatusGenerating,
 			model.AgentStatusTimeout,
 		}

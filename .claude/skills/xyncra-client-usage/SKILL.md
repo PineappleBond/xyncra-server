@@ -18,7 +18,7 @@ Use this skill when working with the xyncra-client CLI tool.
 4. Manual sync? → sync-updates (requires daemon, IPC-only)
 5. Drafts / logs? → draft save/get/delete, logs tail/search/stats/export/cleanup (local SQLite)
 6. Stop daemon? → `xyncra-client kill [--force]`
-7. Resume HITL-interrupted agent? → `xyncra-client agent-resume` (IPC-only, D-114)
+7. Resume RemoteCalling-interrupted agent? → `xyncra-client agent-resume` (IPC-only, D-114)
 8. Reload agent config? → `xyncra-client reload-agents` (IPC-only, D-076, D-036)
 9. Writing tests or direct API client? → **Server Protocol** section below (WebSocket JSON-RPC, sync_updates HTTP, Agent reply flow)
 10. More details? → Check references/ links below
@@ -39,7 +39,7 @@ Use this skill when working with the xyncra-client CLI tool.
 | `get-messages` | Local DB | List messages from SQLite |
 | `search-messages` | Local DB | Search messages in SQLite |
 | `sync-updates` | IPC-only | Trigger full sync via daemon (no fallback) |
-| `agent-resume` | IPC-only | Resume HITL-interrupted agent (D-036, D-114) |
+| `agent-resume` | IPC-only | Resume RemoteCalling-interrupted agent (D-036, D-114) |
 | `reload-agents` | IPC-only | Hot-reload Agent config (D-076, D-036) |
 | `draft save/get/delete` | Local DB | Manage message drafts |
 | `logs tail/search/stats/export/cleanup` | Local DB | View and manage logs |
@@ -88,11 +88,11 @@ The `listen` daemon automatically registers these functions on startup. No separ
 
 | Function | Description | Parameters |
 |----------|-------------|------------|
-| `ping` | Echo test for ReverseRPC channel | `message` (string, optional) |
+| `ping` | Echo test for client function calls | `message` (string, optional) |
 | `get_device_info` | Device info (hostname, OS, arch, pid) | none |
 | `get_time` | Current device time (UTC, unix, timezone) | none |
 
-These functions are registered via `system.register_functions` RPC and can be invoked by the server/agent through ReverseRPC.
+These functions are registered via `system.register_functions` RPC and can be invoked by the server/agent through RemoteCalling (async interrupt-resume pattern).
 
 ### Device Info
 
@@ -115,7 +115,7 @@ D-032: IPC priority, WS fallback | D-033: device-id = hostname SHA256[:8]
 D-034: XYNCRA_ env prefix | D-035: Query commands read local SQLite
 D-036: sync-updates IPC-only | D-037: --peer-id not --user-id | D-038: string UUID vs uint32
 D-039: kill SIGTERM/SIGKILL + cleanup | D-040: logs retain 7d | D-041: tabwriter | D-042: exit codes
-D-076: reload-agents 热加载 Agent 配置 | D-085: HITL event broadcasting | D-087: AgentTimeoutHandler
+D-076: reload-agents 热加载 Agent 配置 | D-085: RemoteCalling event broadcasting | D-087: AgentTimeoutHandler
 D-114: agent-resume IPC-only
 D-115: Daemon 内置函数自动注册（消除 register-functions 独立进程）
 
@@ -169,7 +169,7 @@ type Package struct {
 | `restore_conversation` | `conversation_id` | `{conversation, restored_message_count}` |
 | `delete_message` | `message_id` | `{status}` (sender only) |
 | `reload_agents` | `{}` | `{count}` (agent system) |
-| `agent_resume` | `conversation_id`, `checkpoint_id`, `interrupt_id?`, `answer`, `agent_id` | `{status: "queued"}` (HITL, D-114) |
+| `agent_resume` | `conversation_id`, `checkpoint_id`, `interrupt_id?`, `answer`, `agent_id` | `{status: "queued"}` (RemoteCalling, D-114) |
 
 ### Push Update Types
 
@@ -286,7 +286,7 @@ resp := readResponse(t, aliceConn2, 5*time.Second)
   - [listen + kill](references/commands/listen.md) — Daemon lifecycle
   - [send](references/commands/send.md) | [conversations](references/commands/conversations.md) (5 cmds)
   - [messages](references/commands/messages.md) (4 cmds) | [sync](references/commands/sync.md) (IPC-only)
-  - [agent-resume](references/commands/agent-resume.md) (IPC-only, HITL)
+  - [agent-resume](references/commands/agent-resume.md) (IPC-only, RemoteCalling)
   - [draft](references/commands/draft.md) (3 cmds) | [logs](references/commands/logs.md) (5 cmds)
 - [Architecture](references/architecture/)
   - [Overview](references/architecture/overview.md) | [Database](references/architecture/database.md)

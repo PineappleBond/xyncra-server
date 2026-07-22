@@ -24,9 +24,9 @@ type getConversationParams struct {
 
 // getConversationResponse is the success response payload returned to the client.
 type getConversationResponse struct {
-	Conversation *model.Conversation `json:"conversation"`
-	UnreadCount  int64               `json:"unread_count"`
-	Questions    []*model.Question   `json:"questions"` // HITL questions (nil-safe)
+	Conversation   *model.Conversation   `json:"conversation"`
+	UnreadCount    int64                 `json:"unread_count"`
+	RemoteCallings []*model.RemoteCalling `json:"remote_callings"` // RemoteCallings (nil-safe, D-137)
 }
 
 // --------------------------------------------------------------------------
@@ -95,19 +95,24 @@ func (h *getConversationHandler) HandleRequest(ctx context.Context, client *serv
 		unreadCount = 0
 	}
 
-	// 7. Fetch HITL questions for this conversation (D-063 nil-safe).
-	var questions []*model.Question
-	if h.store.QuestionStore() != nil {
-		questions, _ = h.store.QuestionStore().GetByConversation(ctx, conv.ID)
+	// 7. Fetch pending RemoteCallings for this conversation (D-137 nil-safe).
+	var remoteCallings []*model.RemoteCalling
+	if h.store.RemoteCallingStore() != nil {
+		var rcErr error
+		remoteCallings, rcErr = h.store.RemoteCallingStore().GetPendingByConversation(ctx, conv.ID)
+		if rcErr != nil {
+			// Log but don't fail the request — remote callings are supplementary data.
+			fmt.Printf("[WARN] get_conversation: failed to fetch remote callings for %s: %v\n", conv.ID, rcErr)
+		}
 	}
-	if questions == nil {
-		questions = []*model.Question{} // return empty array, not null
+	if remoteCallings == nil {
+		remoteCallings = []*model.RemoteCalling{} // return empty array, not null
 	}
 
 	// 8. Return response.
 	return marshalResponse(getConversationResponse{
-		Conversation: conv,
-		UnreadCount:  unreadCount,
-		Questions:    questions,
+		Conversation:   conv,
+		UnreadCount:    unreadCount,
+		RemoteCallings: remoteCallings,
 	})
 }

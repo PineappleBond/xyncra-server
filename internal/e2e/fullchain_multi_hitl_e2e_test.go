@@ -115,26 +115,26 @@ func writeMultiHITLAgentConfig(t *testing.T, dir, mockURL string) {
 	writeAgentConfig(t, dir, cfg)
 }
 
-// waitForHITLQuestion polls the server QuestionStore until a pending question
+// waitForHITLRemoteCalling polls the server RemoteCallingStore until a pending remote calling
 // appears for the conversation, or the timeout expires. Returns the checkpoint_id
-// and question text, or fails the test on timeout (D-125).
-func waitForHITLQuestion(t *testing.T, env *agentE2EEnv, convID string, timeout time.Duration) (checkpointID, question string) {
+// and method, or fails the test on timeout (D-137).
+func waitForHITLRemoteCalling(t *testing.T, env *agentE2EEnv, convID string, timeout time.Duration) (checkpointID, method string) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		questions, err := env.store.QuestionStore().GetByConversation(context.Background(), convID)
+		rcs, err := env.store.RemoteCallingStore().GetPendingByConversation(context.Background(), convID)
 		if err == nil {
-			for _, q := range questions {
-				if q.Status == "pending" {
-					return q.CheckpointID, q.QuestionText
+			for _, rc := range rcs {
+				if rc.Status == "pending" {
+					return rc.CheckpointID, rc.Method
 				}
 			}
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	t.Fatalf("waitForHITLQuestion: no pending question found for conversation %s within timeout", convID)
+	t.Fatalf("waitForHITLRemoteCalling: no pending question found for conversation %s within timeout", convID)
 	return "", ""
 }
 
@@ -263,7 +263,7 @@ func TestFullChainMultiHITL_TwoRounds(t *testing.T) {
 	resp := readResponse(t, conn, 5*time.Second)
 	require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send_message should succeed")
 
-	checkpointID1, question1 := waitForHITLQuestion(t, env, convID, 30*time.Second)
+	checkpointID1, question1 := waitForHITLRemoteCalling(t, env, convID, 30*time.Second)
 	require.NotEmpty(t, checkpointID1, "checkpoint_id should not be empty")
 	assert.Contains(t, question1, "step 1", "question should mention step 1")
 	stepLog.Step(fmt.Sprintf("HITL #1: question=%q checkpoint=%s", question1, checkpointID1))
@@ -281,7 +281,7 @@ func TestFullChainMultiHITL_TwoRounds(t *testing.T) {
 	err := triggerAgentResume(t, env, convID, checkpointID1, "", agentUserID, userID, "device-1", "Yes, step 1 confirmed.")
 	require.NoError(t, err, "triggerAgentResume #1 should succeed")
 
-	checkpointID2, question2 := waitForHITLQuestion(t, env, convID, 30*time.Second)
+	checkpointID2, question2 := waitForHITLRemoteCalling(t, env, convID, 30*time.Second)
 	require.NotEmpty(t, checkpointID2, "checkpoint_id should not be empty")
 	assert.Contains(t, question2, "step 2", "question should mention step 2")
 	stepLog.Step(fmt.Sprintf("HITL #2: question=%q checkpoint=%s", question2, checkpointID2))
@@ -362,7 +362,7 @@ func TestFullChainMultiHITL_ToolFailsAfterResume(t *testing.T) {
 	resp := readResponse(t, conn, 5*time.Second)
 	require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send_message should succeed")
 
-	checkpointID, question := waitForHITLQuestion(t, env, convID, 30*time.Second)
+	checkpointID, question := waitForHITLRemoteCalling(t, env, convID, 30*time.Second)
 	require.NotEmpty(t, checkpointID, "checkpoint_id should not be empty")
 	stepLog.Step(fmt.Sprintf("HITL: question=%q checkpoint=%s", question, checkpointID))
 
@@ -438,7 +438,7 @@ func TestFullChainMultiHITL_ThreeRounds(t *testing.T) {
 	resp := readResponse(t, conn, 5*time.Second)
 	require.Equal(t, protocol.ResponseCodeOK, resp.Code, "send_message should succeed")
 
-	checkpointID1, question1 := waitForHITLQuestion(t, env, convID, 30*time.Second)
+	checkpointID1, question1 := waitForHITLRemoteCalling(t, env, convID, 30*time.Second)
 	require.NotEmpty(t, checkpointID1, "checkpoint_id #1 should not be empty")
 	assert.Contains(t, question1, "step A", "question #1 should mention step A")
 	stepLog.Step(fmt.Sprintf("HITL #1: question=%q checkpoint=%s", question1, checkpointID1))
@@ -453,7 +453,7 @@ func TestFullChainMultiHITL_ThreeRounds(t *testing.T) {
 	err := triggerAgentResume(t, env, convID, checkpointID1, "", agentUserID, userID, "device-1", "Step A confirmed.")
 	require.NoError(t, err, "triggerAgentResume #1 should succeed")
 
-	checkpointID2, question2 := waitForHITLQuestion(t, env, convID, 30*time.Second)
+	checkpointID2, question2 := waitForHITLRemoteCalling(t, env, convID, 30*time.Second)
 	require.NotEmpty(t, checkpointID2, "checkpoint_id #2 should not be empty")
 	assert.Contains(t, question2, "step B", "question #2 should mention step B")
 	stepLog.Step(fmt.Sprintf("HITL #2: question=%q checkpoint=%s", question2, checkpointID2))
@@ -468,7 +468,7 @@ func TestFullChainMultiHITL_ThreeRounds(t *testing.T) {
 	err = triggerAgentResume(t, env, convID, checkpointID2, "", agentUserID, userID, "device-1", "Step B confirmed.")
 	require.NoError(t, err, "triggerAgentResume #2 should succeed")
 
-	checkpointID3, question3 := waitForHITLQuestion(t, env, convID, 30*time.Second)
+	checkpointID3, question3 := waitForHITLRemoteCalling(t, env, convID, 30*time.Second)
 	require.NotEmpty(t, checkpointID3, "checkpoint_id #3 should not be empty")
 	assert.Contains(t, question3, "step C", "question #3 should mention step C")
 	stepLog.Step(fmt.Sprintf("HITL #3: question=%q checkpoint=%s", question3, checkpointID3))

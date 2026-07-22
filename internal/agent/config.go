@@ -15,8 +15,8 @@ type MiddlewareConfig struct {
 	ToolReductionMaxChars int  `yaml:"tool_reduction_max_chars" json:"tool_reduction_max_chars"` // default: 50000
 	EnablePatchToolCalls  bool `yaml:"enable_patch_tool_calls" json:"enable_patch_tool_calls"`
 	// EnableClientTools enables dynamic injection of client device functions
-	// as agent tools. Requires ClientFunctionProvider and ClientCaller to be
-	// set on AgentBuilder (D-101).
+	// as agent tools. Requires ClientFunctionProvider to be set on AgentBuilder.
+	// Client functions use the RemoteCalling interrupt-resume pattern (D-137).
 	EnableClientTools bool `yaml:"enable_client_tools" json:"enable_client_tools"`
 	// ClientTools controls how client device functions are surfaced as tools.
 	ClientTools ClientToolsConfig `yaml:"client_tools" json:"client_tools"`

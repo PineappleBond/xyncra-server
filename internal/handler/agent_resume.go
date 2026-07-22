@@ -1,15 +1,14 @@
-// agent_resume RPC handler — HITL Resilience Phase 2 (D-085 / D-116).
+// agent_resume RPC handler — RemoteCalling unified model (D-137 / D-138).
 //
 // Flow:
-//  1. Parse & validate params (conversation_id, answer, agent_id required).
-//  2. Fetch Conversation to infer checkpoint_id if not supplied.
-//  3. Look up pending Questions for that checkpoint.
-//  4. Filter by optional interrupt_id, pick the first match.
-//  5. Call QuestionStore.UpdateAnswer (idempotent: WHERE status='pending').
-//     - ErrConflict → 409 "question_already_answered".
-//  6. Count remaining pending questions.
-//     - Still pending → return {status:"partial", answered, total, pending}.
-//     - All answered  → enqueue TypeAgentResume MQ task (payload has NO answer).
+//  1. Parse & validate params (id, agent_id required).
+//  2. Fetch RemoteCalling by ID to get conversation_id and checkpoint_id.
+//  3. Idempotency check: status != pending → return success.
+//  4. Expiration check: expires_at passed → mark as expired.
+//  5. Resolve the RemoteCalling (success or error).
+//  6. Check if all RemoteCallings for the checkpoint are resolved (D-138).
+//     - Still pending → return {status:"partial", pending_count}.
+//     - All resolved → enqueue TypeAgentResume MQ task.
 package handler
 
 import (
@@ -17,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
@@ -30,16 +30,16 @@ import (
 // --------------------------------------------------------------------------
 
 // agentResumeParams is the JSON-decoded representation of the client-supplied
-// parameters for the "agent_resume" RPC method.
+// parameters for the "agent_resume" RPC method (D-137).
 type agentResumeParams struct {
-	ConversationID string `json:"conversation_id"` // required
-	CheckpointID   string `json:"checkpoint_id"`   // optional (inferred from Conversation)
-	InterruptID    string `json:"interrupt_id"`    // optional (filter specific interrupt)
-	Answer         string `json:"answer"`          // required
-	AgentID        string `json:"agent_id"`        // required
+	ID           string `json:"id"`            // RemoteCalling ID (required)
+	Success      bool   `json:"success"`       // whether the call succeeded
+	Result       string `json:"result"`        // result on success
+	ErrorMessage string `json:"error_message"` // error on failure
+	AgentID      string `json:"agent_id"`      // required for enqueue
 }
 
-// agentResumeHandler handles the "agent_resume" RPC method (D-085 / D-116).
+// agentResumeHandler handles the "agent_resume" RPC method (D-137 / D-138).
 type agentResumeHandler struct {
 	store  store.StoreAPI
 	broker mq.Broker
@@ -51,22 +51,23 @@ func NewAgentResumeHandler(s store.StoreAPI, broker mq.Broker) *agentResumeHandl
 }
 
 // agentResumeTaskPayload is the MQ task payload for TypeAgentResume.
-// The answer is NOT included — it is already persisted in the Question table (D-116).
+// The result is already persisted in the RemoteCalling table (D-137).
 type agentResumeTaskPayload struct {
 	ConversationID string `json:"conversation_id"`
 	CheckpointID   string `json:"checkpoint_id"`
 	AgentID        string `json:"agent_id"`
-	SenderID       string `json:"sender_id"` // human user who sent the answer
-	DeviceID       string `json:"device_id"` // Phase 6 (D-102)
+	SenderID       string `json:"sender_id"`               // human user who triggered the resume
+	DeviceID       string `json:"device_id,omitempty"`      // device that initiated the resume (D-102)
+	CancelledBy    string `json:"cancelled_by,omitempty"`   // non-empty when resuming after cancellation
 }
 
 // --------------------------------------------------------------------------
 // Handler
 // --------------------------------------------------------------------------
 
-// HandleRequest implements MethodHandler. It validates params, persists the
-// answer to the Question table, and — only when all questions for the
-// checkpoint are answered — enqueues a TypeAgentResume MQ task.
+// HandleRequest implements MethodHandler. It validates params, resolves the
+// RemoteCalling, and — only when all RemoteCallings for the checkpoint are
+// resolved — enqueues a TypeAgentResume MQ task (D-138).
 func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
 	// 1. Parse parameters.
 	var params agentResumeParams
@@ -75,107 +76,94 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 	}
 
 	// 2. Validate required fields.
-	if params.ConversationID == "" || params.Answer == "" || params.AgentID == "" {
-		return nil, protocol.NewValidationError("conversation_id, answer and agent_id are required")
+	if params.ID == "" || params.AgentID == "" {
+		return nil, protocol.NewValidationError("id and agent_id are required")
 	}
 
-	// 3. Fetch conversation to infer checkpoint_id when not provided.
-	checkpointID := params.CheckpointID
-	conv, err := h.store.ConversationStore().Get(ctx, params.ConversationID)
+	// 3. Fetch RemoteCalling by ID to get conversation_id and checkpoint_id.
+	rcs := h.store.RemoteCallingStore()
+	if rcs == nil {
+		return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: RemoteCallingStore not available"))
+	}
+
+	rc, err := rcs.GetByID(ctx, params.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, protocol.NewNotFoundError("conversation not found")
+			return nil, protocol.NewNotFoundError("remote calling not found")
 		}
-		return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: get conversation: %w", err))
-	}
-	if checkpointID == "" {
-		checkpointID = conv.CheckpointID
-	}
-	if checkpointID == "" {
-		return nil, protocol.NewValidationError("checkpoint_id is required and cannot be inferred from conversation")
+		return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: get remote calling: %w", err))
 	}
 
-	// Client identity.
+	// 4. Idempotency check: if already resolved/cancelled/expired, return success.
+	if rc.Status != model.RemoteCallingStatusPending {
+		return json.Marshal(map[string]interface{}{
+			"status":  rc.Status,
+			"message": "already processed",
+		})
+	}
+
+	// 5. Expiration check.
+	if rc.ExpiresAt != nil && time.Now().After(*rc.ExpiresAt) {
+		if err := rcs.MarkExpired(ctx, rc.ID); err != nil {
+			return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: mark expired: %w", err))
+		}
+		return json.Marshal(map[string]interface{}{
+			"status":  "expired",
+			"message": "remote calling has expired",
+		})
+	}
+
+	// 6. Resolve the RemoteCalling.
+	if params.Success {
+		if err := rcs.ResolveResult(ctx, rc.ID, params.Result); err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				return json.Marshal(map[string]interface{}{
+					"status":  "resolved",
+					"message": "already resolved",
+				})
+			}
+			return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: resolve result: %w", err))
+		}
+	} else {
+		if err := rcs.ResolveError(ctx, rc.ID, params.ErrorMessage); err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				return json.Marshal(map[string]interface{}{
+					"status":  "resolved",
+					"message": "already resolved",
+				})
+			}
+			return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: resolve error: %w", err))
+		}
+	}
+
+	// 7. Check if all RemoteCallings for this checkpoint are resolved (D-138).
+	// Known limitation: resolve (step 6) and count (step 7) are not atomic.
+	// Two concurrent requests may both see pending=0 and both enqueue agent resume.
+	// The resume handler's idempotency key (D-121) provides a safety net:
+	// only the first resume task will execute; subsequent duplicates are skipped.
+	pending, err := rcs.CountPendingByCheckpoint(ctx, rc.CheckpointID)
+	if err != nil {
+		return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: count pending: %w", err))
+	}
+
+	// 8. If still pending, return partial status.
+	if pending > 0 {
+		return json.Marshal(map[string]interface{}{
+			"status":        "partial",
+			"pending_count": pending,
+		})
+	}
+
+	// 9. All resolved → enqueue TypeAgentResume MQ task.
 	senderID := ""
 	deviceID := ""
 	if client != nil {
 		senderID = client.UserID()
 		deviceID = client.DeviceID()
 	}
-
-	// 4. Look up pending questions for this checkpoint.
-	qs := h.store.QuestionStore()
-	if qs == nil {
-		return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: QuestionStore not available"))
-	}
-
-	questions, err := qs.GetPendingByCheckpoint(ctx, checkpointID)
-	if err != nil {
-		return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: get pending questions: %w", err))
-	}
-
-	// 5. Filter by interrupt_id if provided, then pick the first match.
-	var targetID string
-	for _, q := range questions {
-		if params.InterruptID != "" && q.InterruptID != params.InterruptID {
-			continue
-		}
-		targetID = q.ID
-		break
-	}
-	if targetID == "" {
-		// No pending question matched. Check if one was already answered
-		// (multi-device conflict / idempotency) → return 409.
-		allQ, err := qs.GetByCheckpoint(ctx, checkpointID)
-		if err == nil {
-			for _, q := range allQ {
-				if q.Status == model.QuestionStatusAnswered {
-					if params.InterruptID != "" && q.InterruptID == params.InterruptID {
-						return nil, &protocol.HandlerError{Code: -409, Message: "question_already_answered"}
-					}
-				}
-			}
-		}
-		return nil, protocol.NewNotFoundError("no pending question found for the given checkpoint/interrupt")
-	}
-
-	// 6. Update the answer (idempotent: WHERE status='pending').
-	if err := qs.UpdateAnswer(ctx, targetID, params.Answer, senderID, deviceID); err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			return nil, &protocol.HandlerError{Code: -409, Message: "question_already_answered"}
-		}
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, protocol.NewNotFoundError("question not found")
-		}
-		return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: update answer: %w", err))
-	}
-
-	// 7. Check remaining pending count.
-	allQuestions, err := qs.GetByCheckpoint(ctx, checkpointID)
-	if err != nil {
-		return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: get all questions: %w", err))
-	}
-	total := int64(len(allQuestions))
-	pending, err := qs.CountPendingByCheckpoint(ctx, checkpointID)
-	if err != nil {
-		return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: count pending: %w", err))
-	}
-	answered := total - pending
-
-	// 8. Partial → return status.
-	if pending > 0 {
-		return json.Marshal(map[string]interface{}{
-			"status":   "partial",
-			"answered": answered,
-			"total":    total,
-			"pending":  pending,
-		})
-	}
-
-	// 9. All answered → enqueue TypeAgentResume MQ task.
 	payload := agentResumeTaskPayload{
-		ConversationID: params.ConversationID,
-		CheckpointID:   checkpointID,
+		ConversationID: rc.ConversationID,
+		CheckpointID:   rc.CheckpointID,
 		AgentID:        params.AgentID,
 		SenderID:       senderID,
 		DeviceID:       deviceID,
@@ -194,8 +182,7 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 	}
 
 	return json.Marshal(map[string]interface{}{
-		"status":   "queued",
-		"answered": answered,
-		"total":    total,
+		"status": "queued",
 	})
 }
+

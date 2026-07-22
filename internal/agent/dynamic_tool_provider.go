@@ -2,7 +2,7 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/adk"
@@ -22,13 +22,6 @@ type ClientFunctionProvider interface {
 	GetFunctionsByUser(ctx context.Context, userID string) (map[string][]protocol.FunctionInfo, error)
 }
 
-// ClientCaller sends a request to a specific client device and waits for
-// a response. Defined here to avoid circular dependency on server
-// package (D-101).
-type ClientCaller interface {
-	ServerRequest(ctx context.Context, userID, deviceID, method string, params json.RawMessage, timeout time.Duration) (*protocol.PackageDataResponse, error)
-}
-
 // DynamicToolProvider is an Eino ChatModelAgentMiddleware that dynamically
 // injects client-device functions as InvokableTool instances before each
 // agent run (Phase 6 / D-100, D-101, D-102).
@@ -36,7 +29,6 @@ type DynamicToolProvider struct {
 	*adk.BaseChatModelAgentMiddleware
 
 	funcRegistry ClientFunctionProvider
-	caller       ClientCaller
 	config       ClientToolsConfig
 	logger       Logger
 	toolRegistry *agenttools.Registry // for resolving dynamic_tools from agent config
@@ -49,7 +41,6 @@ type DynamicToolProvider struct {
 // framework's 0->nonzero tool transition to trigger a graph rebuild.
 func NewDynamicToolProvider(
 	registry ClientFunctionProvider,
-	caller ClientCaller,
 	cfg ClientToolsConfig,
 	logger Logger,
 	toolRegistry *agenttools.Registry,
@@ -60,7 +51,6 @@ func NewDynamicToolProvider(
 	}
 	return &DynamicToolProvider{
 		funcRegistry: registry,
-		caller:       caller,
 		config:       cfg,
 		logger:       logger,
 		toolRegistry: toolRegistry,
@@ -84,25 +74,50 @@ func (d *DynamicToolProvider) BeforeAgent(ctx context.Context, runCtx *adk.ChatM
 	// sender's identity (used for tracing/debug).
 	agentID, hasAgent := AgentIDFromContext(ctx)
 	if hasAgent && agentID != "" {
+		// Extract base userID from agentID (e.g. "agent/ui-assistant" -> "agent").
+		// Client devices register functions under the base userID, not the full agentID.
+		baseUserID := agentID
+		if idx := strings.Index(agentID, "/"); idx > 0 {
+			baseUserID = agentID[:idx]
+		}
 		// 2. Get registered functions for this agent user, keyed by deviceID (fail-open).
-		deviceFuncs, err := d.funcRegistry.GetFunctionsByUser(ctx, agentID)
+		deviceFuncs, err := d.funcRegistry.GetFunctionsByUser(ctx, baseUserID)
 		if err != nil {
 			d.logger.Error("DynamicToolProvider: GetFunctionsByUser failed", "agent", agentID, "error", err)
 		} else if len(deviceFuncs) > 0 {
-			defaultTimeout := d.config.CallTimeout
-			if defaultTimeout <= 0 {
-				defaultTimeout = 30 * time.Second
+			// Deduplicate across devices: when multiple devices register the same
+			// function name, prefer the last registered device (most recent).
+			// This prevents stale devices from creating RemoteCallings that the
+			// current client cannot resolve.
+			// Build a map: funcName -> (deviceID, FunctionInfo) from last device.
+			type funcEntry struct {
+				deviceID string
+				info     protocol.FunctionInfo
+			}
+			seenFuncs := make(map[string]funcEntry)
+			for deviceID, funcs := range deviceFuncs {
+				for _, fn := range funcs {
+					seenFuncs[fn.Name] = funcEntry{deviceID: deviceID, info: fn}
+				}
 			}
 
-			for deviceID, funcs := range deviceFuncs {
+			// Group by deviceID.
+			deviceFuncsDeduped := make(map[string][]protocol.FunctionInfo)
+			for _, entry := range seenFuncs {
+				deviceFuncsDeduped[entry.deviceID] = append(deviceFuncsDeduped[entry.deviceID], entry.info)
+			}
+
+			for deviceID, funcs := range deviceFuncsDeduped {
 				funcs = d.applyFilters(funcs)
 				if len(funcs) == 0 {
 					continue
 				}
 
 				var tools []tool.BaseTool
+				// Convert CallTimeout (time.Duration) to milliseconds for the tool.
+				defaultTimeoutMs := int(d.config.CallTimeout / time.Millisecond)
 				for _, fn := range funcs {
-					t, err := newClientFunctionTool(fn, d.caller, agentID, deviceID, defaultTimeout)
+					t, err := newClientFunctionTool(fn, agentID, deviceID, defaultTimeoutMs)
 					if err != nil {
 						d.logger.Error("DynamicToolProvider: failed to create tool", "function", fn.Name, "error", err)
 						continue // fail-open per function
@@ -112,7 +127,7 @@ func (d *DynamicToolProvider) BeforeAgent(ctx context.Context, runCtx *adk.ChatM
 
 				if len(tools) > 0 {
 					merged = append(merged, tools...)
-					d.logger.Info("DynamicToolProvider: injected client tools", "count", len(tools), "device", deviceID)
+					d.logger.Debug("DynamicToolProvider: injected client tools", "count", len(tools), "device", deviceID)
 				}
 			}
 		}
@@ -126,16 +141,51 @@ func (d *DynamicToolProvider) BeforeAgent(ctx context.Context, runCtx *adk.ChatM
 		}
 		if len(staticTools) > 0 {
 			merged = append(merged, staticTools...)
-			d.logger.Info("DynamicToolProvider: injected registry tools", "count", len(staticTools), "tools", d.dynamicTools)
+			d.logger.Debug("DynamicToolProvider: injected registry tools", "count", len(staticTools), "tools", d.dynamicTools)
 		}
 	}
 
-	// Append all injected tools to runCtx.Tools (allocate new slice to avoid aliasing).
+	// Deduplicate: merged tools override existing tools with the same name.
 	if len(merged) > 0 {
+		// Build a set of names from merged (injected) tools.
+		mergedNames := make(map[string]bool, len(merged))
+		for _, t := range merged {
+			if ti, err := t.Info(ctx); err == nil && ti != nil {
+				mergedNames[ti.Name] = true
+			}
+		}
+
+		// Keep existing tools whose names are NOT overridden by merged tools.
 		newTools := make([]tool.BaseTool, 0, len(runCtx.Tools)+len(merged))
-		newTools = append(newTools, runCtx.Tools...)
-		newTools = append(newTools, merged...)
+		for _, t := range runCtx.Tools {
+			skip := false
+			if ti, err := t.Info(ctx); err == nil && ti != nil {
+				if mergedNames[ti.Name] {
+					skip = true
+				}
+			}
+			if !skip {
+				newTools = append(newTools, t)
+			}
+		}
+
+		// Deduplicate within merged itself (client functions may overlap with registry tools).
+		seen := make(map[string]bool, len(merged))
+		deduped := make([]tool.BaseTool, 0, len(merged))
+		for _, t := range merged {
+			if ti, err := t.Info(ctx); err == nil && ti != nil {
+				if !seen[ti.Name] {
+					seen[ti.Name] = true
+					deduped = append(deduped, t)
+				}
+			} else {
+				deduped = append(deduped, t) // keep if we can't get info
+			}
+		}
+
+		newTools = append(newTools, deduped...)
 		runCtx.Tools = newTools
+		d.logger.Info("DynamicToolProvider: final tools count", "existing", len(runCtx.Tools)-len(deduped), "injected", len(deduped), "total", len(runCtx.Tools))
 	}
 
 	return ctx, runCtx, nil

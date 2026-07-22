@@ -129,7 +129,6 @@ func setupAgentE2E(t *testing.T, opts ...agent.ExecutorOption) *agentE2EEnv {
 	agentBuilder.SetToolRegistry(agenttools.DefaultRegistry)
 	agentBuilder.SetRegistry(agentRegistry)
 	agentBuilder.SetClientFunctionProvider(base.funcRegistry)
-	agentBuilder.SetClientCaller(base.srv)
 
 	// LLM call logger for E2E debugging — writes to a temp file.
 	llmLogPath := filepath.Join(t.TempDir(), "llm-calls.log")
@@ -172,7 +171,7 @@ func setupAgentE2E(t *testing.T, opts ...agent.ExecutorOption) *agentE2EEnv {
 		5, // maxConcurrent: lower for tests
 		testLogger{t: t},
 		append([]agent.ExecutorOption{
-			agent.WithQuestionStore(base.store.QuestionStore()),
+			agent.WithRemoteCallingStore(base.store.RemoteCallingStore()),
 			agent.WithCheckPointStore(checkpointStore),
 		}, opts...)...,
 	)
@@ -201,8 +200,7 @@ func setupAgentE2E(t *testing.T, opts ...agent.ExecutorOption) *agentE2EEnv {
 		BroadcastFn:      base.srv.BroadcastUpdates,
 		AgentRegistry:    agentRegistry,
 		FunctionRegistry: base.funcRegistry,
-		ReverseRPC:       base.srv.ReverseRPC(), // Phase 5 (D-108)
-		Logger:           base.srv.Logger(),     // Phase 5 (D-108)
+		Logger:           base.srv.Logger(),
 	})
 
 	return &agentE2EEnv{
@@ -255,36 +253,36 @@ func setupAgentE2EWeakNet(t *testing.T, cfg llmWeakNetConfig, opts ...agent.Exec
 // build → ResumeWithParams → stream bridge → broadcast → persist.
 // Production uses agent_resume RPC (D-085) which enqueues via MQ.
 //
-// Phase 2 (D-116): answers are persisted to the Question table before the
-// resume task is enqueued. This helper simulates that by writing the answer
-// to DB via QuestionStore, then building a payload without answers.
+// Phase 2 (D-137): results are persisted to the RemoteCalling table before the
+// resume task is enqueued. This helper simulates that by writing the result
+// to DB via RemoteCallingStore, then building a payload without results.
 func triggerAgentResume(t *testing.T, env *agentE2EEnv, convID, checkpointID, interruptID, agentUserID, senderID, deviceID, answer string) error {
 	t.Helper()
 
-	// Write the answer to the Question table (simulates agent_resume RPC handler).
-	qs := env.store.QuestionStore()
-	require.NotNil(t, qs, "QuestionStore must be available for resume")
+	// Write the result to the RemoteCalling table (simulates agent_resume RPC handler).
+	rcs := env.store.RemoteCallingStore()
+	require.NotNil(t, rcs, "RemoteCallingStore must be available for resume")
 
-	// Look up the pending question for this checkpoint.
-	questions, err := qs.GetPendingByCheckpoint(context.Background(), checkpointID)
-	require.NoError(t, err, "get pending questions should succeed")
+	// Look up the pending remote callings for this checkpoint.
+	pendingRCs, err := rcs.GetPendingByCheckpoint(context.Background(), checkpointID)
+	require.NoError(t, err, "get pending remote callings should succeed")
 
-	// Find the matching question by interruptID (or use the first one if interruptID is empty).
-	var targetQ *model.Question
-	for _, q := range questions {
-		if interruptID != "" && q.InterruptID == interruptID {
-			targetQ = q
+	// Find the matching remote calling by interruptID (or use the first one if interruptID is empty).
+	var targetRC *model.RemoteCalling
+	for _, rc := range pendingRCs {
+		if interruptID != "" && rc.InterruptID == interruptID {
+			targetRC = rc
 			break
 		}
 		if interruptID == "" {
-			targetQ = q
+			targetRC = rc
 			break
 		}
 	}
-	require.NotNil(t, targetQ, "expected a pending question for checkpoint %s", checkpointID)
+	require.NotNil(t, targetRC, "expected a pending remote calling for checkpoint %s", checkpointID)
 
-	err = qs.UpdateAnswer(context.Background(), targetQ.ID, answer, senderID, deviceID)
-	require.NoError(t, err, "UpdateAnswer should succeed")
+	err = rcs.ResolveResult(context.Background(), targetRC.ID, answer)
+	require.NoError(t, err, "ResolveResult should succeed")
 
 	payload := agent.AgentResumePayload{
 		ConversationID: convID,

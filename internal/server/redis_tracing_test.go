@@ -14,6 +14,8 @@ import (
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
 
+// protocol is used by RedisNodeBroadcaster tests below.
+
 // findServerSpan returns the first span with the given name, or nil.
 func findServerSpan(spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan {
 	for _, sp := range spans {
@@ -74,26 +76,6 @@ func TestRedisConnectionStore_Get_NotFound_EmitsSpan(t *testing.T) {
 	spans := spansSince(startIdx)
 	sp := findServerSpan(spans, tracing.SpanRedisConnectionGet)
 	require.NotNil(t, sp, "expected span %q even on not-found", tracing.SpanRedisConnectionGet)
-}
-
-// ---------------------------------------------------------------------------
-// RedisPendingStore integration tests
-// ---------------------------------------------------------------------------
-
-func TestRedisPendingStore_Save_EmitsSpan(t *testing.T) {
-	store, _ := setupTestRedisPendingStore(t)
-	startIdx := len(recorder.Ended())
-
-	req := makePendingReq("req-1", "user-1", "device-1", "send_message")
-	err := store.Save(context.Background(), req)
-	require.NoError(t, err)
-
-	spans := spansSince(startIdx)
-	sp := findServerSpan(spans, tracing.SpanRedisPendingSave)
-	require.NotNil(t, sp, "expected span %q", tracing.SpanRedisPendingSave)
-	attrs := roAttrMap(sp)
-	assert.Equal(t, "user-1", attrs[tracing.AttrUserID])
-	assert.Equal(t, "device-1", attrs[tracing.AttrDeviceID])
 }
 
 // ---------------------------------------------------------------------------

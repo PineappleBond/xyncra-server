@@ -8,7 +8,7 @@
  * All 9 models map 1:1 to the Go GORM models:
  *   - Conversation  -> pkg/store/model/conversation.go
  *   - Message       -> pkg/store/model/message.go
- *   - Question      -> pkg/store/model/question.go
+ *   - RemoteCalling -> pkg/store/model/remote_calling.go
  *   - SyncState     -> pkg/store/model/sync_state.go
  *   - Draft         -> pkg/store/model/draft.go
  *   - RetryTask     -> pkg/store/model/retry_task.go
@@ -82,13 +82,17 @@ export interface Conversation {
   /** Soft-delete timestamp. Null means not deleted. */
   deleted_at: Date | null;
 
-  /** HITL questions (transient, not stored in DB). */
-  questions?: Array<{
+  /** RemoteCallings (transient, not stored in DB, D-137). */
+  remote_callings?: Array<{
     id: string;
-    question_text: string;
+    conversation_id: string;
     checkpoint_id: string;
-    interrupt_id: string;
+    agent_id: string;
+    method: string;
+    params: string;
+    device_id: string;
     status: string;
+    created_at: Date;
   }>;
 }
 
@@ -126,29 +130,61 @@ export interface Message {
 }
 
 // ---------------------------------------------------------------------------
-// Question — HITL question (client-side mirror, D-125)
+// RemoteCalling — remote calling (client-side mirror, D-137)
 // ---------------------------------------------------------------------------
 
 /**
- * Question represents a HITL question (client-side mirror, D-125).
- * Only contains fields needed for display; answer-related fields
- * (Answer, AnsweredBy, etc.) are server-side only.
+ * RemoteCalling represents a remote call initiated by an Agent (client-side mirror, D-137).
+ * Unifies HITL questions and client function calls into a single model.
  *
- * Mirrors Go model.Question (pkg/store/model/question.go).
+ * Mirrors Go model.RemoteCalling (pkg/store/model/remote_calling.go).
  */
-export interface Question {
+export interface RemoteCalling {
   /** Primary key (UUID, size:36). */
   id: string;
-  /** Conversation ID this question belongs to. */
+  /** Conversation ID this remote calling belongs to. */
   conversation_id: string;
   /** Checkpoint identifier. */
   checkpoint_id: string;
-  /** Interrupt identifier. */
-  interrupt_id: string;
-  /** The question text. */
-  question_text: string;
-  /** Status: "pending", "answered", "dismissed". Default "pending". */
+  /** Agent identifier. */
+  agent_id: string;
+  /** Method name (e.g. ask_user, pg_chatai_sendMessage). */
+  method: string;
+  /** JSON parameters. */
+  params: string;
+  /** Device ID (empty = any device, non-empty = specific device). */
+  device_id: string;
+  /** Status: "pending", "resolved", "cancelled", "expired". Default "pending". */
   status: string;
+  /** Record creation time. */
+  created_at: Date;
+}
+
+// ---------------------------------------------------------------------------
+// RetryQueue — pending RemoteCalling retry task with exponential backoff (D-137)
+// ---------------------------------------------------------------------------
+
+/**
+ * RetryQueue represents a pending RemoteCalling retry task with exponential backoff.
+ * Used to persist failed agent_resume calls for retry.
+ */
+export interface RetryQueueItem {
+  /** Auto-increment primary key. */
+  id?: number;
+  /** RemoteCalling ID. */
+  remote_calling_id: string;
+  /** Whether the call succeeded. */
+  success: boolean;
+  /** Result on success. */
+  result: string;
+  /** Error message on failure. */
+  error_message: string;
+  /** Agent ID for the resume call. */
+  agent_id: string;
+  /** Current retry count. */
+  retry_count: number;
+  /** Next retry timestamp. */
+  next_retry_at: Date;
   /** Record creation time. */
   created_at: Date;
 }

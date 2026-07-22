@@ -1,0 +1,437 @@
+// RemoteCalling timeout cleanup background task (D-123 / D-137).
+//
+// Two-layer cleanup:
+//  1. Conversation-level: scans conversations stuck in asking_user status and cleans up
+//     those that have exceeded the configured max age (default 24h).
+//  2. RemoteCalling-level: scans individual RemoteCallings with expires_at < NOW().
+//
+// Cleanup steps mirror the D-122 cleanupAfterResumeFailure pattern: clear agent status,
+// soft-delete RemoteCallings, delete Redis checkpoint, send a user-friendly timeout
+// message, and broadcast an agent_timeout ephemeral notification.
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/PineappleBond/xyncra-server/internal/mq"
+	"github.com/PineappleBond/xyncra-server/internal/store"
+	"github.com/PineappleBond/xyncra-server/internal/store/model"
+)
+
+// RemoteCallingCleanupConfig holds configuration for the RemoteCalling timeout cleanup task.
+type RemoteCallingCleanupConfig struct {
+	// Interval is the time between cleanup runs. Defaults to 5 minutes.
+	Interval time.Duration
+
+	// MaxAge is the maximum time a conversation can remain in asking_user
+	// status before being cleaned up. Defaults to 24 hours.
+	MaxAge time.Duration
+
+	// BatchSize is the maximum number of conversations/remote callings to process per cycle.
+	// Defaults to 100.
+	BatchSize int
+
+	// LockTTL is the TTL for the per-conversation distributed lock.
+	// Defaults to 30 seconds.
+	LockTTL time.Duration
+}
+
+// RemoteCallingCleanupTask periodically cleans up conversations stuck in asking_user
+// status and individual expired RemoteCallings. It implements D-123 / D-137.
+//
+// All cleanup steps are non-fatal (D-007): errors are logged but do not
+// interrupt processing of other conversations.
+type RemoteCallingCleanupTask struct {
+	config            RemoteCallingCleanupConfig
+	convStore         *store.ConversationStore
+	remoteCallingStore *store.RemoteCallingStore  // optional, nil-safe (D-063)
+	checkpointStore   DeletableCheckPointStore   // optional
+	broadcaster       *BroadcastHelper
+	dataStore         store.StoreAPI // for SendMessage
+	broker            mq.Broker     // for enqueuing agent resume tasks
+	lockClient        redisClient    // reuses interface from task_handler.go (SetNX + Del)
+	logger            Logger
+}
+
+// NewRemoteCallingCleanupTask creates a RemoteCallingCleanupTask with the given dependencies.
+// Zero-value fields in cfg are filled with sensible defaults:
+//
+//   - Interval:  5 minutes
+//   - MaxAge:    24 hours
+//   - BatchSize: 100
+//   - LockTTL:   30 seconds
+//
+// remoteCallingStore and checkpointStore may be nil (gracefully skipped).
+// broker may be nil (agent resume enqueue skipped).
+func NewRemoteCallingCleanupTask(
+	cfg RemoteCallingCleanupConfig,
+	convStore *store.ConversationStore,
+	remoteCallingStore *store.RemoteCallingStore,
+	checkpointStore DeletableCheckPointStore,
+	broadcaster *BroadcastHelper,
+	dataStore store.StoreAPI,
+	broker mq.Broker,
+	lockClient redisClient,
+	logger Logger,
+) *RemoteCallingCleanupTask {
+	if cfg.Interval <= 0 {
+		cfg.Interval = 5 * time.Minute
+	}
+	if cfg.MaxAge <= 0 {
+		cfg.MaxAge = 24 * time.Hour
+	}
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = 100
+	}
+	if cfg.LockTTL <= 0 {
+		cfg.LockTTL = 30 * time.Second
+	}
+	return &RemoteCallingCleanupTask{
+		config:             cfg,
+		convStore:          convStore,
+		remoteCallingStore: remoteCallingStore,
+		checkpointStore:    checkpointStore,
+		broadcaster:        broadcaster,
+		dataStore:          dataStore,
+		broker:             broker,
+		lockClient:         lockClient,
+		logger:             logger,
+	}
+}
+
+// Run starts the cleanup loop. It blocks until ctx is cancelled.
+//
+// On each tick, Run calls cleanupOnce and logs the outcome. Panics are
+// recovered to prevent the background goroutine from crashing the server.
+// Cleanup failures are logged but do not interrupt the loop (D-007).
+//
+// The first cleanup does not run immediately; Run waits for the first tick.
+func (t *RemoteCallingCleanupTask) Run(ctx context.Context) {
+	ticker := time.NewTicker(t.config.Interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.logger.Error("panic recovered", "error", r)
+					}
+				}()
+				t.cleanupOnce(ctx)
+			}()
+		}
+	}
+}
+
+// cleanupOnce executes a single cleanup cycle: query stale conversations,
+// clean expired RemoteCallings, and attempt to clean each one up.
+func (t *RemoteCallingCleanupTask) cleanupOnce(ctx context.Context) {
+	// Layer 1: Conversation-level cleanup (existing logic).
+	t.cleanupStaleConversations(ctx)
+
+	// Layer 2: RemoteCalling-level cleanup (D-137).
+	t.cleanupExpiredRemoteCallings(ctx)
+}
+
+// cleanupStaleConversations scans conversations stuck in asking_user status
+// and cleans up those that have exceeded the configured max age.
+func (t *RemoteCallingCleanupTask) cleanupStaleConversations(ctx context.Context) {
+	conversations, err := t.convStore.ListStaleHITLConversations(ctx, t.config.MaxAge, t.config.BatchSize)
+	if err != nil {
+		t.logger.Error("failed to list stale conversations", "error", err)
+		return
+	}
+	if len(conversations) == 0 {
+		return
+	}
+
+	t.logger.Info("found stale HITL conversations", "count", len(conversations))
+
+	for _, conv := range conversations {
+		// Recover per-conversation so one panic does not abort the batch.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.logger.Error("panic recovered for conversation", "conversation_id", conv.ID, "error", r)
+				}
+			}()
+			t.cleanupConversation(ctx, conv)
+		}()
+	}
+}
+
+// cleanupExpiredRemoteCallings scans individual RemoteCallings with expires_at < NOW()
+// and marks them as expired. If no pending remain for a checkpoint, triggers conversation cleanup.
+func (t *RemoteCallingCleanupTask) cleanupExpiredRemoteCallings(ctx context.Context) {
+	if t.remoteCallingStore == nil {
+		return
+	}
+
+	expired, err := t.remoteCallingStore.ListExpired(ctx, t.config.BatchSize)
+	if err != nil {
+		t.logger.Error("failed to list expired remote callings", "error", err)
+		return
+	}
+	if len(expired) == 0 {
+		return
+	}
+
+	t.logger.Info("found expired remote callings", "count", len(expired))
+
+	for _, rc := range expired {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.logger.Error("panic recovered for remote calling", "id", rc.ID, "error", r)
+				}
+			}()
+			t.cleanupExpiredRemoteCalling(ctx, rc)
+		}()
+	}
+}
+
+// cleanupExpiredRemoteCalling marks a single RemoteCalling as expired and checks
+// if the conversation needs cleanup.
+func (t *RemoteCallingCleanupTask) cleanupExpiredRemoteCalling(ctx context.Context, rc *model.RemoteCalling) {
+	// Mark as expired.
+	if err := t.remoteCallingStore.MarkExpired(ctx, rc.ID); err != nil {
+		t.logger.Error("mark remote calling expired failed (non-fatal)",
+			"id", rc.ID, "error", err)
+		return
+	}
+
+	// Check if there are still pending RemoteCallings for this checkpoint.
+	pending, err := t.remoteCallingStore.CountPendingByCheckpoint(ctx, rc.CheckpointID)
+	if err != nil {
+		t.logger.Error("count pending remote callings failed (non-fatal)",
+			"checkpoint_id", rc.CheckpointID, "error", err)
+		return
+	}
+
+	// If no more pending, determine whether to resume the agent or clean up.
+	if pending == 0 {
+		t.logger.Info("all remote callings resolved/expired for checkpoint",
+			"checkpoint_id", rc.CheckpointID, "conversation_id", rc.ConversationID)
+
+		// Check if any RemoteCallings were resolved (client reported results).
+		// If some were resolved, enqueue agent resume so it can process the results.
+		// If ALL are expired (none resolved), clean up the conversation to break
+		// the infinite loop where: expire → resume → agent re-calls function →
+		// new RemoteCalling → expire again (BUG-002).
+		allRCs, listErr := t.remoteCallingStore.GetByCheckpoint(ctx, rc.CheckpointID)
+		if listErr != nil {
+			t.logger.Error("get remote callings by checkpoint failed (non-fatal)",
+				"checkpoint_id", rc.CheckpointID, "error", listErr)
+			return
+		}
+
+		hasResolved := false
+		for _, r := range allRCs {
+			if r.Status == model.RemoteCallingStatusResolved {
+				hasResolved = true
+				break
+			}
+		}
+
+		if hasResolved {
+			// Some callings were resolved — enqueue agent resume to process results.
+			if t.broker != nil {
+				payload := AgentResumePayload{
+					ConversationID: rc.ConversationID,
+					CheckpointID:   rc.CheckpointID,
+					AgentID:        rc.AgentID,
+				}
+				raw, marshalErr := json.Marshal(payload)
+				if marshalErr != nil {
+					t.logger.Error("marshal agent resume payload failed (non-fatal)",
+						"checkpoint_id", rc.CheckpointID, "error", marshalErr)
+				} else {
+					task := &mq.Task{
+						Type:    mq.TypeAgentResume,
+						Payload: raw,
+						Queue:   mq.QueueDefault,
+					}
+					if _, enqueueErr := t.broker.Enqueue(ctx, task); enqueueErr != nil {
+						t.logger.Error("enqueue agent resume after all expired failed (non-fatal)",
+							"checkpoint_id", rc.CheckpointID, "error", enqueueErr)
+					}
+				}
+			}
+		} else {
+			// All callings expired with none resolved — clean up conversation
+			// instead of re-triggering agent execution.
+			t.cleanupExpiredConversation(ctx, rc)
+		}
+	}
+}
+
+// cleanupExpiredConversation performs full conversation cleanup when all
+// RemoteCallings for a checkpoint have expired without any being resolved.
+// This breaks the infinite loop: expire → agent resume → re-call function →
+// new RemoteCalling → expire (BUG-002).
+//
+// Steps: clear agent status, delete RemoteCallings, delete Redis checkpoint,
+// send a user-friendly timeout message, and broadcast notifications.
+// All steps are non-fatal — errors are logged but do not abort the cleanup.
+func (t *RemoteCallingCleanupTask) cleanupExpiredConversation(ctx context.Context, rc *model.RemoteCalling) {
+	// Re-check conversation status to avoid duplicate cleanup.
+	conv, err := t.convStore.Get(ctx, rc.ConversationID)
+	if err != nil {
+		t.logger.Error("get conversation for expired cleanup failed (non-fatal)",
+			"conversation_id", rc.ConversationID, "error", err)
+		return
+	}
+	if conv.AgentStatus != model.AgentStatusToolCalling {
+		t.logger.Info("conversation no longer in tool_calling, skipping expired cleanup",
+			"conversation_id", rc.ConversationID, "agent_status", conv.AgentStatus)
+		return
+	}
+
+	// Determine the human user (the non-agent participant).
+	humanUserID := conv.UserID1
+	if humanUserID == conv.AgentID {
+		humanUserID = conv.UserID2
+	}
+
+	// 1. Clear agent status (reset conversation to idle).
+	cleanupUpdatedAt, clearErr := t.convStore.ClearAgentStatus(ctx, rc.ConversationID)
+	if clearErr != nil {
+		t.logger.Error("clear agent status failed (non-fatal)",
+			"conversation_id", rc.ConversationID, "error", clearErr)
+	}
+
+	// 2. Delete RemoteCallings for this checkpoint.
+	if err := t.remoteCallingStore.DeleteByCheckpoint(ctx, rc.CheckpointID); err != nil {
+		t.logger.Error("delete remote callings failed (non-fatal)",
+			"checkpoint_id", rc.CheckpointID, "error", err)
+	}
+
+	// 3. Delete checkpoint from Redis.
+	if t.checkpointStore != nil {
+		if err := t.checkpointStore.Delete(ctx, rc.CheckpointID); err != nil {
+			t.logger.Error("delete checkpoint failed (non-fatal)",
+				"checkpoint_id", rc.CheckpointID, "error", err)
+		}
+	}
+
+	// 4. Send user-friendly timeout error message.
+	msg := &model.Message{
+		ID:              uuid.New().String(),
+		ClientMessageID: uuid.New().String(),
+		ConversationID:  rc.ConversationID,
+		SenderID:        rc.AgentID,
+		Content:         "抱歉，远程函数调用超时，请重新发送消息。",
+		Type:            "text",
+		Status:          "sent",
+		CreatedAt:       time.Now(),
+	}
+	if _, err := t.dataStore.SendMessage(ctx, msg, []string{humanUserID, rc.AgentID}); err != nil {
+		t.logger.Error("send timeout message failed (non-fatal)",
+			"conversation_id", rc.ConversationID, "error", err)
+	}
+
+	// 5. Broadcast notifications.
+	if t.broadcaster != nil {
+		t.broadcaster.SendAgentTimeout(ctx, humanUserID, rc.AgentID, rc.ConversationID, "remote_calling_timeout")
+		// Broadcast conversation update to both participants (BUG-001).
+		t.broadcaster.SendConversationUpdate(ctx, humanUserID, rc.ConversationID, cleanupUpdatedAt)
+		t.broadcaster.SendConversationUpdate(ctx, rc.AgentID, rc.ConversationID, cleanupUpdatedAt)
+	}
+
+	t.logger.Info("cleaned up expired remote callings conversation",
+		"conversation_id", rc.ConversationID, "agent_id", rc.AgentID, "checkpoint_id", rc.CheckpointID)
+}
+
+// cleanupConversation performs all cleanup steps for a single stale HITL
+// conversation. All steps are non-fatal — errors are logged but do not affect
+// subsequent steps (D-007 / D-122).
+func (t *RemoteCallingCleanupTask) cleanupConversation(ctx context.Context, conv *model.Conversation) {
+	// 1. Acquire distributed lock (Redis SETNX).
+	// Key format: hitl:cleanup:{conversationID}
+	// TTL ensures the lock is released even if this node crashes.
+	lockKey := "hitl:cleanup:" + conv.ID
+	ok, err := t.lockClient.SetNX(ctx, lockKey, "1", t.config.LockTTL).Result()
+	if err != nil {
+		t.logger.Error("lock acquire failed (non-fatal)", "conversation_id", conv.ID, "error", err)
+		return
+	}
+	if !ok {
+		// Another node is handling this conversation.
+		t.logger.Debug("lock already held, skipping", "conversation_id", conv.ID)
+		return
+	}
+	// Lock TTL ensures automatic release; no explicit DEL needed.
+
+	// 2. Re-check conversation status (another node or user may have resolved it).
+	fresh, err := t.convStore.Get(ctx, conv.ID)
+	if err != nil {
+		t.logger.Error("re-check failed (non-fatal)", "conversation_id", conv.ID, "error", err)
+		return
+	}
+	if fresh.AgentStatus != model.AgentStatusAskingUser && fresh.AgentStatus != model.AgentStatusToolCalling {
+		t.logger.Info("conversation no longer in asking_user/tool_calling, skipping",
+			"conversation_id", conv.ID, "agent_status", fresh.AgentStatus)
+		return
+	}
+
+	// Determine the human user (the non-agent participant).
+	humanUserID := fresh.UserID1
+	if humanUserID == fresh.AgentID {
+		humanUserID = fresh.UserID2
+	}
+
+	// 3. ClearAgentStatus (reset conversation to idle).
+	cleanupUpdatedAt, clearErr := t.convStore.ClearAgentStatus(ctx, conv.ID)
+	if clearErr != nil {
+		t.logger.Error("clear agent status failed (non-fatal)", "conversation_id", conv.ID, "error", clearErr)
+	}
+
+	// 4. DeleteByCheckpoint (soft-delete RemoteCallings via GORM, D-137).
+	if fresh.CheckpointID != "" && t.remoteCallingStore != nil {
+		if err := t.remoteCallingStore.DeleteByCheckpoint(ctx, fresh.CheckpointID); err != nil {
+			t.logger.Error("delete remote callings failed (non-fatal)",
+				"conversation_id", conv.ID, "checkpoint_id", fresh.CheckpointID, "error", err)
+		}
+	}
+
+	// 5. Delete checkpoint from Redis (D-112).
+	if fresh.CheckpointID != "" && t.checkpointStore != nil {
+		if err := t.checkpointStore.Delete(ctx, fresh.CheckpointID); err != nil {
+			t.logger.Error("delete checkpoint failed (non-fatal)",
+				"conversation_id", conv.ID, "checkpoint_id", fresh.CheckpointID, "error", err)
+		}
+	}
+
+	// 6. Send user-friendly timeout error message (D-067 / D-082).
+	msg := &model.Message{
+		ID:              uuid.New().String(),
+		ClientMessageID: uuid.New().String(),
+		ConversationID:  conv.ID,
+		SenderID:        fresh.AgentID,
+		Content:         "抱歉，等待时间过长，会话已超时。请重新发送消息。",
+		Type:            "text",
+		Status:          "sent",
+		CreatedAt:       time.Now(),
+	}
+	if _, err := t.dataStore.SendMessage(ctx, msg, []string{humanUserID, fresh.AgentID}); err != nil {
+		t.logger.Error("send timeout message failed (non-fatal)", "conversation_id", conv.ID, "error", err)
+	}
+
+	// 7. Broadcast agent_timeout ephemeral notification (D-087).
+	if t.broadcaster != nil {
+		t.broadcaster.SendAgentTimeout(ctx, humanUserID, fresh.AgentID, conv.ID, "hitl_timeout")
+		// Also send conversation update so clients refresh state (D-120 / D-124).
+		t.broadcaster.SendConversationUpdate(ctx, humanUserID, conv.ID, cleanupUpdatedAt)
+	}
+
+	t.logger.Info("cleaned up stale HITL conversation",
+		"conversation_id", conv.ID, "agent_id", fresh.AgentID, "checkpoint_id", fresh.CheckpointID)
+}

@@ -63,16 +63,19 @@ export class VueUpdateHandler
         this.emitter.emit('conversation:updated', {
           conversation: toConversationEvent(conversation),
         })
-        if (conversation.agentStatus === 'asking_user' && conversation.questions && conversation.questions.length > 0) {
-          const question = conversation.questions[0]
-          this.emitter.emit('hitl:question', {
-            userId: conversation.userId2,
-            conversationId: conversation.id,
-            reason: question.question_text,
-            questionId: question.id,
-            checkpointId: question.checkpoint_id,
-            interruptId: question.interrupt_id,
-          })
+        if ((conversation.agentStatus === 'asking_user' || conversation.agentStatus === 'tool_calling') && conversation.remoteCallings && conversation.remoteCallings.length > 0) {
+          for (const rc of conversation.remoteCallings) {
+            if (rc.status === 'pending') {
+              this.emitter.emit('remote_calling', {
+                userId: conversation.userId2,
+                conversationId: conversation.id,
+                remoteCallingId: rc.id,
+                method: rc.method,
+                params: rc.params,
+                deviceId: rc.device_id,
+              })
+            }
+          }
         }
         break
     }
@@ -97,7 +100,7 @@ export class VueUpdateHandler
   }
 
   async onAgentTimeout(userId: string, conversationId: string, reason: string): Promise<void> {
-    this.emitter.emit('hitl:question', { userId, conversationId, reason })
+    this.emitter.emit('agent:status', { userId, conversationId, status: 'timeout' })
   }
 
   async onFunctionCall(

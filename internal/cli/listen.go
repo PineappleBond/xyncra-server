@@ -33,17 +33,17 @@ const defaultCleanupInterval = 1 * time.Hour
 
 // cliUpdateHandler is an UpdateHandler that prints received updates to stdout.
 type cliUpdateHandler struct {
-	// questionsDB is the client-side question store for HITL display (D-125).
-	questionsDB *store.QuestionStore
+	// remoteCallingsDB is the client-side remote calling store for HITL display (D-137).
+	remoteCallingsDB *store.RemoteCallingStore
 }
 
 // newCLIUpdateHandler creates a new cliUpdateHandler. If clientDB is non-nil,
-// its Questions store is used to display pending HITL questions in
-// OnConversation (D-125).
+// its RemoteCallings store is used to display pending HITL remote callings in
+// OnConversation (D-137).
 func newCLIUpdateHandler(clientDB *store.ClientDB) *cliUpdateHandler {
 	h := &cliUpdateHandler{}
 	if clientDB != nil {
-		h.questionsDB = clientDB.Questions
+		h.remoteCallingsDB = clientDB.RemoteCallings
 	}
 	return h
 }
@@ -72,24 +72,22 @@ func (h *cliUpdateHandler) OnMarkRead(_ context.Context, conversationID string, 
 
 // OnConversation prints a conversation state change to stdout.
 // When the agent status is "asking_user", it also displays pending HITL
-// questions from the local question store (D-125).
+// remote callings from the local store (D-137).
 func (h *cliUpdateHandler) OnConversation(ctx context.Context, conv *model.Conversation) error {
 	if conv == nil {
 		return nil
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "[conversation] id=%s title=%q\n", conv.ID, conv.Title)
 
-	// HITL display: when agent is asking_user, show pending questions (D-125).
-	if conv.AgentStatus == model.AgentStatusAskingUser && h.questionsDB != nil {
-		questions, err := h.questionsDB.GetByConversation(ctx, conv.ID)
-		if err == nil && len(questions) > 0 {
+	// HITL display: when agent is asking_user, show pending remote callings (D-137).
+	if conv.AgentStatus == model.AgentStatusAskingUser && h.remoteCallingsDB != nil {
+		rcs, err := h.remoteCallingsDB.GetPendingByConversation(ctx, conv.ID)
+		if err == nil && len(rcs) > 0 {
 			_, _ = fmt.Fprintf(os.Stdout, "[hitl] conv=%s agent=%s checkpoint_id=%s\n",
 				conv.ID, conv.AgentID, conv.CheckpointID)
-			for i, q := range questions {
-				if q.Status == "pending" {
-					_, _ = fmt.Fprintf(os.Stdout, "  [%d] interrupt_id=%s question=%q (%s)\n",
-						i+1, q.InterruptID, q.QuestionText, q.Status)
-				}
+			for i, rc := range rcs {
+				_, _ = fmt.Fprintf(os.Stdout, "  [%d] id=%s method=%s status=%s\n",
+					i+1, rc.ID, rc.Method, rc.Status)
 			}
 		}
 	}
@@ -634,14 +632,14 @@ func registerIPCHandlers(s *IPCServer, xc *client.XyncraClient, db *store.Client
 		return NewIPCResponse(req.ID, json.RawMessage(data))
 	})
 
-	// agent_resume forwards the resume request to the server via WebSocket (D-085, D-114).
+	// agent_resume forwards the resume request to the server via WebSocket (D-085, D-137).
 	s.Register("agent_resume", func(ctx context.Context, req *IPCRequest) (*IPCResponse, error) {
 		var params struct {
-			ConversationID string `json:"conversation_id"`
-			CheckpointID   string `json:"checkpoint_id"`
-			InterruptID    string `json:"interrupt_id"`
-			Answer         string `json:"answer"`
-			AgentID        string `json:"agent_id"`
+			ID           string `json:"id"`
+			Success      bool   `json:"success"`
+			Result       string `json:"result"`
+			ErrorMessage string `json:"error_message"`
+			AgentID      string `json:"agent_id"`
 		}
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return NewIPCErrorResponse(req.ID, -32602, fmt.Sprintf("invalid params: %v", err)), nil

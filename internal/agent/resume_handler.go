@@ -150,24 +150,13 @@ func NewAgentResumeHandler(
 		if !ok {
 			logger.Error("agent resume: agent not found", "agent_id", agentID)
 			cleanupAfterResumeFailure(ctx, executor, payload.ConversationID, payload.CheckpointID, logger)
-			execPayload := ExecutePayload{
+			executor.sendErrorMessage(ctx, ExecutePayload{
 				ConversationID: payload.ConversationID,
 				AgentID:        payload.AgentID,
 				SenderID:       payload.SenderID,
 				DeviceID:       payload.DeviceID,
-			}
-			executor.sendErrorMessage(ctx, execPayload,
-				"抱歉，Agent 配置不存在，请重新发送消息。")
-			// Clean up idempotency keys (D-121).
-			if idempotency != nil {
-				processingKey := "agent:resume:processing:" + payload.CheckpointID
-				processedKey := "agent:resume:" + payload.CheckpointID
-				_ = idempotency.DeleteKey(ctx, processingKey)
-				if _, err := idempotency.MarkProcessed(ctx, processedKey, 24*time.Hour); err != nil {
-					logger.Error("agent resume: processed mark after failure (non-fatal)", "error", err)
-				}
-			}
-			releaseLock()
+			}, "抱歉，Agent 配置不存在，请重新发送消息。")
+			markResumeFailed(ctx, idempotency, payload.CheckpointID, releaseLock, logger)
 			return nil
 		}
 
@@ -187,24 +176,13 @@ func NewAgentResumeHandler(
 		if err != nil {
 			logger.Error("agent resume: build failed", "agent_id", agentID, "error", err)
 			cleanupAfterResumeFailure(ctx, executor, payload.ConversationID, payload.CheckpointID, logger)
-			execPayload := ExecutePayload{
+			executor.sendErrorMessage(ctx, ExecutePayload{
 				ConversationID: payload.ConversationID,
 				AgentID:        payload.AgentID,
 				SenderID:       payload.SenderID,
-				DeviceID:       payload.DeviceID, // Phase 6 (D-102)
-			}
-			executor.sendErrorMessage(ctx, execPayload,
-				"抱歉，恢复执行失败，请重新发送消息。")
-			// Clean up idempotency keys (D-121).
-			if idempotency != nil {
-				processingKey := "agent:resume:processing:" + payload.CheckpointID
-				processedKey := "agent:resume:" + payload.CheckpointID
-				_ = idempotency.DeleteKey(ctx, processingKey)
-				if _, err := idempotency.MarkProcessed(ctx, processedKey, 24*time.Hour); err != nil {
-					logger.Error("agent resume: processed mark after failure (non-fatal)", "error", err)
-				}
-			}
-			releaseLock()
+				DeviceID:       payload.DeviceID,
+			}, "抱歉，恢复执行失败，请重新发送消息。")
+			markResumeFailed(ctx, idempotency, payload.CheckpointID, releaseLock, logger)
 			return nil
 		}
 
@@ -222,51 +200,65 @@ func NewAgentResumeHandler(
 		}
 		defer clearTyping()
 
-		// Read answered Questions from DB to build the Targets map (D-116).
-		// Answers are persisted in the Question table, not in the MQ payload.
-		if executor.questionStore == nil {
-			logger.Error("agent resume: questionStore is nil, cannot read answers",
+		// Read resolved RemoteCallings from DB to build the Targets map (D-137).
+		// Results are persisted in the RemoteCalling table, not in the MQ payload.
+		if executor.remoteCallingStore == nil {
+			logger.Error("agent resume: remoteCallingStore is nil, cannot read results",
 				"checkpoint_id", payload.CheckpointID)
 			releaseLock()
 			return nil
 		}
-		questions, err := executor.questionStore.GetByCheckpoint(ctx, payload.CheckpointID)
+		rcList, err := executor.remoteCallingStore.GetByCheckpoint(ctx, payload.CheckpointID)
 		if err != nil {
-			logger.Error("agent resume: get questions failed",
+			logger.Error("agent resume: get remote callings failed",
 				"checkpoint_id", payload.CheckpointID, "error", err)
 			cleanupAfterResumeFailure(ctx, executor, payload.ConversationID, payload.CheckpointID, logger)
-			execPayload := ExecutePayload{
+			executor.sendErrorMessage(ctx, ExecutePayload{
 				ConversationID: payload.ConversationID,
 				AgentID:        payload.AgentID,
 				SenderID:       payload.SenderID,
 				DeviceID:       payload.DeviceID,
-			}
-			executor.sendErrorMessage(ctx, execPayload,
-				"抱歉，恢复执行失败，请重新发送消息。")
-			// Clean up idempotency keys (D-121).
-			if idempotency != nil {
-				processingKey := "agent:resume:processing:" + payload.CheckpointID
-				processedKey := "agent:resume:" + payload.CheckpointID
-				_ = idempotency.DeleteKey(ctx, processingKey)
-				if _, err := idempotency.MarkProcessed(ctx, processedKey, 24*time.Hour); err != nil {
-					logger.Error("agent resume: processed mark after failure (non-fatal)", "error", err)
-				}
-			}
-			releaseLock()
+			}, "抱歉，恢复执行失败，请重新发送消息。")
+			markResumeFailed(ctx, idempotency, payload.CheckpointID, releaseLock, logger)
 			return nil // D-073
 		}
 
 		targets := make(map[string]any)
-		for _, q := range questions {
-			if q.Status == model.QuestionStatusAnswered && q.InterruptID != "" {
-				targets[q.InterruptID] = q.Answer
+		for _, rc := range rcList {
+			if rc.Status == model.RemoteCallingStatusResolved && rc.InterruptID != "" {
+				targets[rc.InterruptID] = rc.Result
 			}
 		}
 		if len(targets) == 0 {
-			logger.Info("agent resume: no answered questions found for checkpoint",
+			// Check if all RemoteCallings are expired/cancelled (BUG-003).
+			// If so, clean up the conversation instead of resuming with empty targets,
+			// which would cause the agent to re-call the function and create an
+			// infinite loop.
+			allExpired := len(rcList) > 0
+			for _, rc := range rcList {
+				if rc.Status != model.RemoteCallingStatusExpired && rc.Status != model.RemoteCallingStatusCancelled {
+					allExpired = false
+					break
+				}
+			}
+			if allExpired {
+				logger.Info("agent resume: all remote callings expired/cancelled, cleaning up",
+					"checkpoint_id", payload.CheckpointID,
+					"conversation_id", payload.ConversationID)
+				cleanupAfterResumeFailure(ctx, executor, payload.ConversationID, payload.CheckpointID, logger)
+				executor.sendErrorMessage(ctx, ExecutePayload{
+					ConversationID: payload.ConversationID,
+					AgentID:        payload.AgentID,
+					SenderID:       payload.SenderID,
+					DeviceID:       payload.DeviceID,
+				}, "抱歉，远程函数调用超时，请重新发送消息。")
+				markResumeFailed(ctx, idempotency, payload.CheckpointID, releaseLock, logger)
+				return nil
+			}
+			logger.Info("agent resume: no resolved remote callings found for checkpoint",
 				"checkpoint_id", payload.CheckpointID)
 		} else {
-			logger.Debug("agent resume: built targets from DB questions",
+			logger.Debug("agent resume: built targets from DB remote callings",
 				"targets_count", len(targets),
 				"checkpoint_id", payload.CheckpointID)
 		}
@@ -284,25 +276,15 @@ func NewAgentResumeHandler(
 				"checkpoint_id", payload.CheckpointID, "error", err)
 			clearTyping()
 			// Check if checkpoint expired.
-			if errors.Is(err, ErrCheckpointNotFound) || strings.Contains(err.Error(), "not found") {
+			if errors.Is(err, ErrCheckpointNotFound) {
 				cleanupAfterResumeFailure(ctx, executor, payload.ConversationID, payload.CheckpointID, logger)
-				execPayload := ExecutePayload{
+				executor.sendErrorMessage(ctx, ExecutePayload{
 					ConversationID: payload.ConversationID,
 					AgentID:        payload.AgentID,
 					SenderID:       payload.SenderID,
-					DeviceID:       payload.DeviceID, // Phase 6 (D-102)
-				}
-				executor.sendErrorMessage(ctx, execPayload,
-					"抱歉，等待时间过长，请重新发送消息。")
-				// Clean up idempotency keys (D-121).
-				if idempotency != nil {
-					processingKey := "agent:resume:processing:" + payload.CheckpointID
-					processedKey := "agent:resume:" + payload.CheckpointID
-					_ = idempotency.DeleteKey(ctx, processingKey)
-					if _, err := idempotency.MarkProcessed(ctx, processedKey, 24*time.Hour); err != nil {
-						logger.Error("agent resume: processed mark after failure (non-fatal)", "error", err)
-					}
-				}
+					DeviceID:       payload.DeviceID,
+				}, "抱歉，等待时间过长，请重新发送消息。")
+				markResumeFailed(ctx, idempotency, payload.CheckpointID, nil, logger)
 			}
 			// HITL resume: transient error notifies user rather than auto-retrying via MQ,
 			// because the user has invested interaction cost and should decide whether to retry.
@@ -376,38 +358,84 @@ func NewAgentResumeHandler(
 			}
 		}
 
-		// 10. Check for another interrupt (multi-turn HITL).
+		// 10. Check for another interrupt (multi-turn HITL or client function).
 		if info, ok := <-interruptCh; ok && info != nil {
-			// Update conversation state to asking_user (D-083).
-			resumeHitlUpdatedAt, err := executor.store.ConversationStore().UpdateAgentStatus(ctx, payload.ConversationID,
-				model.AgentStatusAskingUser, payload.AgentID, payload.CheckpointID)
-			if err != nil {
-				releaseLock()
-				return fmt.Errorf("agent resume: update agent status: %w", err)
-			}
+			// Try to parse interrupt data as JSON to distinguish HITL vs client function.
+			interruptInfo := parseInterruptData(info.Question)
 
-			// Persist Question to DB (D-063: nil-safe).
-			if executor.questionStore != nil {
-				question := &model.Question{
-					ID:             uuid.New().String(),
-					ConversationID: payload.ConversationID,
-					CheckpointID:   payload.CheckpointID,
-					InterruptID:    info.InterruptID,
-					QuestionText:   info.Question,
-					Status:         model.QuestionStatusPending,
-					CreatedAt:      time.Now(),
-				}
-				if err := executor.questionStore.Create(ctx, question); err != nil {
+			if interruptInfo != nil && interruptInfo.IsClientFunc {
+				// --- Client function re-interrupt path ---
+				resumeHitlUpdatedAt, err := executor.store.ConversationStore().UpdateAgentStatus(ctx, payload.ConversationID,
+					model.AgentStatusToolCalling, payload.AgentID, payload.CheckpointID)
+				if err != nil {
 					releaseLock()
-					return fmt.Errorf("agent resume: create question: %w", err)
+					return fmt.Errorf("agent resume: update agent status: %w", err)
 				}
+
+				if executor.remoteCallingStore != nil {
+					timeoutMs := interruptInfo.TimeoutMs
+					if timeoutMs <= 0 {
+						timeoutMs = 30000
+					}
+					expiresAt := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+					rc := &model.RemoteCalling{
+						ID:             uuid.New().String(),
+						ConversationID: payload.ConversationID,
+						CheckpointID:   payload.CheckpointID,
+						AgentID:        payload.AgentID,
+						Method:         interruptInfo.Method,
+						Params:         interruptInfo.Params,
+						InterruptID:    info.InterruptID,
+						DeviceID:       interruptInfo.DeviceID,
+						Status:         model.RemoteCallingStatusPending,
+						CreatedAt:      time.Now(),
+						ExpiresAt:      &expiresAt,
+					}
+					if err := executor.remoteCallingStore.Create(ctx, rc); err != nil {
+						releaseLock()
+						return fmt.Errorf("agent resume: create remote calling: %w", err)
+					}
+				}
+
+				executor.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, resumeHitlUpdatedAt)
+				executor.broadcaster.SendConversationUpdate(ctx, payload.AgentID, payload.ConversationID, resumeHitlUpdatedAt)
+				executor.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "tool_calling")
+			} else {
+				// --- HITL (ask_user) re-interrupt path ---
+				resumeHitlUpdatedAt, err := executor.store.ConversationStore().UpdateAgentStatus(ctx, payload.ConversationID,
+					model.AgentStatusAskingUser, payload.AgentID, payload.CheckpointID)
+				if err != nil {
+					releaseLock()
+					return fmt.Errorf("agent resume: update agent status: %w", err)
+				}
+
+				if executor.remoteCallingStore != nil {
+					expiresAt := time.Now().Add(24 * time.Hour) // D-137: 24h default timeout
+					rc := &model.RemoteCalling{
+						ID:             uuid.New().String(),
+						ConversationID: payload.ConversationID,
+						CheckpointID:   payload.CheckpointID,
+						AgentID:        payload.AgentID,
+						Method:         "ask_user",
+						Params:         info.Question, // question text directly, no nested JSON
+						InterruptID:    info.InterruptID,
+						DeviceID:       "", // any device can respond
+						Status:         model.RemoteCallingStatusPending,
+						CreatedAt:      time.Now(),
+						ExpiresAt:      &expiresAt,
+					}
+					if err := executor.remoteCallingStore.Create(ctx, rc); err != nil {
+						releaseLock()
+						return fmt.Errorf("agent resume: create remote calling: %w", err)
+					}
+				}
+
+				executor.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, resumeHitlUpdatedAt)
+				executor.broadcaster.SendConversationUpdate(ctx, payload.AgentID, payload.ConversationID, resumeHitlUpdatedAt)
+				executor.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")
 			}
 
-			// Broadcast conversation update (pull notification pattern, D-124).
-			executor.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, resumeHitlUpdatedAt)
-
-			executor.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "asking_user")
-			// D-084: Do NOT release lock on HITL re-interrupt.
+			// D-084: Do NOT release lock on re-interrupt.
 			// Delete processing key to allow subsequent resume (D-121).
 			if idempotency != nil {
 				processingKey := "agent:resume:processing:" + payload.CheckpointID
@@ -482,10 +510,10 @@ func NewAgentResumeHandler(
 				"conversation_id", payload.ConversationID, "error", err)
 		}
 
-		// 2. Delete Questions for this checkpoint (D-116).
-		if executor.questionStore != nil {
-			if err := executor.questionStore.DeleteByCheckpoint(ctx, payload.CheckpointID); err != nil {
-				logger.Error("agent resume: delete questions failed (non-fatal)",
+		// 2. Delete RemoteCallings for this checkpoint (D-137).
+		if executor.remoteCallingStore != nil {
+			if err := executor.remoteCallingStore.DeleteByCheckpoint(ctx, payload.CheckpointID); err != nil {
+				logger.Error("agent resume: delete remote callings failed (non-fatal)",
 					"checkpoint_id", payload.CheckpointID, "error", err)
 			}
 		}
@@ -496,7 +524,9 @@ func NewAgentResumeHandler(
 		// 4. Broadcast conversation update to notify clients that questions have been cleared.
 		// This triggers the pull-on-notification pattern: clients will fetch the latest
 		// conversation state via get_conversation RPC and see that questions are empty.
+		// Broadcast to both participants (BUG-001).
 		executor.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, time.Now())
+		executor.broadcaster.SendConversationUpdate(ctx, payload.AgentID, payload.ConversationID, time.Now())
 
 		releaseLock()
 		return nil
@@ -512,13 +542,30 @@ func cleanupAfterResumeFailure(ctx context.Context, executor *AgentExecutor,
 		logger.Error("agent resume: clear status after failure (non-fatal)",
 			"conversation_id", conversationID, "error", err)
 	}
-	// 2. Delete questions for this checkpoint (soft-delete via GORM).
-	if executor.questionStore != nil {
-		if err := executor.questionStore.DeleteByCheckpoint(ctx, checkpointID); err != nil {
-			logger.Error("agent resume: delete questions after failure (non-fatal)",
+	// 2. Delete RemoteCallings for this checkpoint (soft-delete via GORM, D-137).
+	if executor.remoteCallingStore != nil {
+		if err := executor.remoteCallingStore.DeleteByCheckpoint(ctx, checkpointID); err != nil {
+			logger.Error("agent resume: delete remote callings after failure (non-fatal)",
 				"checkpoint_id", checkpointID, "error", err)
 		}
 	}
 	// 3. Delete checkpoint from Redis (D-112).
 	executor.cleanupAfterResume(ctx, checkpointID, logger)
+}
+
+// markResumeFailed cleans up idempotency keys after a permanent resume failure
+// and releases the conversation lock. All operations are non-fatal (D-121).
+func markResumeFailed(ctx context.Context, idempotency IdempotencyStore, checkpointID string,
+	releaseLock func(), logger Logger) {
+	if idempotency != nil {
+		processingKey := "agent:resume:processing:" + checkpointID
+		processedKey := "agent:resume:" + checkpointID
+		_ = idempotency.DeleteKey(ctx, processingKey)
+		if _, err := idempotency.MarkProcessed(ctx, processedKey, 24*time.Hour); err != nil {
+			logger.Error("agent resume: processed mark after failure (non-fatal)", "error", err)
+		}
+	}
+	if releaseLock != nil {
+		releaseLock()
+	}
 }

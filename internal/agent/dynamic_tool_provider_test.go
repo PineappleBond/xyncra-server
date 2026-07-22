@@ -2,10 +2,8 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 	"github.com/cloudwego/eino/adk"
@@ -38,16 +36,6 @@ func (m *mockFunctionProvider) GetFunctionsByUser(_ context.Context, _ string) (
 	return map[string][]protocol.FunctionInfo{"dev1": m.funcs}, nil
 }
 
-// mockCallerForDTP implements ClientCaller for testing.
-type mockCallerForDTP struct {
-	resp *protocol.PackageDataResponse
-	err  error
-}
-
-func (m *mockCallerForDTP) ServerRequest(_ context.Context, _, _, _ string, _ json.RawMessage, _ time.Duration) (*protocol.PackageDataResponse, error) {
-	return m.resp, m.err
-}
-
 // makeTestFuncInfo creates a minimal valid FunctionInfo for testing.
 func makeTestFuncInfo(name string) protocol.FunctionInfo {
 	return protocol.FunctionInfo{
@@ -73,7 +61,6 @@ func TestDynamicToolProvider_InjectsTools(t *testing.T) {
 	funcs := []protocol.FunctionInfo{makeTestFuncInfo("fn1"), makeTestFuncInfo("fn2")}
 	dtp := NewDynamicToolProvider(
 		&mockFunctionProvider{funcs: funcs},
-		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{},
 		discardLogger(),
 		nil,
@@ -95,7 +82,6 @@ func TestDynamicToolProvider_NoCallerDevice_NoOp(t *testing.T) {
 	funcs := []protocol.FunctionInfo{makeTestFuncInfo("fn1")}
 	dtp := NewDynamicToolProvider(
 		&mockFunctionProvider{funcs: funcs},
-		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{},
 		discardLogger(),
 		nil,
@@ -116,7 +102,6 @@ func TestDynamicToolProvider_NoCallerDevice_NoOp(t *testing.T) {
 func TestDynamicToolProvider_EmptyFunctions_NoInjection(t *testing.T) {
 	dtp := NewDynamicToolProvider(
 		&mockFunctionProvider{funcs: []protocol.FunctionInfo{}},
-		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{},
 		discardLogger(),
 		nil,
@@ -137,7 +122,6 @@ func TestDynamicToolProvider_EmptyFunctions_NoInjection(t *testing.T) {
 func TestDynamicToolProvider_GetFunctionsError_FailOpen(t *testing.T) {
 	dtp := NewDynamicToolProvider(
 		&mockFunctionProvider{err: assert.AnError},
-		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{},
 		discardLogger(),
 		nil,
@@ -166,7 +150,6 @@ func TestDynamicToolProvider_FunctionTagsFilter(t *testing.T) {
 
 	dtp := NewDynamicToolProvider(
 		&mockFunctionProvider{funcs: []protocol.FunctionInfo{fn1, fn2, fn3}},
-		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{FunctionTags: []string{"filesystem"}},
 		discardLogger(),
 		nil,
@@ -194,7 +177,6 @@ func TestDynamicToolProvider_ExcludedFunctions(t *testing.T) {
 	funcs := []protocol.FunctionInfo{makeTestFuncInfo("fn1"), makeTestFuncInfo("fn2")}
 	dtp := NewDynamicToolProvider(
 		&mockFunctionProvider{funcs: funcs},
-		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{ExcludedFunctions: []string{"fn2"}},
 		discardLogger(),
 		nil,
@@ -224,7 +206,6 @@ func TestDynamicToolProvider_TagsAndExcluded(t *testing.T) {
 
 	dtp := NewDynamicToolProvider(
 		&mockFunctionProvider{funcs: []protocol.FunctionInfo{fn1, fn2}},
-		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{
 			FunctionTags:      []string{"fs"},
 			ExcludedFunctions: []string{"fn1"},
@@ -246,10 +227,6 @@ func TestDynamicToolProvider_TagsAndExcluded(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// DTP-08: (skipped — hard to construct an invalid FunctionInfo with map[string]any)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // DTP-09: Concurrent BeforeAgent calls — race detector
 // ---------------------------------------------------------------------------
 
@@ -257,7 +234,6 @@ func TestDynamicToolProvider_ConcurrentBeforeAgent(t *testing.T) {
 	funcs := []protocol.FunctionInfo{makeTestFuncInfo("fn1"), makeTestFuncInfo("fn2")}
 	dtp := NewDynamicToolProvider(
 		&mockFunctionProvider{funcs: funcs},
-		&mockCallerForDTP{resp: &protocol.PackageDataResponse{Code: 0}},
 		ClientToolsConfig{},
 		discardLogger(),
 		nil,

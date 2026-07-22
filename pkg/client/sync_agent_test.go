@@ -370,12 +370,12 @@ func TestNotifyHandler_MultipleAgentEvents(t *testing.T) {
 // Conversation update → questions parse flow (D-125)
 // ---------------------------------------------------------------------------
 
-// TestConversationUpdate_ParsesAndStoresQuestions verifies that when an
+// TestConversationUpdate_ParsesAndStoresRemoteCallings verifies that when an
 // ephemeral conversation update triggers a get_conversation RPC and the
-// response includes HITL questions, those questions are parsed and stored
-// in the local QuestionStore (D-125).
-func TestConversationUpdate_ParsesAndStoresQuestions(t *testing.T) {
-	convID := "conv-q-parse"
+// response includes HITL remote callings, those callings are parsed and stored
+// in the local RemoteCallingStore (D-137).
+func TestConversationUpdate_ParsesAndStoresRemoteCallings(t *testing.T) {
+	convID := "conv-rc-parse"
 	serverConv := &model.Conversation{
 		ID:           convID,
 		UserID1:      "test-user",
@@ -385,16 +385,16 @@ func TestConversationUpdate_ParsesAndStoresQuestions(t *testing.T) {
 		CheckpointID: "cp-test",
 	}
 
-	// Questions that the get_conversation RPC should return.
-	questions := []*model.Question{
-		{ID: "q-1", ConversationID: convID, CheckpointID: "cp-test", InterruptID: "int-1", QuestionText: "Proceed?", Status: "pending"},
-		{ID: "q-2", ConversationID: convID, CheckpointID: "cp-test", InterruptID: "int-2", QuestionText: "Are you sure?", Status: "pending"},
+	// RemoteCallings that the get_conversation RPC should return.
+	rcs := []*model.RemoteCalling{
+		{ID: "rc-1", ConversationID: convID, CheckpointID: "cp-test", AgentID: "agent/bot", Method: "ask_user", Status: "pending"},
+		{ID: "rc-2", ConversationID: convID, CheckpointID: "cp-test", AgentID: "agent/bot", Method: "ask_user", Status: "pending"},
 	}
 
-	// Build a response that includes both conversation and questions.
+	// Build a response that includes both conversation and remote callings.
 	resp := map[string]any{
-		"conversation": serverConv,
-		"questions":    questions,
+		"conversation":   serverConv,
+		"remote_callings": rcs,
 	}
 	respData, err := json.Marshal(resp)
 	if err != nil {
@@ -432,23 +432,22 @@ func TestConversationUpdate_ParsesAndStoresQuestions(t *testing.T) {
 
 	require.NoError(t, sm.ApplyUpdate(context.Background(), update))
 
-	// Verify questions are stored in the local QuestionStore.
-	got, err := db.Questions.GetByConversation(context.Background(), convID)
+	// Verify remote callings are stored in the local RemoteCallingStore.
+	got, err := db.RemoteCallings.GetByConversation(context.Background(), convID)
 	require.NoError(t, err)
-	require.Len(t, got, 2, "should have stored 2 questions from get_conversation response")
+	require.Len(t, got, 2, "should have stored 2 remote callings from get_conversation response")
 
-	// Verify question content.
-	qMap := make(map[string]*model.Question)
-	for _, q := range got {
-		qMap[q.ID] = q
+	// Verify remote calling content.
+	rcMap := make(map[string]*model.RemoteCalling)
+	for _, rc := range got {
+		rcMap[rc.ID] = rc
 	}
-	require.Contains(t, qMap, "q-1")
-	assert.Equal(t, "Proceed?", qMap["q-1"].QuestionText)
-	assert.Equal(t, "pending", qMap["q-1"].Status)
-	assert.Equal(t, "int-1", qMap["q-1"].InterruptID)
+	require.Contains(t, rcMap, "rc-1")
+	assert.Equal(t, "ask_user", rcMap["rc-1"].Method)
+	assert.Equal(t, "pending", rcMap["rc-1"].Status)
 
-	require.Contains(t, qMap, "q-2")
-	assert.Equal(t, "Are you sure?", qMap["q-2"].QuestionText)
+	require.Contains(t, rcMap, "rc-2")
+	assert.Equal(t, "ask_user", rcMap["rc-2"].Method)
 
 	// Verify conversation was also upserted.
 	localConv, err := db.Conversations.Get(context.Background(), convID)

@@ -321,18 +321,18 @@ func TestGetConversation_LocalDB(t *testing.T) {
 		}
 	}
 
-	// Seed a HITL question.
-	q := &model.Question{
-		ID:             "q-1",
+	// Seed a HITL remote calling.
+	rc := &model.RemoteCalling{
+		ID:             "rc-1",
 		ConversationID: "conv-get",
 		CheckpointID:   "ckpt-1",
-		InterruptID:    "int-1",
-		QuestionText:   "Are you sure?",
+		AgentID:        "agent/bot",
+		Method:         "ask_user",
 		Status:         "pending",
 		CreatedAt:      time.Now(),
 	}
-	if err := db.Questions.Upsert(ctx, q); err != nil {
-		t.Fatalf("seed question: %v", err)
+	if err := db.RemoteCallings.Upsert(ctx, rc); err != nil {
+		t.Fatalf("seed remote calling: %v", err)
 	}
 
 	c, err := New(
@@ -358,11 +358,11 @@ func TestGetConversation_LocalDB(t *testing.T) {
 	if result.UnreadCount != 5 {
 		t.Errorf("expected UnreadCount=5, got %d", result.UnreadCount)
 	}
-	if len(result.Questions) != 1 {
-		t.Errorf("expected 1 question, got %d", len(result.Questions))
+	if len(result.RemoteCallings) != 1 {
+		t.Errorf("expected 1 remote calling, got %d", len(result.RemoteCallings))
 	}
-	if result.Questions[0].QuestionText != "Are you sure?" {
-		t.Errorf("expected question text 'Are you sure?', got %s", result.Questions[0].QuestionText)
+	if result.RemoteCallings[0].Method != "ask_user" {
+		t.Errorf("expected method 'ask_user', got %s", result.RemoteCallings[0].Method)
 	}
 }
 

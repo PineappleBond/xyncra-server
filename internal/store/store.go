@@ -38,7 +38,7 @@ type StoreAPI interface {
 	ConversationStore() *ConversationStore
 	MessageStore() *MessageStore
 	UserUpdateStore() *UserUpdateStore
-	QuestionStore() *QuestionStore
+	RemoteCallingStore() *RemoteCallingStore
 
 	// Composite operations
 	SendMessage(ctx context.Context, msg *model.Message, memberIDs []string) (*SendMessageResult, error)
@@ -70,8 +70,8 @@ type Store struct {
 	// UserUpdates provides user-update related operations.
 	UserUpdates *UserUpdateStore
 
-	// Questions provides question-related operations (HITL resilience).
-	Questions *QuestionStore
+	// RemoteCallings provides remote calling operations (unified HITL + function calls, D-137).
+	RemoteCallings *RemoteCallingStore
 }
 
 // Ensure Store implements StoreAPI at compile time.
@@ -86,18 +86,18 @@ func (s *Store) MessageStore() *MessageStore { return s.Messages }
 // UserUpdateStore returns the UserUpdateStore.
 func (s *Store) UserUpdateStore() *UserUpdateStore { return s.UserUpdates }
 
-// QuestionStore returns the QuestionStore.
-func (s *Store) QuestionStore() *QuestionStore { return s.Questions }
+// RemoteCallingStore returns the RemoteCallingStore.
+func (s *Store) RemoteCallingStore() *RemoteCallingStore { return s.RemoteCallings }
 
 // New creates a Store backed by the given *gorm.DB. It initialises all
 // sub-stores so that callers can access them directly (e.g. store.Messages.Get).
 func New(db *gorm.DB) *Store {
 	return &Store{
-		db:            db,
-		Conversations: NewConversationStore(db),
-		Messages:      NewMessageStore(db),
-		UserUpdates:   NewUserUpdateStore(db),
-		Questions:     NewQuestionStore(db),
+		db:             db,
+		Conversations:  NewConversationStore(db),
+		Messages:       NewMessageStore(db),
+		UserUpdates:    NewUserUpdateStore(db),
+		RemoteCallings: NewRemoteCallingStore(db),
 	}
 }
 
@@ -118,7 +118,7 @@ func (s *Store) AutoMigrate(ctx context.Context) (err error) {
 		&model.Conversation{},
 		&model.Message{},
 		&model.UserUpdate{},
-		&model.Question{},
+		&model.RemoteCalling{},
 	); err != nil {
 		return fmt.Errorf("store: auto-migrate: %w", err)
 	}

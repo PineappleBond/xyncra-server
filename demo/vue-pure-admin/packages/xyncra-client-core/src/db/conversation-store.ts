@@ -100,31 +100,14 @@ export class ConversationStore {
   ): Promise<Conversation[]> {
     // Database is already scoped by userID+deviceID (xyncra-{userID}-{deviceID}),
     // so we can return all non-deleted conversations without filtering by user_id.
-    console.log('[ConversationStore] getByUser: returning all conversations (DB is user-scoped)');
     if (limit <= 0 || limit > 101) limit = 20;
     if (offset < 0) offset = 0;
-
-    // Debug: get all conversations without filtering
-    const allConvs = await this.db.conversations.toArray();
-    console.log('[ConversationStore] Total conversations in DB:', allConvs.length);
-    allConvs.forEach((conv, i) => {
-      console.log(`[ConversationStore] Conv ${i}:`, {
-        id: conv.id,
-        user_id1: conv.user_id1,
-        user_id2: conv.user_id2,
-        deleted_at: conv.deleted_at,
-        deleted_at_type: typeof conv.deleted_at,
-        deleted_at_is_null: conv.deleted_at == null,
-      });
-    });
 
     // Get all conversations, filter out soft-deleted ones
     // Use == null to match both null and undefined (deleted_at may not be initialized)
     const all = await this.db.conversations
       .filter((conv) => conv.deleted_at == null && !!conv.user_id2)
       .toArray();
-
-    console.log('[ConversationStore] Found', all.length, 'non-deleted conversations');
 
     // Sort by last_message_at descending.
     all.sort(

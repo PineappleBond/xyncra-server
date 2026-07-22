@@ -1,5 +1,5 @@
 import { type App, type InjectionKey, ref, watch, type Ref } from 'vue'
-import { XyncraClient, type ClientOptions } from '@xyncra/client-core'
+import { XyncraClient, type ClientOptions, type XyncraDatabase } from '@xyncra/client-core'
 import type { FunctionInfo } from '@xyncra/protocol'
 import { BrowserWebSocketFactory } from './adapters/websocket'
 import type { ReconnectionState } from './adapters/websocket'
@@ -30,6 +30,7 @@ export const XyncraClientKey: InjectionKey<{
   unregisterFunction: (name: string) => void
   call: (method: string, params: unknown) => Promise<unknown>
   reconnect: () => void
+  db: XyncraDatabase
 }> = Symbol('xyncra-client')
 
 export interface XyncraPluginOptions {
@@ -137,8 +138,6 @@ export function createXyncraPlugin(options: XyncraPluginOptions = {}) {
       }
 
       registry.onChange(() => {
-        const fns = registry.getFunctionInfos()
-        console.log(`[xyncra-plugin] registry.onChange: ${fns.length} functions`, fns.map(f => f.name))
         syncFunctionsToClient()
       })
 
@@ -183,6 +182,7 @@ export function createXyncraPlugin(options: XyncraPluginOptions = {}) {
         },
         call: (method: string, params: unknown) => client.call(method, params),
         reconnect,
+        db: client.getDb(),
       }
 
       initComponentRegistry()

@@ -464,8 +464,8 @@ func (sm *syncManager) fetchAndUpsertConversationTx(ctx context.Context, tx *gor
 	}
 
 	var result struct {
-		Conversation *model.Conversation `json:"conversation"`
-		Questions    []*model.Question   `json:"questions"`
+		Conversation   *model.Conversation   `json:"conversation"`
+		RemoteCallings []*model.RemoteCalling `json:"remote_callings"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
 		return fmt.Errorf("unmarshal get_conversation response: %w", err)
@@ -478,20 +478,20 @@ func (sm *syncManager) fetchAndUpsertConversationTx(ctx context.Context, tx *gor
 		return fmt.Errorf("upsert fetched conversation: %w", err)
 	}
 
-	// Clear stale questions before upserting new ones (D-125).
+	// Clear stale remote callings before upserting new ones (D-137).
 	// When agent_status != asking_user: HITL ended, clean all.
-	// When new questions exist: replace with latest set.
-	if sm.db.Questions != nil {
-		if result.Conversation.AgentStatus != "asking_user" || len(result.Questions) > 0 {
-			_ = sm.db.Questions.DeleteByConversationTx(ctx, tx, result.Conversation.ID)
+	// When new remote callings exist: replace with latest set.
+	if sm.db.RemoteCallings != nil {
+		if result.Conversation.AgentStatus != "asking_user" || len(result.RemoteCallings) > 0 {
+			_ = sm.db.RemoteCallings.DeleteByConversationTx(tx, result.Conversation.ID)
 		}
 	}
 
-	// Upsert questions (best-effort, D-125).
-	if sm.db.Questions != nil && len(result.Questions) > 0 {
-		for _, q := range result.Questions {
-			if err := sm.db.Questions.Upsert(ctx, q); err != nil {
-				sm.logger.Error("upsert question", "error", err, "question_id", q.ID)
+	// Upsert remote callings (best-effort, D-137).
+	if sm.db.RemoteCallings != nil && len(result.RemoteCallings) > 0 {
+		for _, rc := range result.RemoteCallings {
+			if err := sm.db.RemoteCallings.Upsert(ctx, rc); err != nil {
+				sm.logger.Error("upsert remote calling", "error", err, "remote_calling_id", rc.ID)
 			}
 		}
 	}
@@ -681,8 +681,8 @@ func (sm *syncManager) handleEphemeralConversationUpdate(ctx context.Context, up
 	}
 
 	var result struct {
-		Conversation *model.Conversation `json:"conversation"`
-		Questions    []*model.Question   `json:"questions"`
+		Conversation   *model.Conversation   `json:"conversation"`
+		RemoteCallings []*model.RemoteCalling `json:"remote_callings"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
 		sm.logger.Error("unmarshal get_conversation response", "error", err)
@@ -702,20 +702,20 @@ func (sm *syncManager) handleEphemeralConversationUpdate(ctx context.Context, up
 			"error", err, "conversation_id", peek.ConversationID)
 	}
 
-	// Clear stale questions before upserting new ones (D-125).
+	// Clear stale remote callings before upserting new ones (D-137).
 	// When agent_status != asking_user: HITL ended, clean all.
-	// When new questions exist: replace with latest set.
-	if sm.db.Questions != nil {
-		if result.Conversation.AgentStatus != "asking_user" || len(result.Questions) > 0 {
-			_ = sm.db.Questions.DeleteByConversation(ctx, result.Conversation.ID)
+	// When new remote callings exist: replace with latest set.
+	if sm.db.RemoteCallings != nil {
+		if result.Conversation.AgentStatus != "asking_user" || len(result.RemoteCallings) > 0 {
+			_ = sm.db.RemoteCallings.DeleteByConversation(ctx, result.Conversation.ID)
 		}
 	}
 
-	// Upsert questions (best-effort, D-125).
-	if sm.db.Questions != nil && len(result.Questions) > 0 {
-		for _, q := range result.Questions {
-			if err := sm.db.Questions.Upsert(ctx, q); err != nil {
-				sm.logger.Error("upsert question", "error", err, "question_id", q.ID)
+	// Upsert remote callings (best-effort, D-137).
+	if sm.db.RemoteCallings != nil && len(result.RemoteCallings) > 0 {
+		for _, rc := range result.RemoteCallings {
+			if err := sm.db.RemoteCallings.Upsert(ctx, rc); err != nil {
+				sm.logger.Error("upsert remote calling", "error", err, "remote_calling_id", rc.ID)
 			}
 		}
 	}

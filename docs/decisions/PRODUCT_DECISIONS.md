@@ -40,20 +40,20 @@
 | D-083 | HITL CheckpointStore 失败策略 | 非 fail-open：checkpoint 丢失不可恢复 |
 | D-084 | HITL Resume 与并发锁协调 | HITL 中断期间保持会话锁 |
 | D-091 | Agent 输入边界 | CLI 允许空消息通过，由 Agent 端处理错误消息持久化 |
-| D-092 | ReverseRPC 双向请求能力 | 服务端向指定用户发起 RPC |
+| D-092 | ~~ReverseRPC 双向请求能力~~ | **废弃**（D-140：被 RemoteCalling 替代） |
 | D-093 | 连接模型扩展为 (userID, deviceID, connID) | 设备级定向发送 |
-| D-095 | 设备替换策略 | 同设备新连接替换旧连接 |
+| D-095 | 设备替换策略 | 同设备新连接替换旧连接。RemoteCalling 模式下无需特殊处理——设备重连后客户端重新拉取 pending RemoteCalling |
 | D-098 | `system.` 命名空间用于系统级 RPC 方法 | 系统方法与业务方法分离 |
 | D-099 | 客户端函数清单使用 JSON Schema 描述参数 | 标准化函数清单格式 |
-| D-103 | ReverseRPC Pending Store（Redis 持久化） | 超时请求持久化，支持重连补发 |
-| D-108 | system.reconnect RPC 规范 | 客户端重连后自动补发超时请求 |
+| D-103 | ~~ReverseRPC Pending Store（Redis 持久化）~~ | **废弃**（D-140：随 ReverseRPC 删除） |
+| D-108 | ~~system.reconnect RPC 规范~~ | **废弃**（D-140：随 PendingStore 删除） |
 | D-111 | 客户端 4001 语义感知 | 收到 4001 不重连，daemon 优雅退出进程（清理 sock/lock 文件），退出码 0 |
 | D-115 | Daemon 内置函数自动注册 | 消除独立进程的设备替换冲突 |
 | D-116 | Question 持久化表（HITL 韧性） | 替代内存存储，支持多设备/并行 HITL |
 | D-117 | Conversation 状态机 | agent_status 字段驱动客户端 UI |
 | D-118 | Pull-on-Notification 模式 | Update 为轻量通知，客户端拉取最新状态 |
 | D-121 | 两阶段幂等性 | processing key (130s) + processed key (24h) |
-| D-123 | HITL 超时自动清理 | 后台定期清理卡在 asking_user 的会话 |
+| D-123 | HITL 超时自动清理 | 后台定期清理卡在 asking_user 或 tool_calling 的会话（RemoteCalling 记录） |
 | D-124 | Conversation 同步优化（updated_at 广播） | 减少不必要的 get_conversation RPC |
 | D-126 | 消息按需拉取（FetchMoreMessages） | 本地消息不足时从服务器拉取 |
 | D-127 | 手动业务级追踪，而非自动基础设施追踪 | Jaeger Operation 列表保持高信噪比 |
@@ -65,6 +65,10 @@
 | D-134 | 双层函数注册策略：页面级 + 通用级 fallback | 页面函数按需注册/注销，通用函数常驻注册 |
 | D-135 | 每设备最大函数数上调至 500 | 全量适配预期 230+ 函数，上调提供安全边际 |
 | D-136 | 测试辅助函数统一接口（Agent 和 Playwright 共用） | 测试辅助函数既是 Agent 可调用的页面函数，也是 Playwright 可直接调用的测试工具。已采用声明式注册模式 `defineTestHelpers(pageKey, helpers)` 一行代码完成组件注册、函数暴露、window 挂载、页面函数生成 |
+| D-137 | RemoteCalling 统一模型 | Question 表废弃，所有需要等待外部结果的操作统一使用 RemoteCalling |
+| D-138 | RemoteCalling 并发执行策略 | 客户端本地队列串行执行，按 checkpoint 粒度检查：同一 checkpoint 下所有 RemoteCalling 都 resolve 后才触发 Agent 恢复 |
+| D-139 | RemoteCalling 设备路由与过滤 | DeviceID 非空时仅指定设备可处理，为空时任意设备可处理（first-response-wins） |
+| D-140 | ReverseRPC 废弃，客户端函数调用统一为 RemoteCalling | 废弃 D-092/D-103/D-108。客户端函数从同步 RPC 改为 RemoteCalling 异步中断-恢复模式 |
 
 ---
 

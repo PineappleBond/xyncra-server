@@ -34,7 +34,7 @@ func cleanAll(t *testing.T, db *ClientDB, ctx context.Context) {
 	db.db.Unscoped().Where("1=1").Delete(&model.Draft{})
 	db.db.Unscoped().Where("1=1").Delete(&model.SyncState{})
 	db.db.Unscoped().Where("1=1").Delete(&model.UserUpdate{})
-	db.db.Unscoped().Where("1=1").Delete(&model.Question{})
+	db.db.Unscoped().Where("1=1").Delete(&model.RemoteCalling{})
 	db.db.Unscoped().Where("1=1").Delete(&model.Message{})
 	db.db.Unscoped().Where("1=1").Delete(&model.Conversation{})
 }

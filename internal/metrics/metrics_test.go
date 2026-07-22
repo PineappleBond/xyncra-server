@@ -61,13 +61,11 @@ func TestAllMetricsRegistered(t *testing.T) {
 		"xyncra_llm_tokens_output_total",
 		"xyncra_llm_calls_total",
 		"xyncra_llm_calls_failed_total",
-		// Business (6)
+		// Business (4)
 		"xyncra_conversations_active",
 		"xyncra_conversations_created_total",
 		"xyncra_devices_connected",
 		"xyncra_functions_registered",
-		"xyncra_reverse_rpc_requests_total",
-		"xyncra_reverse_rpc_failed_total",
 		// Redis (4)
 		"xyncra_redis_connected",
 		"xyncra_redis_ping_duration_seconds",
@@ -106,8 +104,6 @@ func TestMetricsCanBeSet(t *testing.T) {
 	ConnectionsTotal.Inc()
 	MessagesReceived.Inc()
 	ConversationsCreated.Inc()
-	ReverseRPCRequests.Inc()
-	ReverseRPCFailed.Inc()
 
 	// Vecs
 	MessagesSent.Inc()

@@ -136,10 +136,6 @@
 // function declarations registered by a client device. Defined here to avoid
 // circular dependency on the server package (D-101).
 //
-// ClientCaller (dynamic_tool_provider.go): Interface for sending requests to a
-// specific client device via ReverseRPC and waiting for a response. Defined here
-// to avoid circular dependency on the server package (D-101).
-//
 // CallerDevice (context_keys.go): CallerDevice holds the UserID and DeviceID of
 // the client device that initiated the conversation. It is injected into the
 // context by AgentExecutor.Execute and AgentResumeHandler when DeviceID is
@@ -148,15 +144,18 @@
 //
 // ClientToolsConfig: Per-agent configuration for dynamic client tool injection.
 // FunctionTags filters which functions are exposed (empty = all). ExcludedFunctions
-// is a deny-list checked first. CallTimeout sets the default ReverseRPC timeout
-// (overridden per-function by FunctionInfo.TimeoutMs). Zero/negative CallTimeout
-// defaults to 30 seconds.
+// is a deny-list checked first. CallTimeout sets the default timeout for client
+// function calls. Zero/negative CallTimeout defaults to 30 seconds.
 //
-// AgentBuilder Integration: AgentBuilder exposes SetClientFunctionProvider and
-// SetClientCaller setters. When both are configured and an agent's Middleware
-// config has EnableClientTools=true, buildMiddleware creates a DynamicToolProvider
-// and inserts it as the first middleware (before PatchToolCalls, Summarization,
-// and ToolReduction) so injected tools are visible to all downstream middleware.
+// AgentBuilder Integration: AgentBuilder exposes SetClientFunctionProvider.
+// When configured and an agent's Middleware config has EnableClientTools=true,
+// buildMiddleware creates a DynamicToolProvider and inserts it as the first
+// middleware (before PatchToolCalls, Summarization, and ToolReduction) so
+// injected tools are visible to all downstream middleware.
+//
+// Client functions use the RemoteCalling interrupt-resume pattern (D-137):
+// tool.Interrupt triggers an interrupt, executor creates a RemoteCalling record,
+// client processes it asynchronously, and agent resumes with the result.
 //
 // # Phase 7: Production Hardening
 //
@@ -239,6 +238,22 @@
 // Enhanced Build(): AgentBuilder.Build() now creates tools from the registry
 // (when set via SetToolRegistry) and builds the middleware chain, passing both
 // to adk.ChatModelAgentConfig.
+//
+// # Phase 8B: RemoteCalling Cleanup Task
+//
+// RemoteCallingCleanupTask (remote_calling_cleanup.go, D-123, D-137):
+// RemoteCallingCleanupTask is a background goroutine that periodically cleans
+// up conversations stuck in asking_user/tool_calling status and individual
+// expired RemoteCallings. Two-layer cleanup: (1) conversation-level scans
+// conversations exceeding MaxAge (default 24h) and performs full cleanup
+// (clear status, soft-delete RemoteCallings, delete checkpoint, send timeout
+// message, broadcast agent_timeout); (2) RemoteCalling-level scans individual
+// RemoteCallings with expires_at < NOW() and marks them expired. When all
+// RemoteCallings for a checkpoint expire (pending=0), the task enqueues a
+// TypeAgentResume MQ task so the agent can handle the timeout gracefully.
+// All cleanup steps are non-fatal (D-007): errors are logged but do not
+// interrupt processing of other conversations. Distributed locking via Redis
+// SETNX prevents duplicate cleanup across nodes.
 //
 // # Phase 8C: MCP Integration
 //

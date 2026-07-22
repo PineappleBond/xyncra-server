@@ -16,6 +16,7 @@
 
 export * from './connection-manager';
 export * from './constants';
+export * from './db';
 export * from './errors';
 export * from './idempotency-cache';
 export * from './interfaces';

@@ -1082,13 +1082,13 @@ func TestCLIUpdateHandler_OnConversation_HITL(t *testing.T) {
 	convID := "conv-hitl-cli"
 	ctx := context.Background()
 
-	// Insert a pending question into the question store.
-	err = db.Questions.Upsert(ctx, &model.Question{
-		ID:             "q-hitl-1",
+	// Insert a pending remote calling into the store.
+	err = db.RemoteCallings.Upsert(ctx, &model.RemoteCalling{
+		ID:             "rc-hitl-1",
 		ConversationID: convID,
 		CheckpointID:   "cp-42",
-		InterruptID:    "int-99",
-		QuestionText:   "Are you sure?",
+		AgentID:        "agent/bot1",
+		Method:         "ask_user",
 		Status:         "pending",
 	})
 	require.NoError(t, err)
@@ -1112,12 +1112,12 @@ func TestCLIUpdateHandler_OnConversation_HITL(t *testing.T) {
 	assert.Contains(t, output, "[conversation]")
 	assert.Contains(t, output, "id="+convID)
 
-	// Verify HITL info is displayed (D-125).
+	// Verify HITL info is displayed (D-137).
 	assert.Contains(t, output, "[hitl]")
 	assert.Contains(t, output, "agent=agent/bot1")
 	assert.Contains(t, output, "checkpoint_id=cp-42")
-	assert.Contains(t, output, "interrupt_id=int-99")
-	assert.Contains(t, output, "Are you sure?")
+	assert.Contains(t, output, "id=rc-hitl-1")
+	assert.Contains(t, output, "method=ask_user")
 	assert.Contains(t, output, "pending")
 }
 
@@ -1158,12 +1158,13 @@ func TestCLIUpdateHandler_OnConversation_HITL_NonAskingUser(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Insert a question even though status is idle.
-	require.NoError(t, db.Questions.Upsert(ctx, &model.Question{
-		ID:             "q-idle",
+	// Insert a remote calling even though status is idle.
+	require.NoError(t, db.RemoteCallings.Upsert(ctx, &model.RemoteCalling{
+		ID:             "rc-idle",
 		ConversationID: "conv-idle",
 		CheckpointID:   "cp-1",
-		QuestionText:   "Should not appear",
+		AgentID:        "agent/bot3",
+		Method:         "ask_user",
 		Status:         "pending",
 	}))
 

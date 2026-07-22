@@ -62,14 +62,12 @@ func (f MethodHandlerFunc) HandleRequest(ctx context.Context, client *Client, re
 // It dispatches incoming Packages by type:
 //   - PackageTypeRequest: parsed into PackageDataRequest, routed to a
 //     registered MethodHandler by method name.
-//   - PackageTypeResponse: forwarded to the attached ReverseRPC (if any) so
-//     that pending server-initiated requests can be resolved (D-092).
+//   - PackageTypeResponse: logged and ignored (RemoteCalling replaced ReverseRPC).
 //   - PackageTypeUpdates: logged (reserved for future use).
 type DefaultMessageHandler struct {
-	mu         sync.RWMutex
-	methods    map[string]MethodHandler
-	fallback   MethodHandler
-	reverseRPC *ReverseRPC // may be nil (backward compat, D-092)
+	mu       sync.RWMutex
+	methods  map[string]MethodHandler
+	fallback MethodHandler
 }
 
 // NewDefaultMessageHandler creates a DefaultMessageHandler with no registered
@@ -103,14 +101,6 @@ func (h *DefaultMessageHandler) SetFallback(handler MethodHandler) {
 	h.fallback = handler
 }
 
-// SetReverseRPC sets the ReverseRPC instance for dispatching client responses
-// back to pending server-initiated requests (D-092).
-func (h *DefaultMessageHandler) SetReverseRPC(rpc *ReverseRPC) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.reverseRPC = rpc
-}
-
 // HandleMessage implements MessageHandler. It decodes the Package data
 // according to its type and dispatches to the appropriate handler.
 func (h *DefaultMessageHandler) HandleMessage(ctx context.Context, client *Client, pkg *protocol.Package) {
@@ -118,20 +108,9 @@ func (h *DefaultMessageHandler) HandleMessage(ctx context.Context, client *Clien
 	case protocol.PackageTypeRequest:
 		h.handleRequest(ctx, client, pkg)
 	case protocol.PackageTypeResponse:
-		h.mu.RLock()
-		rpc := h.reverseRPC
-		h.mu.RUnlock()
-
-		if rpc != nil {
-			var resp protocol.PackageDataResponse
-			if err := jsonUnmarshal(pkg.Data, &resp); err != nil {
-				slog.Error("websocket: decode response", "connID", client.ConnID(), "error", err)
-				return
-			}
-			rpc.DispatchResponse(&resp)
-		} else {
-			slog.Debug("websocket: received response from client (ignored, no reverse RPC)", "connID", client.ConnID())
-		}
+		// ReverseRPC removed — Response packages are safely ignored.
+		// Clients may still send Response packages during transition (D-140).
+		slog.Debug("websocket: received response from client (ignored, ReverseRPC removed)", "connID", client.ConnID())
 	case protocol.PackageTypeUpdates:
 		slog.Debug("websocket: received updates package from client (ignored)", "connID", client.ConnID())
 	default:

@@ -49,7 +49,7 @@ type sendMessageCall struct {
 func (m *mockStoreAPI) ConversationStore() *store.ConversationStore { panic("not implemented") }
 func (m *mockStoreAPI) MessageStore() *store.MessageStore           { panic("not implemented") }
 func (m *mockStoreAPI) UserUpdateStore() *store.UserUpdateStore     { panic("not implemented") }
-func (m *mockStoreAPI) QuestionStore() *store.QuestionStore         { panic("not implemented") }
+func (m *mockStoreAPI) RemoteCallingStore() *store.RemoteCallingStore { panic("not implemented") }
 func (m *mockStoreAPI) SendMessage(ctx context.Context, msg *model.Message, memberIDs []string) (*store.SendMessageResult, error) {
 	m.sendMessageCalls = append(m.sendMessageCalls, sendMessageCall{msg: msg, memberIDs: memberIDs})
 	if m.sendMessageErr != nil {

@@ -298,8 +298,8 @@ export class ConnectionManager {
     }
 
     // Send as text JSON for easier debugging (server supports both text and binary)
-    const data = JSON.stringify(pkg);
-    this.sendBuffer.push(data);
+    const jsonData = JSON.stringify(pkg);
+    this.sendBuffer.push(jsonData);
     this.flushSendBuffer();
   }
 

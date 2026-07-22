@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -65,9 +66,9 @@ type AgentExecutor struct {
 	// memory leaks.
 	checkpointStore DeletableCheckPointStore
 
-	// questionStore persists HITL questions to survive server restarts (Phase 1).
-	// Optional: when nil, Question persistence is skipped (D-063 nil-safe).
-	questionStore *store.QuestionStore
+	// remoteCallingStore persists RemoteCallings to survive server restarts (D-137).
+	// Optional: when nil, RemoteCalling persistence is skipped (D-063 nil-safe).
+	remoteCallingStore *store.RemoteCallingStore
 }
 
 // DeletableCheckPointStore extends compose.CheckPointStore with a Delete
@@ -139,11 +140,11 @@ func WithCheckPointStore(store DeletableCheckPointStore) ExecutorOption {
 	}
 }
 
-// WithQuestionStore sets the QuestionStore for HITL question persistence.
-// When not set, Question creation is skipped (D-063 nil-safe).
-func WithQuestionStore(qs *store.QuestionStore) ExecutorOption {
+// WithRemoteCallingStore sets the RemoteCallingStore for RemoteCalling persistence (D-137).
+// When not set, RemoteCalling creation is skipped (D-063 nil-safe).
+func WithRemoteCallingStore(rs *store.RemoteCallingStore) ExecutorOption {
 	return func(e *AgentExecutor) {
-		e.questionStore = qs
+		e.remoteCallingStore = rs
 	}
 }
 
@@ -311,6 +312,9 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 	ctx, runFinish := startAgentRunSpan(ctx, payload.AgentID)
 	defer runFinish(nil)
 
+	// Inject ConversationID into context for tools to use (e.g. client function tools).
+	ctx = ContextWithConversationID(ctx, payload.ConversationID)
+
 	iter := builtAgent.Runner.Run(ctx, schemaMessages, adk.WithCheckPointID(checkpointID))
 
 	// 11. Bridge stream with interrupt detection (Phase 8B).
@@ -404,15 +408,77 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 	}
 	streamFinish(nil)
 
-	// 12b. Check for HITL interrupt (Phase 8B).
+	// 12b. Check for HITL or client function interrupt (Phase 8B / D-137).
 	// BridgeWithInterrupt closes both channels when done. The interruptCh
 	// receives at most one value. A non-blocking select detects whether the
-	// agent paused for user input.
+	// agent paused for user input or client function call.
 	if info, ok := <-interruptCh; ok && info != nil {
-		// Create agent.checkpoint.save span for HITL checkpoint persistence.
+		// Create agent.checkpoint.save span for checkpoint persistence.
 		_, checkpointFinish := startAgentCheckpointSaveSpan(ctx, checkpointID)
 		defer checkpointFinish(nil)
 
+		// Try to parse interrupt data as JSON to distinguish HITL vs client function.
+		interruptInfo := parseInterruptData(info.Question)
+
+		if interruptInfo != nil && interruptInfo.IsClientFunc {
+			// --- Client function interrupt path ---
+			e.logger.Info("agent executor: client function interrupt",
+				"agent_id", payload.AgentID,
+				"conversation_id", payload.ConversationID,
+				"checkpoint_id", checkpointID,
+				"method", interruptInfo.Method,
+			)
+
+			// 1. Update conversation state to tool_calling.
+			hitlUpdatedAt, err := e.store.ConversationStore().UpdateAgentStatus(ctx, payload.ConversationID,
+				model.AgentStatusToolCalling, payload.AgentID, checkpointID)
+			if err != nil {
+				return fmt.Errorf("execute agent: update agent status: %w", err)
+			}
+
+			// 2. Persist RemoteCalling to DB (D-063: nil-safe).
+			if e.remoteCallingStore != nil {
+				timeoutMs := interruptInfo.TimeoutMs
+				if timeoutMs <= 0 {
+					timeoutMs = 30000
+				}
+				expiresAt := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+				rc := &model.RemoteCalling{
+					ID:             uuid.New().String(),
+					ConversationID: payload.ConversationID,
+					CheckpointID:   checkpointID,
+					AgentID:        payload.AgentID,
+					Method:         interruptInfo.Method,
+					Params:         interruptInfo.Params,
+					InterruptID:    info.InterruptID,
+					DeviceID:       interruptInfo.DeviceID,
+					Status:         model.RemoteCallingStatusPending,
+					CreatedAt:      time.Now(),
+					ExpiresAt:      &expiresAt,
+				}
+				if err := e.remoteCallingStore.Create(ctx, rc); err != nil {
+					return fmt.Errorf("execute agent: create remote calling: %w", err)
+				}
+			}
+
+			// 3. Close the stream (D-052) so clients exit the streaming state.
+			partialText := fullResponse.String()
+			e.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, partialText, true)
+
+			// 4. Broadcast lightweight conversation update (pull notification pattern, D-124).
+			// Broadcast to both the human user and the agent user (BUG-001) so that
+			// the agent's daemon receives the notification and can pull RemoteCallings.
+			e.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, hitlUpdatedAt)
+			e.broadcaster.SendConversationUpdate(ctx, payload.AgentID, payload.ConversationID, hitlUpdatedAt)
+
+			// 5. Broadcast agent status.
+			e.broadcaster.SendAgentStatus(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, "tool_calling")
+
+			// 6. Return ErrHITLInterrupted — conversation lock is held (D-084).
+			return fmt.Errorf("execute agent: %w", ErrHITLInterrupted)
+		}
+
+		// --- HITL (ask_user) interrupt path ---
 		e.logger.Info("agent executor: HITL interrupt",
 			"agent_id", payload.AgentID,
 			"conversation_id", payload.ConversationID,
@@ -426,19 +492,24 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 			return fmt.Errorf("execute agent: update agent status: %w", err)
 		}
 
-		// 2. Persist Question to DB (D-063: nil-safe, skip when questionStore is nil).
-		if e.questionStore != nil {
-			question := &model.Question{
+		// 2. Persist RemoteCalling to DB (D-063: nil-safe, skip when remoteCallingStore is nil).
+		if e.remoteCallingStore != nil {
+			expiresAt := time.Now().Add(24 * time.Hour) // D-137: 24h default timeout
+			rc := &model.RemoteCalling{
 				ID:             uuid.New().String(),
 				ConversationID: payload.ConversationID,
 				CheckpointID:   checkpointID,
+				AgentID:        payload.AgentID,
+				Method:         "ask_user",
+				Params:         info.Question, // question text directly, no nested JSON
 				InterruptID:    info.InterruptID,
-				QuestionText:   info.Question,
-				Status:         model.QuestionStatusPending,
+				DeviceID:       "", // any device can respond
+				Status:         model.RemoteCallingStatusPending,
 				CreatedAt:      time.Now(),
+				ExpiresAt:      &expiresAt,
 			}
-			if err := e.questionStore.Create(ctx, question); err != nil {
-				return fmt.Errorf("execute agent: create question: %w", err)
+			if err := e.remoteCallingStore.Create(ctx, rc); err != nil {
+				return fmt.Errorf("execute agent: create remote calling: %w", err)
 			}
 		}
 
@@ -448,6 +519,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 
 		// 4. Broadcast lightweight conversation update (pull notification pattern, D-124).
 		e.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, hitlUpdatedAt)
+		e.broadcaster.SendConversationUpdate(ctx, payload.AgentID, payload.ConversationID, hitlUpdatedAt)
 
 		// 5. Broadcast agent status (D-125: redundant agent_question and
 		// agent_checkpoint_created removed; conversation update carries the data).
@@ -576,4 +648,35 @@ func (e *AgentExecutor) sendErrorMessage(ctx context.Context, payload ExecutePay
 	}
 	// Broadcast conversation update so client pulls the error message.
 	e.broadcaster.SendConversationUpdate(ctx, payload.SenderID, payload.ConversationID, time.Now())
+}
+
+// interruptData holds parsed interrupt data distinguishing HITL vs client function.
+type interruptData struct {
+	IsClientFunc bool
+	Method       string
+	Params       string
+	DeviceID     string
+	TimeoutMs    int64
+}
+
+// parseInterruptData parses the interrupt question JSON to determine if it's a
+// client function call or a HITL (ask_user) interrupt. Returns nil if the data
+// is not a valid client function interrupt.
+func parseInterruptData(question string) *interruptData {
+	var payload struct {
+		Method    string `json:"method"`
+		Params    string `json:"params"`
+		DeviceID  string `json:"device_id"`
+		TimeoutMs int64  `json:"timeout_ms"`
+	}
+	if err := json.Unmarshal([]byte(question), &payload); err != nil || payload.Method == "" || payload.Method == "ask_user" {
+		return nil
+	}
+	return &interruptData{
+		IsClientFunc: true,
+		Method:       payload.Method,
+		Params:       payload.Params,
+		DeviceID:     payload.DeviceID,
+		TimeoutMs:    payload.TimeoutMs,
+	}
 }

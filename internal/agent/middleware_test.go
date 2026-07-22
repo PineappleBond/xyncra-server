@@ -114,10 +114,9 @@ func TestBuildMiddleware_DefaultMaxChars(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildMiddleware_DynamicToolProvider(t *testing.T) {
-	// When EnableClientTools=true and provider/caller are set → DynamicToolProvider registered.
+	// When EnableClientTools=true and provider is set → DynamicToolProvider registered.
 	builder := &AgentBuilder{
 		clientFunctionProvider: &mockFunctionProvider{},
-		clientCaller:           &mockCallerForDTP{},
 	}
 	config := &AgentConfig{
 		ID: "test-agent",
@@ -133,10 +132,9 @@ func TestBuildMiddleware_DynamicToolProvider(t *testing.T) {
 }
 
 func TestBuildMiddleware_DynamicToolProvider_NilProviderSkipped(t *testing.T) {
-	// When EnableClientTools=true but FunctionProvider/Caller not set → skipped.
+	// When EnableClientTools=true but FunctionProvider not set → skipped.
 	builder := &AgentBuilder{
 		clientFunctionProvider: nil,
-		clientCaller:           nil,
 	}
 	config := &AgentConfig{
 		ID: "test-agent",

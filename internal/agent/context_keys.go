@@ -15,6 +15,11 @@ const (
 	// device(s), which may differ from the human sender's identity stored in
 	// CallerDevice.
 	ctxKeyAgentID
+
+	// ctxKeyConversationID is the context key for the conversation ID.
+	// Injected by the executor before agent run, used by tools to identify
+	// the current conversation (e.g. client function tools for RemoteCalling).
+	ctxKeyConversationID
 )
 
 // CallerDevice holds the (userID, deviceID) pair of the device that
@@ -45,5 +50,17 @@ func ContextWithAgentID(ctx context.Context, agentID string) context.Context {
 // Returns ("", false) if not present.
 func AgentIDFromContext(ctx context.Context) (string, bool) {
 	id, ok := ctx.Value(ctxKeyAgentID).(string)
+	return id, ok
+}
+
+// ContextWithConversationID returns a copy of ctx carrying the conversation ID.
+func ContextWithConversationID(ctx context.Context, conversationID string) context.Context {
+	return context.WithValue(ctx, ctxKeyConversationID, conversationID)
+}
+
+// ConversationIDFromContext extracts the conversation ID from ctx.
+// Returns ("", false) if not present.
+func ConversationIDFromContext(ctx context.Context) (string, bool) {
+	id, ok := ctx.Value(ctxKeyConversationID).(string)
 	return id, ok
 }

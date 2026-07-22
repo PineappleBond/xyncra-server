@@ -260,10 +260,6 @@ func main() {
 	})
 	defer func() { _ = redisIdempotencyClient.Close() }()
 
-	// PendingStore for reverse-RPC request persistence (Phase 4, D-103).
-	// Reuses the same dedicated redis.Client as idempotency (D-074).
-	pendingStore := server.NewRedisPendingStore(redisIdempotencyClient, server.PendingStoreConfig{})
-
 	// ---------------------------------------------------------------
 	// WebSocket Server
 	// ---------------------------------------------------------------
@@ -287,7 +283,6 @@ func main() {
 		server.WSWithMessageHandler(msgHandler),
 		server.WSWithNodeBroadcaster(nodeBroadcaster),
 		server.WSWithFunctionRegistry(funcRegistry),
-		server.WSWithPendingStore(pendingStore), // Phase 4 (D-103)
 		server.WSWithLogger(slogAdapter),
 		server.WSWithExtraRoutes(extraRoutes...),
 	)
@@ -308,8 +303,7 @@ func main() {
 		BroadcastFn:      srv.BroadcastUpdates,
 		AgentRegistry:    agentRegistry,
 		FunctionRegistry: funcRegistry,
-		ReverseRPC:       srv.ReverseRPC(), // Phase 5 (D-108)
-		Logger:           srv.Logger(),     // Phase 5 (D-108)
+		Logger:           srv.Logger(),
 	})
 
 	// ---------------------------------------------------------------
@@ -386,7 +380,7 @@ func main() {
 		srv.Logger(),
 		agent.WithLLMMetrics(llmMetrics),
 		agent.WithCheckPointStore(checkpointStore),         // D-112: checkpoint cleanup after resume
-		agent.WithQuestionStore(dataStore.QuestionStore()), // HITL questions persistence
+		agent.WithRemoteCallingStore(dataStore.RemoteCallingStore()), // RemoteCalling persistence (D-137)
 	)
 
 	// Idempotency store for agent task deduplication (D-Phase5-2).
@@ -407,11 +401,9 @@ func main() {
 	mcpBridge := agenttools.NewMCPBridge(nil) // nil → uses slog.Default()
 	agentBuilder.SetMCPBridge(mcpBridge)
 
-	// Wire client function provider and caller for DynamicToolProvider (Phase 6 / D-101).
+	// Wire client function provider for DynamicToolProvider (Phase 6 / D-101).
 	// funcRegistry (*server.MemoryFunctionRegistry) satisfies ClientFunctionProvider.
-	// srv (*server.WebSocketServer) satisfies ClientCaller via ServerRequest().
 	agentBuilder.SetClientFunctionProvider(funcRegistry)
-	agentBuilder.SetClientCaller(srv)
 	agentBuilder.SetLogger(srv.Logger())
 
 	// ---------------------------------------------------------------
@@ -471,20 +463,22 @@ func main() {
 	})
 	go cleaner.Run(ctx)
 
-	// Start the HITL timeout cleanup goroutine (D-123).
+	// Start the RemoteCalling timeout cleanup goroutine (D-123, D-137).
 	// Periodically scans conversations stuck in asking_user status and
 	// cleans up those exceeding 24h timeout, releasing locks and checkpoints.
-	hitlCleanup := agent.NewHITLCleanupTask(
-		agent.HITLCleanupConfig{},
+	// Also cleans up individual expired RemoteCallings.
+	remoteCallingCleanup := agent.NewRemoteCallingCleanupTask(
+		agent.RemoteCallingCleanupConfig{},
 		dataStore.ConversationStore(),
-		dataStore.QuestionStore(),
+		dataStore.RemoteCallingStore(),
 		checkpointStore,
 		broadcastHelper,
 		dataStore,
+		broker,
 		redisIdempotencyClient,
 		srv.Logger(),
 	)
-	go hitlCleanup.Run(ctx)
+	go remoteCallingCleanup.Run(ctx)
 
 	// ---------------------------------------------------------------
 	// Profiling (pprof + Pyroscope)

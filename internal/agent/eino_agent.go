@@ -291,7 +291,6 @@ type AgentBuilder struct {
 	checkpointStore        compose.CheckPointStore // for HITL checkpoint persistence (D-083)
 	mcpBridge              *agenttools.MCPBridge   // for MCP server connections (D-086)
 	clientFunctionProvider ClientFunctionProvider  // Phase 6 (D-101)
-	clientCaller           ClientCaller            // Phase 6 (D-101)
 	llmLogger              *LLMLogger              // optional: dedicated LLM call logger
 	logger                 Logger                  // structured logger for middleware diagnostics
 	tracingEnabled         bool                    // when true, TracingMiddleware is appended to the middleware chain
@@ -338,13 +337,6 @@ func (b *AgentBuilder) SetMCPBridge(bridge *agenttools.MCPBridge) {
 // If not set, client tools are not available.
 func (b *AgentBuilder) SetClientFunctionProvider(provider ClientFunctionProvider) {
 	b.clientFunctionProvider = provider
-}
-
-// SetClientCaller sets the caller used to invoke remote client functions
-// via ReverseRPC (D-101).
-// If not set, client tools are not available.
-func (b *AgentBuilder) SetClientCaller(caller ClientCaller) {
-	b.clientCaller = caller
 }
 
 // SetLLMLogger sets the dedicated LLM call logger. When set, a LoggingMiddleware

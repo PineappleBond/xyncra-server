@@ -132,9 +132,9 @@ flowchart TD
 **Redis Key 模式**（DB 15）：
 - `xyncra:conn:info:{connID}` — 连接信息 JSON
 - `xyncra:conn:user:{userID}` — 用户连接集合
-- `pending:{userID}\x00{deviceID}` — 待补发请求列表
+- `pending:{userID}\x00{deviceID}` — 待补发请求列表（已废弃，D-140）
 - `agent:idempotent:*` — Agent 幂等性 key（24h TTL）
-- `agent:checkpoint:*` — Agent HITL checkpoint
+- `agent:checkpoint:*` — Agent RemoteCalling checkpoint
 - `agent:lock:*` — Agent 会话级并发锁
 - `asynq:{critical}`, `asynq:{default}`, `asynq:{low}` — MQ 队列
 
@@ -278,9 +278,9 @@ flowchart TD
 
 | 编号 | 文件 | 覆盖范围 |
 |------|------|---------|
-| TC-000 | [TC-000-完整链路测试.md](../../../docs/manual-test-cases/TC-000-完整链路测试.md) | 全功能端到端链路（含幂等性、IPC Fallback、Agent 高级功能、ReverseRPC 基础） |
-| TC-002 | [TC-002-Phase5补发机制测试.md](../../../docs/manual-test-cases/TC-002-Phase5补发机制测试.md) | Phase 5 补发机制（Pending Store、system.reconnect、设备替换） |
-| TC-003 | [TC-003-HITL完整流程测试.md](../../../docs/manual-test-cases/TC-003-HITL完整流程测试.md) | HITL 完整流程 + 韧性场景（Question 持久化 D-116、多设备竞态、并行多 Question、服务器重启恢复 Scenario 1-7） |
+| TC-000 | [TC-000-完整链路测试.md](../../../docs/manual-test-cases/TC-000-完整链路测试.md) | 全功能端到端链路（含幂等性、IPC Fallback、Agent 高级功能）（注：原 ReverseRPC 基础部分已废弃，D-140） |
+| TC-002 | [TC-002-Phase5补发机制测试.md](../../../docs/manual-test-cases/TC-002-Phase5补发机制测试.md) | Phase 5 补发机制（已废弃：Pending Store、system.reconnect 均已移除，D-140） |
+| TC-003 | [TC-003-HITL完整流程测试.md](../../../docs/manual-test-cases/TC-003-HITL完整流程测试.md) | RemoteCalling 完整流程 + 韧性场景（Question 持久化 D-116、多设备竞态、并行多 Question、服务器重启恢复 Scenario 1-7） |
 | TC-004 | [TC-004-Agent上下文管理测试.md](../../../docs/manual-test-cases/TC-004-Agent上下文管理测试.md) | Agent 上下文窗口管理（滑动窗口、Token 计算、消息裁剪） |
 | TC-005 | [TC-005-Agent子Agent委派测试.md](../../../docs/manual-test-cases/TC-005-Agent子Agent委派测试.md) | Agent 子 Agent 委派（delegate_task、结果回传） |
 | TC-006 | [TC-006-Agent错误消息持久化测试.md](../../../docs/manual-test-cases/TC-006-Agent错误消息持久化测试.md) | Agent 错误消息持久化（分类错误、用户友好消息） |

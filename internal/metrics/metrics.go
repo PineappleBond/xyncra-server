@@ -199,18 +199,6 @@ var (
 		Name: "xyncra_functions_registered",
 		Help: "Registered functions per device",
 	}, []string{"device_id"})
-
-	// ReverseRPCRequests counts total reverse RPC requests.
-	ReverseRPCRequests = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "xyncra_reverse_rpc_requests_total",
-		Help: "Total reverse RPC requests",
-	})
-
-	// ReverseRPCFailed counts total failed reverse RPC requests.
-	ReverseRPCFailed = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "xyncra_reverse_rpc_failed_total",
-		Help: "Total failed reverse RPC requests",
-	})
 )
 
 // ---------------------------------------------------------------------------

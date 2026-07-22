@@ -27,12 +27,12 @@ func (b *AgentBuilder) buildMiddleware(
 
 	// 0. DynamicToolProvider (must be first -- injects tools before other middleware sees them)
 	if config.Middleware.EnableClientTools {
-		if b.clientFunctionProvider != nil && b.clientCaller != nil {
-			dtp := NewDynamicToolProvider(b.clientFunctionProvider, b.clientCaller, config.Middleware.ClientTools, b.logger,
+		if b.clientFunctionProvider != nil {
+			dtp := NewDynamicToolProvider(b.clientFunctionProvider, config.Middleware.ClientTools, b.logger,
 				b.toolRegistry, config.DynamicTools)
 			mws = append(mws, dtp)
 		} else {
-			log.Default().Printf("agent %s: client_tools enabled but FunctionProvider/Caller not set, skipping", config.ID)
+			log.Default().Printf("agent %s: client_tools enabled but FunctionProvider not set, skipping", config.ID)
 		}
 	}
 

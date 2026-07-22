@@ -22,15 +22,17 @@ import type {
   Draft,
   Message,
   NotificationLog,
-  Question,
+  RemoteCalling,
+  RetryQueueItem,
   RetryTask,
   RPCLog,
   SyncState,
   UserUpdate,
 } from './models';
 import { NotificationLogStore } from './notification-log-store';
-import { QuestionStore } from './question-store';
 import { QueueStore } from './queue-store';
+import { RemoteCallingStore } from './remote-calling-store';
+import { RetryQueueStore } from './retry-queue-store';
 import { RPCLogStore } from './rpc-log-store';
 import { SyncStateStore } from './sync-state-store';
 import { UserUpdateStore } from './user-update-store';
@@ -51,7 +53,8 @@ export class XyncraDatabase extends Dexie {
   // this.version(1).stores(...) is called in the constructor.
   conversations!: Dexie.Table<Conversation, string>;
   messages!: Dexie.Table<Message, string>;
-  questions!: Dexie.Table<Question, string>;
+  remoteCallings!: Dexie.Table<RemoteCalling, string>;
+  retryQueue!: Dexie.Table<RetryQueueItem, number>;
   syncStates!: Dexie.Table<SyncState, string>;
   drafts!: Dexie.Table<Draft, string>;
   retryTasks!: Dexie.Table<RetryTask, string>;
@@ -62,7 +65,8 @@ export class XyncraDatabase extends Dexie {
   // Domain sub-stores (mirrors Go ClientDB struct fields).
   readonly conversationsStore: ConversationStore;
   readonly messagesStore: MessageStore;
-  readonly questionsStore: QuestionStore;
+  readonly remoteCallingsStore: RemoteCallingStore;
+  readonly retryQueueStore: RetryQueueStore;
   readonly syncStatesStore: SyncStateStore;
   readonly draftsStore: DraftStore;
   readonly queueStore: QueueStore;
@@ -134,10 +138,30 @@ export class XyncraDatabase extends Dexie {
       userUpdates: 'id, user_id, [user_id+seq], type, created_at',
     });
 
+    // Version 2: Replace questions with remote_callings (D-137).
+    // Project not launched — no data migration needed, Dexie auto-drops and rebuilds.
+    this.version(2).stores({
+      conversations:
+        'id, user_id1, user_id2, &[user_id1+user_id2], type, created_at, last_message_at, agent_status',
+      messages:
+        'id, &[client_message_id+sender_id], conversation_id, [conversation_id+message_id], sender_id, created_at, message_id',
+      remoteCallings:
+        '++id, conversation_id, status, checkpoint_id, [conversation_id+status]',
+      retryQueue: '++id, remote_calling_id, next_retry_at',
+      syncStates: 'key',
+      drafts: 'id, &conversation_id',
+      retryTasks: 'id, method, status, next_retry, created_at',
+      rpcLogs:
+        'id, type, request_id, method, status_code, conversation_id, created_at',
+      notificationLogs: 'seq, type, created_at',
+      userUpdates: 'id, user_id, [user_id+seq], type, created_at',
+    });
+
     // Initialize domain sub-stores.
     this.conversationsStore = new ConversationStore(this);
     this.messagesStore = new MessageStore(this);
-    this.questionsStore = new QuestionStore(this);
+    this.remoteCallingsStore = new RemoteCallingStore(this);
+    this.retryQueueStore = new RetryQueueStore(this);
     this.syncStatesStore = new SyncStateStore(this);
     this.draftsStore = new DraftStore(this);
     this.queueStore = new QueueStore(this);
@@ -160,8 +184,9 @@ export { MessageStore } from './message-store';
 // Re-export all models and sub-stores for convenience.
 export * from './models';
 export { NotificationLogStore } from './notification-log-store';
-export { QuestionStore } from './question-store';
 export { QueueStore } from './queue-store';
+export { RemoteCallingStore } from './remote-calling-store';
+export { RetryQueueStore } from './retry-queue-store';
 export { RPCLogStore } from './rpc-log-store';
 export { SyncStateStore } from './sync-state-store';
 export { UserUpdateStore } from './user-update-store';

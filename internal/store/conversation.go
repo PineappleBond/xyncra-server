@@ -379,9 +379,9 @@ func (cs *ConversationStore) ClearAgentStatus(ctx context.Context, conversationI
 	return now, nil
 }
 
-// ListStaleHITLConversations returns conversations stuck in asking_user status
-// with updated_at older than maxAge. Results are limited to the given count.
-// Used by the HITL timeout cleanup task (D-123).
+// ListStaleHITLConversations returns conversations stuck in asking_user or
+// tool_calling status with updated_at older than maxAge. Results are limited
+// to the given count. Used by the HITL timeout cleanup task (D-123 / D-137).
 func (cs *ConversationStore) ListStaleHITLConversations(ctx context.Context, maxAge time.Duration, limit int) (result []*model.Conversation, err error) {
 	ctx, finish := startSpan(ctx, tracing.SpanDBConversationListStaleHITL)
 	defer func() { finish(err) }()
@@ -389,8 +389,8 @@ func (cs *ConversationStore) ListStaleHITLConversations(ctx context.Context, max
 	cutoff := time.Now().Add(-maxAge)
 	var conversations []*model.Conversation
 	err = cs.db.WithContext(ctx).
-		Where("agent_status = ? AND agent_last_activity < ?",
-			model.AgentStatusAskingUser, cutoff).
+		Where("agent_status IN (?, ?) AND agent_last_activity < ?",
+			model.AgentStatusAskingUser, model.AgentStatusToolCalling, cutoff).
 		Order("agent_last_activity ASC").
 		Limit(limit).
 		Find(&conversations).Error

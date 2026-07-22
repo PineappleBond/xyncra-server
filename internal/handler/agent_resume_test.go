@@ -8,7 +8,6 @@ import (
 	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
-	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,18 +59,18 @@ func seedConversation(t *testing.T, env *agentResumeTestEnv, convID, checkpointI
 	require.NoError(t, env.store.ConversationStore().Create(context.Background(), conv))
 }
 
-// seedQuestion inserts a pending Question record.
-func seedQuestion(t *testing.T, env *agentResumeTestEnv, id, convID, cpID, interruptID, text string) {
+// seedRemoteCalling inserts a pending RemoteCalling record.
+func seedRemoteCalling(t *testing.T, env *agentResumeTestEnv, id, convID, cpID, agentID, method string) {
 	t.Helper()
-	q := &model.Question{
+	rc := &model.RemoteCalling{
 		ID:             id,
 		ConversationID: convID,
 		CheckpointID:   cpID,
-		InterruptID:    interruptID,
-		QuestionText:   text,
-		Status:         model.QuestionStatusPending,
+		AgentID:        agentID,
+		Method:         method,
+		Status:         model.RemoteCallingStatusPending,
 	}
-	require.NoError(t, env.store.QuestionStore().Create(context.Background(), q))
+	require.NoError(t, env.store.RemoteCallingStore().Create(context.Background(), rc))
 }
 
 // callAgentResume invokes the agent_resume handler and returns the raw
@@ -98,15 +97,11 @@ func parseAgentResumeResponseMap(t *testing.T, data json.RawMessage) map[string]
 }
 
 // decodeAgentResumePayload extracts the task payload from the first enqueued
-// task in the broker.
-func decodeAgentResumePayload(t *testing.T, broker *agentResumeBroker) agentResumeTaskPayload {
+func decodeAgentResumePayload(t *testing.T, env *agentResumeTestEnv) agentResumeTaskPayload {
 	t.Helper()
-	require.GreaterOrEqual(t, len(broker.enqueued), 1, "expected at least one enqueued task")
-	task := broker.enqueued[0]
-	assert.Equal(t, mq.TypeAgentResume, task.Type)
-
+	require.Len(t, env.broker.enqueued, 1, "expected 1 enqueued task")
 	var payload agentResumeTaskPayload
-	require.NoError(t, json.Unmarshal(task.Payload, &payload))
+	require.NoError(t, json.Unmarshal(env.broker.enqueued[0].Payload, &payload))
 	return payload
 }
 
@@ -114,320 +109,184 @@ func decodeAgentResumePayload(t *testing.T, broker *agentResumeBroker) agentResu
 // Tests
 // ---------------------------------------------------------------------------
 
-// TestAgentResumeHandler_ParameterValidation verifies that missing required
-// params return an error.
-func TestAgentResumeHandler_ParameterValidation(t *testing.T) {
-	tests := []struct {
-		name   string
-		params agentResumeParams
-	}{
-		{
-			name:   "missing all",
-			params: agentResumeParams{},
-		},
-		{
-			name: "missing conversation_id",
-			params: agentResumeParams{
-				Answer:  "yes",
-				AgentID: "agent/bot1",
-			},
-		},
-		{
-			name: "missing answer",
-			params: agentResumeParams{
-				ConversationID: "conv-1",
-				AgentID:        "agent/bot1",
-			},
-		},
-		{
-			name: "missing agent_id",
-			params: agentResumeParams{
-				ConversationID: "conv-1",
-				Answer:         "yes",
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			env := newAgentResumeTestEnv(t)
-
-			_, err := callAgentResume(t, env.h, server.NewTestClient("alice"), tc.params)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "required")
-			assert.Empty(t, env.broker.enqueued, "no task should be enqueued on validation failure")
-		})
-	}
-}
-
-// TestAgentResumeHandler_InvalidJSON verifies that invalid JSON params
-// return a descriptive error.
-func TestAgentResumeHandler_InvalidJSON(t *testing.T) {
+// TestAgentResume_InvalidParams verifies that invalid params return a validation error.
+func TestAgentResume_InvalidParams(t *testing.T) {
 	env := newAgentResumeTestEnv(t)
 
-	ctx := context.Background()
-	client := server.NewTestClient("alice")
-	req := &protocol.PackageDataRequest{
-		ID:     "req-invalid",
-		Method: "agent_resume",
-		Params: json.RawMessage(`not valid json`),
-	}
-
-	_, err := env.h.HandleRequest(ctx, client, req)
+	_, err := callAgentResume(t, env.h, nil, "invalid")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid params")
 }
 
-// TestAgentResumeHandler_AllAnswered_EnqueuesMQ verifies that when all
-// questions for a checkpoint are answered, a TypeAgentResume task is enqueued
-// and the response contains status "queued".
-func TestAgentResumeHandler_AllAnswered_EnqueuesMQ(t *testing.T) {
+// TestAgentResume_MissingID verifies that missing id returns a validation error.
+func TestAgentResume_MissingID(t *testing.T) {
 	env := newAgentResumeTestEnv(t)
+
+	_, err := callAgentResume(t, env.h, nil, agentResumeParams{
+		AgentID: "agent/bot1",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "id and agent_id are required")
+}
+
+// TestAgentResume_MissingAgentID verifies that missing agent_id returns a validation error.
+func TestAgentResume_MissingAgentID(t *testing.T) {
+	env := newAgentResumeTestEnv(t)
+
+	_, err := callAgentResume(t, env.h, nil, agentResumeParams{
+		ID: "rc-1",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "id and agent_id are required")
+}
+
+// TestAgentResume_NotFound verifies that a non-existent remote calling returns 404.
+func TestAgentResume_NotFound(t *testing.T) {
+	env := newAgentResumeTestEnv(t)
+
+	_, err := callAgentResume(t, env.h, nil, agentResumeParams{
+		ID:      "non-existent-id",
+		AgentID: "agent/bot1",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "remote calling not found")
+}
+
+// TestAgentResume_AlreadyProcessed verifies idempotency for already resolved calls.
+func TestAgentResume_AlreadyProcessed(t *testing.T) {
+	env := newAgentResumeTestEnv(t)
+	ctx := context.Background()
+
 	seedConversation(t, env, "conv-1", "cp-1")
-	seedQuestion(t, env, "q-1", "conv-1", "cp-1", "intr-1", "What color?")
+	seedRemoteCalling(t, env, "rc-1", "conv-1", "cp-1", "agent/bot1", "ask_user")
 
-	params := agentResumeParams{
-		ConversationID: "conv-1",
-		CheckpointID:   "cp-1",
-		InterruptID:    "intr-1",
-		Answer:         "blue",
-		AgentID:        "agent/weather-bot",
-	}
+	// Resolve it first
+	require.NoError(t, env.store.RemoteCallingStore().ResolveResult(ctx, "rc-1", "done"))
 
-	data, err := callAgentResume(t, env.h, server.NewTestClient("alice"), params)
+	// Call again - should be idempotent
+	data, err := callAgentResume(t, env.h, nil, agentResumeParams{
+		ID:      "rc-1",
+		AgentID: "agent/bot1",
+		Success: true,
+		Result:  "another result",
+	})
+	require.NoError(t, err)
+
+	resp := parseAgentResumeResponseMap(t, data)
+	assert.Equal(t, "resolved", resp["status"])
+}
+
+// TestAgentResume_SuccessResult verifies successful resolution.
+func TestAgentResume_SuccessResult(t *testing.T) {
+	env := newAgentResumeTestEnv(t)
+	ctx := context.Background()
+
+	seedConversation(t, env, "conv-1", "cp-1")
+	seedRemoteCalling(t, env, "rc-1", "conv-1", "cp-1", "agent/bot1", "ask_user")
+
+	data, err := callAgentResume(t, env.h, nil, agentResumeParams{
+		ID:      "rc-1",
+		AgentID: "agent/bot1",
+		Success: true,
+		Result:  "Alice",
+	})
 	require.NoError(t, err)
 
 	resp := parseAgentResumeResponseMap(t, data)
 	assert.Equal(t, "queued", resp["status"])
-	assert.Equal(t, float64(1), resp["answered"])
-	assert.Equal(t, float64(1), resp["total"])
 
-	// Verify the enqueued task payload does NOT contain the answer (D-116).
-	require.Len(t, env.broker.enqueued, 1)
-	payload := decodeAgentResumePayload(t, env.broker)
+	// Verify the record was resolved
+	rc, err := env.store.RemoteCallingStore().GetByID(ctx, "rc-1")
+	require.NoError(t, err)
+	assert.Equal(t, model.RemoteCallingStatusResolved, rc.Status)
+	assert.Equal(t, "Alice", rc.Result)
+	assert.True(t, rc.Success)
+
+	// Verify task was enqueued
+	payload := decodeAgentResumePayload(t, env)
 	assert.Equal(t, "conv-1", payload.ConversationID)
 	assert.Equal(t, "cp-1", payload.CheckpointID)
-	assert.Equal(t, "agent/weather-bot", payload.AgentID)
-	assert.Equal(t, "alice", payload.SenderID)
-	assert.Empty(t, payload.DeviceID)
+	assert.Equal(t, "agent/bot1", payload.AgentID)
 }
 
-// TestAgentResumeHandler_PartialAnswer verifies that when only some questions
-// are answered, no MQ task is enqueued and the response is "partial".
-func TestAgentResumeHandler_PartialAnswer(t *testing.T) {
+// TestAgentResume_ErrorResult verifies error resolution.
+func TestAgentResume_ErrorResult(t *testing.T) {
 	env := newAgentResumeTestEnv(t)
+	ctx := context.Background()
+
 	seedConversation(t, env, "conv-1", "cp-1")
-	seedQuestion(t, env, "q-1", "conv-1", "cp-1", "intr-1", "Question 1?")
-	seedQuestion(t, env, "q-2", "conv-1", "cp-1", "intr-2", "Question 2?")
+	seedRemoteCalling(t, env, "rc-1", "conv-1", "cp-1", "agent/bot1", "ask_user")
 
-	params := agentResumeParams{
-		ConversationID: "conv-1",
-		Answer:         "answer-1",
-		AgentID:        "agent/bot1",
-	}
-
-	data, err := callAgentResume(t, env.h, server.NewTestClient("alice"), params)
+	data, err := callAgentResume(t, env.h, nil, agentResumeParams{
+		ID:           "rc-1",
+		AgentID:      "agent/bot1",
+		Success:      false,
+		ErrorMessage: "timeout",
+	})
 	require.NoError(t, err)
 
 	resp := parseAgentResumeResponseMap(t, data)
-	assert.Equal(t, "partial", resp["status"])
-	assert.Equal(t, float64(1), resp["answered"])
-	assert.Equal(t, float64(2), resp["total"])
-	assert.Equal(t, float64(1), resp["pending"])
-	assert.Empty(t, env.broker.enqueued, "no MQ task should be enqueued on partial answer")
-}
+	assert.Equal(t, "queued", resp["status"])
 
-// TestAgentResumeHandler_Conflict verifies that answering an already-answered
-// question returns a 409 error (multi-device race protection).
-func TestAgentResumeHandler_Conflict(t *testing.T) {
-	env := newAgentResumeTestEnv(t)
-	seedConversation(t, env, "conv-1", "cp-1")
-	seedQuestion(t, env, "q-1", "conv-1", "cp-1", "intr-1", "What?")
-
-	params := agentResumeParams{
-		ConversationID: "conv-1",
-		InterruptID:    "intr-1",
-		Answer:         "first",
-		AgentID:        "agent/bot1",
-	}
-
-	// First call succeeds.
-	_, err := callAgentResume(t, env.h, server.NewTestClient("alice"), params)
+	// Verify the record was resolved with error
+	rc, err := env.store.RemoteCallingStore().GetByID(ctx, "rc-1")
 	require.NoError(t, err)
-
-	// Second call with same interrupt_id should return conflict (question already answered).
-	_, err = callAgentResume(t, env.h, server.NewTestClient("bob"), params)
-	require.Error(t, err)
-	var herr *protocol.HandlerError
-	require.ErrorAs(t, err, &herr)
-	assert.Equal(t, protocol.ResponseCode(-409), herr.Code)
-	assert.Equal(t, "question_already_answered", herr.Message)
+	assert.Equal(t, model.RemoteCallingStatusResolved, rc.Status)
+	assert.Equal(t, "timeout", rc.ErrorMessage)
+	assert.False(t, rc.Success)
 }
 
-// TestAgentResumeHandler_CheckpointIDInferred verifies that checkpoint_id
-// can be inferred from the Conversation when not supplied.
-func TestAgentResumeHandler_CheckpointIDInferred(t *testing.T) {
+// TestAgentResume_PartialResolution verifies partial response when more callings are pending.
+func TestAgentResume_PartialResolution(t *testing.T) {
 	env := newAgentResumeTestEnv(t)
-	seedConversation(t, env, "conv-1", "cp-auto")
-	seedQuestion(t, env, "q-1", "conv-1", "cp-auto", "intr-1", "What?")
 
-	params := agentResumeParams{
-		ConversationID: "conv-1",
-		// CheckpointID intentionally omitted
-		Answer:  "yes",
+	seedConversation(t, env, "conv-1", "cp-1")
+	seedRemoteCalling(t, env, "rc-1", "conv-1", "cp-1", "agent/bot1", "ask_user")
+	seedRemoteCalling(t, env, "rc-2", "conv-1", "cp-1", "agent/bot1", "ask_user")
+
+	data, err := callAgentResume(t, env.h, nil, agentResumeParams{
+		ID:      "rc-1",
 		AgentID: "agent/bot1",
-	}
-
-	data, err := callAgentResume(t, env.h, server.NewTestClient("alice"), params)
+		Success: true,
+		Result:  "Alice",
+	})
 	require.NoError(t, err)
 
-	resp := parseAgentResumeResponseMap(t, data)
-	assert.Equal(t, "queued", resp["status"])
-
-	payload := decodeAgentResumePayload(t, env.broker)
-	assert.Equal(t, "cp-auto", payload.CheckpointID)
-}
-
-// TestAgentResumeHandler_InterruptIDFilter verifies that interrupt_id filters
-// which question is answered.
-func TestAgentResumeHandler_InterruptIDFilter(t *testing.T) {
-	env := newAgentResumeTestEnv(t)
-	seedConversation(t, env, "conv-1", "cp-1")
-	seedQuestion(t, env, "q-1", "conv-1", "cp-1", "intr-1", "Q1?")
-	seedQuestion(t, env, "q-2", "conv-1", "cp-1", "intr-2", "Q2?")
-
-	// Answer only intr-2.
-	params := agentResumeParams{
-		ConversationID: "conv-1",
-		InterruptID:    "intr-2",
-		Answer:         "answer-for-2",
-		AgentID:        "agent/bot1",
-	}
-
-	data, err := callAgentResume(t, env.h, server.NewTestClient("alice"), params)
-	require.NoError(t, err)
-
-	// q-1 is still pending → partial.
 	resp := parseAgentResumeResponseMap(t, data)
 	assert.Equal(t, "partial", resp["status"])
+	assert.Equal(t, float64(1), resp["pending_count"])
 
-	// Now answer intr-1 → all answered → queued.
-	params2 := agentResumeParams{
-		ConversationID: "conv-1",
-		InterruptID:    "intr-1",
-		Answer:         "answer-for-1",
-		AgentID:        "agent/bot1",
-	}
-	data2, err := callAgentResume(t, env.h, server.NewTestClient("alice"), params2)
-	require.NoError(t, err)
-
-	resp2 := parseAgentResumeResponseMap(t, data2)
-	assert.Equal(t, "queued", resp2["status"])
-	require.Len(t, env.broker.enqueued, 1)
+	// No task should be enqueued yet
+	assert.Len(t, env.broker.enqueued, 0)
 }
 
-// TestAgentResumeHandler_NilClient verifies that a nil client does not panic
-// and still succeeds (sender_id will be empty).
-func TestAgentResumeHandler_NilClient(t *testing.T) {
+// TestAgentResume_AllResolvedEnqueue verifies that task is enqueued when all callings are resolved.
+func TestAgentResume_AllResolvedEnqueue(t *testing.T) {
 	env := newAgentResumeTestEnv(t)
+	ctx := context.Background()
+
 	seedConversation(t, env, "conv-1", "cp-1")
-	seedQuestion(t, env, "q-1", "conv-1", "cp-1", "intr-1", "What?")
+	seedRemoteCalling(t, env, "rc-1", "conv-1", "cp-1", "agent/bot1", "ask_user")
+	seedRemoteCalling(t, env, "rc-2", "conv-1", "cp-1", "agent/bot1", "ask_user")
 
-	params := agentResumeParams{
-		ConversationID: "conv-1",
-		Answer:         "yes",
-		AgentID:        "agent/bot1",
-	}
+	// Resolve first one
+	require.NoError(t, env.store.RemoteCallingStore().ResolveResult(ctx, "rc-1", "Alice"))
 
-	data, err := callAgentResume(t, env.h, nil, params)
+	// Resolve second one - should trigger enqueue
+	data, err := callAgentResume(t, env.h, nil, agentResumeParams{
+		ID:      "rc-2",
+		AgentID: "agent/bot1",
+		Success: true,
+		Result:  "Bob",
+	})
 	require.NoError(t, err)
 
 	resp := parseAgentResumeResponseMap(t, data)
 	assert.Equal(t, "queued", resp["status"])
 
-	payload := decodeAgentResumePayload(t, env.broker)
-	assert.Empty(t, payload.SenderID, "sender_id should be empty when client is nil")
-	assert.Empty(t, payload.DeviceID, "device_id should be empty when client is nil")
+	// Verify task was enqueued
+	payload := decodeAgentResumePayload(t, env)
+	assert.Equal(t, "conv-1", payload.ConversationID)
+	assert.Equal(t, "cp-1", payload.CheckpointID)
+	assert.Equal(t, "agent/bot1", payload.AgentID)
 }
-
-// TestAgentResumeHandler_WithDeviceID verifies that the device ID from the
-// client is forwarded into the task payload (D-102).
-func TestAgentResumeHandler_WithDeviceID(t *testing.T) {
-	env := newAgentResumeTestEnv(t)
-	seedConversation(t, env, "conv-1", "cp-1")
-	seedQuestion(t, env, "q-1", "conv-1", "cp-1", "intr-1", "What?")
-
-	params := agentResumeParams{
-		ConversationID: "conv-1",
-		Answer:         "42",
-		AgentID:        "agent/bot1",
-	}
-
-	client := server.NewTestClientWithDevice("alice", "device-xyz", "conn-1")
-	data, err := callAgentResume(t, env.h, client, params)
-	require.NoError(t, err)
-
-	resp := parseAgentResumeResponseMap(t, data)
-	assert.Equal(t, "queued", resp["status"])
-
-	payload := decodeAgentResumePayload(t, env.broker)
-	assert.Equal(t, "alice", payload.SenderID)
-	assert.Equal(t, "device-xyz", payload.DeviceID)
-}
-
-// TestAgentResumeHandler_NoPendingQuestion verifies that when there is no
-// pending question matching the filter, a not-found error is returned.
-func TestAgentResumeHandler_NoPendingQuestion(t *testing.T) {
-	env := newAgentResumeTestEnv(t)
-	seedConversation(t, env, "conv-1", "cp-1")
-	// No questions seeded.
-
-	params := agentResumeParams{
-		ConversationID: "conv-1",
-		Answer:         "yes",
-		AgentID:        "agent/bot1",
-	}
-
-	_, err := callAgentResume(t, env.h, server.NewTestClient("alice"), params)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no pending question")
-}
-
-// TestAgentResumeHandler_ConversationNotFound verifies that a non-existent
-// conversation returns a not-found error.
-func TestAgentResumeHandler_ConversationNotFound(t *testing.T) {
-	env := newAgentResumeTestEnv(t)
-
-	params := agentResumeParams{
-		ConversationID: "conv-nonexistent",
-		Answer:         "yes",
-		AgentID:        "agent/bot1",
-	}
-
-	_, err := callAgentResume(t, env.h, server.NewTestClient("alice"), params)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "conversation not found")
-}
-
-// TestAgentResumeHandler_NoCheckpointID verifies that when checkpoint_id
-// cannot be inferred from the conversation, a validation error is returned.
-func TestAgentResumeHandler_NoCheckpointID(t *testing.T) {
-	env := newAgentResumeTestEnv(t)
-	// Conversation with empty checkpoint_id.
-	seedConversation(t, env, "conv-1", "")
-
-	params := agentResumeParams{
-		ConversationID: "conv-1",
-		Answer:         "yes",
-		AgentID:        "agent/bot1",
-	}
-
-	_, err := callAgentResume(t, env.h, server.NewTestClient("alice"), params)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "checkpoint_id")
-}
-
-// Compile-time interface check.
-var _ interface {
-	HandleRequest(context.Context, *server.Client, *protocol.PackageDataRequest) (json.RawMessage, error)
-} = (*agentResumeHandler)(nil)

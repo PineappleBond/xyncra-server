@@ -1,0 +1,120 @@
+// cancel_remote_calls RPC handler — cancel all pending RemoteCallings for a checkpoint (D-137).
+//
+// Flow:
+//  1. Parse & validate params (checkpoint_id, reason required).
+//  2. Batch cancel all pending RemoteCallings for the checkpoint.
+//  3. If no pending remain, enqueue TypeAgentResume MQ task (cancelled_by set).
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/PineappleBond/xyncra-server/internal/mq"
+	"github.com/PineappleBond/xyncra-server/internal/server"
+	"github.com/PineappleBond/xyncra-server/internal/store"
+	"github.com/PineappleBond/xyncra-server/pkg/protocol"
+)
+
+// --------------------------------------------------------------------------
+// Request / response types
+// --------------------------------------------------------------------------
+
+// cancelRemoteCallsParams is the JSON-decoded representation of the client-supplied
+// parameters for the "cancel_remote_calls" RPC method.
+type cancelRemoteCallsParams struct {
+	CheckpointID string `json:"checkpoint_id"` // required
+	Reason       string `json:"reason"`        // required
+}
+
+// --------------------------------------------------------------------------
+// Handler
+// --------------------------------------------------------------------------
+
+// cancelRemoteCallsHandler handles the "cancel_remote_calls" RPC method (D-137).
+type cancelRemoteCallsHandler struct {
+	store  store.StoreAPI
+	broker mq.Broker
+}
+
+// NewCancelRemoteCallsHandler creates a handler for the "cancel_remote_calls" RPC method.
+func NewCancelRemoteCallsHandler(s store.StoreAPI, broker mq.Broker) *cancelRemoteCallsHandler {
+	return &cancelRemoteCallsHandler{store: s, broker: broker}
+}
+
+// HandleRequest implements MethodHandler. It batch-cancels all pending RemoteCallings
+// for the given checkpoint. If no pending remain, enqueues a TypeAgentResume MQ task
+// with CancelledBy set to the caller's user ID.
+func (h *cancelRemoteCallsHandler) HandleRequest(ctx context.Context, client *server.Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
+	// 1. Parse parameters.
+	var params cancelRemoteCallsParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil, protocol.NewValidationError("invalid params")
+	}
+
+	// 2. Validate required fields.
+	if params.CheckpointID == "" || params.Reason == "" {
+		return nil, protocol.NewValidationError("checkpoint_id and reason are required")
+	}
+
+	// 3. Batch cancel.
+	rcs := h.store.RemoteCallingStore()
+	if rcs == nil {
+		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: RemoteCallingStore not available"))
+	}
+
+	cancelledCount, convID, rcAgentID, err := rcs.CancelByCheckpoint(ctx, params.CheckpointID, params.Reason)
+	if err != nil {
+		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: cancel: %w", err))
+	}
+
+	// 4. Check if all RemoteCallings for this checkpoint are resolved (D-138).
+	// Known limitation: cancel (step 3) and count (step 4) are not atomic.
+	// Two concurrent requests may both see pending=0 and both enqueue agent resume.
+	// The resume handler's idempotency key (D-121) provides a safety net:
+	// only the first resume task will execute; subsequent duplicates are skipped.
+	pending, err := rcs.CountPendingByCheckpoint(ctx, params.CheckpointID)
+	if err != nil {
+		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: count pending: %w", err))
+	}
+
+	// 5. If no pending remain, enqueue TypeAgentResume MQ task.
+	if pending == 0 && convID != "" {
+		// Get the caller's user ID for CancelledBy.
+		cancelledBy := ""
+		if client != nil {
+			cancelledBy = client.UserID()
+		}
+
+		deviceID := ""
+		if client != nil {
+			deviceID = client.DeviceID()
+		}
+		payload := agentResumeTaskPayload{
+			ConversationID: convID,
+			CheckpointID:   params.CheckpointID,
+			AgentID:        rcAgentID,
+			SenderID:       cancelledBy, // same user who cancelled
+			DeviceID:       deviceID,
+			CancelledBy:    cancelledBy,
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: marshal payload: %w", err))
+		}
+		task := &mq.Task{
+			Type:    mq.TypeAgentResume,
+			Payload: raw,
+			Queue:   mq.QueueDefault,
+		}
+		if _, err := h.broker.Enqueue(ctx, task); err != nil {
+			return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: enqueue task: %w", err))
+		}
+	}
+
+	// 6. Return response.
+	return json.Marshal(map[string]interface{}{
+		"cancelled_count": cancelledCount,
+	})
+}

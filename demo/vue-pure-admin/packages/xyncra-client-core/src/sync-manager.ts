@@ -28,7 +28,7 @@ import type {
   Conversation as DBConversation,
   Message as DBMessage,
   NotificationLog,
-  Question,
+  RemoteCalling,
 } from './db/models';
 import { ErrDuplicateKey, SyncError } from './errors';
 import type {
@@ -183,17 +183,10 @@ export class SyncManager {
    *   - seq === localMaxSeq+1 → normal processing: dedup → dispatch → advance seq.
    */
   async applyUpdate(update: PackageDataUpdate): Promise<void> {
-    console.log('[SyncManager] applyUpdate received:', {
-      type: update.type,
-      seq: update.seq,
-      payload: update.payload,
-    });
-
     // C7: Ephemeral updates (seq=0) bypass seq continuity, dedup, and persistence.
     if (update.seq === 0) {
       // Conversation "update" action uses pull-on-notification (D-118/D-124).
       if (update.type === 'conversation') {
-        console.log('[SyncManager] Calling handleEphemeralConversationUpdate');
         await this.handleEphemeralConversationUpdate(update);
       } else {
         await this.notifyHandler(update);
@@ -299,7 +292,7 @@ export class SyncManager {
 
       await db.transaction(
         'rw',
-        [db.notificationLogs, db.messages, db.conversations, db.syncStates, db.questions, db.rpcLogs],
+        [db.notificationLogs, db.messages, db.conversations, db.syncStates, db.remoteCallings, db.rpcLogs],
         async () => {
           // Capture the transaction reference once (guaranteed non-null inside callback).
           const tx = Dexie.currentTransaction as unknown as Transaction;
@@ -685,7 +678,7 @@ export class SyncManager {
 
   /**
    * Processes a "create" action for a conversation update (D-045).
-   * Saves conversation from payload, then syncs questions outside transaction.
+   * Saves conversation from payload, then syncs remote callings outside transaction.
    */
   private async handleConversationCreateTx(
     update: PackageDataUpdate,
@@ -712,13 +705,13 @@ export class SyncManager {
     >;
     await convTable.put(conv);
 
-    // Sync questions outside transaction (RPC call is slow)
+    // Sync remote callings outside transaction (RPC call is slow)
     const convID = conv.id;
     setTimeout(async () => {
       try {
-        await this.syncQuestionsForConversation(convID);
+        await this.syncRemoteCallingsForConversation(convID);
       } catch (error) {
-        this.options.logger.error('Failed to sync questions for new conversation', {
+        this.options.logger.error('Failed to sync remote callings for new conversation', {
           conversation_id: convID,
           error,
         });
@@ -766,7 +759,7 @@ export class SyncManager {
 
   /**
    * Legacy conversation upsert (backward compat with events that omit action).
-   * Saves conversation from payload, then syncs questions outside transaction.
+   * Saves conversation from payload, then syncs remote callings outside transaction.
    */
   private async handleConversationLegacyUpsertTx(
     update: PackageDataUpdate,
@@ -788,13 +781,13 @@ export class SyncManager {
     >;
     await convTable.put(conv);
 
-    // Sync questions outside transaction (RPC call is slow)
+    // Sync remote callings outside transaction (RPC call is slow)
     const convID = conv.id;
     setTimeout(async () => {
       try {
-        await this.syncQuestionsForConversation(convID);
+        await this.syncRemoteCallingsForConversation(convID);
       } catch (error) {
-        this.options.logger.error('Failed to sync questions for legacy upsert', {
+        this.options.logger.error('Failed to sync remote callings for legacy upsert', {
           conversation_id: convID,
           error,
         });
@@ -803,20 +796,24 @@ export class SyncManager {
   }
 
   /**
-   * Syncs questions for a conversation by calling get_conversation RPC.
+   * Syncs remote callings for a conversation by calling get_conversation RPC.
    * This is called outside of transactions to avoid transaction timeout issues.
    */
-  private async syncQuestionsForConversation(convID: string): Promise<void> {
+  private async syncRemoteCallingsForConversation(
+    convID: string,
+  ): Promise<void> {
     const result = (await this.options.rpcFn('get_conversation', {
       conversation_id: convID,
     })) as {
       conversation: Record<string, unknown>;
-      questions?: Array<{
+      remote_callings?: Array<{
         id: string;
         conversation_id: string;
         checkpoint_id: string;
-        interrupt_id: string;
-        question_text: string;
+        agent_id: string;
+        method: string;
+        params: string;
+        device_id: string;
         status: string;
         created_at: string;
       }>;
@@ -829,33 +826,35 @@ export class SyncManager {
       return;
     }
 
-    // Handle questions (D-125): clear stale questions and upsert new ones.
-    // When questions is defined (even if empty), sync local state to match server.
-    if (result.questions) {
-      // Clear stale questions when agent_status != asking_user (HITL ended)
-      // or when new questions are provided.
-      if (result.conversation.agent_status !== 'asking_user') {
-        await this.options.db.questionsStore.deleteByConversation(convID);
+    // Handle remote callings (D-137): clear stale and upsert new ones.
+    // When remote_callings is defined (even if empty), sync local state to match server.
+    if (result.remote_callings) {
+      // Clear stale remote callings when agent_status is neither asking_user nor tool_calling
+      // (both states use RemoteCalling mechanism — D-137).
+      if (result.conversation.agent_status !== 'asking_user' && result.conversation.agent_status !== 'tool_calling') {
+        await this.options.db.remoteCallingsStore.deleteByConversation(convID);
       }
-      for (const q of result.questions) {
+      for (const rc of result.remote_callings) {
         // Convert created_at from string to Date
-        const question: Question = {
-          id: q.id,
-          conversation_id: q.conversation_id,
-          checkpoint_id: q.checkpoint_id,
-          interrupt_id: q.interrupt_id,
-          question_text: q.question_text,
-          status: q.status,
-          created_at: new Date(q.created_at),
+        const remoteCalling: RemoteCalling = {
+          id: rc.id,
+          conversation_id: rc.conversation_id,
+          checkpoint_id: rc.checkpoint_id,
+          agent_id: rc.agent_id,
+          method: rc.method,
+          params: rc.params,
+          device_id: rc.device_id,
+          status: rc.status,
+          created_at: new Date(rc.created_at),
         };
-        await this.options.db.questionsStore.upsert(question);
+        await this.options.db.remoteCallingsStore.upsert(remoteCalling);
       }
     }
   }
 
   /**
    * Fetches a conversation from the server via get_conversation RPC and
-   * upserts it into the local database. Also handles questions (D-125).
+   * upserts it into the local database. Also handles remote callings (D-137).
    */
   private async fetchAndUpsertConversationTx(
     convID: string,
@@ -865,12 +864,14 @@ export class SyncManager {
       conversation_id: convID,
     })) as {
       conversation: Record<string, unknown>;
-      questions?: Array<{
+      remote_callings?: Array<{
         id: string;
         conversation_id: string;
         checkpoint_id: string;
-        interrupt_id: string;
-        question_text: string;
+        agent_id: string;
+        method: string;
+        params: string;
+        device_id: string;
         status: string;
         created_at: string;
       }>;
@@ -890,17 +891,20 @@ export class SyncManager {
     >;
     await convTable.put(conv);
 
-    // Handle questions (D-125): clear stale questions and upsert new ones.
-    // When questions is defined (even if empty), sync local state to match server.
-    if (result.questions) {
-      const qTable = tx.table('questions');
-      // Clear stale questions when agent_status != asking_user (HITL ended)
-      // or when new questions are provided.
-      if (result.conversation.agent_status !== 'asking_user') {
-        await qTable.where('conversation_id').equals(convID).delete();
-      }
-      for (const q of result.questions) {
-        await qTable.put(q);
+    // Handle remote callings (D-137): clear stale and upsert new ones.
+    // When remote_callings is defined (even if empty), sync local state to match server.
+    if (result.remote_callings) {
+      const rcTable = tx.table('remote_callings');
+      // Clear stale remote callings for this conversation before upserting new ones.
+      // This ensures local state matches server state regardless of agent_status.
+      await rcTable.where('conversation_id').equals(convID).delete();
+      for (const rc of result.remote_callings) {
+        // Convert created_at from string to Date for IndexedDB storage.
+        const dbRc = {
+          ...rc,
+          created_at: rc.created_at ? new Date(rc.created_at) : new Date(),
+        };
+        await rcTable.put(dbRc);
       }
     }
   }
@@ -946,8 +950,10 @@ export class SyncManager {
           },
         );
         // Notify handler with local data (already up-to-date).
+        // Also fetch remote callings from local DB so the handler can emit remote_calling events.
+        const localRCs = await this.options.db.remoteCallingsStore.getByConversation(convID);
         await this.options.handler.onConversation(
-          conversationToHandler(localConv),
+          conversationToHandler({ ...localConv, remote_callings: localRCs }),
           'updated',
         );
         return;
@@ -960,12 +966,14 @@ export class SyncManager {
         conversation_id: convID,
       })) as {
         conversation: DBConversation;
-        questions?: Array<{
+        remote_callings?: Array<{
           id: string;
           conversation_id: string;
           checkpoint_id: string;
-          interrupt_id: string;
-          question_text: string;
+          agent_id: string;
+          method: string;
+          params: string;
+          device_id: string;
           status: string;
           created_at: Date;
         }>;
@@ -989,62 +997,57 @@ export class SyncManager {
         });
       }
 
-      // Handle questions (D-125).
-      // When questions is defined (even if empty), sync local state to match server.
-      if (result.questions) {
-        if (result.conversation.agent_status !== 'asking_user') {
-          await this.options.db.questionsStore.deleteByConversation(convID);
+      // Handle remote callings (D-137).
+      // When remote_callings is defined (even if empty), sync local state to match server.
+      // Keep pending remote callings for both 'asking_user' and 'tool_calling' states,
+      // as client function calls (tool_calling) also use RemoteCalling mechanism.
+      if (result.remote_callings) {
+        if (result.conversation.agent_status !== 'asking_user' && result.conversation.agent_status !== 'tool_calling') {
+          await this.options.db.remoteCallingsStore.deleteByConversation(convID);
         }
-        for (const q of result.questions) {
+        for (const rc of result.remote_callings) {
           try {
-            await this.options.db.questionsStore.upsert(q);
+            await this.options.db.remoteCallingsStore.upsert(rc);
           } catch (error) {
-            this.options.logger.error('Upsert question failed', {
-              question_id: q.id,
+            this.options.logger.error('Upsert remote calling failed', {
+              remote_calling_id: rc.id,
               error,
             });
           }
         }
       }
 
-      // Fetch questions from store for HITL (D-125)
-      let questions: Array<{
-        id: string;
-        question_text: string;
-        checkpoint_id: string;
-        interrupt_id: string;
-        status: string;
-      }> | undefined;
-      if (result.conversation.agent_status === 'asking_user') {
+      // Fetch remote callings from store (D-137).
+      let remoteCallings:
+        | Array<{
+            id: string;
+            conversation_id: string;
+            checkpoint_id: string;
+            agent_id: string;
+            method: string;
+            params: string;
+            device_id: string;
+            status: string;
+            created_at: Date;
+          }>
+        | undefined;
+      if (result.conversation.agent_status === 'asking_user' || result.conversation.agent_status === 'tool_calling') {
         try {
-          const storedQuestions = await this.options.db.questionsStore
-            .getByConversation(convID);
-          if (storedQuestions.length > 0) {
-            questions = storedQuestions.map((q: any) => ({
-              id: q.id,
-              question_text: q.question_text,
-              checkpoint_id: q.checkpoint_id,
-              interrupt_id: q.interrupt_id,
-              status: q.status,
-            }));
+          const storedRCs =
+            await this.options.db.remoteCallingsStore.getByConversation(convID);
+          if (storedRCs.length > 0) {
+            remoteCallings = storedRCs;
           }
         } catch (error) {
-          this.options.logger.error('Fetch questions failed', {
+          this.options.logger.error('Fetch remote callings failed', {
             conversation_id: convID,
             error,
           });
         }
       }
 
-      console.log('[SyncManager Debug] Calling onConversation with:', {
-        convID: result.conversation.id,
-        agent_status: result.conversation.agent_status,
-        hasQuestions: !!questions,
-        questionsCount: questions?.length,
-      });
-
       await this.options.handler.onConversation(
-        conversationToHandler({ ...result.conversation, questions }),
+        conversationToHandler({ ...result.conversation, remote_callings: remoteCallings }),
         'updated',
       );
     } catch (error) {
@@ -1367,10 +1370,10 @@ function conversationToHandler(conv: DBConversation): Conversation {
         ? conv.deleted_at.toISOString()
         : String(conv.deleted_at)
       : undefined,
-    // HITL fields (D-125)
+    // HITL fields (D-125 / D-137)
     agentStatus: conv.agent_status || undefined,
     agentId: conv.agent_id || undefined,
     checkpointId: conv.checkpoint_id || undefined,
-    questions: conv.questions,
+    remoteCallings: conv.remote_callings,
   };
 }

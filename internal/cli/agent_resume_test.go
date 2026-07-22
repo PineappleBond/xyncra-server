@@ -24,10 +24,10 @@ func TestAgentResumeCommand_FlagsParsing(t *testing.T) {
 		name string
 		flag string
 	}{
-		{"conversation-id", "conversation-id"},
-		{"checkpoint-id", "checkpoint-id"},
-		{"interrupt-id", "interrupt-id"},
-		{"answer", "answer"},
+		{"id", "id"},
+		{"success", "success"},
+		{"result", "result"},
+		{"error-message", "error-message"},
 		{"agent-id", "agent-id"},
 	}
 
@@ -59,40 +59,18 @@ func TestAgentResumeCommand_RequiredFlags(t *testing.T) {
 			wantMissing: "required",
 		},
 		{
-			name: "missing checkpoint-id",
+			name: "missing id",
 			setFlags: map[string]string{
-				"conversation-id": "conv-1",
-				"answer":          "yes",
-				"agent-id":        "agent/bot1",
+				"agent-id": "agent/bot1",
 			},
-			wantMissing: "checkpoint-id",
-		},
-		{
-			name: "missing answer",
-			setFlags: map[string]string{
-				"conversation-id": "conv-1",
-				"checkpoint-id":   "cp-1",
-				"agent-id":        "agent/bot1",
-			},
-			wantMissing: "answer",
+			wantMissing: "id",
 		},
 		{
 			name: "missing agent-id",
 			setFlags: map[string]string{
-				"conversation-id": "conv-1",
-				"checkpoint-id":   "cp-1",
-				"answer":          "yes",
+				"id": "rc-1",
 			},
 			wantMissing: "agent-id",
-		},
-		{
-			name: "missing conversation-id",
-			setFlags: map[string]string{
-				"checkpoint-id": "cp-1",
-				"answer":        "yes",
-				"agent-id":      "agent/bot1",
-			},
-			wantMissing: "conversation-id",
 		},
 	}
 
@@ -136,9 +114,7 @@ func TestAgentResumeCommand_DaemonOffline(t *testing.T) {
 	cmd.PersistentFlags().String("log-dir", "", "Log directory")
 
 	// Set all required flags.
-	_ = cmd.Flags().Set("conversation-id", "conv-1")
-	_ = cmd.Flags().Set("checkpoint-id", "cp-1")
-	_ = cmd.Flags().Set("answer", "yes")
+	_ = cmd.Flags().Set("id", "rc-1")
 	_ = cmd.Flags().Set("agent-id", "agent/bot1")
 	// Set user/device so CLIContext resolves.
 	setFlag(cmd, "user-id", "testuser")
@@ -157,10 +133,9 @@ func TestAgentResumeCommand_DaemonOffline(t *testing.T) {
 	defer cancel()
 
 	_, err = ipcClient.Call(ctx, "agent_resume", map[string]any{
-		"conversation_id": "conv-1",
-		"checkpoint_id":   "cp-1",
-		"answer":          "yes",
-		"agent_id":        "agent/bot1",
+		"id":       "rc-1",
+		"success":  true,
+		"agent_id": "agent/bot1",
 	})
 	require.Error(t, err, "IPC call should fail when daemon is not running")
 }
@@ -173,11 +148,10 @@ func TestAgentResumeCommand_IPCHandlerIntegration(t *testing.T) {
 
 	ipcClient := NewIPCClient(sockPath, 5*time.Second)
 	resp, err := ipcClient.Call(context.Background(), "agent_resume", map[string]any{
-		"conversation_id": "conv-1",
-		"checkpoint_id":   "cp-1",
-		"interrupt_id":    "intr-1",
-		"answer":          "yes",
-		"agent_id":        "agent/bot1",
+		"id":       "rc-1",
+		"success":  true,
+		"result":   "yes",
+		"agent_id": "agent/bot1",
 	})
 	if err != nil {
 		t.Fatalf("IPC call: %v", err)

@@ -796,11 +796,11 @@ type SearchMessagesResult struct {
 }
 
 // GetConversationResult is the response payload for the GetConversation RPC.
-// Includes HITL questions when the conversation is in asking_user state (D-125).
+// Includes RemoteCallings when the conversation is in asking_user state (D-137).
 type GetConversationResult struct {
-	Conversation *model.Conversation `json:"conversation"`
-	UnreadCount  int64               `json:"unread_count"`
-	Questions    []*model.Question   `json:"questions"` // HITL pending questions (D-125)
+	Conversation   *model.Conversation   `json:"conversation"`
+	UnreadCount    int64                 `json:"unread_count"`
+	RemoteCallings []*model.RemoteCalling `json:"remote_callings"` // RemoteCallings (D-137)
 }
 
 // DeleteConversationResult holds the result of a delete_conversation RPC.
@@ -1001,14 +1001,14 @@ func (c *XyncraClient) GetConversation(ctx context.Context, convID string) (*Get
 	if err != nil {
 		return nil, fmt.Errorf("client: count unread: %w", err)
 	}
-	questions, err := c.db.Questions.GetByConversation(ctx, convID)
+	remoteCallings, err := c.db.RemoteCallings.GetByConversation(ctx, convID)
 	if err != nil {
-		return nil, fmt.Errorf("client: get questions: %w", err)
+		return nil, fmt.Errorf("client: get remote callings: %w", err)
 	}
 	return &GetConversationResult{
-		Conversation: conv,
-		UnreadCount:  unreadCount,
-		Questions:    questions,
+		Conversation:   conv,
+		UnreadCount:    unreadCount,
+		RemoteCallings: remoteCallings,
 	}, nil
 }
 
