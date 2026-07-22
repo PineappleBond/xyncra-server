@@ -102,6 +102,23 @@ func (rs *RemoteCallingStore) GetByCheckpoint(ctx context.Context, checkpointID 
 	return rcs, nil
 }
 
+// GetResolvedByCheckpoint returns only resolved RemoteCallings for a checkpoint.
+// This is more efficient than GetByCheckpoint when only resolved results are needed
+// (e.g., in the cleanup task to check if any were resolved).
+func (rs *RemoteCallingStore) GetResolvedByCheckpoint(ctx context.Context, checkpointID string) (result []*model.RemoteCalling, err error) {
+	ctx, finish := startSpan(ctx, tracing.SpanDBRemoteCallingGetByCheckpoint)
+	defer func() { finish(err) }()
+
+	var rcs []*model.RemoteCalling
+	if err = rs.db.WithContext(ctx).
+		Where("checkpoint_id = ? AND status = ?", checkpointID, model.RemoteCallingStatusResolved).
+		Order("created_at ASC").
+		Find(&rcs).Error; err != nil {
+		return nil, classifyError(fmt.Errorf("store: get resolved remote callings by checkpoint: %w", err))
+	}
+	return rcs, nil
+}
+
 // ResolveResult marks a pending RemoteCalling as resolved with a successful result.
 // Returns ErrConflict if the RemoteCalling is already resolved.
 func (rs *RemoteCallingStore) ResolveResult(ctx context.Context, id, result string) (err error) {
@@ -265,13 +282,14 @@ func (rs *RemoteCallingStore) CountPendingByCheckpoint(ctx context.Context, chec
 }
 
 // ListExpired returns pending RemoteCallings that have passed their expiration time.
-func (rs *RemoteCallingStore) ListExpired(ctx context.Context, limit int) (result []*model.RemoteCalling, err error) {
+// The now parameter allows callers to inject the current time for testability.
+func (rs *RemoteCallingStore) ListExpired(ctx context.Context, limit int, now time.Time) (result []*model.RemoteCalling, err error) {
 	ctx, finish := startSpan(ctx, tracing.SpanDBRemoteCallingListExpired)
 	defer func() { finish(err) }()
 
 	var rcs []*model.RemoteCalling
 	if err = rs.db.WithContext(ctx).
-		Where("status = ? AND expires_at IS NOT NULL AND expires_at < ?", model.RemoteCallingStatusPending, time.Now()).
+		Where("status = ? AND expires_at IS NOT NULL AND expires_at < ?", model.RemoteCallingStatusPending, now).
 		Limit(limit).
 		Order("created_at ASC").
 		Find(&rcs).Error; err != nil {

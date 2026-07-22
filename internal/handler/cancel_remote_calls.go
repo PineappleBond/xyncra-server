@@ -9,6 +9,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/PineappleBond/xyncra-server/internal/mq"
@@ -58,19 +59,45 @@ func (h *cancelRemoteCallsHandler) HandleRequest(ctx context.Context, client *se
 		return nil, protocol.NewValidationError("checkpoint_id and reason are required")
 	}
 
-	// 3. Batch cancel.
+	// 2b. Validate Reason length to prevent oversized payloads (review suggestion).
+	const maxReasonLength = 1024
+	if len(params.Reason) > maxReasonLength {
+		return nil, protocol.NewValidationError("reason exceeds maximum length (1024 bytes)")
+	}
+
+	// 3. Fetch the checkpoint's conversation and verify the caller is a member.
 	rcs := h.store.RemoteCallingStore()
 	if rcs == nil {
 		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: RemoteCallingStore not available"))
 	}
 
-	// Get the caller's user ID for cancelled_by field.
-	cancelledBy := ""
-	if client != nil {
-		cancelledBy = client.UserID()
+	// Use GetByCheckpoint to find the conversation for permission check.
+	existingRCs, err := rcs.GetByCheckpoint(ctx, params.CheckpointID)
+	if err != nil {
+		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: get by checkpoint: %w", err))
+	}
+	if len(existingRCs) == 0 {
+		return nil, protocol.NewNotFoundError("no remote callings found for checkpoint")
 	}
 
-	cancelledCount, convID, rcAgentID, err := rcs.CancelByCheckpoint(ctx, params.CheckpointID, params.Reason, cancelledBy)
+	// Verify caller is a member of the conversation.
+	convID := existingRCs[0].ConversationID
+	conv, err := h.store.ConversationStore().Get(ctx, convID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, protocol.NewNotFoundError("conversation not found")
+		}
+		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: get conversation: %w", err))
+	}
+	members := conversationMembers(conv)
+	if !containsUserOrAgentBase(members, client.UserID()) {
+		return nil, protocol.NewPermissionDeniedError("user is not a member of the conversation")
+	}
+
+	// Get the caller's user ID for cancelled_by field.
+	cancelledBy := client.UserID()
+
+	cancelledCount, rcConvID, rcAgentID, err := rcs.CancelByCheckpoint(ctx, params.CheckpointID, params.Reason, cancelledBy)
 	if err != nil {
 		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: cancel: %w", err))
 	}
@@ -86,13 +113,13 @@ func (h *cancelRemoteCallsHandler) HandleRequest(ctx context.Context, client *se
 	}
 
 	// 5. If no pending remain, enqueue TypeAgentResume MQ task.
-	if pending == 0 && convID != "" {
+	if pending == 0 && rcConvID != "" {
 		deviceID := ""
 		if client != nil {
 			deviceID = client.DeviceID()
 		}
 		payload := agentResumeTaskPayload{
-			ConversationID: convID,
+			ConversationID: rcConvID,
 			CheckpointID:   params.CheckpointID,
 			AgentID:        rcAgentID,
 			SenderID:       cancelledBy, // same user who cancelled

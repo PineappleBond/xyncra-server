@@ -37,6 +37,7 @@ import {
   DefaultAdaptiveTimeoutMin,
   DefaultHeartbeatInterval,
   DefaultIdempotencyCacheSize,
+  MinHeartbeatInterval,
   DefaultReconnectBaseDelay,
   DefaultReconnectMaxDelay,
   DefaultRetryPollInterval,
@@ -223,8 +224,11 @@ export class XyncraClient {
     this.onError = options.onError;
 
     // Resolve tunable options with defaults.
-    this.heartbeatInterval =
-      options.heartbeatInterval ?? DefaultHeartbeatInterval;
+    // Clamp heartbeat interval to minimum to prevent flooding (BUG-001).
+    this.heartbeatInterval = Math.max(
+      options.heartbeatInterval ?? DefaultHeartbeatInterval,
+      MinHeartbeatInterval,
+    );
     this.rpcTimeout = options.rpcTimeout ?? DefaultRPCTimeout;
     this.adaptiveTimeoutMin =
       options.reconnectBaseDelay !== undefined

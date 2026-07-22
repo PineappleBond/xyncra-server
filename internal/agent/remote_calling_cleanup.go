@@ -13,6 +13,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"runtime/debug"
 	"time"
 
 	"github.com/google/uuid"
@@ -122,7 +123,7 @@ func (t *RemoteCallingCleanupTask) Run(ctx context.Context) {
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						t.logger.Error("panic recovered", "error", r)
+						t.logger.Error("panic recovered", "error", r, "stack", string(debug.Stack()))
 					}
 				}()
 				t.cleanupOnce(ctx)
@@ -160,7 +161,7 @@ func (t *RemoteCallingCleanupTask) cleanupStaleConversations(ctx context.Context
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					t.logger.Error("panic recovered for conversation", "conversation_id", conv.ID, "error", r)
+					t.logger.Error("panic recovered for conversation", "conversation_id", conv.ID, "error", r, "stack", string(debug.Stack()))
 				}
 			}()
 			t.cleanupConversation(ctx, conv)
@@ -179,7 +180,7 @@ func (t *RemoteCallingCleanupTask) cleanupExpiredRemoteCallings(ctx context.Cont
 		return
 	}
 
-	expired, err := t.remoteCallingStore.ListExpired(ctx, t.config.BatchSize)
+	expired, err := t.remoteCallingStore.ListExpired(ctx, t.config.BatchSize, time.Now())
 	if err != nil {
 		t.logger.Error("failed to list expired remote callings", "error", err)
 		return
@@ -221,7 +222,7 @@ func (t *RemoteCallingCleanupTask) cleanupExpiredRemoteCallings(ctx context.Cont
 			defer func() {
 				if r := recover(); r != nil {
 					t.logger.Error("panic recovered for checkpoint group",
-						"checkpoint_id", checkpointID, "error", r)
+						"checkpoint_id", checkpointID, "error", r, "stack", string(debug.Stack()))
 				}
 			}()
 			// Use the first RC as representative for the group.
@@ -252,28 +253,45 @@ func (t *RemoteCallingCleanupTask) cleanupExpiredCheckpoint(ctx context.Context,
 		// If ALL are expired (none resolved), clean up the conversation to break
 		// the infinite loop where: expire → resume → agent re-calls function →
 		// new RemoteCalling → expire again (BUG-002).
-		allRCs, listErr := t.remoteCallingStore.GetByCheckpoint(ctx, checkpointID)
+		resolvedRCs, listErr := t.remoteCallingStore.GetResolvedByCheckpoint(ctx, checkpointID)
 		if listErr != nil {
-			t.logger.Error("get remote callings by checkpoint failed (non-fatal)",
+			t.logger.Error("get resolved remote callings by checkpoint failed (non-fatal)",
 				"checkpoint_id", checkpointID, "error", listErr)
 			return
 		}
 
-		hasResolved := false
-		for _, r := range allRCs {
-			if r.Status == model.RemoteCallingStatusResolved {
-				hasResolved = true
-				break
-			}
-		}
-
-		if hasResolved {
+		if len(resolvedRCs) > 0 {
 			// Some callings were resolved — enqueue agent resume to process results.
+			//
+			// Anti-loop guard (BUG-002): use a Redis SETNX key to prevent the
+			// cleanup task from repeatedly triggering resume for the same checkpoint.
+			// Without this, the cycle would be: expire → cleanup enqueues resume →
+			// agent re-calls function → new RCs → expire → cleanup enqueues resume again.
+			// The TTL (5 minutes) is intentionally short — it only needs to outlast
+			// the cleanup interval (5 minutes) to prevent duplicate enqueues within
+			// a single cleanup window. The idempotency guard in the resume handler
+			// (D-121) provides longer-term deduplication.
+			if t.broker != nil && t.lockClient != nil {
+				resumeGuardKey := "cleanup:resume:" + checkpointID
+				acquired, lockErr := t.lockClient.SetNX(ctx, resumeGuardKey, "1", 5*time.Minute).Result()
+				if lockErr != nil {
+					t.logger.Error("cleanup resume guard check failed (non-fatal)",
+						"checkpoint_id", checkpointID, "error", lockErr)
+					// Fail-open: proceed with enqueue even if guard check fails.
+				} else if !acquired {
+					t.logger.Info("cleanup resume already triggered for checkpoint, skipping",
+						"checkpoint_id", checkpointID)
+					return
+				}
+			}
+
 			if t.broker != nil {
 				payload := AgentResumePayload{
 					ConversationID: representativeRC.ConversationID,
 					CheckpointID:   checkpointID,
 					AgentID:        representativeRC.AgentID,
+					SenderID:       "", // cleanup-triggered; no specific sender
+					DeviceID:       "", // cleanup-triggered; no specific device
 				}
 				raw, marshalErr := json.Marshal(payload)
 				if marshalErr != nil {

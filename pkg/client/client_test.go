@@ -1071,7 +1071,8 @@ func TestHeartbeat_PeriodicSend(t *testing.T) {
 		return json.RawMessage(`{}`), nil
 	})
 
-	c := newTestClient(t, server, WithHeartbeatInterval(100*time.Millisecond))
+	// Use minHeartbeatInterval (5s) since values below are clamped (BUG-001).
+	c := newTestClient(t, server, WithHeartbeatInterval(minHeartbeatInterval))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1080,8 +1081,8 @@ func TestHeartbeat_PeriodicSend(t *testing.T) {
 		t.Fatalf("server did not accept connection: %v", err)
 	}
 
-	// Wait for at least 2 heartbeats.
-	time.Sleep(350 * time.Millisecond)
+	// Wait for at least 2 heartbeats (each at minHeartbeatInterval = 5s).
+	time.Sleep(minHeartbeatInterval*2 + 1*time.Second)
 	cancel()
 	time.Sleep(100 * time.Millisecond)
 

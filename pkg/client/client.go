@@ -106,6 +106,10 @@ func New(opts ...ClientOption) (*XyncraClient, error) {
 	if o.logger == nil {
 		o.logger = newStdLogger()
 	}
+	// Clamp heartbeat interval to minimum to prevent flooding (BUG-001).
+	if o.heartbeatInterval < minHeartbeatInterval {
+		o.heartbeatInterval = minHeartbeatInterval
+	}
 
 	c := &XyncraClient{
 		opts:            o,

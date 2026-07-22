@@ -365,6 +365,9 @@ func NewAgentResumeHandler(
 					firstToken = false
 				}
 				executor.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, chunk.Content, false)
+				// Accumulate text: each chunk replaces the previous content.
+				// The server sends cumulative text (not deltas), so Reset+Write
+				// correctly builds the final response for persistence.
 				fullResponse.Reset()
 				fullResponse.WriteString(chunk.Content)
 			}

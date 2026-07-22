@@ -16,7 +16,8 @@ const DefaultClientFunctionCallTimeoutMs = 120000 // 120 seconds
 // it will be clamped to this value. This prevents RemoteCallings from expiring
 // before the client has a reasonable chance to process them.
 // See: Vue测试问题 - LLM超时时间设置问题
-const MinClientFunctionCallTimeoutMs = 30000 // 30 seconds
+// See: TC-011 联调测试 - get_page_description 30s 超时过短问题
+const MinClientFunctionCallTimeoutMs = 60000 // 60 seconds
 
 // DefaultHITLTimeout is the default expiration timeout for HITL (ask_user) RemoteCallings.
 // Used when the agent interrupts to ask the user a question without a client function.

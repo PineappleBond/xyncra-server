@@ -633,6 +633,7 @@ export class SyncManager {
 
   /**
    * Cascade soft-deletes a conversation and its messages (D-013).
+   * Also cleans up associated remote callings and retry queue entries.
    */
   private async handleConversationDeleteTx(
     convID: string,
@@ -665,6 +666,33 @@ export class SyncManager {
           msg.deleted_at = now;
         }
       });
+
+    // Clean up remote callings and retry queue entries outside the transaction
+    // (retry queue is not part of the transaction tables).
+    setTimeout(async () => {
+      try {
+        // Get remote callings before deleting to clean up retry queue.
+        const rcs = await this.options.db.remoteCallingsStore.getByConversation(convID);
+        await this.options.db.remoteCallingsStore.deleteByConversation(convID);
+
+        // Clean up retry queue entries for each remote calling.
+        for (const rc of rcs) {
+          try {
+            await this.options.db.retryQueueStore.deleteByRemoteCallingId(rc.id);
+          } catch (error) {
+            this.options.logger.error('Failed to delete retry queue entry', {
+              remote_calling_id: rc.id,
+              error,
+            });
+          }
+        }
+      } catch (error) {
+        this.options.logger.error('Failed to clean up remote callings on conversation delete', {
+          conversation_id: convID,
+          error,
+        });
+      }
+    }, 0);
   }
 
   /**

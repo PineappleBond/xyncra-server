@@ -33,6 +33,12 @@ export const DefaultPingInterval = 54_000; // (PongWait * 9) / 10
 /** Interval between heartbeat pings (ms). */
 export const DefaultHeartbeatInterval = 30_000;
 
+/**
+ * Minimum allowed heartbeat interval (ms).
+ * Values below this are clamped to prevent heartbeat flooding (BUG-001).
+ */
+export const MinHeartbeatInterval = 5_000;
+
 // ---------------------------------------------------------------------------
 // RPC defaults
 // ---------------------------------------------------------------------------

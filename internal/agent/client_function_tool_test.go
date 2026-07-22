@@ -138,7 +138,7 @@ func TestExecuteClientFunction_MinTimeoutEnforcement(t *testing.T) {
 	// Verify that timeout_ms below minimum is clamped to MinClientFunctionCallTimeoutMs.
 	funcInfo := protocol.FunctionInfo{
 		Name:      "slow_fn",
-		TimeoutMs: 5000, // 5 seconds, below minimum (30s)
+		TimeoutMs: 5000, // 5 seconds, below minimum (60s)
 	}
 
 	timeoutMs := funcInfo.TimeoutMs

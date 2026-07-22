@@ -77,6 +77,8 @@ export class RemoteCallingRetryManager {
     failedRetries: 0,
     lastPollAt: 0,
     lastQueueSize: 0,
+    /** Total number of items ever enqueued (monotonically increasing counter). */
+    totalEnqueued: 0,
   };
 
   constructor(options: RemoteCallingRetryManagerOptions) {
@@ -133,6 +135,17 @@ export class RemoteCallingRetryManager {
     errorMessage: string,
     agentId: string,
   ): Promise<void> {
+    // Dedup check: skip if an item with the same remote_calling_id already exists.
+    // This prevents duplicate retry entries when agent_resume is called multiple
+    // times for the same RemoteCalling (e.g., due to rapid retries or race conditions).
+    const existing = await this.db.retryQueueStore.getByRemoteCallingId(remoteCallingId);
+    if (existing.length > 0) {
+      this.logger.debug('Skipping duplicate enqueue for remote calling', {
+        remote_calling_id: remoteCallingId,
+      });
+      return;
+    }
+
     const item: Omit<RetryQueueItem, 'id'> = {
       remote_calling_id: remoteCallingId,
       success,
@@ -144,6 +157,7 @@ export class RemoteCallingRetryManager {
       created_at: new Date(),
     };
     await this.db.retryQueueStore.enqueue(item);
+    this.stats.totalEnqueued++;
     this.logger.info('Enqueued agent_resume for retry', {
       remote_calling_id: remoteCallingId,
     });

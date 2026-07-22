@@ -382,7 +382,7 @@ func TestRemoteCallingStore_ListExpired(t *testing.T) {
 		rc3 := newTestRemoteCalling("rc-3", "conv-1", "cp-1", "agent/bot", "ask_user")
 		require.NoError(t, s.RemoteCallings.Create(ctx, rc3))
 
-		got, err := s.RemoteCallings.ListExpired(ctx, 100)
+		got, err := s.RemoteCallings.ListExpired(ctx, 100, time.Now())
 		require.NoError(t, err)
 		require.Len(t, got, 1, "should return only 1 expired remote calling")
 		assert.Equal(t, "rc-1", got[0].ID)

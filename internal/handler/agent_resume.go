@@ -43,11 +43,15 @@ type agentResumeParams struct {
 type agentResumeHandler struct {
 	store  store.StoreAPI
 	broker mq.Broker
+	logger server.Logger
 }
 
 // NewAgentResumeHandler creates a handler for the "agent_resume" RPC method.
-func NewAgentResumeHandler(s store.StoreAPI, broker mq.Broker) *agentResumeHandler {
-	return &agentResumeHandler{store: s, broker: broker}
+func NewAgentResumeHandler(s store.StoreAPI, broker mq.Broker, logger server.Logger) *agentResumeHandler {
+	if logger == nil {
+		logger = defaultLogger{}
+	}
+	return &agentResumeHandler{store: s, broker: broker, logger: logger}
 }
 
 // agentResumeTaskPayload is the MQ task payload for TypeAgentResume.
@@ -155,7 +159,8 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 	if _, err := rcs.MarkExpiredByCheckpoint(ctx, rc.CheckpointID); err != nil {
 		// Non-fatal: log and continue with the pending count.
 		// The periodic cleanup task will eventually expire them.
-		fmt.Printf("agent_resume: mark expired by checkpoint failed (non-fatal): %v\n", err)
+		h.logger.Error("agent_resume: mark expired by checkpoint failed (non-fatal)",
+			"checkpoint_id", rc.CheckpointID, "error", err)
 	}
 
 	// 8. Check if all RemoteCallings for this checkpoint are resolved (D-138).

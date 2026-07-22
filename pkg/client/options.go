@@ -47,6 +47,9 @@ const (
 	defaultRPCTimeout = 30 * time.Second
 	// defaultHeartbeatInterval is the interval between heartbeat pings.
 	defaultHeartbeatInterval = 30 * time.Second
+	// minHeartbeatInterval is the minimum allowed heartbeat interval.
+	// Values below this are clamped to prevent heartbeat flooding (BUG-001).
+	minHeartbeatInterval = 5 * time.Second
 	// defaultSyncBatchSize is the number of records fetched per sync pull batch.
 	defaultSyncBatchSize = 100
 	// defaultPullDebounce is the debounce window for coalescing pull requests.

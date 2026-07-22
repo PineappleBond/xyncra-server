@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/pkg/protocol"
@@ -33,17 +35,30 @@ type heartbeatResponse struct {
 // Handler
 // --------------------------------------------------------------------------
 
+// minHeartbeatInterval is the minimum allowed interval between heartbeat
+// requests from the same connection. Requests arriving faster than this
+// are silently dropped to prevent heartbeat flooding (BUG-001).
+const minHeartbeatInterval = 5 * time.Second
+
 // heartbeatHandler implements MethodHandler for the "heartbeat" method.
-// It is stateless (only holds an immutable dependency reference) and
-// therefore safe for concurrent use.
+// It follows the passive renewal strategy (D-010): each heartbeat call
+// invokes ConnectionStore.Refresh to reset the connection TTL.
 //
-// The heartbeat follows the passive renewal strategy (D-010): each
-// heartbeat call invokes ConnectionStore.Refresh to reset the connection
-// TTL, keeping the connection alive without requiring a write to the
-// store's metadata fields.
+// Rate limiting (BUG-001): the handler tracks the last heartbeat time
+// per connection and silently drops requests that arrive faster than
+// minHeartbeatInterval. This prevents a misconfigured or buggy client
+// from flooding the server with heartbeat requests, which would block
+// processing of other RPCs (e.g. get_conversation for RemoteCalling).
 type heartbeatHandler struct {
 	connStore server.ConnectionStore
 	logger    server.Logger
+
+	// mu protects lastHeartbeat map.
+	mu sync.Mutex
+	// lastHeartbeat tracks the last heartbeat time per connection ID.
+	// Entries are cleaned up when the connection is closed (TTL-based
+	// eviction is not needed because the map is bounded by active connections).
+	lastHeartbeat map[string]time.Time
 }
 
 // NewHeartbeatHandler creates a heartbeatHandler backed by the given
@@ -52,7 +67,11 @@ func NewHeartbeatHandler(connStore server.ConnectionStore, logger server.Logger)
 	if logger == nil {
 		logger = defaultLogger{}
 	}
-	return &heartbeatHandler{connStore: connStore, logger: logger}
+	return &heartbeatHandler{
+		connStore:     connStore,
+		logger:        logger,
+		lastHeartbeat: make(map[string]time.Time),
+	}
 }
 
 // HandleRequest implements MethodHandler. It processes a "heartbeat" RPC
@@ -70,25 +89,48 @@ func NewHeartbeatHandler(connStore server.ConnectionStore, logger server.Logger)
 // does not break the heartbeat, because the only purpose of params is
 // to carry optional device info for logging.
 func (h *heartbeatHandler) HandleRequest(ctx context.Context, client *server.Client, req *protocol.PackageDataRequest) (json.RawMessage, error) {
-	// 1. Parse params (best-effort; heartbeat must not fail on bad params).
+	connID := client.ConnID()
+
+	// 1. Rate limiting (BUG-001): drop heartbeat requests that arrive faster
+	//    than minHeartbeatInterval. This prevents a misconfigured client from
+	//    flooding the server and blocking other RPCs.
+	now := time.Now()
+	h.mu.Lock()
+	last, exists := h.lastHeartbeat[connID]
+	if exists && now.Sub(last) < minHeartbeatInterval {
+		h.mu.Unlock()
+		h.logger.Debug("heartbeat: rate-limited (too fast)",
+			"connID", connID, "interval", now.Sub(last))
+		// Return success silently — the connection is still alive, no need
+		// to penalise the client with an error.
+		return marshalResponse(heartbeatResponse{Status: "ok"})
+	}
+	h.lastHeartbeat[connID] = now
+	h.mu.Unlock()
+
+	// 2. Parse params (best-effort; heartbeat must not fail on bad params).
 	var params heartbeatParams
 	_ = json.Unmarshal(req.Params, &params)
 
-	// 2. Log device info if provided (observability only, not persisted).
+	// 3. Log device info if provided (observability only, not persisted).
 	if len(params.DeviceInfo) > 0 {
 		h.logger.Debug("heartbeat: device_info received",
-			"connID", client.ConnID(), "userID", client.UserID(), "device_info", params.DeviceInfo)
+			"connID", connID, "userID", client.UserID(), "device_info", params.DeviceInfo)
 	}
 
-	// 3. Refresh the connection TTL (D-010 passive renewal).
-	if err := h.connStore.Refresh(ctx, client.ConnID()); err != nil {
+	// 4. Refresh the connection TTL (D-010 passive renewal).
+	if err := h.connStore.Refresh(ctx, connID); err != nil {
 		if errors.Is(err, server.ErrConnectionNotFound) {
+			// Clean up the lastHeartbeat entry for expired connections.
+			h.mu.Lock()
+			delete(h.lastHeartbeat, connID)
+			h.mu.Unlock()
 			return nil, protocol.NewNotFoundError("connection expired")
 		}
 		return nil, protocol.NewInternalError(fmt.Errorf("refresh connection: %w", err))
 	}
 
-	// 4. Return success.
+	// 5. Return success.
 	return marshalResponse(heartbeatResponse{Status: "ok"})
 }
 
