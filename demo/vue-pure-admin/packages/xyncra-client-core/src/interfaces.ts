@@ -7,6 +7,7 @@
  */
 
 import type { PackageDataUpdate } from '@xyncra/protocol';
+import type { RemoteCalling } from './db/models';
 
 // ---------------------------------------------------------------------------
 // Conversation action
@@ -62,26 +63,7 @@ export interface Conversation {
   agentStatus?: string; // 'idle' | 'thinking' | 'tool_calling' | 'generating' | 'asking_user' | 'timeout'
   agentId?: string;
   checkpointId?: string;
-  remoteCallings?: Array<{
-    id: string;
-    conversation_id: string;
-    checkpoint_id: string;
-    agent_id: string;
-    method: string;
-    params: string;
-    interrupt_id: string;
-    device_id: string;
-    status: string;
-    result: string;
-    error_message: string;
-    success: boolean;
-    created_at: Date;
-    resolved_at: Date | null;
-    expires_at: Date | null;
-    cancelled_at: Date | null;
-    cancelled_by: string;
-    cancel_reason: string;
-  }>;
+  remoteCallings?: RemoteCalling[];
 }
 
 // ---------------------------------------------------------------------------

@@ -2,9 +2,10 @@
 
 > **测试编号**: TC-011
 > **测试类型**: 端到端集成测试
-> **覆盖范围**: RemoteCalling 统一模型 (D-137)、客户端函数注册 (D-115)、函数调用链路、DeviceID 路由、状态流转 (pending/resolved/cancelled/expired)、幂等性、CancelledBy 持久化、锁释放、复合索引、并行执行、断线重连、服务器重启恢复、上报失败重试、超时清理防无限循环、HITL 统一 (ask_user / ask_user_choice)
+> **覆盖范围**: RemoteCalling 统一模型 (D-137)、客户端函数注册 (D-115)、函数调用链路、DeviceID 路由、状态流转 (pending/resolved/cancelled/expired)、幂等性、CancelledBy 持久化、锁释放、复合索引、并行执行、断线重连、服务器重启恢复、上报失败重试、超时清理防无限循环、HITL 统一 (ask_user / ask_user_choice)、失败上报、过期后上报幂等
 > **环境**: Docker E2E (D-043)
 > **最后更新**: 2026-07-22
+> **版本**: v1.1
 
 ---
 
@@ -240,9 +241,9 @@ flowchart TD
 > **广播修复 (已验证)**: 广播（SendConversationUpdate）现在使用 `extractBaseUserID()` 发送到 base userID（`agent`），
 > 而不是完整的 agentID（`agent/weather-bot`）。daemon 可以正确接收到广播通知。
 >
-> **已知问题**: daemon 接收到广播后调用 `get_conversation` 时可能遇到 RPC 超时。
-> 这可能与多个 WebSocket 连接或响应路由有关。如果自动处理失败，
-> 可以使用 `agent-resume` 命令手动触发 daemon 处理 RemoteCallings。
+> **已知问题 (已修复)**: daemon 接收到广播后调用 `get_conversation` 时可能遇到 RPC 超时。
+> 现已通过重试机制修复：`handleEphemeralConversationUpdate` 最多重试 3 次，
+> 每次使用 10 秒超时和指数退避（500ms, 1s），所有重试失败后降级为最小数据通知。
 
 ### 步骤 1.1: 启动 Agent daemon（内置函数自动注册）
 
@@ -531,7 +532,7 @@ $DB "SELECT id, device_id FROM remote_callings WHERE conversation_id='$NEW_CONV_
 
 # 阶段 4: 状态流转
 
-## 4.1 pending -> resolved（正常完成）
+## 4.1 pending -> resolved（成功）
 
 ### 步骤 4.1.1: 发送消息触发 RemoteCalling
 
@@ -552,14 +553,80 @@ RES_CONV_ID=$(./bin/xyncra-client create-conversation \
 sleep 20
 ```
 
-### 步骤 4.1.2: 验证状态变为 resolved
+### 步骤 4.1.2: 验证状态变为 resolved（成功）
 
 ```bash
 DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
 
 $DB "SELECT id, status, success, result, resolved_at FROM remote_callings WHERE conversation_id='$RES_CONV_ID' ORDER BY created_at DESC LIMIT 3;"
-# 预期: status=resolved, resolved_at 非空
+# 预期: status=resolved, success=1, result 包含时间信息, resolved_at 非空
 ```
+
+## 4.1.1 pending -> resolved（失败）
+
+> **测试目标**: 验证客户端执行函数失败时，上报 success=false, error_message，状态正确流转为 resolved。
+
+### 步骤 4.1.1.1: 创建会话并触发 RemoteCalling
+
+```bash
+FAIL_CONV_ID=$(./bin/xyncra-client create-conversation \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --peer-id "agent/weather-bot" | grep "Conversation ID:" | awk '{print $3}')
+
+./bin/xyncra-client send \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --conversation-id "$FAIL_CONV_ID" \
+  --content "请使用 ping 工具发送消息 fail-test"
+
+sleep 15
+```
+
+### 步骤 4.1.1.2: 获取 pending 的 RemoteCalling ID
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+FAIL_RC_ID=$($DB "SELECT id FROM remote_callings WHERE conversation_id='$FAIL_CONV_ID' AND status='pending' ORDER BY created_at DESC LIMIT 1;")
+echo "FAIL_RC_ID=$FAIL_RC_ID"
+```
+
+### 步骤 4.1.1.3: 通过 agent_resume 上报失败结果
+
+```bash
+./bin/xyncra-client agent-resume \
+  --user-id alice \
+  --device-id test-device-alice \
+  --id "$FAIL_RC_ID" \
+  --agent-id "agent/weather-bot" \
+  --error "客户端执行失败: 设备未响应"
+```
+
+### 步骤 4.1.1.4: 验证状态变为 resolved（失败）
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+$DB "SELECT id, status, success, error_message, resolved_at FROM remote_callings WHERE id='$FAIL_RC_ID';"
+# 预期: status=resolved, success=0, error_message="客户端执行失败: 设备未响应", resolved_at 非空
+```
+
+### 步骤 4.1.1.5: 验证 Agent 恢复执行（携带错误信息）
+
+```bash
+sleep 15
+
+$DB "SELECT agent_status FROM conversations WHERE id='$FAIL_CONV_ID';"
+# 预期: 不再为 tool_calling（恢复为 idle）
+
+$DB "SELECT sender_id, SUBSTR(content, 1, 100) FROM messages WHERE conversation_id='$FAIL_CONV_ID' AND sender_id LIKE 'agent/%' ORDER BY created_at DESC LIMIT 3;"
+# 预期: Agent 回复中包含对错误的处理说明
+```
+
+**判定**: 客户端执行失败时，通过 agent_resume 上报 success=false，状态正确流转为 resolved，Agent 恢复执行并处理错误。
 
 ## 4.2 pending -> cancelled（用户取消 + CancelledBy 持久化）
 
@@ -706,6 +773,10 @@ $DB "SELECT agent_status FROM conversations WHERE id='$EXPIRE_CONV_ID';"
 
 ## 4.4 幂等性：已 resolved 的调用重复上报
 
+> **修复说明**: `ResolveResult` 和 `ResolveError` 现在使用 `Unscoped()` 查询来检查记录是否存在。
+> 当 RemoteCalling 被 cleanup 任务软删除后（`deleted_at` 非空），重复上报仍返回 `"already processed"`
+> 而非 `"not found"`。这确保客户端能区分"不存在"和"已处理"两种情况。
+
 ### 步骤 4.4.1: 获取一个已 resolved 的 RemoteCalling ID
 
 ```bash
@@ -755,6 +826,99 @@ $DB "SELECT id, status, result FROM remote_callings WHERE id='$IDEMPOTENT_RC_ID'
 ```
 
 **判定**: 已 resolved 的调用重复上报返回幂等成功，数据不被修改。
+
+## 4.5 过期后上报（幂等性扩展）
+
+> **测试目标**: 验证客户端在 RemoteCalling 过期后上报结果时，服务端正确处理并返回幂等响应。
+> **源代码依据**: `ResolveResult` 和 `ResolveError` 方法会检查 status，如果 status 不是 pending，会返回 ErrConflict。
+> **修复说明**: 即使 RemoteCalling 已被 cleanup 任务软删除（`deleted_at` 非空），`Unscoped()` 查询仍能找到记录并返回 ErrConflict。
+
+### 步骤 4.5.1: 创建会话并触发 RemoteCalling
+
+```bash
+EXPIRE_REPORT_CONV_ID=$(./bin/xyncra-client create-conversation \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --peer-id "agent/weather-bot" | grep "Conversation ID:" | awk '{print $3}')
+
+./bin/xyncra-client send \
+  --user-id alice \
+  --device-id test-device-alice \
+  --server ws://localhost:18080/ws \
+  --conversation-id "$EXPIRE_REPORT_CONV_ID" \
+  --content "请使用 ping 工具发送消息 expire-report-test"
+
+sleep 15
+```
+
+### 步骤 4.5.2: 手动修改 expires_at 模拟过期
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+EXPIRE_REPORT_RC_ID=$($DB "SELECT id FROM remote_callings WHERE conversation_id='$EXPIRE_REPORT_CONV_ID' AND status='pending' ORDER BY created_at DESC LIMIT 1;")
+echo "EXPIRE_REPORT_RC_ID=$EXPIRE_REPORT_RC_ID"
+
+# 将 expires_at 设置为 1 小时前
+$DB "UPDATE remote_callings SET expires_at = datetime('now', '-1 hour') WHERE id='$EXPIRE_REPORT_RC_ID';"
+```
+
+### 步骤 4.5.3: 等待后台清理任务执行
+
+```bash
+sleep 360
+```
+
+### 步骤 4.5.4: 验证状态变为 expired
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+$DB "SELECT id, status FROM remote_callings WHERE id='$EXPIRE_REPORT_RC_ID';"
+# 预期: status=expired
+```
+
+### 步骤 4.5.5: 客户端尝试上报结果（过期后）
+
+```bash
+python3 -c "
+import json, asyncio, websockets
+
+async def resume():
+    async with websockets.connect('$SERVER_URL') as ws:
+        req = {
+            'type': 0,
+            'data': {
+                'id': 'resume-expired-1',
+                'method': 'agent_resume',
+                'params': {
+                    'id': '$EXPIRE_REPORT_RC_ID',
+                    'agent_id': 'agent/weather-bot',
+                    'success': True,
+                    'result': 'pong: expired-test'
+                }
+            }
+        }
+        await ws.send(json.dumps(req))
+        resp = await asyncio.wait_for(ws.recv(), timeout=5)
+        print(resp)
+
+asyncio.run(resume())
+"
+# 预期: 返回幂等成功（status=expired，不修改数据）
+```
+
+### 步骤 4.5.6: 验证数据未被修改
+
+```bash
+DB="docker exec deploy-xyncra-server-e2e-1 sqlite3 /app/xyncra-e2e.db"
+
+$DB "SELECT id, status, result FROM remote_callings WHERE id='$EXPIRE_REPORT_RC_ID';"
+# 预期: status 仍为 expired, result 为空（原值不变）
+```
+
+**判定**: 过期后的上报请求被幂等处理，数据不被修改。这验证了 `ResolveResult` 和 `ResolveError` 方法中的 status 检查逻辑。
 
 ---
 
@@ -1365,12 +1529,14 @@ sqlite3 "$ALICE_DB" "SELECT id, method, status_code, error_msg FROM rpc_logs ORD
 | 步骤 3.5 | 指定 DeviceID 只被目标设备拉取 | ✅ | |
 | 步骤 3.6 | 空 DeviceID 任意设备可拉取 | ✅ | |
 | **阶段 4: 状态流转** | | | |
-| 步骤 4.1.2 | pending -> resolved | ✅ | |
+| 步骤 4.1.2 | pending -> resolved（成功） | ✅ | |
+| 步骤 4.1.1.4 | pending -> resolved（失败） | ✅ | 检查 ResolveError 实现 |
 | 步骤 4.2.4 | pending -> cancelled | ✅ | |
 | 步骤 4.2.5 | CancelledBy 持久化 | ✅ | 检查 CancelByCheckpoint 实现 |
 | 步骤 4.2.6 | 取消后锁释放 | ✅ | 检查 resume_handler 锁释放逻辑 |
 | 步骤 4.3.4 | pending -> expired | ✅ | |
 | 步骤 4.4.3 | 幂等性：重复上报不修改数据 | ✅ | |
+| 步骤 4.5.6 | 过期后上报幂等处理 | ✅ | 检查 ResolveResult/ResolveError 的 status 检查 |
 | **阶段 5: 边缘场景** | | | |
 | 步骤 5.1.2 | 多个 RemoteCalling 并行创建 | ✅ | |
 | 步骤 5.1.3 | 全部 resolved 后 Agent 恢复 | ✅ | |
@@ -1412,6 +1578,8 @@ sqlite3 "$ALICE_DB" "SELECT id, method, status_code, error_msg FROM rpc_logs ORD
 | Agent 看不到注册的函数 | 函数注册在错误的 userID 下 | 确保函数注册在 agent 的 userID 下 (commit 602b9a9) |
 | cancelled_by 字段为空 | CancelByCheckpoint 未传递 cancelledBy | 检查 cancel_remote_calls handler 中的 cancelledBy 参数 |
 | 锁未释放 | resume_handler 锁释放逻辑错误 | 检查 releaseLock() 调用和 Lua 脚本 token 校验 |
+| 失败上报 success 仍为 true | ResolveError 未被调用 | 检查 agent_resume handler 中 success=false 的分支是否正确调用 ResolveError |
+| 过期后上报修改了数据 | status 检查缺失 | 检查 ResolveResult/ResolveError 的 WHERE status='pending' 条件 |
 
 ---
 
@@ -1465,10 +1633,12 @@ cp .env.example .env
 | 阶段 1 (函数注册) | 是 | 环境准备 |
 | 阶段 2 (端到端链路) | 否 | 阶段 1 |
 | 阶段 3 (DeviceID 路由) | 是* | 环境准备（独立会话） |
-| 阶段 4.1 (resolved) | 是* | 环境准备（独立会话） |
+| 阶段 4.1 (resolved 成功) | 是* | 环境准备（独立会话） |
+| 阶段 4.1.1 (resolved 失败) | 是* | 环境准备（独立会话） |
 | 阶段 4.2 (cancelled) | 是* | 环境准备（独立会话） |
 | 阶段 4.3 (expired) | 是* | 环境准备（独立会话 + 等待 cleanup） |
 | 阶段 4.4 (幂等性) | 否 | 阶段 2（需要已 resolved 的记录） |
+| 阶段 4.5 (过期后上报) | 是* | 环境准备（独立会话 + 等待 cleanup） |
 | 阶段 5.1 (并行) | 是* | 环境准备（独立会话） |
 | 阶段 5.2 (断线重连) | 是* | 环境准备（独立会话） |
 | 阶段 5.3 (服务器重启) | 是* | 环境准备（独立会话） |
@@ -1479,7 +1649,7 @@ cp .env.example .env
 
 > 标记 * 的阶段可在环境准备完成后独立执行（使用独立会话），但建议按顺序执行以避免干扰。
 
-**推荐执行顺序**: 1 → 2 → 3 → 4.1 → 4.2 → 4.3 → 4.4 → 5.1 → 5.2 → 5.3 → 5.4 → 5.5 → 6.1 → 6.2
+**推荐执行顺序**: 1 → 2 → 3 → 4.1 → 4.1.1 → 4.2 → 4.3 → 4.4 → 4.5 → 5.1 → 5.2 → 5.3 → 5.4 → 5.5 → 6.1 → 6.2
 
 ---
 
@@ -1523,12 +1693,14 @@ cp .env.example .env
 
 | 步骤 | 结果 | 备注 |
 |------|------|------|
-| 步骤 4.1.2: resolved | ✅ / ❌ | |
+| 步骤 4.1.2: resolved（成功） | ✅ / ❌ | |
+| 步骤 4.1.1.4: resolved（失败） | ✅ / ❌ | ResolveError |
 | 步骤 4.2.4: cancelled | ✅ / ❌ | |
 | 步骤 4.2.5: CancelledBy 持久化 | ✅ / ❌ | |
 | 步骤 4.2.6: 取消后锁释放 | ✅ / ❌ | |
 | 步骤 4.3.4: expired | ✅ / ❌ | D-123 |
 | 步骤 4.4.3: 幂等性 | ✅ / ❌ | D-121 |
+| 步骤 4.5.6: 过期后上报幂等 | ✅ / ❌ | |
 
 #### 阶段 5: 边缘场景
 

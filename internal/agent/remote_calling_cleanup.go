@@ -283,6 +283,11 @@ func (t *RemoteCallingCleanupTask) cleanupExpiredRemoteCalling(ctx context.Conte
 // All steps are non-fatal — errors are logged but do not abort the cleanup.
 func (t *RemoteCallingCleanupTask) cleanupExpiredConversation(ctx context.Context, rc *model.RemoteCalling) {
 	// Re-check conversation status to avoid duplicate cleanup.
+	// NOTE: Only checking for tool_calling here (not asking_user) because:
+	// - cleanupStaleConversations (Layer 1) handles conversations stuck in asking_user.
+	// - cleanupExpiredRemoteCallings (Layer 2) handles individual expired RemoteCallings,
+	//   which trigger this method only when ALL are expired (none resolved).
+	// This division ensures each cleanup path has clear responsibility.
 	conv, err := t.convStore.Get(ctx, rc.ConversationID)
 	if err != nil {
 		t.logger.Error("get conversation for expired cleanup failed (non-fatal)",
@@ -370,6 +375,9 @@ func (t *RemoteCallingCleanupTask) cleanupConversation(ctx context.Context, conv
 
 	// 2. Acquire cleanup lock (Redis SETNX).
 	// Key format: hitl:cleanup:{conversationID}
+	// NOTE: LockKey prefix differs from agent:lock: intentionally — agent:lock is
+	// held by the agent task handler during active processing, while hitl:cleanup
+	// is held by this cleanup task to prevent duplicate cleanup across nodes.
 	// TTL ensures the lock is released even if this node crashes.
 	lockKey := "hitl:cleanup:" + conv.ID
 	ok, err := t.lockClient.SetNX(ctx, lockKey, "1", t.config.LockTTL).Result()

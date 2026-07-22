@@ -119,14 +119,18 @@ func (rs *RemoteCallingStore) ResolveResult(ctx context.Context, id, result stri
 	}
 	if dbResult.RowsAffected == 0 {
 		// Either the record doesn't exist, or it's already resolved.
+		// Use Unscoped() to also find soft-deleted records (D-137): after
+		// cleanup (DeleteByCheckpoint), resolved RemoteCallings are soft-deleted
+		// but we still need to return ErrConflict (not ErrNotFound) so the
+		// client gets an "already processed" response instead of "not found".
 		var existing model.RemoteCalling
-		if err = rs.db.WithContext(ctx).Where("id = ?", id).First(&existing).Error; err != nil {
+		if err = rs.db.WithContext(ctx).Unscoped().Where("id = ?", id).First(&existing).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrNotFound
 			}
 			return classifyError(fmt.Errorf("store: get remote calling for resolve check: %w", err))
 		}
-		// Record exists but is already resolved — conflict (idempotency).
+		// Record exists (possibly soft-deleted) — conflict (idempotency).
 		return ErrConflict
 	}
 	return nil
@@ -152,8 +156,10 @@ func (rs *RemoteCallingStore) ResolveError(ctx context.Context, id, errorMessage
 		return classifyError(fmt.Errorf("store: resolve remote calling error: %w", dbResult.Error))
 	}
 	if dbResult.RowsAffected == 0 {
+		// Use Unscoped() to also find soft-deleted records (D-137), matching
+		// the ResolveResult behavior above.
 		var existing model.RemoteCalling
-		if err = rs.db.WithContext(ctx).Where("id = ?", id).First(&existing).Error; err != nil {
+		if err = rs.db.WithContext(ctx).Unscoped().Where("id = ?", id).First(&existing).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrNotFound
 			}

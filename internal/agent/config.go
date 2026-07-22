@@ -11,6 +11,13 @@ import (
 // this constant to ensure consistency.
 const DefaultClientFunctionCallTimeoutMs = 120000 // 120 seconds
 
+// MinClientFunctionCallTimeoutMs is the minimum allowed timeout (in milliseconds)
+// for client function calls. Even if a function specifies a smaller timeout_ms,
+// it will be clamped to this value. This prevents RemoteCallings from expiring
+// before the client has a reasonable chance to process them.
+// See: Vue测试问题 - LLM超时时间设置问题
+const MinClientFunctionCallTimeoutMs = 30000 // 30 seconds
+
 // MiddlewareConfig controls which Eino middleware to enable per agent.
 // All fields are optional; when the middleware block is absent from YAML,
 // no middleware is applied (backward compatible with Phase 1-7).

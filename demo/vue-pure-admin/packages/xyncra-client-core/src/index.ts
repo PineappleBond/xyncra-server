@@ -21,6 +21,7 @@ export * from './errors';
 export * from './idempotency-cache';
 export * from './interfaces';
 export * from './options';
+export * from './remote-calling-retry-manager';
 export * from './response-retry-queue';
 export * from './retry-manager';
 export * from './rtt-tracker';

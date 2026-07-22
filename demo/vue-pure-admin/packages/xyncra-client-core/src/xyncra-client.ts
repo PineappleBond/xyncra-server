@@ -49,6 +49,7 @@ import { XyncraDatabase } from './db';
 import type {
   Conversation as DBConversation,
   Message as DBMessage,
+  RemoteCalling,
   RPCLog,
 } from './db/models';
 import {
@@ -61,6 +62,7 @@ import {
 import { IdempotencyCache } from './idempotency-cache';
 import type { ILogger } from './interfaces';
 import type { ClientOptions } from './options';
+import { RemoteCallingRetryManager } from './remote-calling-retry-manager';
 import { ResponseRetryQueue } from './response-retry-queue';
 import { RetryManager } from './retry-manager';
 import { RTTTracker } from './rtt-tracker';
@@ -123,26 +125,7 @@ export interface SearchMessagesResult {
 export interface GetConversationResult {
   conversation: DBConversation;
   unread_count: number;
-  remoteCallings: Array<{
-    id: string;
-    conversation_id: string;
-    checkpoint_id: string;
-    agent_id: string;
-    method: string;
-    params: string;
-    interrupt_id: string;
-    device_id: string;
-    status: string;
-    result: string;
-    error_message: string;
-    success: boolean;
-    created_at: Date;
-    resolved_at: Date | null;
-    expires_at: Date | null;
-    cancelled_at: Date | null;
-    cancelled_by: string;
-    cancel_reason: string;
-  }>;
+  remoteCallings: RemoteCalling[];
 }
 
 /** Result of the DeleteConversation RPC. */
@@ -175,6 +158,7 @@ export class XyncraClient {
   private readonly connMgr: ConnectionManager;
   private readonly syncMgr: SyncManager;
   private readonly retryMgr: RetryManager;
+  private readonly rcRetryMgr: RemoteCallingRetryManager;
   private readonly idempotencyCache: IdempotencyCache;
   private readonly rttTracker: RTTTracker;
   private readonly responseRetryQueue: ResponseRetryQueue;
@@ -327,6 +311,13 @@ export class XyncraClient {
       logger: this.logger,
       pollInterval: options.retryPollInterval ?? DefaultRetryPollInterval,
     });
+
+    // --- RemoteCallingRetryManager (D-137 infinite retry for agent_resume) ---
+    this.rcRetryMgr = new RemoteCallingRetryManager({
+      db: this.db,
+      rpcFn: (method, params) => this.call(method, params),
+      logger: this.logger,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -353,6 +344,7 @@ export class XyncraClient {
     //    updates that may arrive as soon as the connection is established.
     this.syncMgr.start();
     this.retryMgr.start();
+    this.rcRetryMgr.start();
 
     // 2. Launch background loops (fire-and-forget).
     void this.heartbeatLoop(signal);
@@ -419,6 +411,15 @@ export class XyncraClient {
   /** Returns the underlying database instance for direct store access. */
   getDb(): XyncraDatabase {
     return this.db;
+  }
+
+  /**
+   * Returns the RemoteCallingRetryManager for enqueuing failed agent_resume calls.
+   * Used by external code (e.g., XyncraProvider) to persist results that failed
+   * to reach the server.
+   */
+  getRemoteCallingRetryManager(): RemoteCallingRetryManager {
+    return this.rcRetryMgr;
   }
 
   /** No-op retained for API compatibility (mirrors Go's Reconnect). */
@@ -1247,6 +1248,7 @@ export class XyncraClient {
     // 2. Stop sync and retry managers.
     this.syncMgr.stop();
     this.retryMgr.stop();
+    this.rcRetryMgr.stop();
 
     // 3. Fail all pending RPCs.
     for (const [id, resolve] of this.pending) {

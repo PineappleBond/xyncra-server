@@ -57,6 +57,7 @@ type RemoteCalling struct {
     Params         string     `json:"params"`          // 函数参数 (JSON)
 
     // 设备路由 (客户端过滤用)
+    InterruptID    string     `json:"interrupt_id"`    // Eino interrupt ID (ask_user 专用)
     DeviceID       string     `json:"device_id"`       // 空 = 任意设备, 非空 = 指定设备
 
     // 状态
@@ -170,7 +171,7 @@ sequenceDiagram
 ### 设计决策
 
 1. **客户端动态注册**: 函数在客户端运行时注册，不是静态配置
-2. **必须支持的函数**: 客户端必须实现 `list_function` 和 `ask_user_question`
+2. **必须支持的函数**: 客户端必须实现 `list_functions` 和 `ask_user_question`
 3. **页面级注册**: 函数按页面/上下文注册，不是一次性注册全部
 4. **客户端定义元数据**: 名称、描述、参数 Schema 由客户端定义
 
@@ -202,7 +203,7 @@ sequenceDiagram
 
 | 函数名 | 说明 |
 | --- | --- |
-| `list_function` | 列出设备支持的所有函数 |
+| `list_functions` | 列出设备支持的所有函数 |
 | `ask_user_question` | 弹窗让用户输入 |
 
 ---

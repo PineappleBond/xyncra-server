@@ -383,6 +383,11 @@ func NewAgentResumeHandler(
 					if timeoutMs <= 0 {
 						timeoutMs = DefaultClientFunctionCallTimeoutMs // unified fallback constant
 					}
+					// Enforce minimum timeout to prevent RemoteCallings from expiring
+					// before the client has a reasonable chance to process them.
+					if timeoutMs < MinClientFunctionCallTimeoutMs {
+						timeoutMs = MinClientFunctionCallTimeoutMs
+					}
 					expiresAt := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 					rc := &model.RemoteCalling{
 						ID:             uuid.New().String(),

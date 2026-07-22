@@ -83,26 +83,7 @@ export interface Conversation {
   deleted_at: Date | null;
 
   /** RemoteCallings (transient, not stored in DB, D-137). */
-  remote_callings?: Array<{
-    id: string;
-    conversation_id: string;
-    checkpoint_id: string;
-    agent_id: string;
-    method: string;
-    params: string;
-    interrupt_id: string;
-    device_id: string;
-    status: string;
-    result: string;
-    error_message: string;
-    success: boolean;
-    created_at: Date;
-    resolved_at: Date | null;
-    expires_at: Date | null;
-    cancelled_at: Date | null;
-    cancelled_by: string;
-    cancel_reason: string;
-  }>;
+  remote_callings?: RemoteCalling[];
 }
 
 // ---------------------------------------------------------------------------

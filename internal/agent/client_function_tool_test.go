@@ -96,12 +96,16 @@ func TestExecuteClientFunction_InterruptDataFormat(t *testing.T) {
 	// we test the JSON construction logic directly.
 	funcInfo := protocol.FunctionInfo{
 		Name:      "read_file",
-		TimeoutMs: 5000,
+		TimeoutMs: 60000, // 60 seconds, above minimum
 	}
 
 	timeoutMs := funcInfo.TimeoutMs
 	if timeoutMs <= 0 {
-		timeoutMs = 30000
+		timeoutMs = DefaultClientFunctionCallTimeoutMs
+	}
+	// Enforce minimum timeout
+	if timeoutMs < MinClientFunctionCallTimeoutMs {
+		timeoutMs = MinClientFunctionCallTimeoutMs
 	}
 
 	interruptData, _ := json.Marshal(map[string]any{
@@ -123,7 +127,31 @@ func TestExecuteClientFunction_InterruptDataFormat(t *testing.T) {
 	assert.Equal(t, "read_file", parsed.Method)
 	assert.Equal(t, `{"path":"/tmp/test"}`, parsed.Params)
 	assert.Equal(t, "dev-1", parsed.DeviceID)
-	assert.Equal(t, int64(5000), parsed.TimeoutMs)
+	assert.Equal(t, int64(60000), parsed.TimeoutMs)
+}
+
+// ---------------------------------------------------------------------------
+// CFT-04b: Minimum timeout enforcement when TimeoutMs is too small
+// ---------------------------------------------------------------------------
+
+func TestExecuteClientFunction_MinTimeoutEnforcement(t *testing.T) {
+	// Verify that timeout_ms below minimum is clamped to MinClientFunctionCallTimeoutMs.
+	funcInfo := protocol.FunctionInfo{
+		Name:      "slow_fn",
+		TimeoutMs: 5000, // 5 seconds, below minimum (30s)
+	}
+
+	timeoutMs := funcInfo.TimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = DefaultClientFunctionCallTimeoutMs
+	}
+	// Enforce minimum timeout
+	if timeoutMs < MinClientFunctionCallTimeoutMs {
+		timeoutMs = MinClientFunctionCallTimeoutMs
+	}
+
+	assert.Equal(t, int64(MinClientFunctionCallTimeoutMs), int64(timeoutMs),
+		"timeout_ms below minimum should be clamped to MinClientFunctionCallTimeoutMs")
 }
 
 // ---------------------------------------------------------------------------
@@ -138,8 +166,12 @@ func TestExecuteClientFunction_DefaultTimeout(t *testing.T) {
 
 	timeoutMs := funcInfo.TimeoutMs
 	if timeoutMs <= 0 {
-		timeoutMs = 30000
+		timeoutMs = DefaultClientFunctionCallTimeoutMs
+	}
+	// Enforce minimum timeout
+	if timeoutMs < MinClientFunctionCallTimeoutMs {
+		timeoutMs = MinClientFunctionCallTimeoutMs
 	}
 
-	assert.Equal(t, int64(30000), int64(timeoutMs))
+	assert.Equal(t, int64(DefaultClientFunctionCallTimeoutMs), int64(timeoutMs))
 }

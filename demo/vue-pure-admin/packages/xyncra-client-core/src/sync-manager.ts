@@ -108,6 +108,37 @@ interface SyncUpdatesResponse {
 }
 
 // ---------------------------------------------------------------------------
+// RawRemoteCalling — server response shape for RemoteCalling (D-137)
+// ---------------------------------------------------------------------------
+
+/**
+ * RawRemoteCalling is the shape of a RemoteCalling as returned by the server
+ * in get_conversation responses. All date fields are ISO strings.
+ * Defined once to avoid repetition across syncRemoteCallingsForConversation,
+ * fetchAndUpsertConversationTx, and handleEphemeralConversationUpdate.
+ */
+interface RawRemoteCalling {
+  id: string;
+  conversation_id: string;
+  checkpoint_id: string;
+  agent_id: string;
+  method: string;
+  params: string;
+  interrupt_id?: string;
+  device_id?: string;
+  status: string;
+  result?: string;
+  error_message?: string;
+  success?: boolean;
+  created_at: string;
+  resolved_at?: string;
+  expires_at?: string;
+  cancelled_at?: string;
+  cancelled_by?: string;
+  cancel_reason?: string;
+}
+
+// ---------------------------------------------------------------------------
 // SyncManager
 // ---------------------------------------------------------------------------
 
@@ -806,26 +837,7 @@ export class SyncManager {
       conversation_id: convID,
     })) as {
       conversation: Record<string, unknown>;
-      remote_callings?: Array<{
-        id: string;
-        conversation_id: string;
-        checkpoint_id: string;
-        agent_id: string;
-        method: string;
-        params: string;
-        interrupt_id?: string;
-        device_id?: string;
-        status: string;
-        result?: string;
-        error_message?: string;
-        success?: boolean;
-        created_at: string;
-        resolved_at?: string;
-        expires_at?: string;
-        cancelled_at?: string;
-        cancelled_by?: string;
-        cancel_reason?: string;
-      }>;
+      remote_callings?: RawRemoteCalling[];
     };
 
     if (!result.conversation) {
@@ -844,29 +856,9 @@ export class SyncManager {
         await this.options.db.remoteCallingsStore.deleteByConversation(convID);
       }
       for (const rc of result.remote_callings) {
-        // BUG-FIX: Map ALL RemoteCalling fields (not just a subset).
-        // The server returns the full model; missing fields caused data loss.
-        const remoteCalling: RemoteCalling = {
-          id: rc.id,
-          conversation_id: rc.conversation_id,
-          checkpoint_id: rc.checkpoint_id,
-          agent_id: rc.agent_id,
-          method: rc.method,
-          params: rc.params,
-          interrupt_id: rc.interrupt_id ?? '',
-          device_id: rc.device_id ?? '',
-          status: rc.status,
-          result: rc.result ?? '',
-          error_message: rc.error_message ?? '',
-          success: rc.success ?? false,
-          created_at: rc.created_at ? new Date(rc.created_at) : new Date(),
-          resolved_at: rc.resolved_at ? new Date(rc.resolved_at) : null,
-          expires_at: rc.expires_at ? new Date(rc.expires_at) : null,
-          cancelled_at: rc.cancelled_at ? new Date(rc.cancelled_at) : null,
-          cancelled_by: rc.cancelled_by ?? '',
-          cancel_reason: rc.cancel_reason ?? '',
-        };
-        await this.options.db.remoteCallingsStore.upsert(remoteCalling);
+        await this.options.db.remoteCallingsStore.upsert(
+          this.mapRawRemoteCallingToDB(rc),
+        );
       }
     }
   }
@@ -883,26 +875,7 @@ export class SyncManager {
       conversation_id: convID,
     })) as {
       conversation: Record<string, unknown>;
-      remote_callings?: Array<{
-        id: string;
-        conversation_id: string;
-        checkpoint_id: string;
-        agent_id: string;
-        method: string;
-        params: string;
-        interrupt_id?: string;
-        device_id?: string;
-        status: string;
-        result?: string;
-        error_message?: string;
-        success?: boolean;
-        created_at: string;
-        resolved_at?: string;
-        expires_at?: string;
-        cancelled_at?: string;
-        cancelled_by?: string;
-        cancel_reason?: string;
-      }>;
+      remote_callings?: RawRemoteCalling[];
     };
 
     if (!result.conversation) {
@@ -929,31 +902,41 @@ export class SyncManager {
         await rcTable.where('conversation_id').equals(convID).delete();
       }
       for (const rc of result.remote_callings) {
-        // BUG-FIX: Convert ALL date fields (not just created_at).
-        // The server sends ISO date strings; IndexedDB expects Date objects.
-        const dbRc: RemoteCalling = {
-          id: rc.id,
-          conversation_id: rc.conversation_id,
-          checkpoint_id: rc.checkpoint_id,
-          agent_id: rc.agent_id,
-          method: rc.method,
-          params: rc.params,
-          interrupt_id: rc.interrupt_id ?? '',
-          device_id: rc.device_id ?? '',
-          status: rc.status,
-          result: rc.result ?? '',
-          error_message: rc.error_message ?? '',
-          success: rc.success ?? false,
-          created_at: rc.created_at ? new Date(rc.created_at) : new Date(),
-          resolved_at: rc.resolved_at ? new Date(rc.resolved_at) : null,
-          expires_at: rc.expires_at ? new Date(rc.expires_at) : null,
-          cancelled_at: rc.cancelled_at ? new Date(rc.cancelled_at) : null,
-          cancelled_by: rc.cancelled_by ?? '',
-          cancel_reason: rc.cancel_reason ?? '',
-        };
-        await rcTable.put(dbRc);
+        await rcTable.put(this.mapRawRemoteCallingToDB(rc));
       }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // RemoteCalling helpers (D-137)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Converts a raw server RemoteCalling (ISO date strings) to a DB RemoteCalling
+   * (Date objects). Shared across syncRemoteCallingsForConversation,
+   * fetchAndUpsertConversationTx, and handleEphemeralConversationUpdate.
+   */
+  private mapRawRemoteCallingToDB(rc: RawRemoteCalling): RemoteCalling {
+    return {
+      id: rc.id,
+      conversation_id: rc.conversation_id,
+      checkpoint_id: rc.checkpoint_id,
+      agent_id: rc.agent_id,
+      method: rc.method,
+      params: rc.params,
+      interrupt_id: rc.interrupt_id ?? '',
+      device_id: rc.device_id ?? '',
+      status: rc.status,
+      result: rc.result ?? '',
+      error_message: rc.error_message ?? '',
+      success: rc.success ?? false,
+      created_at: rc.created_at ? new Date(rc.created_at) : new Date(),
+      resolved_at: rc.resolved_at ? new Date(rc.resolved_at) : null,
+      expires_at: rc.expires_at ? new Date(rc.expires_at) : null,
+      cancelled_at: rc.cancelled_at ? new Date(rc.cancelled_at) : null,
+      cancelled_by: rc.cancelled_by ?? '',
+      cancel_reason: rc.cancel_reason ?? '',
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -1008,32 +991,53 @@ export class SyncManager {
     }
 
     // Local cache is stale or missing — fetch full conversation from server.
+    // Retry with a shorter per-attempt timeout to handle transient RPC timeouts.
+    // The daemon may receive multiple SendConversationUpdate broadcasts in quick
+    // succession (e.g. during cleanup), causing concurrent get_conversation RPCs
+    // that can hit database lock contention or network delays.
+    const CONVERSATION_FETCH_RETRIES = 3;
+    let lastError: unknown = null;
+    let result: {
+      conversation: DBConversation;
+      remote_callings?: RawRemoteCalling[];
+    } | null = null;
+
+    for (let attempt = 0; attempt < CONVERSATION_FETCH_RETRIES; attempt++) {
+      try {
+        result = (await this.options.rpcFn('get_conversation', {
+          conversation_id: convID,
+        })) as {
+          conversation: DBConversation;
+          remote_callings?: RawRemoteCalling[];
+        };
+        lastError = null;
+        break; // success
+      } catch (error) {
+        lastError = error;
+        if (attempt < CONVERSATION_FETCH_RETRIES - 1) {
+          this.options.logger.debug(
+            `Fetch conversation for update notification: retrying`,
+            { attempt: attempt + 1, conversation_id: convID, error },
+          );
+          // Brief backoff before retry (exponential: 500ms, 1s).
+          await new Promise((resolve) =>
+            setTimeout(resolve, 500 * (1 << attempt)),
+          );
+        }
+      }
+    }
+
+    if (lastError || !result) {
+      this.options.logger.error(
+        `Fetch conversation for update notification failed (all retries exhausted)`,
+        { conversation_id: convID, error: lastError },
+      );
+      // Fall back to notifying handler with minimal data (D-118 degraded).
+      await this.notifyHandler(update);
+      return;
+    }
+
     try {
-      const result = (await this.options.rpcFn('get_conversation', {
-        conversation_id: convID,
-      })) as {
-        conversation: DBConversation;
-        remote_callings?: Array<{
-          id: string;
-          conversation_id: string;
-          checkpoint_id: string;
-          agent_id: string;
-          method: string;
-          params: string;
-          interrupt_id?: string;
-          device_id?: string;
-          status: string;
-          result?: string;
-          error_message?: string;
-          success?: boolean;
-          created_at: string; // server sends ISO string, not Date
-          resolved_at?: string;
-          expires_at?: string;
-          cancelled_at?: string;
-          cancelled_by?: string;
-          cancel_reason?: string;
-        }>;
-      };
 
       if (!result.conversation) {
         this.options.logger.error(
@@ -1063,28 +1067,9 @@ export class SyncManager {
         }
         for (const rc of result.remote_callings) {
           try {
-            // BUG-FIX: Convert ALL date fields from ISO strings to Date objects.
-            const dbRc: RemoteCalling = {
-              id: rc.id,
-              conversation_id: rc.conversation_id,
-              checkpoint_id: rc.checkpoint_id,
-              agent_id: rc.agent_id,
-              method: rc.method,
-              params: rc.params,
-              interrupt_id: rc.interrupt_id ?? '',
-              device_id: rc.device_id ?? '',
-              status: rc.status,
-              result: rc.result ?? '',
-              error_message: rc.error_message ?? '',
-              success: rc.success ?? false,
-              created_at: rc.created_at ? new Date(rc.created_at) : new Date(),
-              resolved_at: rc.resolved_at ? new Date(rc.resolved_at) : null,
-              expires_at: rc.expires_at ? new Date(rc.expires_at) : null,
-              cancelled_at: rc.cancelled_at ? new Date(rc.cancelled_at) : null,
-              cancelled_by: rc.cancelled_by ?? '',
-              cancel_reason: rc.cancel_reason ?? '',
-            };
-            await this.options.db.remoteCallingsStore.upsert(dbRc);
+            await this.options.db.remoteCallingsStore.upsert(
+              this.mapRawRemoteCallingToDB(rc),
+            );
           } catch (error) {
             this.options.logger.error('Upsert remote calling failed', {
               remote_calling_id: rc.id,

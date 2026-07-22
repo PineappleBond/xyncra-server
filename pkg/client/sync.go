@@ -669,11 +669,45 @@ func (sm *syncManager) handleEphemeralConversationUpdate(ctx context.Context, up
 	}
 
 	// Local cache is stale or missing — fetch full conversation from server.
-	data, err := sm.rpcFn(ctx, "get_conversation", map[string]any{
-		"conversation_id": peek.ConversationID,
-	})
+	// Retry with a shorter per-attempt timeout to handle transient RPC timeouts.
+	// The daemon may receive multiple SendConversationUpdate broadcasts in quick
+	// succession (e.g. during cleanup), causing concurrent get_conversation RPCs
+	// that can hit database lock contention (SQLite) or network delays.
+	const (
+		conversationFetchRetries    = 3
+		conversationFetchPerAttempt = 10 * time.Second
+	)
+	var data json.RawMessage
+	var err error
+	for attempt := 0; attempt < conversationFetchRetries; attempt++ {
+		// Use a per-attempt context with a shorter timeout so retries don't
+		// consume the entire parent context deadline.
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, conversationFetchPerAttempt)
+		data, err = sm.rpcFn(attemptCtx, "get_conversation", map[string]any{
+			"conversation_id": peek.ConversationID,
+		})
+		attemptCancel()
+
+		if err == nil {
+			break // success
+		}
+		if attempt < conversationFetchRetries-1 {
+			sm.logger.Debug("fetch conversation for update notification: retrying",
+				"attempt", attempt+1,
+				"error", err,
+				"conversation_id", peek.ConversationID)
+			// Brief backoff before retry (exponential: 500ms, 1s).
+			backoff := time.Duration(500*(1<<attempt)) * time.Millisecond
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				sm.notifyHandler(ctx, update)
+				return
+			}
+		}
+	}
 	if err != nil {
-		sm.logger.Error("fetch conversation for update notification",
+		sm.logger.Error("fetch conversation for update notification (all retries exhausted)",
 			"error", err, "conversation_id", peek.ConversationID)
 		// Fall back to notifying handler with minimal data (D-118 degraded).
 		sm.notifyHandler(ctx, update)

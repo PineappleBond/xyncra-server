@@ -440,7 +440,12 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 			if e.remoteCallingStore != nil {
 				timeoutMs := interruptInfo.TimeoutMs
 				if timeoutMs <= 0 {
-					timeoutMs = 30000
+					timeoutMs = DefaultClientFunctionCallTimeoutMs
+				}
+				// Enforce minimum timeout to prevent RemoteCallings from expiring
+				// before the client has a reasonable chance to process them.
+				if timeoutMs < MinClientFunctionCallTimeoutMs {
+					timeoutMs = MinClientFunctionCallTimeoutMs
 				}
 				expiresAt := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 				rc := &model.RemoteCalling{
