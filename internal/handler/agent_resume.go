@@ -80,6 +80,10 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 	}
 
 	// 2. Validate required fields.
+	// NOTE: agent_id is required for protocol consistency and future extensibility,
+	// but the actual value used in the MQ payload comes from the database record
+	// (rc.AgentID), not from the client request. This prevents a malicious client
+	// from specifying an arbitrary agent_id (see BUG-FIX comment in step 10).
 	if params.ID == "" || params.AgentID == "" {
 		return nil, protocol.NewValidationError("id and agent_id are required")
 	}
@@ -156,7 +160,7 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 	// passed their expires_at but haven't been cleaned up by the periodic task
 	// yet (which runs every 5 minutes). Without this, the conversation would be
 	// stuck in tool_calling status until the next cleanup tick.
-	if _, err := rcs.MarkExpiredByCheckpoint(ctx, rc.CheckpointID); err != nil {
+	if _, err := rcs.MarkExpiredByCheckpoint(ctx, rc.CheckpointID, time.Now()); err != nil {
 		// Non-fatal: log and continue with the pending count.
 		// The periodic cleanup task will eventually expire them.
 		h.logger.Error("agent_resume: mark expired by checkpoint failed (non-fatal)",

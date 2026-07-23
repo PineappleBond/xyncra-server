@@ -68,7 +68,7 @@
 |------|----------|------|------|
 | Redis 7 | Docker | 16379 | DB 15，Checkpoint/锁/幂等性存储 |
 | xyncra-server | Docker (xyncra-server-e2e) | 18080 | WebSocket + HTTP，SQLite: xyncra-e2e.db |
-| Vue 客户端 | 浏览器 | 5173 | Vue Pure Admin 开发服务器 |
+| Vue 客户端 | 浏览器 | 8848 | Vue Pure Admin 开发服务器（配置端口，若被占用 Vite 会自动选择其他端口） |
 | LLM API | 外部服务 | - | 真实 LLM API 调用 |
 
 **数据流向**：
@@ -124,7 +124,7 @@ docker exec deploy-xyncra-server-e2e-1 apk add --no-cache sqlite
 cd demo/vue-pure-admin
 pnpm install
 pnpm dev
-# 预期: 服务启动在 http://localhost:5173
+# 预期: 服务启动在 http://localhost:8848（若端口被占用，Vite 会自动选择其他端口，请查看终端输出）
 ```
 
 ### 4.6 配置 Agent
@@ -180,7 +180,7 @@ docker compose -f deploy/docker-compose.e2e.yml restart xyncra-server-e2e
 | 变量 | 值 | 说明 |
 |------|-----|------|
 | `$SERVER_URL` | `ws://localhost:18080/ws` | E2E 服务器 WebSocket 地址 |
-| `$VUE_URL` | `http://localhost:5173` | Vue Dev Server 地址 |
+| `$VUE_URL` | `http://localhost:8848` | Vue Dev Server 地址（配置端口，若被占用请以 Vite 实际输出为准） |
 | `$REDIS_ADDR` | `localhost:16379` | E2E Redis 地址 |
 | `$REDIS_DB` | `15` | E2E Redis DB 编号 |
 | `$USER_ID` | `test-user-vue` | 测试用户 ID |

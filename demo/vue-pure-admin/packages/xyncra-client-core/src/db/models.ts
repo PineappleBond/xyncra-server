@@ -128,6 +128,12 @@ export interface Message {
  * Unifies HITL questions and client function calls into a single model.
  *
  * Mirrors Go model.RemoteCalling (pkg/store/model/remote_calling.go).
+ *
+ * NOTE: The Go model includes a `DeletedAt gorm.DeletedAt` field for soft-delete
+ * support via GORM. The client-side IndexedDB (Dexie) uses hard deletes instead,
+ * so `deleted_at` is intentionally omitted from this interface. If soft-delete
+ * semantics are needed on the client in the future, add the field here and
+ * update the Dexie schema accordingly.
  */
 export interface RemoteCalling {
   /** Primary key (UUID, size:36). */

@@ -246,9 +246,9 @@ func TestEphemeralConvUpdate_FallsBackToHandlerOnRPCFailure(t *testing.T) {
 	update := makeEphemeralConvUpdate("conv-d5", newerTime.Unix())
 	require.NoError(t, sm.ApplyUpdate(context.Background(), update))
 
-	// Verify RPC was called.
-	assert.Equal(t, int32(1), atomic.LoadInt32(&rpcCallsCount),
-		"RPC should be called when local cache is stale")
+	// Verify RPC was called (3 attempts due to retry on failure).
+	assert.Equal(t, int32(3), atomic.LoadInt32(&rpcCallsCount),
+		"RPC should be called 3 times (initial + 2 retries) when local cache is stale")
 
 	// Verify handler was still notified with minimal data (just the ID).
 	handler.mu.Lock()

@@ -157,6 +157,27 @@ export class XyncraDatabase extends Dexie {
       userUpdates: 'id, user_id, [user_id+seq], type, created_at',
     });
 
+    // Version 3: Add [conversation_id+device_id] compound index to remoteCallings.
+    // Enables efficient queries when filtering remote callings by device within a
+    // conversation (e.g., device-specific function calls in multi-device scenarios).
+    // Project not launched — no data migration needed, Dexie auto-drops and rebuilds.
+    this.version(3).stores({
+      conversations:
+        'id, user_id1, user_id2, &[user_id1+user_id2], type, created_at, last_message_at, agent_status',
+      messages:
+        'id, &[client_message_id+sender_id], conversation_id, [conversation_id+message_id], sender_id, created_at, message_id',
+      remoteCallings:
+        'id, conversation_id, status, checkpoint_id, [conversation_id+status], [conversation_id+device_id]',
+      retryQueue: '++id, remote_calling_id, next_retry_at',
+      syncStates: 'key',
+      drafts: 'id, &conversation_id',
+      retryTasks: 'id, method, status, next_retry, created_at',
+      rpcLogs:
+        'id, type, request_id, method, status_code, conversation_id, created_at',
+      notificationLogs: 'seq, type, created_at',
+      userUpdates: 'id, user_id, [user_id+seq], type, created_at',
+    });
+
     // Initialize domain sub-stores.
     this.conversationsStore = new ConversationStore(this);
     this.messagesStore = new MessageStore(this);

@@ -71,13 +71,16 @@ func (h *cancelRemoteCallsHandler) HandleRequest(ctx context.Context, client *se
 		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: RemoteCallingStore not available"))
 	}
 
-	// Use GetByCheckpoint to find the conversation for permission check.
-	existingRCs, err := rcs.GetByCheckpoint(ctx, params.CheckpointID)
+	// Use GetPendingByCheckpoint (not GetByCheckpoint) to only query pending
+	// records. This is more efficient and avoids fetching resolved/cancelled/
+	// expired records that are irrelevant to the cancel operation.
+	// If no pending records exist, there is nothing to cancel.
+	existingRCs, err := rcs.GetPendingByCheckpoint(ctx, params.CheckpointID)
 	if err != nil {
-		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: get by checkpoint: %w", err))
+		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: get pending by checkpoint: %w", err))
 	}
 	if len(existingRCs) == 0 {
-		return nil, protocol.NewNotFoundError("no remote callings found for checkpoint")
+		return nil, protocol.NewNotFoundError("no pending remote callings found for checkpoint")
 	}
 
 	// Verify caller is a member of the conversation.

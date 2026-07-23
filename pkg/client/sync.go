@@ -669,13 +669,17 @@ func (sm *syncManager) handleEphemeralConversationUpdate(ctx context.Context, up
 	}
 
 	// Local cache is stale or missing — fetch full conversation from server.
-	// Retry with a shorter per-attempt timeout to handle transient RPC timeouts.
+	// Retry with a per-attempt timeout to handle transient RPC timeouts.
 	// The daemon may receive multiple SendConversationUpdate broadcasts in quick
 	// succession (e.g. during cleanup), causing concurrent get_conversation RPCs
 	// that can hit database lock contention (SQLite) or network delays.
+	// 30s per attempt allows sufficient headroom for:
+	//   - Database lock contention under concurrent access
+	//   - Multiple sequential queries (Get, CountUnread, GetPendingByConversation)
+	//   - Network latency between daemon and server
 	const (
 		conversationFetchRetries    = 3
-		conversationFetchPerAttempt = 10 * time.Second
+		conversationFetchPerAttempt = 30 * time.Second
 	)
 	var data json.RawMessage
 	var err error

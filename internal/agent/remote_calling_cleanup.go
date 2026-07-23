@@ -175,6 +175,15 @@ func (t *RemoteCallingCleanupTask) cleanupStaleConversations(ctx context.Context
 // Optimization: expired RCs are grouped by checkpointID so that the pending count
 // query (CountPendingByCheckpoint) is executed once per checkpoint instead of once
 // per expired RC, reducing redundant database queries.
+//
+// KNOWN LIMITATION (review #1): ListExpired and MarkExpired are not atomic.
+// Between the ListExpired query and the MarkExpired batch, concurrent operations
+// (resolve, cancel, new create) may change the state. This is acceptable because:
+//  1. MarkExpired is idempotent — marking an already-resolved RC is a no-op
+//     (WHERE status = 'pending' prevents the update).
+//  2. Any RCs missed in this cycle will be caught in the next cleanup tick (5min).
+//  3. CountPendingByCheckpoint (called after all MarkExpired) reflects the
+//     post-mark state, so the resume/cleanup decision is based on fresh data.
 func (t *RemoteCallingCleanupTask) cleanupExpiredRemoteCallings(ctx context.Context) {
 	if t.remoteCallingStore == nil {
 		return

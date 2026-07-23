@@ -302,14 +302,17 @@ func (rs *RemoteCallingStore) ListExpired(ctx context.Context, limit int, now ti
 // that have passed their expires_at as expired. Returns the count of newly expired RCs.
 // This is called by the agent_resume handler to immediately expire overdue siblings
 // before checking pending count, avoiding the need to wait for the periodic cleanup task.
-func (rs *RemoteCallingStore) MarkExpiredByCheckpoint(ctx context.Context, checkpointID string) (count int64, err error) {
+//
+// The now parameter allows callers to inject the current time for testability,
+// consistent with ListExpired which also accepts a now parameter.
+func (rs *RemoteCallingStore) MarkExpiredByCheckpoint(ctx context.Context, checkpointID string, now time.Time) (count int64, err error) {
 	ctx, finish := startSpan(ctx, tracing.SpanDBRemoteCallingMarkExpiredByCheckpoint)
 	defer func() { finish(err) }()
 
 	result := rs.db.WithContext(ctx).
 		Model(&model.RemoteCalling{}).
 		Where("checkpoint_id = ? AND status = ? AND expires_at IS NOT NULL AND expires_at < ?",
-			checkpointID, model.RemoteCallingStatusPending, time.Now()).
+			checkpointID, model.RemoteCallingStatusPending, now).
 		Update("status", model.RemoteCallingStatusExpired)
 	if result.Error != nil {
 		return 0, classifyError(fmt.Errorf("store: mark expired by checkpoint: %w", result.Error))
