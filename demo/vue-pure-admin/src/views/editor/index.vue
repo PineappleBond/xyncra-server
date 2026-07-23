@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import { EditorBase, EditorMulti, EditorUpload } from "./components";
 
 defineOptions({
@@ -9,8 +9,7 @@ defineOptions({
 
 const activeNames = ref("1");
 
-
-defineTestHelpers('editor', {})
+defineTestHelpers("editor", {});
 </script>
 
 <template>

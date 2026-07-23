@@ -75,7 +75,7 @@ onBeforeUnmount(() => {
   }
 });
 
-defineTestHelpers('able-wavesurfer', {})
+defineTestHelpers("able-wavesurfer", {});
 </script>
 
 <template>

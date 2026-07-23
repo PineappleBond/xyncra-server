@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "Collapse"
@@ -24,8 +24,7 @@ const handleChange = (val: string[]) => {
   console.log(val);
 };
 
-
-defineTestHelpers('components-collapse', {})
+defineTestHelpers("components-collapse", {});
 </script>
 
 <template>

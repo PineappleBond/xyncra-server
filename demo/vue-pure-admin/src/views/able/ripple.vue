@@ -5,7 +5,7 @@ defineOptions({
   name: "Ripple"
 });
 
-defineTestHelpers('able-ripple', {})
+defineTestHelpers("able-ripple", {});
 </script>
 
 <template>

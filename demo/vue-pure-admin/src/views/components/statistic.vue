@@ -23,7 +23,7 @@ function reset() {
   value1.value = Date.now() + 1000 * 60 * 60 * 24 * 2;
 }
 
-defineTestHelpers('components-statistic', {})
+defineTestHelpers("components-statistic", {});
 </script>
 
 <template>

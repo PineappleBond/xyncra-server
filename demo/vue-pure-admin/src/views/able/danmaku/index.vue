@@ -102,7 +102,7 @@ function addDanmu() {
   danmuMsg.value = "";
 }
 
-defineTestHelpers('able-danmaku', {})
+defineTestHelpers("able-danmaku", {});
 </script>
 <template>
   <el-card shadow="never">

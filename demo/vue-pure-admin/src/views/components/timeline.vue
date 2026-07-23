@@ -52,7 +52,7 @@ const activities = [
   }
 ];
 
-defineTestHelpers('components-timeline', {})
+defineTestHelpers("components-timeline", {});
 </script>
 
 <template>

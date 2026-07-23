@@ -76,7 +76,7 @@ const tableData: User[] = [
   }
 ];
 
-defineTestHelpers('able-print', {})
+defineTestHelpers("able-print", {});
 </script>
 
 <template>

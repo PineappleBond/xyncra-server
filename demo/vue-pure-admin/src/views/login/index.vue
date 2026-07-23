@@ -24,7 +24,7 @@ import { ref, toRaw, reactive, watch, computed } from "vue";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import { useTranslationLang } from "@/layout/hooks/useTranslationLang";
 import { useDataThemeChange } from "@/layout/hooks/useDataThemeChange";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 import dayIcon from "@/assets/svg/day.svg?component";
 import darkIcon from "@/assets/svg/dark.svg?component";
@@ -118,45 +118,55 @@ watch(loginDay, value => {
   useUserStoreHook().SET_LOGINDAY(value);
 });
 
-defineTestHelpers('login', {
+defineTestHelpers("login", {
   fill_username: {
-    name: 'fill_username',
-    description: 'Fill username field',
+    name: "fill_username",
+    description: "Fill username field",
     parameters: {
-      type: 'object',
-      properties: { value: { type: 'string', description: 'Username to fill' } },
-      required: ['value'],
+      type: "object",
+      properties: {
+        value: { type: "string", description: "Username to fill" }
+      },
+      required: ["value"]
     },
-    handler: (args) => { ruleForm.username = args.value as string },
+    handler: args => {
+      ruleForm.username = args.value as string;
+    }
   },
   fill_password: {
-    name: 'fill_password',
-    description: 'Fill password field',
+    name: "fill_password",
+    description: "Fill password field",
     parameters: {
-      type: 'object',
-      properties: { value: { type: 'string', description: 'Password to fill' } },
-      required: ['value'],
+      type: "object",
+      properties: {
+        value: { type: "string", description: "Password to fill" }
+      },
+      required: ["value"]
     },
-    handler: (args) => { ruleForm.password = args.value as string },
+    handler: args => {
+      ruleForm.password = args.value as string;
+    }
   },
   submit: {
-    name: 'submit',
-    description: 'Submit login form',
-    parameters: { type: 'object', properties: {} },
+    name: "submit",
+    description: "Submit login form",
+    parameters: { type: "object", properties: {} },
     handler: async () => {
       // 设置验证码值以绕过验证（测试模式）
-      ruleForm.verifyCode = imgCode.value || '000000'
-      useUserStoreHook().SET_VERIFYCODE(ruleForm.verifyCode)
-      await onLogin(ruleFormRef.value)
-    },
+      ruleForm.verifyCode = imgCode.value || "000000";
+      useUserStoreHook().SET_VERIFYCODE(ruleForm.verifyCode);
+      await onLogin(ruleFormRef.value);
+    }
   },
   reset: {
-    name: 'reset',
-    description: 'Reset login form',
-    parameters: { type: 'object', properties: {} },
-    handler: () => { ruleFormRef.value?.resetFields() },
-  },
-})
+    name: "reset",
+    description: "Reset login form",
+    parameters: { type: "object", properties: {} },
+    handler: () => {
+      ruleFormRef.value?.resetFields();
+    }
+  }
+});
 </script>
 
 <template>

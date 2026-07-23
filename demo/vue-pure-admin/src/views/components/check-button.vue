@@ -87,7 +87,7 @@ watch(size, val =>
     : (dynamicSize.value = size.value)
 );
 
-defineTestHelpers('components-check-button', {})
+defineTestHelpers("components-check-button", {});
 </script>
 
 <template>

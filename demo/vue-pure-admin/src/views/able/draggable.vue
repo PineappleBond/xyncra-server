@@ -53,7 +53,7 @@ onMounted(() => {
   });
 });
 
-defineTestHelpers('able-draggable', {})
+defineTestHelpers("able-draggable", {});
 </script>
 
 <template>

@@ -12,7 +12,7 @@ import formPrimitive from "./formPrimitive.vue";
 import forms, { type FormProps } from "./form.vue";
 import { defineTestHelpers } from "../../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
-defineTestHelpers('components-drawer', {})
+defineTestHelpers("components-drawer", {});
 
 function onBaseClick() {
   addDrawer({
@@ -436,7 +436,6 @@ function onResizableClick(title, content, direction) {
     )
   });
 }
-
 </script>
 
 <template>

@@ -7,7 +7,7 @@ import ListCard from "./components/ListCard.vue";
 import ListDialogForm from "./components/ListDialogForm.vue";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import AddFill from "~icons/ri/add-circle-line";
-import { defineTestHelpers } from '../../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "CardList"
@@ -93,24 +93,30 @@ const handleManageProduct = product => {
   });
 };
 
-defineTestHelpers('card-list', {
+defineTestHelpers("card-list", {
   viewDetail: {
-    name: 'viewDetail',
-    description: 'View card detail',
+    name: "viewDetail",
+    description: "View card detail",
     parameters: {
-      type: 'object',
-      properties: { product: { type: 'object', description: 'Product to view' } },
-      required: ['product'],
+      type: "object",
+      properties: {
+        product: { type: "object", description: "Product to view" }
+      },
+      required: ["product"]
     },
-    handler: (args) => { handleManageProduct(args.product) },
+    handler: args => {
+      handleManageProduct(args.product);
+    }
   },
   refresh: {
-    name: 'refresh',
-    description: 'Refresh card list',
-    parameters: { type: 'object', properties: {} },
-    handler: () => { getCardListData() },
-  },
-})
+    name: "refresh",
+    description: "Refresh card list",
+    parameters: { type: "object", properties: {} },
+    handler: () => {
+      getCardListData();
+    }
+  }
+});
 </script>
 
 <template>

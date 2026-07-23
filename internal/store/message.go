@@ -209,6 +209,30 @@ func (ms *MessageStore) DeleteByConversation(ctx context.Context, convID string)
 	return nil
 }
 
+// MarkSummarized sets summarized=true for all messages in the conversation
+// with MessageID <= maxMessageID. This is called after a summary is generated
+// to mark the original messages as summarized.
+func (ms *MessageStore) MarkSummarized(ctx context.Context, convID string, maxMessageID uint32) (err error) {
+	ctx, finish := startSpan(ctx, "db.message.mark_summarized")
+	defer func() { finish(err) }()
+
+	result := ms.db.WithContext(ctx).
+		Model(&model.Message{}).
+		Where("conversation_id = ? AND message_id <= ? AND summarized = ?", convID, maxMessageID, false).
+		Update("summarized", true)
+	if result.Error != nil {
+		return classifyError(fmt.Errorf("store: mark summarized: %w", result.Error))
+	}
+	return nil
+}
+
+// Begin starts a new database transaction and returns the underlying *gorm.DB
+// scoped to that transaction. The caller is responsible for calling
+// tx.Commit() or tx.Rollback().
+func (ms *MessageStore) Begin() *gorm.DB {
+	return ms.db.Begin()
+}
+
 // CountUnread returns the number of messages in the given conversation with
 // MessageID greater than afterMessageID. Soft-deleted messages are excluded
 // automatically by GORM's soft-delete plugin. This supports unread message
@@ -252,6 +276,30 @@ func (ms *MessageStore) RestoreByConversation(ctx context.Context, convID string
 	return result.RowsAffected, nil
 }
 
+// UpdateMessageContentTx updates the Content, Type, and Status fields of a
+// message identified by (conversation_id, message_id) within the given
+// transaction. Returns ErrNotFound if no matching record exists.
+func (ms *MessageStore) UpdateMessageContentTx(ctx context.Context, tx *gorm.DB, conversationID string, messageID uint32, content, msgType, status string) (err error) {
+	ctx, finish := startSpan(ctx, "db.message.update_content_tx")
+	defer func() { finish(err) }()
+
+	result := tx.WithContext(ctx).
+		Model(&model.Message{}).
+		Where("conversation_id = ? AND message_id = ?", conversationID, messageID).
+		Updates(map[string]interface{}{
+			"content": content,
+			"type":    msgType,
+			"status":  status,
+		})
+	if result.Error != nil {
+		return classifyError(fmt.Errorf("store: update message content tx: %w", result.Error))
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ListRecentByConversation returns the most recent messages for a conversation,
 // ordered by MessageID descending (newest first), limited to at most limit rows.
 // Soft-deleted messages are excluded automatically by GORM's soft-delete plugin.
@@ -267,7 +315,7 @@ func (ms *MessageStore) ListRecentByConversation(ctx context.Context, convID str
 
 	var msgs []*model.Message
 	err = ms.db.WithContext(ctx).
-		Where("conversation_id = ?", convID).
+		Where("conversation_id = ? AND (summarized = ? OR type = ?)", convID, false, "summary").
 		Order("message_id DESC").
 		Limit(limit).
 		Find(&msgs).Error

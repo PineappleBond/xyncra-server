@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import {
   provinceAndCityDataPlus,
   provinceAndCityData,
@@ -23,8 +23,7 @@ const handleChange = value => {
   console.log(value);
 };
 
-
-defineTestHelpers('components-cascader', {})
+defineTestHelpers("components-cascader", {});
 </script>
 
 <template>

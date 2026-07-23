@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "ColorPicker"
@@ -41,8 +41,7 @@ function onClick() {
   isOpen.value = !isOpen.value;
 }
 
-
-defineTestHelpers('components-color-picker', {})
+defineTestHelpers("components-color-picker", {});
 </script>
 
 <template>

@@ -25,7 +25,7 @@ const selectedVal = ({ left, right }): void => {
   selectRange.value = `${left}-${right}`;
 };
 
-defineTestHelpers('components-selector', {})
+defineTestHelpers("components-selector", {});
 </script>
 
 <template>

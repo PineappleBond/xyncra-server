@@ -2,7 +2,7 @@
 import { ref } from "vue";
 import intro from "intro.js";
 import "intro.js/minified/introjs.min.css";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 type GuideStep = {
   element: HTMLElement;
@@ -74,14 +74,14 @@ const onTour = () => {
   tourOpen.value = true;
 };
 
-defineTestHelpers('guide', {
+defineTestHelpers("guide", {
   startGuide: {
-    name: 'startGuide',
-    description: '启动引导页',
-    parameters: { type: 'object', properties: {} },
+    name: "startGuide",
+    description: "启动引导页",
+    parameters: { type: "object", properties: {} },
     handler: () => onGuide()
   }
-})
+});
 </script>
 
 <template>

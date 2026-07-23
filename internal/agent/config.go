@@ -25,6 +25,31 @@ const MinClientFunctionCallTimeoutMs = 60000 // 60 seconds
 // Both executor.go and resume_handler.go use this constant for consistency.
 const DefaultHITLTimeout = 24 * time.Hour
 
+// NormalizeClientFunctionTimeout applies the standard timeout normalization
+// logic for client function calls. This consolidates the previously duplicated
+// logic from executor.go, resume_handler.go, and client_function_tool.go.
+//
+// The normalization rules are:
+//  1. If timeoutMs <= 0, use defaultCallTimeoutMs (if positive) or DefaultClientFunctionCallTimeoutMs.
+//  2. Clamp to MinClientFunctionCallTimeoutMs if below minimum.
+//
+// Returns the normalized timeout in milliseconds.
+func NormalizeClientFunctionTimeout(timeoutMs int, defaultCallTimeoutMs int) int {
+	if timeoutMs <= 0 {
+		if defaultCallTimeoutMs > 0 {
+			timeoutMs = defaultCallTimeoutMs
+		} else {
+			timeoutMs = DefaultClientFunctionCallTimeoutMs
+		}
+	}
+	// Enforce minimum timeout to prevent RemoteCallings from expiring
+	// before the client has a reasonable chance to process them.
+	if timeoutMs < MinClientFunctionCallTimeoutMs {
+		timeoutMs = MinClientFunctionCallTimeoutMs
+	}
+	return timeoutMs
+}
+
 // MiddlewareConfig controls which Eino middleware to enable per agent.
 // All fields are optional; when the middleware block is absent from YAML,
 // no middleware is applied (backward compatible with Phase 1-7).

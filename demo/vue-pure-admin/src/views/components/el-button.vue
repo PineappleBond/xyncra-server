@@ -52,7 +52,7 @@ watch(size, val =>
     : (dynamicSize.value = size.value)
 );
 
-defineTestHelpers('components-el-button', {})
+defineTestHelpers("components-el-button", {});
 </script>
 
 <template>

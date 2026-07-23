@@ -21,7 +21,7 @@ const disabledClick = () => {
   message("失效", { type: "info" });
 };
 
-defineTestHelpers('able-qrcode', {})
+defineTestHelpers("able-qrcode", {});
 </script>
 
 <template>

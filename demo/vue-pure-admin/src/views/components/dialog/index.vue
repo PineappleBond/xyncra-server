@@ -475,7 +475,7 @@ function onTransitionClick(title, transition) {
   });
 }
 
-defineTestHelpers('components-dialog', {})
+defineTestHelpers("components-dialog", {});
 </script>
 
 <template>

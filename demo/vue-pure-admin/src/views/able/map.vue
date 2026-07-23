@@ -6,7 +6,7 @@ defineOptions({
   name: "MapPage"
 });
 
-defineTestHelpers('able-map', {})
+defineTestHelpers("able-map", {});
 </script>
 
 <template>

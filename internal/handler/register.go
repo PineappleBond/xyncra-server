@@ -75,7 +75,7 @@ func RegisterAll(h *server.DefaultMessageHandler, deps Dependencies) {
 	h.RegisterMethod("reload_agents", NewReloadAgentsHandler(deps.AgentRegistry))
 	h.RegisterMethod("agent_resume", NewAgentResumeHandler(deps.Store, deps.Broker, deps.Logger))
 	h.RegisterMethod("get_remote_callings", NewGetRemoteCallingsHandler(deps.Store))
-	h.RegisterMethod("cancel_remote_calls", NewCancelRemoteCallsHandler(deps.Store, deps.Broker))
+	h.RegisterMethod("cancel_remote_calls", NewCancelRemoteCallsHandler(deps.Store, deps.Broker, deps.Logger))
 	// Phase 2: register function registry handler (nil-safe per D-063).
 	if deps.FunctionRegistry != nil {
 		h.RegisterMethod("system.register_functions", NewRegisterFunctionsHandler(deps.FunctionRegistry))

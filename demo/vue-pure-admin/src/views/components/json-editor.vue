@@ -71,7 +71,7 @@ watch(
   }
 );
 
-defineTestHelpers('components-json-editor', {})
+defineTestHelpers("components-json-editor", {});
 </script>
 
 <template>

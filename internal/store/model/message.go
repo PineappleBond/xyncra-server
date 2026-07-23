@@ -16,6 +16,7 @@ type Message struct {
 	Type            string    `gorm:"size:20;default:'text'" json:"type"`
 	ReplyTo         uint32    `json:"reply_to"`
 	Status          string    `gorm:"size:20;default:'sent'" json:"status"`
+	Summarized      bool      `gorm:"default:false;index" json:"summarized"`
 	CreatedAt       time.Time `gorm:"index" json:"created_at"`
 
 	DeletedAt gorm.DeletedAt `gorm:"index:idx_message_conv_msg_deleted,priority:3;index"`

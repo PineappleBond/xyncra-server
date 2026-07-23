@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
-import { defineTestHelpers } from '../../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "StepForm"
@@ -37,46 +37,51 @@ const onSubmit = () => {
 
 const onTransferAgain = () => {
   activeStep.value = 0;
-  formData.value = { payAccount: "", receiveAccount: "", receiverName: "", amount: "" };
+  formData.value = {
+    payAccount: "",
+    receiveAccount: "",
+    receiverName: "",
+    amount: ""
+  };
 };
 
-defineTestHelpers('step-form', {
+defineTestHelpers("step-form", {
   next: {
-    name: 'next',
-    description: '进入下一步',
-    parameters: { type: 'object', properties: {} },
+    name: "next",
+    description: "进入下一步",
+    parameters: { type: "object", properties: {} },
     handler: () => onNext()
   },
   prev: {
-    name: 'prev',
-    description: '返回上一步',
-    parameters: { type: 'object', properties: {} },
+    name: "prev",
+    description: "返回上一步",
+    parameters: { type: "object", properties: {} },
     handler: () => onPrev()
   },
   submit: {
-    name: 'submit',
-    description: '确认提交转账',
-    parameters: { type: 'object', properties: {} },
+    name: "submit",
+    description: "确认提交转账",
+    parameters: { type: "object", properties: {} },
     handler: () => onSubmit()
   },
   transferAgain: {
-    name: 'transferAgain',
-    description: '再次转账',
-    parameters: { type: 'object', properties: {} },
+    name: "transferAgain",
+    description: "再次转账",
+    parameters: { type: "object", properties: {} },
     handler: () => onTransferAgain()
   },
   setFieldValue: {
-    name: 'setFieldValue',
-    description: '设置表单字段值',
+    name: "setFieldValue",
+    description: "设置表单字段值",
     parameters: {
-      type: 'object',
+      type: "object",
       properties: {
-        field: { type: 'string', description: '字段名' },
-        value: { description: '字段值' }
+        field: { type: "string", description: "字段名" },
+        value: { description: "字段值" }
       },
-      required: ['field', 'value']
+      required: ["field", "value"]
     },
-    handler: (args) => {
+    handler: args => {
       const { field, value } = args as { field: string; value: unknown };
       if (field in formData.value) {
         (formData.value as Record<string, unknown>)[field] = value;
@@ -101,13 +106,22 @@ defineTestHelpers('step-form', {
     <div v-if="activeStep === 0">
       <el-form :model="formData" label-width="120px">
         <el-form-item label="付款账户">
-          <el-input v-model="formData.payAccount" placeholder="请输入付款账户" />
+          <el-input
+            v-model="formData.payAccount"
+            placeholder="请输入付款账户"
+          />
         </el-form-item>
         <el-form-item label="收款账户">
-          <el-input v-model="formData.receiveAccount" placeholder="请输入收款账户" />
+          <el-input
+            v-model="formData.receiveAccount"
+            placeholder="请输入收款账户"
+          />
         </el-form-item>
         <el-form-item label="收款人姓名">
-          <el-input v-model="formData.receiverName" placeholder="请输入收款人姓名" />
+          <el-input
+            v-model="formData.receiverName"
+            placeholder="请输入收款人姓名"
+          />
         </el-form-item>
         <el-form-item label="转账金额">
           <el-input v-model="formData.amount" placeholder="请输入转账金额">
@@ -121,13 +135,25 @@ defineTestHelpers('step-form', {
     </div>
 
     <div v-else>
-      <el-result icon="info" title="确认转账信息" sub-title="请确认以下转账信息无误后提交">
+      <el-result
+        icon="info"
+        title="确认转账信息"
+        sub-title="请确认以下转账信息无误后提交"
+      >
         <template #extra>
           <el-descriptions :column="1" border>
-            <el-descriptions-item label="付款账户">{{ formData.payAccount }}</el-descriptions-item>
-            <el-descriptions-item label="收款账户">{{ formData.receiveAccount }}</el-descriptions-item>
-            <el-descriptions-item label="收款人姓名">{{ formData.receiverName }}</el-descriptions-item>
-            <el-descriptions-item label="转账金额">¥ {{ formData.amount }}</el-descriptions-item>
+            <el-descriptions-item label="付款账户">{{
+              formData.payAccount
+            }}</el-descriptions-item>
+            <el-descriptions-item label="收款账户">{{
+              formData.receiveAccount
+            }}</el-descriptions-item>
+            <el-descriptions-item label="收款人姓名">{{
+              formData.receiverName
+            }}</el-descriptions-item>
+            <el-descriptions-item label="转账金额"
+              >¥ {{ formData.amount }}</el-descriptions-item
+            >
           </el-descriptions>
           <div class="mt-4">
             <el-button @click="onPrev">上一步</el-button>

@@ -17,7 +17,7 @@ function onInput() {
   modelValue.value = mint.filter(modelValue.value).text;
 }
 
-defineTestHelpers('able-sensitive', {})
+defineTestHelpers("able-sensitive", {});
 </script>
 
 <template>

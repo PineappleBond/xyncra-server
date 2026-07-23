@@ -31,7 +31,7 @@ const load = () => {
   }
 };
 
-defineTestHelpers('able-infinite-scroll', {})
+defineTestHelpers("able-infinite-scroll", {});
 </script>
 
 <template>

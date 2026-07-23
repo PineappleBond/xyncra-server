@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "ButtonPage"
@@ -10,8 +10,7 @@ const { VITE_PUBLIC_PATH } = import.meta.env;
 
 const url = ref(`${VITE_PUBLIC_PATH}html/button.html`);
 
-
-defineTestHelpers('components-button', {})
+defineTestHelpers("components-button", {});
 </script>
 
 <template>

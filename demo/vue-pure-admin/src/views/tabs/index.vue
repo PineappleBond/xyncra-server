@@ -11,12 +11,11 @@ import { clone } from "@pureadmin/utils";
 import { transformI18n } from "@/plugins/i18n";
 import { useMultiTagsStoreHook } from "@/store/modules/multiTags";
 import { usePermissionStoreHook } from "@/store/modules/permission";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "Tabs"
 });
-
 
 const { locale } = useI18n();
 const { toDetail, router } = useDetail();
@@ -54,22 +53,24 @@ function onCloseTags() {
   });
 }
 
-defineTestHelpers('tabs', {
+defineTestHelpers("tabs", {
   switchTab: {
-    name: 'switchTab',
-    description: 'Switch to a tab by name',
+    name: "switchTab",
+    description: "Switch to a tab by name",
     parameters: {
-      type: 'object',
-      properties: { tab: { type: 'string', description: 'Tab name to switch to' } },
-      required: ['tab'],
+      type: "object",
+      properties: {
+        tab: { type: "string", description: "Tab name to switch to" }
+      },
+      required: ["tab"]
     },
-    handler: (args) => {
+    handler: args => {
       if (args.tab) {
-        router.push({ name: args.tab as string })
+        router.push({ name: args.tab as string });
       }
-    },
-  },
-})
+    }
+  }
+});
 </script>
 
 <template>

@@ -2,7 +2,7 @@
 import { h } from "vue";
 import { ElEmpty } from "element-plus";
 import { deviceDetection } from "@pureadmin/utils";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import {
   ChatGPT,
   Bard,
@@ -95,20 +95,24 @@ const swiperExample: any[] = [
   }
 ];
 
-defineTestHelpers('chatai', {
+defineTestHelpers("chatai", {
   sendMessage: {
-    name: 'sendMessage',
-    description: 'Send a message in chat',
-    parameters: { type: 'object', properties: {} },
-    handler: () => { console.log('chatai sendMessage') },
+    name: "sendMessage",
+    description: "Send a message in chat",
+    parameters: { type: "object", properties: {} },
+    handler: () => {
+      console.log("chatai sendMessage");
+    }
   },
   clearChat: {
-    name: 'clearChat',
-    description: 'Clear chat history',
-    parameters: { type: 'object', properties: {} },
-    handler: () => { console.log('chatai clearChat') },
-  },
-})
+    name: "clearChat",
+    description: "Clear chat history",
+    parameters: { type: "object", properties: {} },
+    handler: () => {
+      console.log("chatai clearChat");
+    }
+  }
+});
 </script>
 
 <template>

@@ -32,7 +32,7 @@ onMounted(() => {
   });
 });
 
-defineTestHelpers('able-video', {})
+defineTestHelpers("able-video", {});
 </script>
 
 <template>

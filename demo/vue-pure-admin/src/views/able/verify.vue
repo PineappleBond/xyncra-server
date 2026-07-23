@@ -13,7 +13,7 @@ function onFail() {
   console.log("验证失败");
 }
 
-defineTestHelpers('able-verify', {})
+defineTestHelpers("able-verify", {});
 </script>
 
 <template>

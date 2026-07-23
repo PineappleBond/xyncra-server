@@ -34,7 +34,7 @@ const onPrint = () => {
   pdfRef.value.print();
 };
 
-defineTestHelpers('able-pdf', {})
+defineTestHelpers("able-pdf", {});
 </script>
 
 <template>

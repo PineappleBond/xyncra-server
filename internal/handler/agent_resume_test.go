@@ -98,12 +98,20 @@ func parseAgentResumeResponseMap(t *testing.T, data json.RawMessage) map[string]
 	return resp
 }
 
-// decodeAgentResumePayload extracts the task payload from the first enqueued
+// decodeAgentResumePayload extracts the agent_resume task payload from enqueued tasks.
+// It finds the task by type (mq.TypeAgentResume) since broadcast may also enqueue tasks.
 func decodeAgentResumePayload(t *testing.T, env *agentResumeTestEnv) agentResumeTaskPayload {
 	t.Helper()
-	require.Len(t, env.broker.enqueued, 1, "expected 1 enqueued task")
+	var task *mq.Task
+	for _, tk := range env.broker.enqueued {
+		if tk.Type == mq.TypeAgentResume {
+			task = tk
+			break
+		}
+	}
+	require.NotNil(t, task, "expected an enqueued agent_resume task")
 	var payload agentResumeTaskPayload
-	require.NoError(t, json.Unmarshal(env.broker.enqueued[0].Payload, &payload))
+	require.NoError(t, json.Unmarshal(task.Payload, &payload))
 	return payload
 }
 

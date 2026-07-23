@@ -21,7 +21,7 @@ const dataProps = {
   children: "children"
 };
 
-defineTestHelpers('able-line-tree', {})
+defineTestHelpers("able-line-tree", {});
 </script>
 
 <template>
@@ -38,8 +38,8 @@ defineTestHelpers('able-line-tree', {})
         >
           代码位置 src/views/able/line-tree.vue
         </el-link>
-  </div>
-</template>
+      </div>
+    </template>
 
     <el-row :gutter="24">
       <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12" class="mb-5">

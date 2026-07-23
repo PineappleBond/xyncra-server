@@ -8,7 +8,7 @@ defineOptions({
   name: "VirtualList"
 });
 
-defineTestHelpers('components-virtual-list', {})
+defineTestHelpers("components-virtual-list", {});
 </script>
 
 <template>

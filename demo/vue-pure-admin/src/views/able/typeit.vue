@@ -10,7 +10,7 @@ const options: TypeItOptions = {
   strings: ["test1", "test2", "test3"]
 };
 
-defineTestHelpers('able-typeit', {})
+defineTestHelpers("able-typeit", {});
 </script>
 
 <template>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { defineTestHelpers } from '../../../../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import { useI18n } from "vue-i18n";
 import { useRoute } from "vue-router";
 
@@ -12,8 +12,7 @@ const input = ref("");
 const { t } = useI18n();
 const { query } = useRoute();
 
-
-defineTestHelpers('nested-menu1-2-2', {})
+defineTestHelpers("nested-menu1-2-2", {});
 </script>
 
 <template>

@@ -19,7 +19,7 @@ const settingTB: ContextProps = reactive({
   split: "horizontal"
 });
 
-defineTestHelpers('components-split-pane', {})
+defineTestHelpers("components-split-pane", {});
 </script>
 
 <template>

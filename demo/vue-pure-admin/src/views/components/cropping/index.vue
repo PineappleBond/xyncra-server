@@ -1,6 +1,6 @@
 <script setup lang="tsx">
 import avatar from "./avatar.png";
-import { defineTestHelpers } from '../../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import { ref, onBeforeUnmount } from "vue";
 import ReCropper from "@/components/ReCropper";
 import { formatBytes } from "@pureadmin/utils";
@@ -25,8 +25,7 @@ onBeforeUnmount(() => {
   popoverRef.value.hide();
 });
 
-
-defineTestHelpers('components-cropping', {})
+defineTestHelpers("components-cropping", {});
 </script>
 
 <template>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import basic from "./basic.vue";
-import { defineTestHelpers } from '../../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import menuGroup from "./menuGroup.vue";
 import menuDynamic from "./menuDynamic.vue";
 import "v-contextmenu/dist/themes/default.css";
@@ -9,8 +9,7 @@ defineOptions({
   name: "ContextMenu"
 });
 
-
-defineTestHelpers('components-contextmenu', {})
+defineTestHelpers("components-contextmenu", {});
 </script>
 
 <template>

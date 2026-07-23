@@ -110,8 +110,19 @@ func NewRemoteCallingCleanupTask(
 // recovered to prevent the background goroutine from crashing the server.
 // Cleanup failures are logged but do not interrupt the loop (D-007).
 //
-// The first cleanup does not run immediately; Run waits for the first tick.
+// The first cleanup runs immediately on startup to avoid a 5-minute delay
+// before stale conversations and expired RemoteCallings are cleaned up.
 func (t *RemoteCallingCleanupTask) Run(ctx context.Context) {
+	// Run cleanup immediately on startup to catch stale/expired records right away.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.logger.Error("panic recovered on initial cleanup", "error", r, "stack", string(debug.Stack()))
+			}
+		}()
+		t.cleanupOnce(ctx)
+	}()
+
 	ticker := time.NewTicker(t.config.Interval)
 	defer ticker.Stop()
 

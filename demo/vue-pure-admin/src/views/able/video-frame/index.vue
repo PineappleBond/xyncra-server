@@ -76,7 +76,7 @@ onBeforeUnmount(() => {
   emitter.off("imageInfo");
 });
 
-defineTestHelpers('able-video-frame', {})
+defineTestHelpers("able-video-frame", {});
 </script>
 
 <template>

@@ -398,15 +398,7 @@ func NewAgentResumeHandler(
 				}
 
 				if executor.remoteCallingStore != nil {
-					timeoutMs := interruptInfo.TimeoutMs
-					if timeoutMs <= 0 {
-						timeoutMs = DefaultClientFunctionCallTimeoutMs // unified fallback constant
-					}
-					// Enforce minimum timeout to prevent RemoteCallings from expiring
-					// before the client has a reasonable chance to process them.
-					if timeoutMs < MinClientFunctionCallTimeoutMs {
-						timeoutMs = MinClientFunctionCallTimeoutMs
-					}
+					timeoutMs := NormalizeClientFunctionTimeout(int(interruptInfo.TimeoutMs), 0)
 					expiresAt := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 					rc := &model.RemoteCalling{
 						ID:             uuid.New().String(),
@@ -424,6 +416,15 @@ func NewAgentResumeHandler(
 					if err := executor.remoteCallingStore.Create(ctx, rc); err != nil {
 						releaseLock()
 						return fmt.Errorf("agent resume: create remote calling: %w", err)
+					}
+				}
+
+				// Persisted broadcast to conversation members (D-137).
+				if executor.broadcastConversationUpdate != nil {
+					memberIDs := executor.getConversationMemberIDs(ctx, payload.ConversationID)
+					if err := executor.broadcastConversationUpdate(ctx, payload.ConversationID, memberIDs, "update"); err != nil {
+						logger.Info("agent resume: broadcast conversation update failed (non-fatal)",
+							"conversation_id", payload.ConversationID, "error", err)
 					}
 				}
 
@@ -458,6 +459,15 @@ func NewAgentResumeHandler(
 					if err := executor.remoteCallingStore.Create(ctx, rc); err != nil {
 						releaseLock()
 						return fmt.Errorf("agent resume: create remote calling: %w", err)
+					}
+				}
+
+				// Persisted broadcast to conversation members (D-137).
+				if executor.broadcastConversationUpdate != nil {
+					memberIDs := executor.getConversationMemberIDs(ctx, payload.ConversationID)
+					if err := executor.broadcastConversationUpdate(ctx, payload.ConversationID, memberIDs, "update"); err != nil {
+						logger.Info("agent resume: broadcast conversation update failed (non-fatal)",
+							"conversation_id", payload.ConversationID, "error", err)
 					}
 				}
 

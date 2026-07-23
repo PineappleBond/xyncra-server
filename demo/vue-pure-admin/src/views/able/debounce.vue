@@ -15,7 +15,7 @@ const debounceClick = debounce(handle, 1000);
 
 const throttleClick = throttle(handle);
 
-defineTestHelpers('able-debounce', {})
+defineTestHelpers("able-debounce", {});
 </script>
 
 <template>

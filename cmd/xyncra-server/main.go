@@ -353,6 +353,8 @@ func main() {
 	agentBuilder.SetToolRegistry(agenttools.DefaultRegistry)
 	// Wire the agent registry for sub-agent resolution (D-081).
 	agentBuilder.SetRegistry(agentRegistry)
+	// Wire MessageStore for summary persistence (D-summary).
+	agentBuilder.SetMessageStore(dataStore.MessageStore())
 	streamBridge := agent.NewStreamBridge()
 	broadcastHelper := agent.NewBroadcastHelper(srv, srv.Logger())
 	// Wire the agent registry so BroadcastHelper can resolve is_agent
@@ -381,6 +383,7 @@ func main() {
 		agent.WithLLMMetrics(llmMetrics),
 		agent.WithCheckPointStore(checkpointStore),         // D-112: checkpoint cleanup after resume
 		agent.WithRemoteCallingStore(dataStore.RemoteCallingStore()), // RemoteCalling persistence (D-137)
+		agent.WithBroadcastConversationUpdate(agent.BroadcastConversationUpdateFunc(handler.NewBroadcastConversationUpdateFunc(dataStore, broker, srv.Logger()))), // persisted conversation broadcast (D-137)
 	)
 
 	// Idempotency store for agent task deduplication (D-Phase5-2).

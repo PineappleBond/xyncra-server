@@ -10,7 +10,7 @@ defineOptions({
   name: "Message"
 });
 
-defineTestHelpers('components-message', {})
+defineTestHelpers("components-message", {});
 </script>
 
 <template>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "ColorPickerPanel"
@@ -25,8 +25,7 @@ const predefineColors = [
   "#c7158577"
 ];
 
-
-defineTestHelpers('components-color-picker-panel', {})
+defineTestHelpers("components-color-picker-panel", {});
 </script>
 
 <template>

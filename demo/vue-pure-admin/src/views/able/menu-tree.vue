@@ -42,7 +42,7 @@ const filterMethod = (query: string, node: treeNode) => {
   return transformI18n(node.meta.title)!.indexOf(query) !== -1;
 };
 
-defineTestHelpers('able-menu-tree', {})
+defineTestHelpers("able-menu-tree", {});
 </script>
 
 <template>

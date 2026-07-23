@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 
 defineOptions({
@@ -128,8 +128,7 @@ watch(size, val =>
     : (dynamicSize.value = size.value)
 );
 
-
-defineTestHelpers('components-date-picker', {})
+defineTestHelpers("components-date-picker", {});
 </script>
 
 <template>

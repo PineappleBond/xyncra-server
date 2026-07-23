@@ -11,6 +11,7 @@
 
 import type { ConnectionCallbacks } from '../connection-manager';
 import { backoffDelay, ConnectionManager } from '../connection-manager';
+import { ConnectionError } from '../errors';
 import {
   createMockLogger,
   createMockWebSocket,
@@ -53,8 +54,8 @@ describe('ConnectionManager', () => {
       data: { id: 'test', method: 'test', params: null },
     };
 
-    // Note: sendPackage will drop if not connected, but it still sets version=1
-    connMgr.sendPackage(pkg);
+    // sendPackage throws ConnectionError when not connected, but still sets version=1
+    expect(() => connMgr.sendPackage(pkg)).toThrow(ConnectionError);
     expect(pkg.version).toBe(1);
   });
 

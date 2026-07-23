@@ -84,7 +84,7 @@ const swiperExample: any[] = [
   }
 ];
 
-defineTestHelpers('components-swiper', {})
+defineTestHelpers("components-swiper", {});
 </script>
 
 <template>

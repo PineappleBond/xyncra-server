@@ -3,7 +3,7 @@ import { ref } from "vue";
 import { useRole } from "./hook";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
-import { defineTestHelpers } from '../../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 import Plane from "~icons/ri/plane-line";
 import Refresh from "~icons/ep/refresh";
@@ -27,28 +27,30 @@ const {
   handleSelectionChange
 } = useRole();
 
-defineTestHelpers('monitor', {
+defineTestHelpers("monitor", {
   search: {
-    name: 'search',
-    description: 'Search online users',
+    name: "search",
+    description: "Search online users",
     parameters: {
-      type: 'object',
-      properties: { keyword: { type: 'string', description: 'Search keyword' } },
+      type: "object",
+      properties: { keyword: { type: "string", description: "Search keyword" } }
     },
-    handler: (args) => {
+    handler: args => {
       if (args.keyword !== undefined) {
-        form.username = args.keyword as string
+        form.username = args.keyword as string;
       }
-      onSearch()
-    },
+      onSearch();
+    }
   },
   refresh: {
-    name: 'refresh',
-    description: 'Refresh online users list',
-    parameters: { type: 'object', properties: {} },
-    handler: () => { onSearch() },
-  },
-})
+    name: "refresh",
+    description: "Refresh online users list",
+    parameters: { type: "object", properties: {} },
+    handler: () => {
+      onSearch();
+    }
+  }
+});
 </script>
 
 <template>

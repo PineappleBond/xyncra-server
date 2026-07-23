@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { defineTestHelpers } from '../../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "ListSearch"
@@ -23,45 +23,48 @@ const onTabChange = (tab: string) => {
   activeTab.value = tab;
 };
 
-defineTestHelpers('list-search', {
+defineTestHelpers("list-search", {
   switchTab: {
-    name: 'switchTab',
-    description: '切换搜索分类 Tab',
+    name: "switchTab",
+    description: "切换搜索分类 Tab",
     parameters: {
-      type: 'object',
+      type: "object",
       properties: {
-        tab: { type: 'string', description: 'Tab 名称（articles/projects/applications）' }
+        tab: {
+          type: "string",
+          description: "Tab 名称（articles/projects/applications）"
+        }
       },
-      required: ['tab']
+      required: ["tab"]
     },
-    handler: (args) => onTabChange((args as { tab: string }).tab)
+    handler: args => onTabChange((args as { tab: string }).tab)
   },
   search: {
-    name: 'search',
-    description: '执行搜索',
+    name: "search",
+    description: "执行搜索",
     parameters: {
-      type: 'object',
+      type: "object",
       properties: {
-        keyword: { type: 'string', description: '搜索关键词' }
+        keyword: { type: "string", description: "搜索关键词" }
       }
     },
-    handler: (args) => {
+    handler: args => {
       const { keyword } = args as { keyword?: string };
       if (keyword) searchKeyword.value = keyword;
       onSearch();
     }
   },
   setSearchKeyword: {
-    name: 'setSearchKeyword',
-    description: '设置搜索关键词',
+    name: "setSearchKeyword",
+    description: "设置搜索关键词",
     parameters: {
-      type: 'object',
+      type: "object",
       properties: {
-        keyword: { type: 'string', description: '搜索关键词' }
+        keyword: { type: "string", description: "搜索关键词" }
       },
-      required: ['keyword']
+      required: ["keyword"]
     },
-    handler: (args) => {
+    handler: args => {
       searchKeyword.value = (args as { keyword: string }).keyword;
     }
   }
@@ -76,7 +79,12 @@ defineTestHelpers('list-search', {
       </div>
     </template>
     <el-tabs v-model="activeTab" @tab-change="onTabChange">
-      <el-tab-pane v-for="tab in tabs" :key="tab.key" :label="tab.label" :name="tab.key" />
+      <el-tab-pane
+        v-for="tab in tabs"
+        :key="tab.key"
+        :label="tab.label"
+        :name="tab.key"
+      />
     </el-tabs>
     <div class="mb-4">
       <el-input

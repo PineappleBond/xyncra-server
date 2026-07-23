@@ -25,7 +25,7 @@ function down() {
     });
 }
 
-defineTestHelpers('able-download', {})
+defineTestHelpers("able-download", {});
 </script>
 
 <template>

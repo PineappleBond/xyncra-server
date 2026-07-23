@@ -99,14 +99,7 @@ func TestExecuteClientFunction_InterruptDataFormat(t *testing.T) {
 		TimeoutMs: 60000, // 60 seconds, above minimum
 	}
 
-	timeoutMs := funcInfo.TimeoutMs
-	if timeoutMs <= 0 {
-		timeoutMs = DefaultClientFunctionCallTimeoutMs
-	}
-	// Enforce minimum timeout
-	if timeoutMs < MinClientFunctionCallTimeoutMs {
-		timeoutMs = MinClientFunctionCallTimeoutMs
-	}
+	timeoutMs := NormalizeClientFunctionTimeout(funcInfo.TimeoutMs, 0)
 
 	interruptData, _ := json.Marshal(map[string]any{
 		"method":     funcInfo.Name,
@@ -141,16 +134,9 @@ func TestExecuteClientFunction_MinTimeoutEnforcement(t *testing.T) {
 		TimeoutMs: 5000, // 5 seconds, below minimum (60s)
 	}
 
-	timeoutMs := funcInfo.TimeoutMs
-	if timeoutMs <= 0 {
-		timeoutMs = DefaultClientFunctionCallTimeoutMs
-	}
-	// Enforce minimum timeout
-	if timeoutMs < MinClientFunctionCallTimeoutMs {
-		timeoutMs = MinClientFunctionCallTimeoutMs
-	}
+	timeoutMs := NormalizeClientFunctionTimeout(funcInfo.TimeoutMs, 0)
 
-	assert.Equal(t, int64(MinClientFunctionCallTimeoutMs), int64(timeoutMs),
+	assert.Equal(t, MinClientFunctionCallTimeoutMs, timeoutMs,
 		"timeout_ms below minimum should be clamped to MinClientFunctionCallTimeoutMs")
 }
 
@@ -164,14 +150,7 @@ func TestExecuteClientFunction_DefaultTimeout(t *testing.T) {
 		TimeoutMs: 0,
 	}
 
-	timeoutMs := funcInfo.TimeoutMs
-	if timeoutMs <= 0 {
-		timeoutMs = DefaultClientFunctionCallTimeoutMs
-	}
-	// Enforce minimum timeout
-	if timeoutMs < MinClientFunctionCallTimeoutMs {
-		timeoutMs = MinClientFunctionCallTimeoutMs
-	}
+	timeoutMs := NormalizeClientFunctionTimeout(funcInfo.TimeoutMs, 0)
 
-	assert.Equal(t, int64(DefaultClientFunctionCallTimeoutMs), int64(timeoutMs))
+	assert.Equal(t, DefaultClientFunctionCallTimeoutMs, timeoutMs)
 }

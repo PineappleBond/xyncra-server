@@ -8,7 +8,7 @@ defineOptions({
 
 const format = percentage => (percentage === 100 ? "Full" : `${percentage}%`);
 
-defineTestHelpers('components-progress', {})
+defineTestHelpers("components-progress", {});
 </script>
 
 <template>

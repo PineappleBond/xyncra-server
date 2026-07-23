@@ -2,7 +2,11 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
@@ -10,6 +14,10 @@ import (
 	"github.com/cloudwego/eino/adk/middlewares/reduction"
 	"github.com/cloudwego/eino/adk/middlewares/summarization"
 	einomodel "github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
+
+	"github.com/PineappleBond/xyncra-server/internal/store"
+	"github.com/PineappleBond/xyncra-server/internal/store/model"
 )
 
 // buildMiddleware constructs the middleware chain for an agent based on its
@@ -22,6 +30,7 @@ func (b *AgentBuilder) buildMiddleware(
 	ctx context.Context,
 	config *AgentConfig,
 	chatModel einomodel.BaseChatModel,
+	messageStore *store.MessageStore,
 ) []adk.ChatModelAgentMiddleware {
 	var mws []adk.ChatModelAgentMiddleware
 
@@ -57,6 +66,7 @@ func (b *AgentBuilder) buildMiddleware(
 			Trigger: &summarization.TriggerCondition{
 				ContextTokens: tokens,
 			},
+			Callback: buildSummarizeCallback(messageStore, b.logger),
 		})
 		if err != nil {
 			log.Default().Printf("agent %s: summarization middleware init failed, skipping: %v", config.ID, err)
@@ -100,4 +110,115 @@ func (b *AgentBuilder) buildMiddleware(
 	}
 
 	return mws
+}
+
+// buildSummarizeCallback creates a Callback that persists the summary to the database.
+// It marks old messages as summarized and inserts a new summary message.
+func buildSummarizeCallback(messageStore *store.MessageStore, logger Logger) summarization.TypedCallbackFunc[*schema.Message] {
+	return func(ctx context.Context, before, after adk.TypedChatModelAgentState[*schema.Message]) error {
+		// Get conversationID from context
+		convID, ok := ConversationIDFromContext(ctx)
+		if !ok || convID == "" {
+			if logger != nil {
+				logger.Info("summarize callback: no conversation ID in context, skipping persistence")
+			}
+			return nil
+		}
+
+		if messageStore == nil {
+			return nil
+		}
+
+		// Find the max DB MessageID from before.Messages
+		var maxMessageID uint32
+		for _, msg := range before.Messages {
+			if msg.Extra == nil {
+				continue
+			}
+			if idRaw, ok := msg.Extra["xyncra_message_id"]; ok {
+				// JSON unmarshal converts uint32 to float64
+				if idFloat, ok := idRaw.(float64); ok {
+					id := uint32(idFloat)
+					if id > maxMessageID {
+						maxMessageID = id
+					}
+				}
+			}
+		}
+
+		if maxMessageID == 0 {
+			if logger != nil {
+				logger.Info("summarize callback: no DB MessageID found in before messages")
+			}
+			return nil
+		}
+
+		// Extract summary content from after.Messages
+		// The summary is a user message with Extra["_eino_summarization_content_type"] == "summary"
+		var summaryContent string
+		for _, msg := range after.Messages {
+			if msg.Extra == nil {
+				continue
+			}
+			if ct, ok := msg.Extra["_eino_summarization_content_type"]; ok && ct == "summary" {
+				if msg.Content != "" {
+					summaryContent = msg.Content
+				}
+				break
+			}
+		}
+
+		if summaryContent == "" {
+			if logger != nil {
+				logger.Info("summarize callback: no summary content found in after messages")
+			}
+			return nil
+		}
+
+		// Create summary message
+		summaryMsg := &model.Message{
+			ID:             uuid.New().String(),
+			ConversationID: convID,
+			SenderID:       "system",
+			Content:        summaryContent,
+			Type:           "summary",
+			Status:         "sent",
+			CreatedAt:      time.Now(),
+		}
+
+		// Use a transaction to ensure atomicity
+		tx := messageStore.Begin()
+		if tx.Error != nil {
+			return fmt.Errorf("summarize callback: begin tx: %w", tx.Error)
+		}
+
+		// Insert summary message
+		if err := tx.Create(summaryMsg).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("summarize callback: insert summary: %w", err)
+		}
+
+		// Mark old messages as summarized
+		result := tx.Model(&model.Message{}).
+			Where("conversation_id = ? AND message_id <= ? AND summarized = ?", convID, maxMessageID, false).
+			Update("summarized", true)
+		if result.Error != nil {
+			tx.Rollback()
+			return fmt.Errorf("summarize callback: mark summarized: %w", result.Error)
+		}
+
+		// Commit transaction
+		if err := tx.Commit().Error; err != nil {
+			return fmt.Errorf("summarize callback: commit tx: %w", err)
+		}
+
+		if logger != nil {
+			logger.Info("summarize callback: persisted summary",
+				"conversation_id", convID,
+				"messages_marked", result.RowsAffected,
+			)
+		}
+
+		return nil
+	}
 }

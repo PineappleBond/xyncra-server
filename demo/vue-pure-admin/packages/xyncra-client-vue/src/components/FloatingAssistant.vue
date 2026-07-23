@@ -1,6 +1,6 @@
 <template>
   <div class="xyncra-floating-assistant">
-    <el-badge :is-dot="hasQuestions" class="floating-badge">
+    <el-badge :is-dot="executingCalls.length > 0" class="floating-badge">
       <el-button
         class="floating-button"
         :type="buttonType"
@@ -124,13 +124,10 @@
       </div>
     </Teleport>
 
-    <RemoteCallingDialog
-      :visible="hitlVisible"
-      :callings="pendingCallings"
-      :is-submitting="isSubmitting"
-      @submit="handleSubmitRemoteCalling"
-      @dismiss="handleDismissRemoteCalling"
-      @update:visible="hitlVisible = $event"
+    <AskUserDialog />
+    <RemoteCallingStatusIndicator
+      :executing-calls="executingCalls"
+      @cancel="cancelCall"
     />
   </div>
 </template>
@@ -139,28 +136,26 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { Close, Plus, User, ChatDotRound } from '@element-plus/icons-vue'
 import { useXyncra } from '../composables/useXyncra'
-import { useRemoteCalling } from '../composables/useRemoteCalling'
+import { useRemoteCallingRouter } from '../composables/useRemoteCallingRouter'
 import { useConversations } from '../composables/useConversations'
 import { getAgentName } from '../constants/agents'
 import ConnectionStatus from './ConnectionStatus.vue'
 import ChatPanel from './ChatPanel.vue'
-import RemoteCallingDialog from './RemoteCallingDialog.vue'
+import AskUserDialog from './AskUserDialog.vue'
+import RemoteCallingStatusIndicator from './RemoteCallingStatusIndicator.vue'
 import AgentSelector from './AgentSelector.vue'
 import ConversationList from './ConversationList.vue'
 
 const { connectionStatus, reconnect } = useXyncra()
 const { conversations, currentConversationId, selectConversation, createConversation, createConversationWithAgent } = useConversations()
-const { pendingCallings, currentCalling, resolveCalling, dismiss, isSubmitting } = useRemoteCalling(currentConversationId)
+const { executingCalls, cancelCall } = useRemoteCallingRouter()
 
 const panelVisible = ref(false)
 const slideIn = ref(false)
 const showAgentPanel = ref(false)
 const showConvPanel = ref(false)
-const hitlVisible = ref(false)
 const sidebarRef = ref<HTMLElement | null>(null)
 const selectedAgentID = ref<string | null>(null)
-
-const hasQuestions = computed(() => pendingCallings.value.length > 0)
 
 const buttonType = computed(() => {
   switch (connectionStatus.value) {
@@ -227,28 +222,6 @@ function handleCreateConversation() {
 
 function handleReconnect() {
   reconnect()
-}
-
-watch(pendingCallings, (callings) => {
-  if (callings.length > 0) {
-    hitlVisible.value = true
-  }
-})
-
-async function handleSubmitRemoteCalling(resolutions: Map<string, { success: boolean; result?: string; errorMessage?: string }>) {
-  try {
-    for (const [id, { success, result, errorMessage }] of resolutions) {
-      await resolveCalling(id, success, result, errorMessage)
-    }
-    hitlVisible.value = false
-  } catch (error) {
-    console.error('[FloatingAssistant] Failed to submit remote calling answers:', error)
-  }
-}
-
-function handleDismissRemoteCalling() {
-  dismiss()
-  hitlVisible.value = false
 }
 
 // Close sidebar on Escape key

@@ -187,7 +187,7 @@ onUnmounted(() => {
   }
 });
 
-defineTestHelpers('able-mqtt-client', {})
+defineTestHelpers("able-mqtt-client", {});
 </script>
 
 <template>

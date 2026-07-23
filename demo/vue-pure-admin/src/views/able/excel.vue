@@ -68,7 +68,7 @@ const exportExcel = () => {
   writeFile(workBook, "tableV2.xlsx");
 };
 
-defineTestHelpers('able-excel', {})
+defineTestHelpers("able-excel", {});
 </script>
 
 <template>

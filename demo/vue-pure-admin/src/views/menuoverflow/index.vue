@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "MenuOverflow"
 });
 
-
-defineTestHelpers('menuoverflow', {})
+defineTestHelpers("menuoverflow", {});
 </script>
 
 <template>

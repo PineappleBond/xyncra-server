@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { defineTestHelpers } from '../../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "AdvancedForm"
@@ -24,25 +24,25 @@ const onSubmit = () => {
   console.log("Advanced form submitted:", formData.value);
 };
 
-defineTestHelpers('advanced-form', {
+defineTestHelpers("advanced-form", {
   submit: {
-    name: 'submit',
-    description: '提交高级表单',
-    parameters: { type: 'object', properties: {} },
+    name: "submit",
+    description: "提交高级表单",
+    parameters: { type: "object", properties: {} },
     handler: () => onSubmit()
   },
   setFieldValue: {
-    name: 'setFieldValue',
-    description: '设置表单字段值',
+    name: "setFieldValue",
+    description: "设置表单字段值",
     parameters: {
-      type: 'object',
+      type: "object",
       properties: {
-        field: { type: 'string', description: '字段名' },
-        value: { description: '字段值' }
+        field: { type: "string", description: "字段名" },
+        value: { description: "字段值" }
       },
-      required: ['field', 'value']
+      required: ["field", "value"]
     },
-    handler: (args) => {
+    handler: args => {
       const { field, value } = args as { field: string; value: unknown };
       if (field in formData.value) {
         (formData.value as Record<string, unknown>)[field] = value;
@@ -80,7 +80,13 @@ defineTestHelpers('advanced-form', {
         </el-select>
       </el-form-item>
       <el-form-item label="生效日期">
-        <el-date-picker v-model="formData.dateRange" type="daterange" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" />
+        <el-date-picker
+          v-model="formData.dateRange"
+          type="daterange"
+          range-separator="至"
+          start-placeholder="开始日期"
+          end-placeholder="结束日期"
+        />
       </el-form-item>
       <el-form-item label="仓库类型">
         <el-select v-model="formData.type" placeholder="请选择仓库类型">
@@ -94,7 +100,11 @@ defineTestHelpers('advanced-form', {
         <el-input v-model="formData.taskName" placeholder="请输入任务名" />
       </el-form-item>
       <el-form-item label="任务描述">
-        <el-input v-model="formData.taskDesc" type="textarea" placeholder="请输入任务描述" />
+        <el-input
+          v-model="formData.taskDesc"
+          type="textarea"
+          placeholder="请输入任务描述"
+        />
       </el-form-item>
       <el-form-item label="执行人">
         <el-select v-model="formData.taskOwner" placeholder="请选择执行人">

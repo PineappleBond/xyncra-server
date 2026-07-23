@@ -15,7 +15,7 @@ const changeTooltipContent = () => {
     "现在的时间是: " + dayjs().format("YYYY-MM-DD HH:mm:ss");
 };
 
-defineTestHelpers('components-text', {})
+defineTestHelpers("components-text", {});
 </script>
 
 <template>

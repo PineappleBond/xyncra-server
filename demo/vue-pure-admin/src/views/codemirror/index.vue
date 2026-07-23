@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import "codemirror/theme/material-darker.css";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import "codemirror/addon/hint/show-hint.css";
 import "codemirror/addon/hint/show-hint";
 import "codemirror/addon/hint/javascript-hint.js";
@@ -55,8 +55,7 @@ watch(
   }
 );
 
-
-defineTestHelpers('codemirror', {})
+defineTestHelpers("codemirror", {});
 </script>
 
 <template>

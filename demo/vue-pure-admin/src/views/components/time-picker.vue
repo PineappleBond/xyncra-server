@@ -52,7 +52,7 @@ const value5 = ref("");
 const startTime = ref("");
 const endTime = ref("");
 
-defineTestHelpers('components-time-picker', {})
+defineTestHelpers("components-time-picker", {});
 </script>
 
 <template>

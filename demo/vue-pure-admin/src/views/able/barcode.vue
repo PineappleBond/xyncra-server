@@ -29,7 +29,7 @@ const barcodes = [
   }
 ];
 
-defineTestHelpers('able-barcode', {})
+defineTestHelpers("able-barcode", {});
 </script>
 
 <template>

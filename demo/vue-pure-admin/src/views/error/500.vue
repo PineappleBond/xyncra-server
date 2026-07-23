@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { useRouter } from "vue-router";
 import noServer from "@/assets/status/500.svg?component";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
-defineTestHelpers('error-500', {})
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
+defineTestHelpers("error-500", {});
 
 defineOptions({
   name: "500"

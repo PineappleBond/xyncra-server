@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, markRaw } from "vue";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import ReCol from "@/components/ReCol";
 import { useDark, randomGradient } from "./utils";
 import WelcomeTable from "./components/table/index.vue";
@@ -9,7 +9,6 @@ import { useRenderFlicker } from "@/components/ReFlicker";
 import { ChartBar, ChartLine, ChartRound } from "./components/charts";
 import Segmented, { type OptionsType } from "@/components/ReSegmented";
 import { chartData, barChartData, progressData, latestNewsData } from "./data";
-
 
 defineOptions({
   name: "Welcome"
@@ -27,7 +26,7 @@ const optionsBasis: Array<OptionsType> = [
   }
 ];
 
-defineTestHelpers('welcome', {})
+defineTestHelpers("welcome", {});
 </script>
 
 <template>

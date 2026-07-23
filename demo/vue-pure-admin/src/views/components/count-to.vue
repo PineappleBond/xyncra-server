@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { ReNormalCountTo, ReboundCountTo } from "@/components/ReCountTo";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "CountTo"
 });
 
-
-defineTestHelpers('components-count-to', {})
+defineTestHelpers("components-count-to", {});
 </script>
 
 <template>

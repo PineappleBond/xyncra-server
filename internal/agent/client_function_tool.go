@@ -96,19 +96,7 @@ func executeClientFunction(
 	}
 
 	// First call: build interrupt data and trigger interrupt.
-	timeoutMs := funcInfo.TimeoutMs
-	if timeoutMs <= 0 {
-		if defaultCallTimeoutMs > 0 {
-			timeoutMs = defaultCallTimeoutMs
-		} else {
-			timeoutMs = DefaultClientFunctionCallTimeoutMs // unified fallback constant
-		}
-	}
-	// Enforce minimum timeout to prevent RemoteCallings from expiring
-	// before the client has a reasonable chance to process them.
-	if timeoutMs < MinClientFunctionCallTimeoutMs {
-		timeoutMs = MinClientFunctionCallTimeoutMs
-	}
+	timeoutMs := NormalizeClientFunctionTimeout(funcInfo.TimeoutMs, defaultCallTimeoutMs)
 
 	interruptData, err := json.Marshal(map[string]any{
 		"method":     funcInfo.Name,

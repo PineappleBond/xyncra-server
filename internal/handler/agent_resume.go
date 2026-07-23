@@ -225,10 +225,25 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 			"action":          "update",
 		})
 		sc.Append(protocol.PackageDataUpdate{
-			Seq:     0, // ephemeral: not persisted
-			Type:    protocol.UpdateTypeConversation,
-			Payload: updatePayload,
+			Seq:       0, // ephemeral: not persisted
+			Type:      protocol.UpdateTypeConversation,
+			Payload:   updatePayload,
+			CreatedAt: time.Now(),
 		})
+	}
+
+	// Persisted broadcast to conversation members (D-137).
+	// Creates UserUpdate records and enqueues MQ push for online devices.
+	conv, convErr := h.store.ConversationStore().Get(ctx, rc.ConversationID)
+	if convErr != nil {
+		h.logger.Error("agent_resume: get conversation for broadcast failed (non-fatal)",
+			"conversation_id", rc.ConversationID, "error", convErr)
+	} else {
+		members := conversationMembers(conv)
+		if err := broadcastConversationUpdateToMembers(ctx, h.store, h.broker, h.logger, rc.ConversationID, members, "update"); err != nil {
+			h.logger.Error("agent_resume: broadcast conversation update failed (non-fatal)",
+				"conversation_id", rc.ConversationID, "error", err)
+		}
 	}
 
 	return json.Marshal(map[string]interface{}{

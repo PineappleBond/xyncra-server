@@ -100,7 +100,7 @@ const onDownload = () => {
   });
 };
 
-defineTestHelpers('components-upload', {})
+defineTestHelpers("components-upload", {});
 </script>
 
 <template>

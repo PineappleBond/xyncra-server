@@ -198,7 +198,7 @@ function onChange({ index, option }) {
 
 watch(size, val => (dynamicSize.value = size.value));
 
-defineTestHelpers('components-segmented', {})
+defineTestHelpers("components-segmented", {});
 </script>
 
 <template>

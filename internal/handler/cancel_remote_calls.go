@@ -37,11 +37,15 @@ type cancelRemoteCallsParams struct {
 type cancelRemoteCallsHandler struct {
 	store  store.StoreAPI
 	broker mq.Broker
+	logger server.Logger
 }
 
 // NewCancelRemoteCallsHandler creates a handler for the "cancel_remote_calls" RPC method.
-func NewCancelRemoteCallsHandler(s store.StoreAPI, broker mq.Broker) *cancelRemoteCallsHandler {
-	return &cancelRemoteCallsHandler{store: s, broker: broker}
+func NewCancelRemoteCallsHandler(s store.StoreAPI, broker mq.Broker, logger server.Logger) *cancelRemoteCallsHandler {
+	if logger == nil {
+		logger = defaultLogger{}
+	}
+	return &cancelRemoteCallsHandler{store: s, broker: broker, logger: logger}
 }
 
 // HandleRequest implements MethodHandler. It batch-cancels all pending RemoteCallings
@@ -103,6 +107,13 @@ func (h *cancelRemoteCallsHandler) HandleRequest(ctx context.Context, client *se
 	cancelledCount, rcConvID, rcAgentID, err := rcs.CancelByCheckpoint(ctx, params.CheckpointID, params.Reason, cancelledBy)
 	if err != nil {
 		return nil, protocol.NewInternalError(fmt.Errorf("cancel_remote_calls: cancel: %w", err))
+	}
+
+	// Persisted broadcast to conversation members (D-137).
+	// `members` was already fetched and verified above (step 3).
+	if err := broadcastConversationUpdateToMembers(ctx, h.store, h.broker, h.logger, convID, members, "update"); err != nil {
+		h.logger.Error("cancel_remote_calls: broadcast conversation update failed (non-fatal)",
+			"conversation_id", convID, "error", err)
 	}
 
 	// 4. Check if all RemoteCallings for this checkpoint are resolved (D-138).

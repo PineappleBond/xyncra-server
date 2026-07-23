@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 // https://plus-pro-components.com/components/check-card-group.html
 import "plus-pro-components/es/components/check-card-group/style/css";
 import { PlusCheckCardGroup } from "plus-pro-components";
@@ -37,8 +37,7 @@ watch(size, val =>
     : (dynamicSize.value = size.value)
 );
 
-
-defineTestHelpers('components-check-card', {})
+defineTestHelpers("components-check-card", {});
 </script>
 
 <template>

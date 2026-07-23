@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 // https://zunnzunn.github.io/vue-ganttastic/introduction.html
 import { GGanttChart, GGanttRow } from "@infectoone/vue-ganttastic";
 
@@ -142,8 +142,7 @@ function getWeekRange() {
 
 const weekRangeInChina = getWeekRange();
 
-
-defineTestHelpers('ganttastic', {})
+defineTestHelpers("ganttastic", {});
 </script>
 
 <template>

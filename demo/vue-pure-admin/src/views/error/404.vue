@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { useRouter } from "vue-router";
 import noExist from "@/assets/status/404.svg?component";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
-defineTestHelpers('error-404', {})
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
+defineTestHelpers("error-404", {});
 
 defineOptions({
   name: "404"

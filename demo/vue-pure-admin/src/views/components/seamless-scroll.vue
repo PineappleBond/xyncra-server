@@ -48,7 +48,7 @@ function changeDirection(val) {
   unref(classOption).direction = val;
 }
 
-defineTestHelpers('components-seamless-scroll', {})
+defineTestHelpers("components-seamless-scroll", {});
 </script>
 
 <template>

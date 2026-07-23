@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import demoData from "./dataTurbo.json";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import "@logicflow/core/lib/style/index.css";
 import "@logicflow/extension/lib/style/index.css";
 
@@ -64,8 +64,7 @@ onMounted(() => {
   initLf();
 });
 
-
-defineTestHelpers('flow-chart', {})
+defineTestHelpers("flow-chart", {});
 </script>
 
 <template>

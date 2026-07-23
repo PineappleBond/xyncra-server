@@ -154,7 +154,7 @@ watch(size, val =>
     : (dynamicSize.value = size.value)
 );
 
-defineTestHelpers('components-datetime-picker', {})
+defineTestHelpers("components-datetime-picker", {});
 </script>
 
 <template>

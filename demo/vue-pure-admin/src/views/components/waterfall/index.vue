@@ -103,7 +103,7 @@ useInfiniteScroll(
   { distance: 10 }
 );
 
-defineTestHelpers('components-waterfall', {})
+defineTestHelpers("components-waterfall", {});
 </script>
 
 <template>

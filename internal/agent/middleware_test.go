@@ -20,7 +20,7 @@ func TestBuildMiddleware_NoMiddlewareEnabled(t *testing.T) {
 		},
 	}
 
-	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{})
+	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{}, nil)
 	if len(mws) != 0 {
 		t.Errorf("expected 0 middleware, got %d", len(mws))
 	}
@@ -39,7 +39,7 @@ func TestBuildMiddleware_PatchToolCallsOnly(t *testing.T) {
 		},
 	}
 
-	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{})
+	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{}, nil)
 	if len(mws) != 1 {
 		t.Errorf("expected 1 middleware, got %d", len(mws))
 	}
@@ -62,7 +62,7 @@ func TestBuildMiddleware_AllEnabled(t *testing.T) {
 		},
 	}
 
-	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{})
+	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{}, nil)
 	if len(mws) != 3 {
 		t.Errorf("expected 3 middleware, got %d", len(mws))
 	}
@@ -83,7 +83,7 @@ func TestBuildMiddleware_DefaultTokens(t *testing.T) {
 	}
 
 	// Just verify it doesn't panic and returns 1 middleware.
-	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{})
+	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{}, nil)
 	if len(mws) != 1 {
 		t.Errorf("expected 1 middleware (summarization), got %d", len(mws))
 	}
@@ -103,7 +103,7 @@ func TestBuildMiddleware_DefaultMaxChars(t *testing.T) {
 		},
 	}
 
-	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{})
+	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{}, nil)
 	if len(mws) != 1 {
 		t.Errorf("expected 1 middleware (tool reduction), got %d", len(mws))
 	}
@@ -125,7 +125,7 @@ func TestBuildMiddleware_DynamicToolProvider(t *testing.T) {
 		},
 	}
 
-	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{})
+	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{}, nil)
 	if len(mws) != 1 {
 		t.Errorf("expected 1 middleware (DynamicToolProvider), got %d", len(mws))
 	}
@@ -143,7 +143,7 @@ func TestBuildMiddleware_DynamicToolProvider_NilProviderSkipped(t *testing.T) {
 		},
 	}
 
-	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{})
+	mws := builder.buildMiddleware(context.Background(), config, &mockChatModel{}, nil)
 	if len(mws) != 0 {
 		t.Errorf("expected 0 middleware (provider nil → skipped), got %d", len(mws))
 	}

@@ -281,8 +281,8 @@ export class ConnectionManager {
     pkg.version = 1;
 
     if (this.closing || !this.connected || !this.ws) {
-      this.opts.logger.warn('sendPackage: not connected, dropping message');
-      return;
+      this.opts.logger.warn('sendPackage: not connected, rejecting message');
+      throw new ConnectionError('Cannot send package: not connected');
     }
 
     // Log the method being sent

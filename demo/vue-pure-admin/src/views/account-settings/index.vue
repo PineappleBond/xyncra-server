@@ -9,7 +9,7 @@ import SecurityLog from "./components/SecurityLog.vue";
 import { useGlobal, deviceDetection } from "@pureadmin/utils";
 import AccountManagement from "./components/AccountManagement.vue";
 import { useDataThemeChange } from "@/layout/hooks/useDataThemeChange";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import LaySidebarTopCollapse from "@/layout/components/lay-sidebar/components/SidebarTopCollapse.vue";
 
 import leftLine from "~icons/ri/arrow-left-s-line";
@@ -21,7 +21,6 @@ import AccountManagementIcon from "~icons/ri/profile-line";
 defineOptions({
   name: "AccountSettings"
 });
-
 
 const router = useRouter();
 const isOpen = ref(deviceDetection() ? false : true);
@@ -70,33 +69,37 @@ onMounted(async () => {
   }
 });
 
-defineTestHelpers('account-settings', {
+defineTestHelpers("account-settings", {
   setFieldValue: {
-    name: 'setFieldValue',
-    description: '设置字段值',
+    name: "setFieldValue",
+    description: "设置字段值",
     parameters: {
-      type: 'object',
+      type: "object",
       properties: {
-        field: { type: 'string', description: '字段名' },
-        value: { description: '字段值' }
+        field: { type: "string", description: "字段名" },
+        value: { description: "字段值" }
       },
-      required: ['field', 'value']
+      required: ["field", "value"]
     },
-    handler: (args) => { /* TODO: implement */ }
+    handler: args => {
+      /* TODO: implement */
+    }
   },
   switchPane: {
-    name: 'switchPane',
-    description: '切换设置面板',
+    name: "switchPane",
+    description: "切换设置面板",
     parameters: {
-      type: 'object',
+      type: "object",
       properties: {
-        pane: { type: 'string', description: '面板名称' }
+        pane: { type: "string", description: "面板名称" }
       },
-      required: ['pane']
+      required: ["pane"]
     },
-    handler: (args) => { witchPane.value = args.pane as string }
+    handler: args => {
+      witchPane.value = args.pane as string;
+    }
   }
-})
+});
 </script>
 
 <template>

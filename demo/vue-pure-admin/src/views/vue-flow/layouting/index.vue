@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import "@vue-flow/core/dist/style.css";
-import { defineTestHelpers } from '../../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import "@vue-flow/core/dist/theme-default.css";
 import Icon from "./icon.vue";
 import { nextTick, ref } from "vue";
@@ -53,8 +53,7 @@ async function layoutGraph(direction) {
   });
 }
 
-
-defineTestHelpers('vue-flow', {})
+defineTestHelpers("vue-flow", {});
 </script>
 
 <template>

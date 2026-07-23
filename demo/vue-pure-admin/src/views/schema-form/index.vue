@@ -1,76 +1,82 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { list } from "./list";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "SchemaForm"
 });
 
 const selected = ref(0);
-const formRefs = ref<any[]>([])
+const formRefs = ref<any[]>([]);
 
 function setFormRef(index: number, el: any) {
-  formRefs.value[index] = el
+  formRefs.value[index] = el;
 }
 
 function tabClick({ index }) {
   selected.value = index;
 }
 
-defineTestHelpers('schema-form', {
+defineTestHelpers("schema-form", {
   fill: {
-    name: 'fill',
-    description: 'Fill form field value',
+    name: "fill",
+    description: "Fill form field value",
     parameters: {
-      type: 'object',
+      type: "object",
       properties: {
-        field: { type: 'string', description: 'Field name' },
-        value: { type: 'string', description: 'Field value' },
+        field: { type: "string", description: "Field name" },
+        value: { type: "string", description: "Field value" }
       },
-      required: ['field', 'value'],
+      required: ["field", "value"]
     },
-    handler: (args) => {
+    handler: args => {
       for (const instance of formRefs.value) {
-        if (instance?.setFieldValue) { instance.setFieldValue(args.field, args.value); break }
-        if (instance?.setFormValues) { instance.setFormValues({ [args.field as string]: args.value }); break }
+        if (instance?.setFieldValue) {
+          instance.setFieldValue(args.field, args.value);
+          break;
+        }
+        if (instance?.setFormValues) {
+          instance.setFormValues({ [args.field as string]: args.value });
+          break;
+        }
       }
-    },
+    }
   },
   submit: {
-    name: 'submit',
-    description: 'Submit form',
-    parameters: { type: 'object', properties: {} },
+    name: "submit",
+    description: "Submit form",
+    parameters: { type: "object", properties: {} },
     handler: async () => {
       for (const instance of formRefs.value) {
-        if (instance?.submit) await instance.submit()
-        else if (instance?.validate) await instance.validate()
+        if (instance?.submit) await instance.submit();
+        else if (instance?.validate) await instance.validate();
       }
-    },
+    }
   },
   reset: {
-    name: 'reset',
-    description: 'Reset form',
-    parameters: { type: 'object', properties: {} },
+    name: "reset",
+    description: "Reset form",
+    parameters: { type: "object", properties: {} },
     handler: () => {
       for (const instance of formRefs.value) {
-        if (instance?.reset) instance.reset()
-        else if (instance?.resetForm) instance.resetForm()
+        if (instance?.reset) instance.reset();
+        else if (instance?.resetForm) instance.resetForm();
       }
-    },
+    }
   },
   validate: {
-    name: 'validate',
-    description: 'Validate form',
-    parameters: { type: 'object', properties: {} },
+    name: "validate",
+    description: "Validate form",
+    parameters: { type: "object", properties: {} },
     handler: async () => {
       for (const instance of formRefs.value) {
-        if (instance?.validate) return await instance.validate()
+        if (instance?.validate) return await instance.validate();
       }
-      return { valid: true }
-    },
-  },
-})
+      return { valid: true };
+    }
+  }
+});
 </script>
 
 <template>
@@ -111,7 +117,11 @@ defineTestHelpers('schema-form', {
               {{ item.title }}
             </span>
           </template>
-          <component :is="item.component" v-if="selected == index" :ref="(el) => setFormRef(index, el)" />
+          <component
+            :is="item.component"
+            v-if="selected == index"
+            :ref="el => setFormRef(index, el)"
+          />
         </el-tab-pane>
       </template>
     </el-tabs>

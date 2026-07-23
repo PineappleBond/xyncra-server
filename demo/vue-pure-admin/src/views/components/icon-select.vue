@@ -9,7 +9,7 @@ defineOptions({
 
 const icon = ref("ep:add-location");
 
-defineTestHelpers('components-icon-select', {})
+defineTestHelpers("components-icon-select", {});
 </script>
 
 <template>

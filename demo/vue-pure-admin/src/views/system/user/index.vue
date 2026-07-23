@@ -4,7 +4,7 @@ import tree from "./tree.vue";
 import { useUser } from "./utils/hook";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
-import { defineTestHelpers } from '../../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 import Upload from "~icons/ri/upload-line";
 import Role from "~icons/ri/admin-line";
@@ -50,52 +50,60 @@ const {
   handleSelectionChange
 } = useUser(tableRef, treeRef);
 
-defineTestHelpers('system-user', {
+defineTestHelpers("system-user", {
   search: {
-    name: 'search',
-    description: 'Search users by keyword',
+    name: "search",
+    description: "Search users by keyword",
     parameters: {
-      type: 'object',
-      properties: { keyword: { type: 'string', description: 'Search keyword' } },
+      type: "object",
+      properties: { keyword: { type: "string", description: "Search keyword" } }
     },
-    handler: (args) => {
-      if (args.keyword !== undefined) form.username = args.keyword as string
-      onSearch()
-    },
+    handler: args => {
+      if (args.keyword !== undefined) form.username = args.keyword as string;
+      onSearch();
+    }
   },
   openCreateDialog: {
-    name: 'openCreateDialog',
-    description: 'Open create user dialog',
-    parameters: { type: 'object', properties: {} },
-    handler: () => { openDialog() },
+    name: "openCreateDialog",
+    description: "Open create user dialog",
+    parameters: { type: "object", properties: {} },
+    handler: () => {
+      openDialog();
+    }
   },
   refresh: {
-    name: 'refresh',
-    description: 'Refresh user list',
-    parameters: { type: 'object', properties: {} },
-    handler: () => { onSearch() },
+    name: "refresh",
+    description: "Refresh user list",
+    parameters: { type: "object", properties: {} },
+    handler: () => {
+      onSearch();
+    }
   },
   openEditDialog: {
-    name: 'openEditDialog',
-    description: 'Open edit user dialog',
+    name: "openEditDialog",
+    description: "Open edit user dialog",
     parameters: {
-      type: 'object',
-      properties: { id: { type: 'string', description: 'User ID to edit' } },
-      required: ['id'],
+      type: "object",
+      properties: { id: { type: "string", description: "User ID to edit" } },
+      required: ["id"]
     },
-    handler: (args) => { openDialog('修改', { id: Number(args.id) } as any) },
+    handler: args => {
+      openDialog("修改", { id: Number(args.id) } as any);
+    }
   },
   deleteUser: {
-    name: 'deleteUser',
-    description: 'Delete a user',
+    name: "deleteUser",
+    description: "Delete a user",
     parameters: {
-      type: 'object',
-      properties: { id: { type: 'string', description: 'User ID to delete' } },
-      required: ['id'],
+      type: "object",
+      properties: { id: { type: "string", description: "User ID to delete" } },
+      required: ["id"]
     },
-    handler: (args) => { handleDelete({ id: Number(args.id) }) },
-  },
-})
+    handler: args => {
+      handleDelete({ id: Number(args.id) });
+    }
+  }
+});
 </script>
 
 <template>

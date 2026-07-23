@@ -1,20 +1,22 @@
 <script setup lang="ts">
 import { useColumns } from "./columns";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 defineOptions({
   name: "Fail"
 });
 
 const { columns } = useColumns();
 
-defineTestHelpers('result-fail', {
+defineTestHelpers("result-fail", {
   goBack: {
-    name: 'goBack',
-    description: 'Go back to previous page',
-    parameters: { type: 'object', properties: {} },
-    handler: () => { window.history.back() },
-  },
-})
+    name: "goBack",
+    description: "Go back to previous page",
+    parameters: { type: "object", properties: {} },
+    handler: () => {
+      window.history.back();
+    }
+  }
+});
 </script>
 
 <template>

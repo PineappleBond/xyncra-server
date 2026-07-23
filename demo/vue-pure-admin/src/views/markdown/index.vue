@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import Vditor from "./components/Vditor.vue";
 
 defineOptions({
@@ -22,8 +22,7 @@ sayHello();
 ###### 六级标题
 `);
 
-
-defineTestHelpers('markdown', {})
+defineTestHelpers("markdown", {});
 </script>
 
 <template>

@@ -52,7 +52,7 @@ function onReset() {
   idx.value = 0;
 }
 
-defineTestHelpers('able-directives', {})
+defineTestHelpers("able-directives", {});
 </script>
 
 <template>
@@ -67,8 +67,8 @@ defineTestHelpers('able-directives', {})
         >
           代码位置 src/views/able/directives.vue
         </el-link>
-  </div>
-</template>
+      </div>
+    </template>
 
     <div class="mb-2">
       防抖指令（连续输入，只会执行第一次点击事件，立即执行）

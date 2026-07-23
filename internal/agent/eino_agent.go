@@ -18,6 +18,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	agenttools "github.com/PineappleBond/xyncra-server/internal/agent/tools"
+	"github.com/PineappleBond/xyncra-server/internal/store"
 	xyncramodel "github.com/PineappleBond/xyncra-server/internal/store/model"
 )
 
@@ -291,6 +292,7 @@ type AgentBuilder struct {
 	checkpointStore        compose.CheckPointStore // for HITL checkpoint persistence (D-083)
 	mcpBridge              *agenttools.MCPBridge   // for MCP server connections (D-086)
 	clientFunctionProvider ClientFunctionProvider  // Phase 6 (D-101)
+	messageStore           *store.MessageStore     // for summarization callback persistence
 	llmLogger              *LLMLogger              // optional: dedicated LLM call logger
 	logger                 Logger                  // structured logger for middleware diagnostics
 	tracingEnabled         bool                    // when true, TracingMiddleware is appended to the middleware chain
@@ -337,6 +339,13 @@ func (b *AgentBuilder) SetMCPBridge(bridge *agenttools.MCPBridge) {
 // If not set, client tools are not available.
 func (b *AgentBuilder) SetClientFunctionProvider(provider ClientFunctionProvider) {
 	b.clientFunctionProvider = provider
+}
+
+// SetMessageStore sets the MessageStore used by the summarization callback
+// to persist summary messages and mark old messages as summarized.
+// If not set, summarization runs without DB persistence.
+func (b *AgentBuilder) SetMessageStore(ms *store.MessageStore) {
+	b.messageStore = ms
 }
 
 // SetLLMLogger sets the dedicated LLM call logger. When set, a LoggingMiddleware
@@ -438,7 +447,7 @@ func (b *AgentBuilder) Build(ctx context.Context, config *AgentConfig) (built *B
 	}
 
 	// Build middleware chain (D-079).
-	handlers := b.buildMiddleware(ctx, config, chatModel)
+	handlers := b.buildMiddleware(ctx, config, chatModel, b.messageStore)
 
 	agentCfg := &adk.ChatModelAgentConfig{
 		Name:        config.ID,
@@ -494,13 +503,21 @@ func (b *AgentBuilder) Build(ctx context.Context, config *AgentConfig) (built *B
 func convertMessages(messages []*xyncramodel.Message, registry *AgentRegistry) []*schema.Message {
 	result := make([]*schema.Message, 0, len(messages))
 	for _, msg := range messages {
+		var einoMsg *schema.Message
 		if registry != nil {
 			if _, ok := registry.IsAgent(msg.SenderID); ok {
-				result = append(result, schema.AssistantMessage(msg.Content, nil))
-				continue
+				einoMsg = schema.AssistantMessage(msg.Content, nil)
 			}
 		}
-		result = append(result, schema.UserMessage(msg.Content))
+		if einoMsg == nil {
+			einoMsg = schema.UserMessage(msg.Content)
+		}
+		// Preserve DB MessageID for summarization callback
+		if einoMsg.Extra == nil {
+			einoMsg.Extra = map[string]any{}
+		}
+		einoMsg.Extra["xyncra_message_id"] = msg.MessageID
+		result = append(result, einoMsg)
 	}
 	return result
 }

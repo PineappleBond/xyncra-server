@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import { useColumns } from "./columns";
-
 
 export interface schemaItem {
   field: string;
@@ -59,7 +58,7 @@ Object.keys(devDependencies).forEach(key => {
   devSchema.push({ field: devDependencies[key], label: key });
 });
 
-defineTestHelpers('about', {})
+defineTestHelpers("about", {});
 </script>
 
 <template>

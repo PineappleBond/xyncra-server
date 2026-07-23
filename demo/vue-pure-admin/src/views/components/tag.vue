@@ -63,7 +63,7 @@ const handleInputConfirm = () => {
   inputValue.value = "";
 };
 
-defineTestHelpers('components-tag', {})
+defineTestHelpers("components-tag", {});
 </script>
 
 <template>

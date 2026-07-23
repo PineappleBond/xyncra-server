@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { useRouter } from "vue-router";
 import back from "@/assets/svg/back.svg?component";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
-defineTestHelpers('empty', {})
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
+defineTestHelpers("empty", {});
 
 defineOptions({
   name: "Empty"

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 import ReAnimateSelector from "@/components/ReAnimateSelector";
 
 defineOptions({
@@ -13,8 +13,7 @@ watch(animate, () => {
   console.log("animate", animate.value);
 });
 
-
-defineTestHelpers('components-animatecss', {})
+defineTestHelpers("components-animatecss", {});
 </script>
 
 <template>

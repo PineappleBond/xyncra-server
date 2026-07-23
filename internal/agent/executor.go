@@ -69,7 +69,23 @@ type AgentExecutor struct {
 	// remoteCallingStore persists RemoteCallings to survive server restarts (D-137).
 	// Optional: when nil, RemoteCalling persistence is skipped (D-063 nil-safe).
 	remoteCallingStore *store.RemoteCallingStore
+
+	// broadcastConversationUpdate creates persisted UserUpdate records and
+	// enqueues MQ push notifications for conversation members. Injected via
+	// WithBroadcastConversationUpdate to avoid circular dependency with handler.
+	// Optional: when nil, persisted broadcast is skipped (D-063 nil-safe).
+	broadcastConversationUpdate BroadcastConversationUpdateFunc
 }
+
+// BroadcastConversationUpdateFunc is the function signature for broadcasting
+// persisted conversation updates. This mirrors handler.BroadcastConversationUpdateFunc
+// to avoid importing the handler package (which would create a circular dependency).
+type BroadcastConversationUpdateFunc func(
+	ctx context.Context,
+	conversationID string,
+	memberIDs []string,
+	action string,
+) error
 
 // DeletableCheckPointStore extends compose.CheckPointStore with a Delete
 // capability (D-112). Any store that implements Get, Set, and Delete satisfies
@@ -145,6 +161,16 @@ func WithCheckPointStore(store DeletableCheckPointStore) ExecutorOption {
 func WithRemoteCallingStore(rs *store.RemoteCallingStore) ExecutorOption {
 	return func(e *AgentExecutor) {
 		e.remoteCallingStore = rs
+	}
+}
+
+// WithBroadcastConversationUpdate sets the function for broadcasting persisted
+// conversation updates to conversation members. When not set, persisted broadcast
+// is skipped (D-063 nil-safe).
+// This is injected from the handler package to avoid circular dependency.
+func WithBroadcastConversationUpdate(fn BroadcastConversationUpdateFunc) ExecutorOption {
+	return func(e *AgentExecutor) {
+		e.broadcastConversationUpdate = fn
 	}
 }
 
@@ -463,6 +489,15 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 				}
 			}
 
+			// 2b. Persisted broadcast to conversation members (D-137).
+			if e.broadcastConversationUpdate != nil {
+				memberIDs := e.getConversationMemberIDs(ctx, payload.ConversationID)
+				if err := e.broadcastConversationUpdate(ctx, payload.ConversationID, memberIDs, "update"); err != nil {
+					e.logger.Info("executor: broadcast conversation update failed (non-fatal)",
+						"conversation_id", payload.ConversationID, "error", err)
+				}
+			}
+
 			// 3. Close the stream (D-052) so clients exit the streaming state.
 			partialText := fullResponse.String()
 			e.broadcaster.SendStreamUpdate(ctx, payload.SenderID, payload.AgentID, payload.ConversationID, streamID, partialText, true)
@@ -514,6 +549,15 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 			}
 			if err := e.remoteCallingStore.Create(ctx, rc); err != nil {
 				return fmt.Errorf("execute agent: create remote calling: %w", err)
+			}
+		}
+
+		// 2b. Persisted broadcast to conversation members (D-137).
+		if e.broadcastConversationUpdate != nil {
+			memberIDs := e.getConversationMemberIDs(ctx, payload.ConversationID)
+			if err := e.broadcastConversationUpdate(ctx, payload.ConversationID, memberIDs, "update"); err != nil {
+				e.logger.Info("executor: broadcast conversation update failed (non-fatal)",
+					"conversation_id", payload.ConversationID, "error", err)
 			}
 		}
 
@@ -666,6 +710,22 @@ func extractBaseUserID(agentID string) string {
 		return agentID[:idx]
 	}
 	return agentID
+}
+
+// getConversationMemberIDs fetches the conversation and returns member user IDs.
+// Returns [senderID, agentID] on failure to fetch (best-effort, non-fatal).
+func (e *AgentExecutor) getConversationMemberIDs(ctx context.Context, conversationID string) []string {
+	conv, err := e.store.ConversationStore().Get(ctx, conversationID)
+	if err != nil {
+		e.logger.Info("executor: get conversation for member IDs failed (non-fatal)",
+			"conversation_id", conversationID, "error", err)
+		return nil
+	}
+	members := []string{conv.UserID1}
+	if conv.UserID2 != "" {
+		members = append(members, conv.UserID2)
+	}
+	return members
 }
 
 // interruptData holds parsed interrupt data distinguishing HITL vs client function.

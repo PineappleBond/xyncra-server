@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 defineOptions({
   name: "Success"
 });
@@ -21,51 +21,53 @@ const columns = [
   }
 ];
 
-defineTestHelpers('result-success', {
+defineTestHelpers("result-success", {
   goBack: {
-    name: 'goBack',
-    description: '返回上一页',
-    parameters: { type: 'object', properties: {} },
-    handler: () => { window.history.back() },
+    name: "goBack",
+    description: "返回上一页",
+    parameters: { type: "object", properties: {} },
+    handler: () => {
+      window.history.back();
+    }
   },
   backToList: {
-    name: 'backToList',
-    description: '点击返回列表按钮',
-    parameters: { type: 'object', properties: {} },
+    name: "backToList",
+    description: "点击返回列表按钮",
+    parameters: { type: "object", properties: {} },
     handler: () => {
-      const btn = document.querySelector('.el-button--primary')
-      if (btn) (btn as HTMLElement).click()
-    },
+      const btn = document.querySelector(".el-button--primary");
+      if (btn) (btn as HTMLElement).click();
+    }
   },
   viewProject: {
-    name: 'viewProject',
-    description: '点击查看项目按钮',
-    parameters: { type: 'object', properties: {} },
+    name: "viewProject",
+    description: "点击查看项目按钮",
+    parameters: { type: "object", properties: {} },
     handler: () => {
-      const btns = document.querySelectorAll('.el-button')
+      const btns = document.querySelectorAll(".el-button");
       for (const btn of btns) {
-        if (btn.textContent?.includes('查看项目')) {
-          (btn as HTMLElement).click()
-          break
+        if (btn.textContent?.includes("查看项目")) {
+          (btn as HTMLElement).click();
+          break;
         }
       }
-    },
+    }
   },
   print: {
-    name: 'print',
-    description: '点击打印按钮',
-    parameters: { type: 'object', properties: {} },
+    name: "print",
+    description: "点击打印按钮",
+    parameters: { type: "object", properties: {} },
     handler: () => {
-      const btns = document.querySelectorAll('.el-button')
+      const btns = document.querySelectorAll(".el-button");
       for (const btn of btns) {
-        if (btn.textContent?.includes('打印')) {
-          (btn as HTMLElement).click()
-          break
+        if (btn.textContent?.includes("打印")) {
+          (btn as HTMLElement).click();
+          break;
         }
       }
-    },
-  },
-})
+    }
+  }
+});
 </script>
 
 <template>

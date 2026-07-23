@@ -15,7 +15,7 @@ defineOptions({
   name: "PureSlider"
 });
 
-defineTestHelpers('components-slider', {})
+defineTestHelpers("components-slider", {});
 </script>
 
 <template>

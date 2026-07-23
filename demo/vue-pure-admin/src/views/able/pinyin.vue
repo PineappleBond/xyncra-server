@@ -6,7 +6,7 @@ defineOptions({
   name: "Pinyin"
 });
 
-defineTestHelpers('able-pinyin', {})
+defineTestHelpers("able-pinyin", {});
 </script>
 
 <template>

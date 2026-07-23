@@ -31,7 +31,7 @@ onBeforeUnmount(() => {
   clear();
 });
 
-defineTestHelpers('able-watermark', {})
+defineTestHelpers("able-watermark", {});
 </script>
 
 <template>

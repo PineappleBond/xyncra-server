@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { list } from "./base/list";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
 
 defineOptions({
   name: "PureTable"
@@ -17,7 +17,7 @@ function tabClick({ index }) {
 // table components (base.vue, stripe.vue, etc.) expose these methods via
 // defineExpose. The base tables are display-only demo components. If CRUD
 // table pages are added in the future, helpers can be re-introduced here.
-defineTestHelpers('pure-table', {})
+defineTestHelpers("pure-table", {});
 </script>
 
 <template>

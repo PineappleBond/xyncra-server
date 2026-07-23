@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { useRouter } from "vue-router";
 import noAccess from "@/assets/status/403.svg?component";
-import { defineTestHelpers } from '../../../packages/xyncra-client-vue/src/defineTestHelpers'
-defineTestHelpers('error-403', {})
+import { defineTestHelpers } from "../../../packages/xyncra-client-vue/src/defineTestHelpers";
+defineTestHelpers("error-403", {});
 
 defineOptions({
   name: "403"
