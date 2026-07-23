@@ -69,6 +69,10 @@ const EPHEMERAL_UPDATE_TYPES: ReadonlySet<UpdateType> = new Set([
   UpdateType.AgentStatus,
   UpdateType.AgentTimeout,
   UpdateType.FunctionCall,
+  // NOTE: Conversation is NOT included here. It is a persistent type with real
+  // sequence numbers in the standalone Updates channel. When piggybacked in a
+  // response (D-118), it uses seq=0 which the SyncManager handles via the
+  // `update.seq === 0` check, not via isEphemeralUpdateType.
 ]);
 
 /**
@@ -140,6 +144,13 @@ export interface PackageDataResponse {
   msg: string;
   /** Response payload as JSON. */
   data: unknown;
+  /**
+   * Piggyback updates attached to this response (D-118).
+   * When present, the client should process these updates before resolving
+   * the pending RPC promise. This is a low-latency optimization variant of
+   * the Pull-on-Notification pattern.
+   */
+  updates?: PackageDataUpdate[];
 }
 
 /**

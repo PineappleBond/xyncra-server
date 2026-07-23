@@ -162,4 +162,102 @@ describe('XyncraClient', () => {
     // Should not throw
     client.reconnect();
   });
+
+  // ---------------------------------------------------------------------------
+  // D-118: Piggyback updates in dispatchResponse
+  // ---------------------------------------------------------------------------
+
+  test('D-118: dispatchResponse processes embedded updates', async () => {
+    const client = createClient();
+
+    // Start the client to establish connection.
+    const startPromise = client.start();
+    await sleep(100);
+
+    // Simulate an RPC call that will be pending.
+    const callPromise = client.call('test.method', {});
+
+    // Wait for the request to be sent.
+    await sleep(50);
+
+    // Verify the request was sent.
+    expect(mockWs.sentMessages.length).toBeGreaterThan(0);
+
+    // Parse the sent request to get the ID.
+    const sentData = mockWs.sentMessages[0] as string;
+    const sentPkg = JSON.parse(sentData);
+    const requestId = sentPkg.data.id;
+
+    // Simulate a response with piggyback updates.
+    const responsePkg = {
+      type: 1, // PackageTypeResponse
+      version: 1,
+      data: {
+        id: requestId,
+        code: 0,
+        msg: 'ok',
+        data: { status: 'queued' },
+        updates: [
+          {
+            seq: 0,
+            type: 'conversation',
+            payload: { conversation_id: 'conv-1', action: 'update' },
+          },
+        ],
+      },
+    };
+
+    // Trigger the message to simulate server response.
+    mockWs.triggerMessage(JSON.stringify(responsePkg));
+
+    // The call should resolve.
+    const result = await callPromise;
+    expect(result).toEqual({ status: 'queued' });
+
+    // Cleanup.
+    client.stop();
+    await startPromise.catch(() => {});
+  });
+
+  test('D-118: dispatchResponse works without updates (backward compatible)', async () => {
+    const client = createClient();
+
+    // Start the client to establish connection.
+    const startPromise = client.start();
+    await sleep(100);
+
+    // Simulate an RPC call.
+    const callPromise = client.call('test.method', {});
+
+    // Wait for the request to be sent.
+    await sleep(50);
+
+    // Parse the sent request to get the ID.
+    const sentData = mockWs.sentMessages[0] as string;
+    const sentPkg = JSON.parse(sentData);
+    const requestId = sentPkg.data.id;
+
+    // Simulate a response WITHOUT piggyback updates.
+    const responsePkg = {
+      type: 1, // PackageTypeResponse
+      version: 1,
+      data: {
+        id: requestId,
+        code: 0,
+        msg: 'ok',
+        data: { status: 'ok' },
+      },
+    };
+
+    // Trigger the message.
+    mockWs.triggerMessage(JSON.stringify(responsePkg));
+
+    // The call should resolve.
+    const result = await callPromise;
+    expect(result).toEqual({ status: 'ok' });
+
+    // Cleanup.
+    client.stop();
+    await startPromise.catch(() => {});
+  });
 });

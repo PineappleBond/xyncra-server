@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/PineappleBond/xyncra-server/internal/mq"
 	"github.com/PineappleBond/xyncra-server/internal/server"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -289,4 +291,138 @@ func TestAgentResume_AllResolvedEnqueue(t *testing.T) {
 	assert.Equal(t, "conv-1", payload.ConversationID)
 	assert.Equal(t, "cp-1", payload.CheckpointID)
 	assert.Equal(t, "agent/bot1", payload.AgentID)
+}
+
+// ---------------------------------------------------------------------------
+// D-118: Piggyback updates via sidecar tests
+// ---------------------------------------------------------------------------
+
+// callAgentResumeWithSidecar invokes the agent_resume handler with a
+// ResponseSidecar injected into the context.
+func callAgentResumeWithSidecar(
+	t *testing.T,
+	h *agentResumeHandler,
+	client *server.Client,
+	params interface{},
+) (json.RawMessage, *server.ResponseSidecar, error) {
+	t.Helper()
+	ctx := server.WithSidecar(context.Background())
+	req := newTestRequest("1", "agent_resume", params)
+	data, err := h.HandleRequest(ctx, client, req)
+	return data, server.GetSidecar(ctx), err
+}
+
+// TestAgentResume_PiggybackUpdateOnQueued verifies that a conversation update
+// is attached via the sidecar when the status is "queued" (D-118).
+func TestAgentResume_PiggybackUpdateOnQueued(t *testing.T) {
+	env := newAgentResumeTestEnv(t)
+
+	seedConversation(t, env, "conv-1", "cp-1")
+	seedRemoteCalling(t, env, "rc-1", "conv-1", "cp-1", "agent/bot1", "ask_user")
+
+	data, sc, err := callAgentResumeWithSidecar(t, env.h, nil, agentResumeParams{
+		ID:      "rc-1",
+		AgentID: "agent/bot1",
+		Success: true,
+		Result:  "Alice",
+	})
+	require.NoError(t, err)
+
+	resp := parseAgentResumeResponseMap(t, data)
+	assert.Equal(t, "queued", resp["status"])
+
+	// Verify piggyback update was attached.
+	require.NotNil(t, sc, "sidecar should be present")
+	updates := sc.Updates()
+	require.Len(t, updates, 1, "expected 1 piggyback update")
+	assert.Equal(t, protocol.UpdateTypeConversation, updates[0].Type)
+	assert.Equal(t, uint32(0), updates[0].Seq, "ephemeral update should have seq=0")
+
+	// Verify update payload.
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(updates[0].Payload, &payload))
+	assert.Equal(t, "conv-1", payload["conversation_id"])
+	assert.Equal(t, "update", payload["action"])
+}
+
+// TestAgentResume_NoPiggybackOnIdempotent verifies that no piggyback update
+// is attached when the call is already processed (idempotent).
+func TestAgentResume_NoPiggybackOnIdempotent(t *testing.T) {
+	env := newAgentResumeTestEnv(t)
+	ctx := context.Background()
+
+	seedConversation(t, env, "conv-1", "cp-1")
+	seedRemoteCalling(t, env, "rc-1", "conv-1", "cp-1", "agent/bot1", "ask_user")
+
+	// Resolve it first.
+	require.NoError(t, env.store.RemoteCallingStore().ResolveResult(ctx, "rc-1", "done"))
+
+	// Call again with sidecar.
+	_, sc, err := callAgentResumeWithSidecar(t, env.h, nil, agentResumeParams{
+		ID:      "rc-1",
+		AgentID: "agent/bot1",
+		Success: true,
+		Result:  "another result",
+	})
+	require.NoError(t, err)
+
+	// No piggyback update on idempotent response.
+	require.NotNil(t, sc)
+	assert.Nil(t, sc.Updates(), "idempotent response should not have piggyback updates")
+}
+
+// TestAgentResume_NoPiggybackOnPartial verifies that no piggyback update
+// is attached when the response is "partial" (more callings pending).
+func TestAgentResume_NoPiggybackOnPartial(t *testing.T) {
+	env := newAgentResumeTestEnv(t)
+
+	seedConversation(t, env, "conv-1", "cp-1")
+	seedRemoteCalling(t, env, "rc-1", "conv-1", "cp-1", "agent/bot1", "ask_user")
+	seedRemoteCalling(t, env, "rc-2", "conv-1", "cp-1", "agent/bot1", "ask_user")
+
+	_, sc, err := callAgentResumeWithSidecar(t, env.h, nil, agentResumeParams{
+		ID:      "rc-1",
+		AgentID: "agent/bot1",
+		Success: true,
+		Result:  "Alice",
+	})
+	require.NoError(t, err)
+
+	// No piggyback update on partial response.
+	require.NotNil(t, sc)
+	assert.Nil(t, sc.Updates(), "partial response should not have piggyback updates")
+}
+
+// TestAgentResume_NoPiggybackOnExpired verifies that no piggyback update
+// is attached when the remote calling has expired.
+func TestAgentResume_NoPiggybackOnExpired(t *testing.T) {
+	env := newAgentResumeTestEnv(t)
+	ctx := context.Background()
+
+	seedConversation(t, env, "conv-1", "cp-1")
+
+	// Create an expired remote calling.
+	pastTime := time.Now().Add(-1 * time.Hour)
+	rc := &model.RemoteCalling{
+		ID:             "rc-expired",
+		ConversationID: "conv-1",
+		CheckpointID:   "cp-1",
+		AgentID:        "agent/bot1",
+		Method:         "ask_user",
+		Status:         model.RemoteCallingStatusPending,
+		ExpiresAt:      &pastTime,
+	}
+	require.NoError(t, env.store.RemoteCallingStore().Create(ctx, rc))
+
+	_, sc, err := callAgentResumeWithSidecar(t, env.h, nil, agentResumeParams{
+		ID:      "rc-expired",
+		AgentID: "agent/bot1",
+		Success: true,
+		Result:  "result",
+	})
+	require.NoError(t, err)
+
+	// No piggyback update on expired response.
+	require.NotNil(t, sc)
+	assert.Nil(t, sc.Updates(), "expired response should not have piggyback updates")
 }

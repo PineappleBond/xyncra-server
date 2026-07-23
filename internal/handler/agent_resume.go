@@ -215,6 +215,22 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 		return nil, protocol.NewInternalError(fmt.Errorf("agent_resume: enqueue task: %w", err))
 	}
 
+	// Attach piggyback conversation update via sidecar (D-118).
+	// This notifies the caller that the conversation state has changed,
+	// allowing the client to pull the latest state without waiting for
+	// the separate WebSocket broadcast channel.
+	if sc := server.GetSidecar(ctx); sc != nil {
+		updatePayload, _ := json.Marshal(map[string]interface{}{
+			"conversation_id": rc.ConversationID,
+			"action":          "update",
+		})
+		sc.Append(protocol.PackageDataUpdate{
+			Seq:     0, // ephemeral: not persisted
+			Type:    protocol.UpdateTypeConversation,
+			Payload: updatePayload,
+		})
+	}
+
 	return json.Marshal(map[string]interface{}{
 		"status": "queued",
 	})

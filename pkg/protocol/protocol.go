@@ -80,6 +80,12 @@ type PackageDataResponse struct {
 	Msg string `json:"msg"`
 	// Data contains the response payload as JSON.
 	Data json.RawMessage `json:"data"`
+	// Updates contains piggyback updates attached to this response (D-118).
+	// When present, the client should process these updates before resolving
+	// the pending RPC promise. This is a low-latency optimization variant of
+	// the Pull-on-Notification pattern — the original WebSocket push channel
+	// is preserved for broadcasting to non-caller devices.
+	Updates []PackageDataUpdate `json:"updates,omitempty"`
 }
 
 // PackageDataUpdates wraps a batch of data update notifications.

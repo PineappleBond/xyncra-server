@@ -121,6 +121,15 @@ func (h *DefaultMessageHandler) HandleMessage(ctx context.Context, client *Clien
 // handleRequest dispatches a PackageTypeRequest. It parses the
 // PackageDataRequest, looks up the method handler, invokes it, and sends back
 // a PackageTypeResponse with the result (or an error).
+//
+// A ResponseSidecar is injected into the context before calling the handler.
+// Handlers can optionally attach piggyback updates via GetSidecar(ctx).Append().
+// After the handler returns, any accumulated updates are attached to the response.
+//
+// Design note: When the handler returns an error, any accumulated sidecar
+// updates are discarded. This is intentional — the only sidecar consumer
+// (agent_resume) appends updates on the success path only. If future handlers
+// need to attach updates on error paths, this behavior should be revisited.
 func (h *DefaultMessageHandler) handleRequest(ctx context.Context, client *Client, pkg *protocol.Package) {
 	var req protocol.PackageDataRequest
 	if err := jsonUnmarshal(pkg.Data, &req); err != nil {
@@ -134,6 +143,9 @@ func (h *DefaultMessageHandler) handleRequest(ctx context.Context, client *Clien
 	// Start handler.invoke span after we know the method name.
 	invokeCtx, invokeFinish := startHandlerInvokeSpan(ctx, req.Method)
 	defer invokeFinish(nil)
+
+	// Inject ResponseSidecar for piggyback updates (D-118).
+	invokeCtx = WithSidecar(invokeCtx)
 
 	h.mu.RLock()
 	methodHandler, ok := h.methods[req.Method]
@@ -162,7 +174,13 @@ func (h *DefaultMessageHandler) handleRequest(ctx context.Context, client *Clien
 		return
 	}
 
-	_ = sendSuccessResponse(client, req.ID, result)
+	// Read piggyback updates from sidecar (D-118).
+	var updates []protocol.PackageDataUpdate
+	if sc := GetSidecar(invokeCtx); sc != nil {
+		updates = sc.Updates()
+	}
+
+	_ = sendSuccessResponseWithUpdates(client, req.ID, result, updates)
 }
 
 // --------------------------------------------------------------------------
@@ -172,11 +190,18 @@ func (h *DefaultMessageHandler) handleRequest(ctx context.Context, client *Clien
 // sendSuccessResponse sends a PackageTypeResponse with a success code to the
 // given client.
 func sendSuccessResponse(client *Client, id string, data json.RawMessage) error {
+	return sendSuccessResponseWithUpdates(client, id, data, nil)
+}
+
+// sendSuccessResponseWithUpdates sends a PackageTypeResponse with a success
+// code and optional piggyback updates to the given client (D-118).
+func sendSuccessResponseWithUpdates(client *Client, id string, data json.RawMessage, updates []protocol.PackageDataUpdate) error {
 	resp := &protocol.PackageDataResponse{
-		ID:   id,
-		Code: protocol.ResponseCodeOK,
-		Msg:  "ok",
-		Data: data,
+		ID:      id,
+		Code:    protocol.ResponseCodeOK,
+		Msg:     "ok",
+		Data:    data,
+		Updates: updates,
 	}
 	return sendResponse(client, resp)
 }

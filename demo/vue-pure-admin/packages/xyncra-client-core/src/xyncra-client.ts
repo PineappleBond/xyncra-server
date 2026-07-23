@@ -893,8 +893,24 @@ export class XyncraClient {
   /**
    * Routes an incoming server response to the pending RPC caller identified
    * by the response's ID.
+   *
+   * D-118: If the response carries piggyback updates, they are dispatched
+   * to the SyncManager and awaited before resolving the pending promise.
+   * This ensures the caller sees consistent local state after `await client.call()`.
+   * Errors from dispatchUpdates are caught and logged — they do not block
+   * the response from being delivered to the caller.
    */
-  private dispatchResponse(response: PackageDataResponse): void {
+  private async dispatchResponse(response: PackageDataResponse): Promise<void> {
+    // Dispatch piggyback updates if present (D-118).
+    // Await to ensure local DB is updated before the caller's await resolves.
+    if (response.updates && response.updates.length > 0) {
+      try {
+        await this.dispatchUpdates({ updates: response.updates });
+      } catch (error) {
+        this.logger.error('Piggyback updates dispatch failed', error);
+      }
+    }
+
     const resolve = this.pending.get(response.id);
     if (resolve) {
       this.pending.delete(response.id);
@@ -952,7 +968,7 @@ export class XyncraClient {
   /**
    * setFunctions updates the function list used by the reconnect handshake's
    * reregisterFunctions (D-101). The initial system.register_functions may be
-   * dropped if sent before the socket is open (sendPackage silently drops when
+   * dropped if sent before the socket is open (sendPackage throws when
    * not connected), so the handshake — which runs after the socket is open —
    * is the reliable re-send path. Callers (e.g. XyncraProvider) should keep
    * this in sync with their local function registry.
@@ -963,9 +979,11 @@ export class XyncraClient {
     // Immediately register functions with the server when they change
     // This ensures the agent can call newly registered functions without
     // waiting for a reconnect
-    if (fns.length > 0 && !this.closed) {
+    if (fns.length > 0 && !this.closed && this.connMgr.isConnected()) {
       this.logger.info('setFunctions: registering functions immediately', { count: fns.length });
       void this.reregisterFunctions();
+    } else if (fns.length > 0 && !this.closed) {
+      this.logger.info('setFunctions: not connected, will register on reconnect', { count: fns.length });
     }
   }
 
