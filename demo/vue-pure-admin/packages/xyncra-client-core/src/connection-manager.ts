@@ -513,7 +513,8 @@ export class ConnectionManager {
       }
       case 2: {
         // PackageTypeUpdates
-        this.opts.callbacks.onUpdates(pkg.data as PackageDataUpdates);
+        const updatesPkg = pkg.data as PackageDataUpdates;
+        this.opts.callbacks.onUpdates(updatesPkg);
         break;
       }
       case 0: {

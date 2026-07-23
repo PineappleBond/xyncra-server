@@ -53,6 +53,25 @@ func (ms *MessageStore) Get(ctx context.Context, id string) (result *model.Messa
 	return &msg, nil
 }
 
+// GetByConversationAndMessageIDTx retrieves a message by conversation_id and
+// message_id within the given transaction. Returns ErrNotFound if no record exists.
+func (ms *MessageStore) GetByConversationAndMessageIDTx(ctx context.Context, tx *gorm.DB, conversationID string, messageID uint32) (result *model.Message, err error) {
+	ctx, finish := startSpan(ctx, "db.message.get_by_conv_msg_id_tx")
+	defer func() { finish(err) }()
+
+	var msg model.Message
+	err = tx.WithContext(ctx).
+		Where("conversation_id = ? AND message_id = ?", conversationID, messageID).
+		First(&msg).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, classifyError(fmt.Errorf("store: get message by conversation and message id: %w", err))
+	}
+	return &msg, nil
+}
+
 // ListByConversation returns messages for the given conversation with
 // MessageID greater than afterMessageID, ordered by MessageID ascending,
 // limited to at most limit rows. This supports incremental message fetching.

@@ -148,7 +148,7 @@ import ConversationList from './ConversationList.vue'
 
 const { connectionStatus, reconnect } = useXyncra()
 const { conversations, currentConversationId, selectConversation, createConversation, createConversationWithAgent } = useConversations()
-const { executingCalls, cancelCall } = useRemoteCallingRouter()
+const { executingCalls, cancelCall } = useRemoteCallingRouter(currentConversationId)
 
 const panelVisible = ref(false)
 const slideIn = ref(false)

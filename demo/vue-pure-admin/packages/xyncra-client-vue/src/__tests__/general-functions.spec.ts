@@ -32,13 +32,13 @@ describe('generalFunctions', () => {
   // -------------------------------------------------------
   // Function count assertion
   // -------------------------------------------------------
-  it('should contain exactly 4 functions', () => {
-    expect(generalFunctions).toHaveLength(4)
+  it('should contain exactly 5 functions', () => {
+    expect(generalFunctions).toHaveLength(5)
   })
 
   it('should contain only the expected function names', () => {
     const names = generalFunctions.map(fn => fn.info.name)
-    expect(names).toEqual(['navigate_to', 'show_notification', 'confirm_action', 'ask_user'])
+    expect(names).toEqual(['navigate_to', 'show_notification', 'confirm_action', 'get_current_page', 'ask_user'])
   })
 
   // -------------------------------------------------------
@@ -53,7 +53,6 @@ describe('generalFunctions', () => {
       'type_text',
       'highlight_element',
       'scroll_to',
-      'get_current_page',
       'get_page_description',
       'get_page_structure',
       'wait_for_element'
@@ -192,6 +191,251 @@ describe('generalFunctions', () => {
       expect(confirmAction.info.parameters.required).toContain('message')
       expect(confirmAction.info.tags).toContain('type:action')
       expect(confirmAction.info.timeout_ms).toBe(30000)
+    })
+  })
+
+  // -------------------------------------------------------
+  // get_current_page
+  // -------------------------------------------------------
+  describe('get_current_page', () => {
+    it('should return current route info when router is available', async () => {
+      const mockRoute = {
+        path: '/dashboard',
+        name: 'Dashboard',
+        meta: { title: 'Dashboard' },
+        fullPath: '/dashboard?tab=overview',
+        params: {},
+        query: { tab: 'overview' },
+      }
+      mockGetRouter.mockReturnValue({
+        currentRoute: { value: mockRoute },
+      })
+
+      const getCurrentPage = generalFunctions.find(fn => fn.info.name === 'get_current_page')!
+      const result = await getCurrentPage.handler({})
+
+      expect(result).toEqual({
+        success: true,
+        path: '/dashboard',
+        name: 'Dashboard',
+        title: 'Dashboard',
+        fullPath: '/dashboard?tab=overview',
+        params: {},
+        query: { tab: 'overview' },
+        functions: [],
+      })
+    })
+
+    it('should handle route with no name or title', async () => {
+      const mockRoute = {
+        path: '/settings',
+        name: null,
+        meta: {},
+        fullPath: '/settings',
+        params: {},
+        query: {},
+      }
+      mockGetRouter.mockReturnValue({
+        currentRoute: { value: mockRoute },
+      })
+
+      const getCurrentPage = generalFunctions.find(fn => fn.info.name === 'get_current_page')!
+      const result = await getCurrentPage.handler({})
+
+      expect(result).toEqual({
+        success: true,
+        path: '/settings',
+        name: null,
+        title: null,
+        fullPath: '/settings',
+        params: {},
+        query: {},
+        functions: [],
+      })
+    })
+
+    it('should fallback to window.location when router is not available', async () => {
+      mockGetRouter.mockReturnValue(undefined)
+
+      // Mock window and document for the fallback path
+      const originalWindow = globalThis.window
+      const originalDocument = globalThis.document
+      globalThis.window = { location: { pathname: '/test-page', search: '?foo=bar' } } as any
+      globalThis.document = { title: 'Test Page' } as any
+
+      try {
+        const getCurrentPage = generalFunctions.find(fn => fn.info.name === 'get_current_page')!
+        const result = await getCurrentPage.handler({})
+
+        expect(result.success).toBe(true)
+        expect(result.path).toBe('/test-page')
+        expect(result.name).toBeNull()
+        expect(result.title).toBe('Test Page')
+        expect(result.fullPath).toBe('/test-page?foo=bar')
+        expect(result.params).toEqual({})
+        expect(result.query).toEqual({ foo: 'bar' })
+        expect(result.functions).toEqual([])
+      } finally {
+        // Restore globals
+        if (originalWindow === undefined) delete (globalThis as any).window
+        else globalThis.window = originalWindow
+        if (originalDocument === undefined) delete (globalThis as any).document
+        else globalThis.document = originalDocument
+      }
+    })
+
+    it('should return only general functions when no page-specific functions match', async () => {
+      const mockRoute = {
+        path: '/dashboard',
+        name: 'Dashboard',
+        meta: { title: 'Dashboard' },
+        fullPath: '/dashboard',
+        params: {},
+        query: {},
+      }
+      mockGetRouter.mockReturnValue({
+        currentRoute: { value: mockRoute },
+      })
+
+      // Mock registry: general functions + page-specific for a different route
+      const mockFunctionInfos = [
+        { name: 'navigate_to', description: '导航到指定页面', tags: ['type:navigate', 'page:general'] },
+        { name: 'show_notification', description: '显示通知消息', tags: ['type:action', 'page:general'] },
+        { name: 'get_current_page', description: '获取用户当前所在的页面信息', tags: ['type:query', 'page:general'] },
+        { name: 'settings_save', description: '保存设置', tags: ['type:action', 'page:settings', 'route:/settings'] },
+      ]
+      const originalXyncra = (window as any).$xyncra
+      ;(window as any).$xyncra = {
+        registry: {
+          getFunctionInfos: vi.fn().mockReturnValue(mockFunctionInfos),
+        },
+      }
+
+      try {
+        const getCurrentPage = generalFunctions.find(fn => fn.info.name === 'get_current_page')!
+        const result = await getCurrentPage.handler({})
+
+        // Only general functions should be returned; settings_save is for /settings route
+        expect(result.functions).toEqual([
+          { name: 'navigate_to', description: '导航到指定页面' },
+          { name: 'show_notification', description: '显示通知消息' },
+          { name: 'get_current_page', description: '获取用户当前所在的页面信息' },
+        ])
+      } finally {
+        if (originalXyncra === undefined) delete (window as any).$xyncra
+        else (window as any).$xyncra = originalXyncra
+      }
+    })
+
+    it('should return general + matching page-specific functions', async () => {
+      const mockRoute = {
+        path: '/dashboard',
+        name: 'Dashboard',
+        meta: { title: 'Dashboard' },
+        fullPath: '/dashboard',
+        params: {},
+        query: {},
+      }
+      mockGetRouter.mockReturnValue({
+        currentRoute: { value: mockRoute },
+      })
+
+      // Mock registry: general + page-specific for /dashboard + page-specific for /settings
+      const mockFunctionInfos = [
+        { name: 'navigate_to', description: '导航到指定页面', tags: ['type:navigate', 'page:general'] },
+        { name: 'dashboard_refresh', description: '刷新仪表盘数据', tags: ['type:action', 'page:dashboard', 'route:/dashboard'] },
+        { name: 'dashboard_export', description: '导出仪表盘报告', tags: ['type:action', 'page:dashboard', 'route:/dashboard'] },
+        { name: 'settings_save', description: '保存设置', tags: ['type:action', 'page:settings', 'route:/settings'] },
+      ]
+      const originalXyncra = (window as any).$xyncra
+      ;(window as any).$xyncra = {
+        registry: {
+          getFunctionInfos: vi.fn().mockReturnValue(mockFunctionInfos),
+        },
+      }
+
+      try {
+        const getCurrentPage = generalFunctions.find(fn => fn.info.name === 'get_current_page')!
+        const result = await getCurrentPage.handler({})
+
+        // Should include general + /dashboard-specific, but NOT /settings-specific
+        expect(result.functions).toEqual([
+          { name: 'navigate_to', description: '导航到指定页面' },
+          { name: 'dashboard_refresh', description: '刷新仪表盘数据' },
+          { name: 'dashboard_export', description: '导出仪表盘报告' },
+        ])
+      } finally {
+        if (originalXyncra === undefined) delete (window as any).$xyncra
+        else (window as any).$xyncra = originalXyncra
+      }
+    })
+
+    it('should return empty functions array when registry is not available', async () => {
+      const mockRoute = {
+        path: '/test',
+        name: null,
+        meta: {},
+        fullPath: '/test',
+        params: {},
+        query: {},
+      }
+      mockGetRouter.mockReturnValue({
+        currentRoute: { value: mockRoute },
+      })
+
+      // Ensure no registry exists
+      const originalXyncra = (window as any).$xyncra
+      delete (window as any).$xyncra
+
+      try {
+        const getCurrentPage = generalFunctions.find(fn => fn.info.name === 'get_current_page')!
+        const result = await getCurrentPage.handler({})
+
+        expect(result.functions).toEqual([])
+      } finally {
+        if (originalXyncra === undefined) delete (window as any).$xyncra
+        else (window as any).$xyncra = originalXyncra
+      }
+    })
+
+    it('should return empty functions array when registry.getFunctionInfos throws', async () => {
+      const mockRoute = {
+        path: '/test',
+        name: null,
+        meta: {},
+        fullPath: '/test',
+        params: {},
+        query: {},
+      }
+      mockGetRouter.mockReturnValue({
+        currentRoute: { value: mockRoute },
+      })
+
+      const originalXyncra = (window as any).$xyncra
+      ;(window as any).$xyncra = {
+        registry: {
+          getFunctionInfos: vi.fn().mockImplementation(() => { throw new Error('registry error') }),
+        },
+      }
+
+      try {
+        const getCurrentPage = generalFunctions.find(fn => fn.info.name === 'get_current_page')!
+        const result = await getCurrentPage.handler({})
+
+        expect(result.functions).toEqual([])
+      } finally {
+        if (originalXyncra === undefined) delete (window as any).$xyncra
+        else (window as any).$xyncra = originalXyncra
+      }
+    })
+
+    it('should have correct function info', () => {
+      const getCurrentPage = generalFunctions.find(fn => fn.info.name === 'get_current_page')!
+
+      expect(getCurrentPage.info.description).toContain('获取用户当前所在的页面信息')
+      expect(getCurrentPage.info.parameters.properties).toEqual({})
+      expect(getCurrentPage.info.tags).toContain('type:query')
+      expect(getCurrentPage.info.tags).toContain('page:general')
     })
   })
 

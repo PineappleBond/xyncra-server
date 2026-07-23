@@ -59,6 +59,7 @@ type AgentExecutor struct {
 	totalTimeout   time.Duration // default 120s
 	typingTimeout  time.Duration // default 60s
 	metrics        LLMMetrics    // optional LLM call metrics recorder (nil = disabled)
+	debugErrors    bool          // when true, expose raw error messages to users
 
 	// checkpointStore is used for HITL checkpoint cleanup after resume (D-112).
 	// When non-nil and the underlying store supports Delete, the resume handler
@@ -171,6 +172,15 @@ func WithRemoteCallingStore(rs *store.RemoteCallingStore) ExecutorOption {
 func WithBroadcastConversationUpdate(fn BroadcastConversationUpdateFunc) ExecutorOption {
 	return func(e *AgentExecutor) {
 		e.broadcastConversationUpdate = fn
+	}
+}
+
+// WithDebugErrors enables exposing raw error messages to users instead of
+// generic friendly messages. Useful for development and debugging.
+// WARNING: Do NOT enable in production — raw errors may leak sensitive info.
+func WithDebugErrors(enabled bool) ExecutorOption {
+	return func(e *AgentExecutor) {
+		e.debugErrors = enabled
 	}
 }
 
@@ -480,6 +490,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 					Params:         interruptInfo.Params,
 					InterruptID:    info.InterruptID,
 					DeviceID:       interruptInfo.DeviceID,
+					MessageID:      popToolCallingMsgID(payload.ConversationID),
 					Status:         model.RemoteCallingStatusPending,
 					CreatedAt:      time.Now(),
 					ExpiresAt:      &expiresAt,
@@ -656,16 +667,27 @@ func (e *AgentExecutor) ExecuteWithErrorMessage(ctx context.Context, payload Exe
 }
 
 // classifyError maps sentinel errors to user-friendly Chinese error messages (D-067/D-082).
+// When debugErrors is enabled, raw error messages are exposed for debugging.
 func (e *AgentExecutor) classifyError(err error) string {
+	if e.debugErrors {
+		return fmt.Sprintf("错误详情（调试模式）: %v", err)
+	}
+
 	switch {
 	case errors.Is(err, ErrAPIKeyMissing), errors.Is(err, ErrUnsupportedModel):
 		return "抱歉，我的配置有误，请联系管理员检查设置。"
+	case errors.Is(err, ErrAgentNotFound):
+		return "抱歉，该助手尚未注册，请联系管理员。"
+	case errors.Is(err, ErrAgentBuild):
+		return "抱歉，助手初始化失败，请稍后重试。"
 	case errors.Is(err, ErrLLMTimeout), errors.Is(err, ErrLLMRateLimited):
 		return "抱歉，我暂时无法回复，请稍后重试。"
 	case errors.Is(err, ErrContextLoad):
 		return "抱歉，我无法读取对话历史，请重新发送消息。"
 	case errors.Is(err, ErrCheckpointStoreSet):
 		return "抱歉，等待时间过长，请重新发送消息。"
+	case errors.Is(err, ErrStreamClosed):
+		return "抱歉，连接中断，请重新发送消息。"
 	case errors.Is(err, ErrMCPUnreachable):
 		return "抱歉，外部工具服务不可用，请稍后重试。"
 	default:

@@ -94,6 +94,76 @@ export const generalFunctions = [
     },
   ),
 
+  // Get current page - query the user's current route
+  buildFunctionEntry(
+    {
+      name: 'get_current_page',
+      description: '获取用户当前所在的页面信息，包括路径、路由名称、页面标题、URL参数和查询参数。当需要了解用户当前在哪个页面时调用此函数。',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      tags: ['type:query', 'page:general'],
+    },
+    async () => {
+      const { getRouter } = await import('../plugin')
+      const router = getRouter()
+
+      // Determine current route path
+      const currentPath = router
+        ? router.currentRoute.value.path
+        : window.location.pathname
+
+      // Get registered functions from FunctionRegistry, filtered by relevance:
+      //   - general functions (tags include 'page:general')
+      //   - page-specific functions (tags include 'route:<currentPath>')
+      let functions: Array<{ name: string; description: string }> = []
+      try {
+        const registry = (window as any).$xyncra?.registry
+        if (registry && typeof registry.getFunctionInfos === 'function') {
+          const infos = registry.getFunctionInfos()
+          const routeTag = `route:${currentPath}`
+          functions = infos
+            .filter((info: { tags?: string[] }) => {
+              const tags = info.tags ?? []
+              return tags.includes('page:general') || tags.includes(routeTag)
+            })
+            .map((info: { name: string; description?: string }) => ({
+              name: info.name,
+              description: info.description ?? '',
+            }))
+        }
+      } catch {
+        // Registry not available, return empty array
+      }
+
+      if (router) {
+        const route = router.currentRoute.value
+        return {
+          success: true,
+          path: route.path,
+          name: route.name ?? null,
+          title: route.meta?.title ?? null,
+          fullPath: route.fullPath,
+          params: route.params,
+          query: route.query,
+          functions,
+        }
+      }
+      // Fallback when router is not available
+      return {
+        success: true,
+        path: window.location.pathname,
+        name: null,
+        title: document.title || null,
+        fullPath: window.location.pathname + window.location.search,
+        params: {},
+        query: Object.fromEntries(new URLSearchParams(window.location.search)),
+        functions,
+      }
+    },
+  ),
+
   // Ask user - HITL (Human-In-The-Loop)
   buildFunctionEntry(
     {

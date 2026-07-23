@@ -279,6 +279,26 @@ func (bh *BroadcastHelper) BroadcastRaw(targetUserID string, updates *protocol.P
 	return bh.wsServer.BroadcastUpdates(targetUserID, updates)
 }
 
+// SendEphemeralMessageUpdate sends an ephemeral (seq=0) message update
+// to the given user. This bypasses the client's sync pipeline (applyChain)
+// and triggers an instant message:added event for immediate UI feedback.
+// Used for tool_calling status changes where the persisted update would
+// arrive too late due to sync pipeline latency.
+func (bh *BroadcastHelper) SendEphemeralMessageUpdate(targetUserID string, payload json.RawMessage) {
+	updates := &protocol.PackageDataUpdates{
+		Updates: []protocol.PackageDataUpdate{
+			{
+				Seq:     0, // ephemeral — bypasses client sync pipeline
+				Type:    protocol.UpdateTypeMessage,
+				Payload: payload,
+			},
+		},
+	}
+	if err := bh.wsServer.BroadcastUpdates(targetUserID, updates); err != nil {
+		bh.logger.Error("broadcast: ephemeral message update failed", "user_id", targetUserID, "error", err)
+	}
+}
+
 // BroadcastMessageUpdate broadcasts persisted message updates to each user
 // with their real DB-allocated seq numbers. This is needed after the agent
 // executor persists a message via store.SendMessage — the DB records are

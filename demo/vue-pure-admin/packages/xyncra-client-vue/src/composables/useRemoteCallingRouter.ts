@@ -19,7 +19,7 @@
  *     conversations can run in parallel.
  */
 
-import { ref, onMounted, onUnmounted, type Ref } from 'vue'
+import { ref, watch, onMounted, onUnmounted, type Ref } from 'vue'
 import { useXyncra } from './useXyncra'
 
 /**
@@ -61,7 +61,9 @@ export interface UseRemoteCallingRouterReturn {
   cancelCall: (id: string) => void
 }
 
-export function useRemoteCallingRouter(): UseRemoteCallingRouterReturn {
+export function useRemoteCallingRouter(
+  conversationId?: Ref<string | null> | string,
+): UseRemoteCallingRouterReturn {
   const { client, eventEmitter, registry, db } = useXyncra()
   const executingCalls = ref(new Map<string, ExecutingCall>()) as Ref<Map<string, ExecutingCall>>
   const processedIds = new Set<string>()
@@ -383,6 +385,40 @@ export function useRemoteCallingRouter(): UseRemoteCallingRouterReturn {
   onUnmounted(() => {
     unsub?.()
   })
+
+  // ---- Initial-load detection of pending RemoteCallings ----
+  async function fetchAndRoutePendingCallings(convId: string) {
+    if (!db || !convId) return
+
+    try {
+      const storedRCs = await db.remoteCallingsStore.getByConversation(convId)
+      for (const rc of storedRCs) {
+        if (rc.status !== 'pending') continue
+        // Route through the existing routeCalling function.
+        // routeCalling already deduplicates via processedIds, so re-routing
+        // an already-processed calling is safe (it will be skipped).
+        routeCalling({
+          remoteCallingId: rc.id,
+          method: rc.method,
+          params: rc.params,
+          conversationId: rc.conversation_id,
+          userId: rc.agent_id,
+          deviceId: rc.device_id,
+        })
+      }
+    } catch (error) {
+      console.error('[RemoteCallingRouter] Failed to fetch pending remote callings:', error)
+    }
+  }
+
+  const convIdRef = typeof conversationId === 'string' ? ref(conversationId) : conversationId
+  if (convIdRef) {
+    watch(convIdRef, (newId) => {
+      if (newId) {
+        fetchAndRoutePendingCallings(newId)
+      }
+    }, { immediate: true })
+  }
 
   return {
     executingCalls,

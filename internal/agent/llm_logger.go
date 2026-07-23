@@ -11,12 +11,34 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/PineappleBond/xyncra-server/internal/store"
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
+	"github.com/PineappleBond/xyncra-server/pkg/protocol"
 )
+
+// ---------------------------------------------------------------------------
+// Tool-calling message ID tracker (execution-time bridge)
+// ---------------------------------------------------------------------------
+
+// toolCallingMsgTracker maps conversationID -> toolMsgID so that the executor
+// can associate a RemoteCalling record with the persisted tool_calling message.
+// The map is ephemeral (in-memory); the ID is persisted to the remote_callings
+// table before the entry is deleted, so server restarts do not lose data.
+var toolCallingMsgTracker sync.Map
+
+// popToolCallingMsgID retrieves and deletes the pending tool-calling message ID
+// for the given conversation. Returns 0 if no pending ID exists.
+func popToolCallingMsgID(conversationID string) uint32 {
+	if v, ok := toolCallingMsgTracker.LoadAndDelete(conversationID); ok {
+		return v.(uint32)
+	}
+	return 0
+}
 
 // ---------------------------------------------------------------------------
 // Context keys for function call broadcasting
@@ -347,6 +369,7 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 
 		// Attempt to persist tool_calling message (best-effort, fire-and-forget).
 		var toolMsgID uint32
+		var toolMsgUUID string // UUID of persisted message (for ephemeral broadcast)
 		s := storeFromContext(ctx)
 		bh, _ := ctx.Value(ctxKeyBroadcastHelper).(*BroadcastHelper)
 		humanUserID, _ := ctx.Value(ctxKeyBroadcastHumanUserID).(string)
@@ -371,38 +394,85 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 					Error:     fmt.Sprintf("marshal tool_calling payload: %v", err),
 				})
 			} else {
-				// Create message for persistence.
-				msg := &model.Message{
-					ID:             uuid.New().String(),
-					ConversationID: conversationID,
-					SenderID:       agentUserID,
-					Content:        string(payloadJSON),
-					Type:           "tool_calling",
-					Status:         "executing",
-					CreatedAt:      time.Now(),
-				}
-
 				// Determine member IDs for UserUpdate fan-out.
 				memberIDs := []string{humanUserID}
 				if agentUserID != "" && agentUserID != humanUserID {
 					memberIDs = append(memberIDs, agentUserID)
 				}
 
-				// Persist via SendMessage (atomic: allocates MessageID + creates UserUpdates).
-				result, err := s.SendMessage(ctx, msg, memberIDs)
-				if err != nil {
-					m.logger.write(LogRecord{
-						Timestamp: time.Now(),
-						AgentID:   m.agentID,
-						Model:     m.model,
-						Iteration: iter,
-						Phase:     "error",
-						Error:     fmt.Sprintf("persist tool_calling message: %v", err),
+				// During resume, the RemoteCalling for this tool has already been
+				// resolved (client returned result). It still holds the message_id
+				// of the tool_calling message created during the initial execution.
+				// Reuse that message instead of creating a duplicate.
+				// Query the DB (not memory) so it survives restarts.
+				var existingMsgUUID string
+				var existingMsgID uint32
+				if rcStore := s.RemoteCallingStore(); rcStore != nil {
+					// Query by checkpoint_id from conversation, which is more reliable
+					// than status-based filtering.
+					if conv, _ := s.ConversationStore().Get(ctx, conversationID); conv != nil && conv.CheckpointID != "" {
+						if rcs, _ := rcStore.GetByCheckpoint(ctx, conv.CheckpointID); len(rcs) > 0 {
+							for _, rc := range rcs {
+								if rc.Method == tCtx.Name && rc.MessageID > 0 {
+									existingMsgID = rc.MessageID
+									break
+								}
+							}
+						}
+					}
+				}
+				if existingMsgID > 0 {
+					// Found existing message via RemoteCalling. Look up UUID and reuse.
+					_ = s.Transaction(ctx, func(tx *gorm.DB) error {
+						if existingMsg, _ := s.MessageStore().GetByConversationAndMessageIDTx(ctx, tx, conversationID, existingMsgID); existingMsg != nil {
+							existingMsgUUID = existingMsg.ID
+						}
+						return nil
 					})
+				}
+				if existingMsgUUID != "" {
+					// Reuse: update the existing message content (args may differ).
+					toolMsgID = existingMsgID
+					toolMsgUUID = existingMsgUUID
+					_ = s.Transaction(ctx, func(tx *gorm.DB) error {
+						return s.MessageStore().UpdateMessageContentTx(ctx, tx, conversationID, existingMsgID, string(payloadJSON), "tool_calling", "executing")
+					})
+					// Store in tracker for this execution.
+					toolCallingMsgTracker.Store(conversationID, toolMsgID)
 				} else {
-					toolMsgID = result.Message.MessageID
-					// Broadcast the persisted message update.
-					bh.BroadcastMessageUpdate(ctx, result.Updates)
+					// Create new message for persistence.
+					msgUUID := uuid.New().String()
+					msg := &model.Message{
+						ID:             msgUUID,
+						ConversationID: conversationID,
+						SenderID:       agentUserID,
+						Content:        string(payloadJSON),
+						Type:           "tool_calling",
+						Status:         "executing",
+						CreatedAt:      time.Now(),
+					}
+
+					// Persist via SendMessage (atomic: allocates MessageID + creates UserUpdates).
+					result, err := s.SendMessage(ctx, msg, memberIDs)
+					if err != nil {
+						m.logger.write(LogRecord{
+							Timestamp: time.Now(),
+							AgentID:   m.agentID,
+							Model:     m.model,
+							Iteration: iter,
+							Phase:     "error",
+							Error:     fmt.Sprintf("persist tool_calling message: %v", err),
+						})
+					} else {
+						toolMsgID = result.Message.MessageID
+						toolMsgUUID = msgUUID
+						// Broadcast the persisted message update.
+						bh.BroadcastMessageUpdate(ctx, result.Updates)
+						// Store in tracker so executor can associate with RemoteCalling.
+						if conversationID != "" {
+							toolCallingMsgTracker.Store(conversationID, toolMsgID)
+						}
+					}
 				}
 			}
 		} else {
@@ -442,13 +512,29 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 				Args:       truncate(argumentsInJSON, 2048),
 				DurationMs: dur,
 			}
-			if err != nil {
+			if _, isInterrupt := compose.IsInterruptRerunError(err); isInterrupt {
+				// Interrupt is not an error — the agent is paused waiting for
+				// an external result (remote calling). Keep the message as
+				// "executing" so the client knows it's still in progress.
+				finalPayload.Status = "executing"
+			} else if err != nil {
 				finalPayload.Status = "failed"
 				finalPayload.Error = truncate(errStr, 2048)
 			} else {
 				finalPayload.Status = "completed"
 				finalPayload.Result = truncate(result, 4096)
 			}
+
+			// DIAG: log before attempting update
+			m.logger.write(LogRecord{
+				Timestamp: time.Now(),
+				AgentID:   m.agentID,
+				Model:     m.model,
+				Iteration: iter,
+				Phase:     "tool_calling_diag",
+				ToolName:  tCtx.Name,
+				Error:     fmt.Sprintf("pre-update: toolMsgID=%d status=%s convID=%s humanUser=%s agentUser=%s ctxErr=%v dur=%dms", toolMsgID, finalPayload.Status, conversationID, humanUserID, agentUserID, ctx.Err(), dur),
+			})
 
 			finalPayloadJSON, marshalErr := json.Marshal(finalPayload)
 			if marshalErr != nil {
@@ -463,14 +549,64 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 			} else {
 				// Update message in transaction with UserUpdate fan-out.
 				m.updateToolCallingMessage(ctx, s, bh, conversationID, toolMsgID, humanUserID, agentUserID, string(finalPayloadJSON), finalPayload.Status)
+
+				// Send an ephemeral message update (seq=0) for instant UI feedback.
+				// The persisted update above goes through the client's sync pipeline
+				// (IndexedDB + applyChain), which can be delayed by streaming updates.
+				// The ephemeral update bypasses this pipeline and triggers an immediate
+				// message:added event, causing ToolCallingMessage to re-render.
+				if bh != nil && humanUserID != "" && toolMsgID > 0 && toolMsgUUID != "" {
+					ephemeralPayload, _ := json.Marshal(map[string]interface{}{
+						"id":              toolMsgUUID,
+						"conversation_id": conversationID,
+						"sender_id":       agentUserID,
+						"content":         string(finalPayloadJSON),
+						"type":            "tool_calling",
+						"message_id":      toolMsgID,
+						"status":          finalPayload.Status,
+						"created_at":      time.Now().Format(time.RFC3339Nano),
+					})
+					if ephemeralPayload != nil {
+						m.logger.write(LogRecord{
+							Timestamp: time.Now(),
+							AgentID:   m.agentID,
+							Model:     m.model,
+							Iteration: iter,
+							Phase:     "tool_calling_ephemeral_broadcast",
+							ToolName:  tCtx.Name,
+							Error:     fmt.Sprintf("sending ephemeral message update: toolMsgUUID=%s toolMsgID=%d status=%s", toolMsgUUID, toolMsgID, finalPayload.Status),
+						})
+						bh.SendEphemeralMessageUpdate(humanUserID, ephemeralPayload)
+					}
+				}
+
+				// Also send an ephemeral function_call broadcast for immediate
+				// UI feedback. The persisted message update above goes through
+				// IndexedDB transaction + applyChain serialization on the client,
+				// which may be deferred during rapid streaming. The ephemeral
+				// broadcast (seq=0) bypasses this pipeline and triggers an
+				// instant UI update via the function:called event.
+				if bh != nil && humanUserID != "" && conversationID != "" {
+					errStr := ""
+					if err != nil {
+						errStr = err.Error()
+					}
+					bh.SendFunctionCall(ctx, humanUserID, agentUserID, conversationID,
+						tCtx.Name, truncate(argumentsInJSON, 2048),
+						truncate(result, 4096), errStr, dur, true)
+				}
 			}
 		} else if bh != nil {
 			// Fallback: ephemeral broadcast completion (legacy behavior).
-			errStr := ""
-			if err != nil {
-				errStr = err.Error()
+			// Skip interrupt errors — they are not real failures, just the
+			// agent pausing for an external result (remote calling).
+			if _, isInterrupt := compose.IsInterruptRerunError(err); !isInterrupt {
+				errStr := ""
+				if err != nil {
+					errStr = err.Error()
+				}
+				m.broadcastFunctionCall(ctx, tCtx.Name, truncate(argumentsInJSON, 2048), truncate(result, 4096), errStr, dur, true)
 			}
-			m.broadcastFunctionCall(ctx, tCtx.Name, truncate(argumentsInJSON, 2048), truncate(result, 4096), errStr, dur, true)
 		}
 
 		return result, err
@@ -481,6 +617,14 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 // transaction and creates UserUpdate records for sync. This is fire-and-forget;
 // errors are logged but never propagated.
 func (m *LoggingMiddleware) updateToolCallingMessage(ctx context.Context, s store.StoreAPI, bh *BroadcastHelper, conversationID string, messageID uint32, humanUserID, agentUserID, content, status string) {
+	// DIAG: trace entry
+	m.logger.write(LogRecord{
+		Timestamp: time.Now(),
+		AgentID:   m.agentID,
+		Phase:     "tool_calling_update_diag",
+		Error:     fmt.Sprintf("ENTER: convID=%s msgID=%d status=%s ctxErr=%v", conversationID, messageID, status, ctx.Err()),
+	})
+
 	// Use the store's transaction to update the message and create UserUpdates.
 	tx := s.MessageStore().Begin()
 	if tx == nil {
@@ -505,13 +649,27 @@ func (m *LoggingMiddleware) updateToolCallingMessage(ctx context.Context, s stor
 		return
 	}
 
-	// Build updated message for UserUpdate payload.
-	updatedMsg := &model.Message{
-		ConversationID: conversationID,
-		MessageID:      messageID,
-		Content:        content,
-		Type:           "tool_calling",
-		Status:         status,
+	// DIAG: update succeeded
+	m.logger.write(LogRecord{
+		Timestamp: time.Now(),
+		AgentID:   m.agentID,
+		Phase:     "tool_calling_update_diag",
+		Error:     fmt.Sprintf("STEP1 OK: UpdateMessageContentTx success, msgID=%d", messageID),
+	})
+
+	// Query the full message to get all fields (id, sender_id, created_at, etc.)
+	// for the UserUpdate payload. The partial message from the update would have
+	// empty fields that cause frontend validation errors (D-137).
+	updatedMsg, err := s.MessageStore().GetByConversationAndMessageIDTx(ctx, tx, conversationID, messageID)
+	if err != nil {
+		tx.Rollback()
+		m.logger.write(LogRecord{
+			Timestamp: time.Now(),
+			AgentID:   m.agentID,
+			Phase:     "error",
+			Error:     fmt.Sprintf("get updated message for payload: %v", err),
+		})
+		return
 	}
 	payload, err := json.Marshal(updatedMsg)
 	if err != nil {
@@ -524,6 +682,14 @@ func (m *LoggingMiddleware) updateToolCallingMessage(ctx context.Context, s stor
 		})
 		return
 	}
+
+	// DIAG: query + marshal succeeded
+	m.logger.write(LogRecord{
+		Timestamp: time.Now(),
+		AgentID:   m.agentID,
+		Phase:     "tool_calling_update_diag",
+		Error:     fmt.Sprintf("STEP2 OK: GetByConversationAndMessageIDTx success, payloadLen=%d", len(payload)),
+	})
 
 	// Allocate per-user seq values and build UserUpdate records.
 	memberIDs := []string{humanUserID}
@@ -560,6 +726,14 @@ func (m *LoggingMiddleware) updateToolCallingMessage(ctx context.Context, s stor
 		updates = append(updates, update)
 	}
 
+	// DIAG: seq allocation done
+	m.logger.write(LogRecord{
+		Timestamp: time.Now(),
+		AgentID:   m.agentID,
+		Phase:     "tool_calling_update_diag",
+		Error:     fmt.Sprintf("STEP3 OK: allocated %d UserUpdates, memberIDs=%v", len(updates), memberIDs),
+	})
+
 	// Batch insert UserUpdates.
 	if len(updates) > 0 {
 		if err := tx.CreateInBatches(updates, 100).Error; err != nil {
@@ -585,8 +759,24 @@ func (m *LoggingMiddleware) updateToolCallingMessage(ctx context.Context, s stor
 		return
 	}
 
+	// DIAG: commit done, about to broadcast
+	m.logger.write(LogRecord{
+		Timestamp: time.Now(),
+		AgentID:   m.agentID,
+		Phase:     "tool_calling_update_diag",
+		Error:     fmt.Sprintf("STEP4 OK: tx committed, broadcasting %d updates", len(updates)),
+	})
+
 	// Broadcast the update.
 	bh.BroadcastMessageUpdate(ctx, updates)
+
+	// DIAG: broadcast done
+	m.logger.write(LogRecord{
+		Timestamp: time.Now(),
+		AgentID:   m.agentID,
+		Phase:     "tool_calling_update_diag",
+		Error:     fmt.Sprintf("STEP5 OK: BroadcastMessageUpdate returned, status=%s", status),
+	})
 }
 
 // broadcastFunctionCall reads broadcast metadata from the context and sends
@@ -605,4 +795,97 @@ func (m *LoggingMiddleware) broadcastFunctionCall(ctx context.Context, name, arg
 		return
 	}
 	bh.SendFunctionCall(ctx, humanUserID, agentUserID, conversationID, name, args, result, errStr, durationMs, isDone)
+}
+
+// ---------------------------------------------------------------------------
+// Tool-calling message helpers (used by resume_handler)
+// ---------------------------------------------------------------------------
+
+// buildToolCallingContent constructs the JSON content for a tool_calling message.
+func buildToolCallingContent(method, params, result, errMsg, status string) string {
+	payload := ToolCallingPayload{
+		Name:   method,
+		Args:   params,
+		Status: status,
+	}
+	if result != "" {
+		payload.Result = truncate(result, 4096)
+	}
+	if errMsg != "" {
+		payload.Error = truncate(errMsg, 2048)
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Sprintf(`{"name":%q,"status":%q}`, method, status)
+	}
+	return string(b)
+}
+
+// broadcastToolCallingUpdate creates a UserUpdate for the updated tool_calling
+// message and broadcasts it to conversation members. Must be called within an
+// existing transaction (tx). The tx is NOT committed or rolled back by this
+// function — the caller is responsible for commit/rollback.
+func broadcastToolCallingUpdate(ctx context.Context, executor *AgentExecutor, tx *gorm.DB, conversationID string, messageID uint32, content, humanUserID, agentUserID string, logger Logger) {
+	// Query the full message for the UserUpdate payload.
+	updatedMsg, err := executor.store.MessageStore().GetByConversationAndMessageIDTx(ctx, tx, conversationID, messageID)
+	if err != nil {
+		logger.Error("broadcastToolCallingUpdate: get message failed", "error", err)
+		return
+	}
+	payload, err := json.Marshal(updatedMsg)
+	if err != nil {
+		logger.Error("broadcastToolCallingUpdate: marshal payload failed", "error", err)
+		return
+	}
+
+	// Build member list.
+	memberIDs := []string{humanUserID}
+	if agentUserID != "" && agentUserID != humanUserID {
+		memberIDs = append(memberIDs, agentUserID)
+	}
+
+	// Allocate seq and create UserUpdate records.
+	now := time.Now()
+	updates := make([]model.UserUpdate, 0, len(memberIDs))
+	for _, memberID := range memberIDs {
+		var latestSeq uint32
+		if err := tx.Model(&model.UserUpdate{}).
+			Where("user_id = ?", memberID).
+			Select("COALESCE(MAX(seq), 0)").
+			Scan(&latestSeq).Error; err != nil {
+			logger.Error("broadcastToolCallingUpdate: get seq failed", "user_id", memberID, "error", err)
+			return
+		}
+		updates = append(updates, model.UserUpdate{
+			ID:        uuid.New().String(),
+			UserID:    memberID,
+			Seq:       latestSeq + 1,
+			Type:      "message",
+			Payload:   payload,
+			CreatedAt: now,
+		})
+	}
+
+	// Batch insert.
+	if err := tx.Create(&updates).Error; err != nil {
+		logger.Error("broadcastToolCallingUpdate: insert UserUpdates failed", "error", err)
+		return
+	}
+
+	// Broadcast via WebSocket.
+	for _, u := range updates {
+		wsUpdates := &protocol.PackageDataUpdates{
+			Updates: []protocol.PackageDataUpdate{
+				{
+					Seq:       u.Seq,
+					Type:      protocol.UpdateTypeMessage,
+					Payload:   u.Payload,
+					CreatedAt: u.CreatedAt,
+				},
+			},
+		}
+		if err := executor.broadcaster.BroadcastRaw(u.UserID, wsUpdates); err != nil {
+			logger.Error("broadcastToolCallingUpdate: broadcast failed", "user_id", u.UserID, "error", err)
+		}
+	}
 }

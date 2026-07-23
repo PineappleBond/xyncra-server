@@ -126,14 +126,19 @@ func TestClassifyError(t *testing.T) {
 			"抱歉，处理遇到问题，请稍后重试。",
 		},
 		{
-			"ErrAgentBuild → generic message",
+			"ErrAgentBuild → agent build error",
 			ErrAgentBuild,
-			"抱歉，处理遇到问题，请稍后重试。",
+			"抱歉，助手初始化失败，请稍后重试。",
 		},
 		{
-			"ErrAgentNotFound → generic message",
+			"ErrAgentNotFound → agent not found error",
 			ErrAgentNotFound,
-			"抱歉，处理遇到问题，请稍后重试。",
+			"抱歉，该助手尚未注册，请联系管理员。",
+		},
+		{
+			"ErrStreamClosed → stream closed error",
+			ErrStreamClosed,
+			"抱歉，连接中断，请重新发送消息。",
 		},
 	}
 
@@ -141,6 +146,32 @@ func TestClassifyError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			result := executor.classifyError(tc.err)
 			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// classifyError with debugErrors enabled
+// ---------------------------------------------------------------------------
+
+func TestClassifyError_DebugMode(t *testing.T) {
+	executor := &AgentExecutor{debugErrors: true}
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"ErrAPIKeyMissing", ErrAPIKeyMissing},
+		{"ErrAgentNotFound", ErrAgentNotFound},
+		{"unknown error", errors.New("something went wrong")},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := executor.classifyError(tc.err)
+			// Debug mode should expose the raw error
+			assert.Contains(t, result, tc.err.Error())
+			assert.Contains(t, result, "错误详情（调试模式）")
 		})
 	}
 }
@@ -205,7 +236,7 @@ func TestExecuteWithErrorMessage_UnknownAgent(t *testing.T) {
 	call := mockStore.sendMessageCalls[0]
 	assert.Equal(t, "conv-1", call.msg.ConversationID)
 	assert.Equal(t, "agent/nonexistent", call.msg.SenderID)
-	assert.Equal(t, "抱歉，处理遇到问题，请稍后重试。", call.msg.Content)
+	assert.Equal(t, "抱歉，该助手尚未注册，请联系管理员。", call.msg.Content)
 	assert.Equal(t, "text", call.msg.Type)
 	assert.Equal(t, "sent", call.msg.Status)
 }

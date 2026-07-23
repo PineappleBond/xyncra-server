@@ -99,6 +99,7 @@ export interface MessageEvent {
   conversationId: string;
   senderId: string;
   content: string;
+  type?: string; // 'text' | 'tool_calling' | 'summary'
   clientMessageId: string;
   replyToId?: string;
   createdAt: string;

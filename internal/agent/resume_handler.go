@@ -197,6 +197,12 @@ func NewAgentResumeHandler(
 		ctx, cancel := context.WithTimeout(ctx, executor.totalTimeout)
 		defer cancel()
 
+		// 7b. Enrich context with broadcast metadata and store so that
+		// the LoggingMiddleware can persist tool_calling messages during
+		// the resumed execution (same as executor.Execute lines 282-287).
+		ctx = WithBroadcastInfo(ctx, executor.broadcaster, payload.SenderID, payload.AgentID, payload.ConversationID)
+		ctx = WithStore(ctx, executor.store)
+
 		// Send typing indicator.
 		executor.broadcaster.SendTyping(ctx, payload.AgentID, payload.SenderID, payload.ConversationID, true)
 		var typingOnce sync.Once
@@ -409,6 +415,7 @@ func NewAgentResumeHandler(
 						Params:         interruptInfo.Params,
 						InterruptID:    info.InterruptID,
 						DeviceID:       interruptInfo.DeviceID,
+						MessageID:      popToolCallingMsgID(payload.ConversationID),
 						Status:         model.RemoteCallingStatusPending,
 						CreatedAt:      time.Now(),
 						ExpiresAt:      &expiresAt,
@@ -552,7 +559,42 @@ func NewAgentResumeHandler(
 				"conversation_id", payload.ConversationID, "error", err)
 		}
 
-		// 2. Delete RemoteCallings for this checkpoint (D-137).
+		// 2. Update tool_calling messages for resolved RemoteCallings (D-141).
+		//    Must happen BEFORE DeleteByCheckpoint because we need the MessageID.
+		if executor.remoteCallingStore != nil {
+			resolvedRCs, rcErr := executor.remoteCallingStore.GetResolvedByCheckpoint(ctx, payload.CheckpointID)
+			if rcErr != nil {
+				logger.Error("agent resume: get resolved remote callings failed (non-fatal)",
+					"checkpoint_id", payload.CheckpointID, "error", rcErr)
+			} else {
+				for _, rc := range resolvedRCs {
+					if rc.MessageID > 0 {
+						// Determine final status based on the RemoteCalling result.
+						tcStatus := "completed"
+						if !rc.Success {
+							tcStatus = "failed"
+						}
+						tcContent := buildToolCallingContent(rc.Method, rc.Params, rc.Result, rc.ErrorMessage, tcStatus)
+						tx := executor.store.MessageStore().Begin()
+						if tx == nil {
+							logger.Error("agent resume: begin tx for tool_calling update failed (non-fatal)")
+							continue
+						}
+						if err := executor.store.MessageStore().UpdateMessageContentTx(ctx, tx, rc.ConversationID, rc.MessageID, tcContent, "tool_calling", tcStatus); err != nil {
+							logger.Error("agent resume: update tool_calling message failed (non-fatal)",
+								"message_id", rc.MessageID, "error", err)
+							tx.Rollback()
+							continue
+						}
+						// Create UserUpdate and broadcast.
+						broadcastToolCallingUpdate(ctx, executor, tx, rc.ConversationID, rc.MessageID, tcContent, payload.SenderID, payload.AgentID, logger)
+						tx.Commit()
+					}
+				}
+			}
+		}
+
+		// 3. Delete RemoteCallings for this checkpoint (D-137).
 		if executor.remoteCallingStore != nil {
 			if err := executor.remoteCallingStore.DeleteByCheckpoint(ctx, payload.CheckpointID); err != nil {
 				logger.Error("agent resume: delete remote callings failed (non-fatal)",

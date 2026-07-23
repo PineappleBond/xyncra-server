@@ -32,10 +32,12 @@ export type Helpers = Record<string, HelperDef>
  *
  * @param pageKey - Unique page identifier (e.g. "login", "table-demo").
  * @param helpers - Map of helper definitions to register.
+ * @param routePath - Optional route path for the page (e.g. "/guide"). Added as a `route:` tag.
  */
 export function defineTestHelpers(
   pageKey: string,
   helpers: Helpers,
+  routePath: string = '',
 ): void {
   // 1. Extract helpers map: name -> handler function.
   const helpersMap: Record<string, (args: any) => any> = {}
@@ -57,7 +59,7 @@ export function defineTestHelpers(
       name: `pg_${underscoredKey}_${def.name}`,
       description: def.description,
       parameters: def.parameters,
-      tags: [`page:${pageKey}`, 'type:helper', ...(def.tags ?? [])],
+      tags: [`page:${pageKey}`, 'type:helper', ...(routePath ? [`route:${routePath}`] : []), ...(def.tags ?? [])],
       timeout_ms: def.timeout_ms ?? 10000,
     },
     handler: async (params: Record<string, unknown>) => {

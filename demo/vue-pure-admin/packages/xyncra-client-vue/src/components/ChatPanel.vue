@@ -27,28 +27,36 @@
 
       <!-- Messages -->
       <template v-for="msg in displayedMessages" :key="msg.id">
-        <div
-          class="message-item"
-          :class="msg.senderId === 'user' ? 'message-user' : 'message-ai'"
-        >
-          <div class="message-bubble" :class="msg.senderId === 'user' ? 'bubble-user' : 'bubble-ai'">
-            <div
-              v-if="msg.senderId !== 'user'"
-              class="message-content markdown-body"
-              v-html="renderMarkdown(msg.content)"
-            />
-            <div v-else class="message-content">{{ msg.content }}</div>
-          </div>
-          <div class="message-time" :class="msg.senderId === 'user' ? 'time-right' : 'time-left'">
-            {{ formatRelativeTime(msg.createdAt) }}
-          </div>
-        </div>
-        <!-- Function calls rendered after AI messages -->
-        <FunctionCallDisplay
-          v-if="msg.senderId !== 'user' && getFunctionCalls(msg.id).length > 0"
-          :key="'fc-' + msg.id"
-          :calls="getFunctionCalls(msg.id)"
+        <!-- Tool calling message -->
+        <ToolCallingMessage
+          v-if="msg.type === 'tool_calling'"
+          :content="msg.content"
         />
+        <!-- Normal message -->
+        <template v-else>
+          <div
+            class="message-item"
+            :class="msg.senderId === 'user' ? 'message-user' : 'message-ai'"
+          >
+            <div class="message-bubble" :class="msg.senderId === 'user' ? 'bubble-user' : 'bubble-ai'">
+              <div
+                v-if="msg.senderId !== 'user'"
+                class="message-content markdown-body"
+                v-html="renderMarkdown(msg.content)"
+              />
+              <div v-else class="message-content">{{ msg.content }}</div>
+            </div>
+            <div class="message-time" :class="msg.senderId === 'user' ? 'time-right' : 'time-left'">
+              {{ formatRelativeTime(msg.createdAt) }}
+            </div>
+          </div>
+          <!-- Function calls rendered after AI messages -->
+          <FunctionCallDisplay
+            v-if="msg.senderId !== 'user' && getFunctionCalls(msg.id).length > 0"
+            :key="'fc-' + msg.id"
+            :calls="getFunctionCalls(msg.id)"
+          />
+        </template>
       </template>
 
       <!-- Streaming message (appended to last AI message or as new bubble) -->
@@ -108,6 +116,7 @@ import { useXyncra } from '../composables/useXyncra'
 import { sanitizeHtml } from '../utils/sanitize'
 import FunctionCallDisplay from './FunctionCallDisplay.vue'
 import type { FunctionCallInfo } from './FunctionCallDisplay.vue'
+import ToolCallingMessage from './ToolCallingMessage.vue'
 
 dayjs.extend(relativeTime)
 dayjs.locale('zh-cn')
