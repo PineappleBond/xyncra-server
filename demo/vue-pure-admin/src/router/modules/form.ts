@@ -33,6 +33,14 @@ export default {
       meta: {
         title: "分步表单"
       }
+    },
+    {
+      path: "/form/test",
+      name: "FormTest",
+      component: () => import("@/views/form/test/index.vue"),
+      meta: {
+        title: "Xyncra 测试表单"
+      }
     }
   ]
 } satisfies RouteConfigsTable;

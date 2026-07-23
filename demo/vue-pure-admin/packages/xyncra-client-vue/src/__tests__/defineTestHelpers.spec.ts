@@ -1,19 +1,25 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const { mockRegisterFunction, mockUnregisterFunction } = vi.hoisted(() => ({
-  mockRegisterFunction: vi.fn(),
-  mockUnregisterFunction: vi.fn(),
+const { mockRegister, mockBatchUnregister } = vi.hoisted(() => ({
+  mockRegister: vi.fn(),
+  mockBatchUnregister: vi.fn(),
 }))
 
-vi.mock('vue', () => ({
-  getCurrentInstance: vi.fn().mockReturnValue({ proxy: {} }),
-  onMounted: vi.fn((cb: () => void) => cb()),
-  onUnmounted: vi.fn(),
-  inject: vi.fn().mockReturnValue({
-    registerFunction: mockRegisterFunction,
-    unregisterFunction: mockUnregisterFunction,
-  }),
-}))
+vi.mock('vue', async () => {
+  const actual = await vi.importActual<typeof import('vue')>('vue')
+  return {
+    ...actual,
+    getCurrentInstance: vi.fn().mockReturnValue({ proxy: {} }),
+    onMounted: vi.fn((cb: () => void) => cb()),
+    onUnmounted: vi.fn(),
+    inject: vi.fn().mockReturnValue({
+      registry: {
+        register: mockRegister,
+        batchUnregister: mockBatchUnregister,
+      },
+    }),
+  }
+})
 
 vi.mock('../utils/component-accessor', () => ({
   registerComponent: vi.fn(),
@@ -24,12 +30,7 @@ import { registerComponent } from '../utils/component-accessor'
 
 describe('defineTestHelpers', () => {
   beforeEach(() => {
-    delete (window as any).XyncraTestHelpers
     vi.clearAllMocks()
-  })
-
-  afterEach(() => {
-    delete (window as any).XyncraTestHelpers
   })
 
   // -------------------------------------------------------
@@ -56,8 +57,8 @@ describe('defineTestHelpers', () => {
       )
 
       // useRegisterFunctions should have been invoked via onMounted;
-      // verify registerFunction was called with the pg_ prefixed name.
-      expect(mockRegisterFunction).toHaveBeenCalledWith(
+      // verify register was called with the pg_ prefixed name.
+      expect(mockRegister).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'pg_schema_form_fill' }),
         expect.any(Function),
       )
@@ -81,7 +82,7 @@ describe('defineTestHelpers', () => {
         expect.objectContaining({ submit: expect.any(Function) }),
       )
 
-      expect(mockRegisterFunction).toHaveBeenCalledWith(
+      expect(mockRegister).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'pg_login_submit' }),
         expect.any(Function),
       )
@@ -99,7 +100,7 @@ describe('defineTestHelpers', () => {
 
       defineTestHelpers('my-complex-page', helpers)
 
-      expect(mockRegisterFunction).toHaveBeenCalledWith(
+      expect(mockRegister).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'pg_my_complex_page_action' }),
         expect.any(Function),
       )
@@ -129,7 +130,7 @@ describe('defineTestHelpers', () => {
 
       defineTestHelpers('test', helpers)
 
-      expect(mockRegisterFunction).toHaveBeenCalledWith(
+      expect(mockRegister).toHaveBeenCalledWith(
         expect.objectContaining({ parameters: schema }),
         expect.any(Function),
       )
@@ -147,7 +148,7 @@ describe('defineTestHelpers', () => {
 
       defineTestHelpers('page', helpers)
 
-      expect(mockRegisterFunction).toHaveBeenCalledWith(
+      expect(mockRegister).toHaveBeenCalledWith(
         expect.objectContaining({ description: 'Does something important' }),
         expect.any(Function),
       )
@@ -170,7 +171,7 @@ describe('defineTestHelpers', () => {
 
       defineTestHelpers('login', helpers)
 
-      expect(mockRegisterFunction).toHaveBeenCalledWith(
+      expect(mockRegister).toHaveBeenCalledWith(
         expect.objectContaining({
           tags: expect.arrayContaining(['page:login', 'type:helper']),
         }),
@@ -191,7 +192,7 @@ describe('defineTestHelpers', () => {
 
       defineTestHelpers('login', helpers)
 
-      expect(mockRegisterFunction).toHaveBeenCalledWith(
+      expect(mockRegister).toHaveBeenCalledWith(
         expect.objectContaining({
           tags: ['page:login', 'type:helper', 'form', 'critical'],
         }),
@@ -216,7 +217,7 @@ describe('defineTestHelpers', () => {
 
       defineTestHelpers('login', helpers)
 
-      expect(mockRegisterFunction).toHaveBeenCalledWith(
+      expect(mockRegister).toHaveBeenCalledWith(
         expect.objectContaining({ timeout_ms: 10000 }),
         expect.any(Function),
       )
@@ -235,100 +236,10 @@ describe('defineTestHelpers', () => {
 
       defineTestHelpers('login', helpers)
 
-      expect(mockRegisterFunction).toHaveBeenCalledWith(
+      expect(mockRegister).toHaveBeenCalledWith(
         expect.objectContaining({ timeout_ms: 30000 }),
         expect.any(Function),
       )
-    })
-  })
-
-  // -------------------------------------------------------
-  // window mounting
-  // -------------------------------------------------------
-  describe('window mounting', () => {
-    it('should mount helpers on window.XyncraTestHelpers by default', () => {
-      const handler = vi.fn()
-      const helpers = {
-        fill: {
-          name: 'fill',
-          description: 'Fill field',
-          parameters: { type: 'object' as const, properties: {} },
-          handler,
-        },
-        submit: {
-          name: 'submit',
-          description: 'Submit form',
-          parameters: { type: 'object' as const, properties: {} },
-          handler: vi.fn(),
-        },
-      }
-
-      defineTestHelpers('login', helpers)
-
-      expect(window.XyncraTestHelpers).toBeDefined()
-      expect(window.XyncraTestHelpers?.['login']).toBeDefined()
-      expect(window.XyncraTestHelpers?.['login']['fill']).toBeInstanceOf(Function)
-      expect(window.XyncraTestHelpers?.['login']['submit']).toBeInstanceOf(Function)
-    })
-
-    it('should not mount to window when exposeToWindow is false', () => {
-      const helpers = {
-        fill: {
-          name: 'fill',
-          description: 'Fill field',
-          parameters: { type: 'object' as const, properties: {} },
-          handler: vi.fn(),
-        },
-      }
-
-      defineTestHelpers('login', helpers, { exposeToWindow: false })
-
-      expect(window.XyncraTestHelpers).toBeUndefined()
-    })
-
-    it('should create nested structure for multiple pageKeys', () => {
-      const helpers1 = {
-        fill: {
-          name: 'fill',
-          description: 'Fill',
-          parameters: { type: 'object' as const, properties: {} },
-          handler: vi.fn(),
-        },
-      }
-      const helpers2 = {
-        submit: {
-          name: 'submit',
-          description: 'Submit',
-          parameters: { type: 'object' as const, properties: {} },
-          handler: vi.fn(),
-        },
-      }
-
-      defineTestHelpers('login', helpers1)
-      defineTestHelpers('schema-form', helpers2)
-
-      expect(window.XyncraTestHelpers?.['login']['fill']).toBeInstanceOf(Function)
-      expect(window.XyncraTestHelpers?.['schema-form']['submit']).toBeInstanceOf(Function)
-    })
-
-    it('should guard against missing window (SSR)', () => {
-      const originalWindow = globalThis.window
-      // @ts-ignore -- simulate SSR environment
-      delete (globalThis as any).window
-
-      const helpers = {
-        fill: {
-          name: 'fill',
-          description: 'Fill',
-          parameters: { type: 'object' as const, properties: {} },
-          handler: vi.fn(),
-        },
-      }
-
-      // Should not throw
-      expect(() => defineTestHelpers('login', helpers)).not.toThrow()
-
-      globalThis.window = originalWindow
     })
   })
 
@@ -373,25 +284,6 @@ describe('defineTestHelpers', () => {
   // helper function behavior
   // -------------------------------------------------------
   describe('helper function behavior', () => {
-    it('should call handler when window helper is invoked', () => {
-      const handler = vi.fn()
-      const helpers = {
-        fill: {
-          name: 'fill',
-          description: 'Fill',
-          parameters: { type: 'object' as const, properties: {} },
-          handler,
-        },
-      }
-
-      defineTestHelpers('login', helpers)
-
-      const args = { value: 'test' }
-      window.XyncraTestHelpers?.['login']['fill'](args)
-
-      expect(handler).toHaveBeenCalledWith(args)
-    })
-
     it('should call handler when registerComponent helper is invoked', () => {
       const handler = vi.fn()
       const helpers = {
@@ -429,7 +321,7 @@ describe('defineTestHelpers', () => {
       defineTestHelpers('login', helpers)
 
       // Extract the handler passed to registerFunction
-      const registeredHandler = mockRegisterFunction.mock.calls[0][1] as (
+      const registeredHandler = mockRegister.mock.calls[0][1] as (
         params: Record<string, unknown>,
       ) => Promise<any>
       const result = await registeredHandler({ value: 'test' })

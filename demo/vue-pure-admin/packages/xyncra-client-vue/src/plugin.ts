@@ -1,4 +1,5 @@
 import { type App, type InjectionKey, ref, watch, type Ref } from 'vue'
+import type { Router } from 'vue-router'
 import { XyncraClient, type ClientOptions, type XyncraDatabase } from '@xyncra/client-core'
 import type { FunctionInfo } from '@xyncra/protocol'
 import { BrowserWebSocketFactory } from './adapters/websocket'
@@ -38,6 +39,16 @@ export interface XyncraPluginOptions {
   userID?: string
   deviceID?: string
   autoConnect?: boolean
+  /** Vue Router instance for navigate_to function */
+  router?: Router
+}
+
+/** Module-level router reference for navigate_to function */
+let _router: Router | undefined
+
+/** Get the router instance (used by navigate_to via dynamic import) */
+export function getRouter(): Router | undefined {
+  return _router
 }
 
 function resolveDeviceID(provided?: string): string {
@@ -59,6 +70,9 @@ export function createXyncraPlugin(options: XyncraPluginOptions = {}) {
         deviceID,
         autoConnect = true,
       } = options
+
+      // Store router reference for navigate_to function
+      _router = options.router
 
       const resolvedDeviceID = resolveDeviceID(deviceID)
       const connectionStatus = ref<ConnectionStatus>('disconnected')

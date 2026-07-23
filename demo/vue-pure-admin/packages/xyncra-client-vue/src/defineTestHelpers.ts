@@ -5,7 +5,7 @@ import { registerComponent } from './utils/component-accessor'
 
 /** HelperDef defines a single test helper function. */
 export interface HelperDef {
-  /** Helper function name (used in pg_* naming and window mount). */
+  /** Helper function name (used in pg_* naming). */
   name: string
   /** Human-readable description for Agent. */
   description: string
@@ -22,12 +22,6 @@ export interface HelperDef {
 /** Helpers maps helper names to their definitions. */
 export type Helpers = Record<string, HelperDef>
 
-/** DefineTestHelpersOptions configures defineTestHelpers behavior. */
-export interface DefineTestHelpersOptions {
-  /** Whether to mount helpers on window.XyncraTestHelpers. Default true. */
-  exposeToWindow?: boolean
-}
-
 /**
  * defineTestHelpers registers page-level test helpers in a single call.
  *
@@ -38,40 +32,25 @@ export interface DefineTestHelpersOptions {
  *
  * @param pageKey - Unique page identifier (e.g. "login", "table-demo").
  * @param helpers - Map of helper definitions to register.
- * @param options - Optional configuration for window exposure.
  */
 export function defineTestHelpers(
   pageKey: string,
   helpers: Helpers,
-  options?: DefineTestHelpersOptions,
 ): void {
-  // 1. Mount to window FIRST (before any composable that might fail).
-  const exposeToWindow = options?.exposeToWindow ?? true
-  if (exposeToWindow && typeof window !== 'undefined') {
-    if (!window.XyncraTestHelpers) {
-      window.XyncraTestHelpers = {}
-    }
-    window.XyncraTestHelpers[pageKey] = {}
-    for (const def of Object.values(helpers)) {
-      window.XyncraTestHelpers[pageKey][def.name] = (args: Record<string, unknown>) => def.handler(args)
-    }
-    console.log(`[defineTestHelpers] Mounted ${Object.keys(helpers).length} helpers for "${pageKey}" on window.XyncraTestHelpers`)
-  }
-
-  // 2. Extract helpers map: name -> handler function.
+  // 1. Extract helpers map: name -> handler function.
   const helpersMap: Record<string, (args: any) => any> = {}
   for (const [, def] of Object.entries(helpers)) {
     helpersMap[def.name] = (args: any) => def.handler(args)
   }
 
-  // 3. Register component with helpers.
+  // 2. Register component with helpers.
   try {
     registerComponent(pageKey, helpersMap)
   } catch (error) {
     console.warn(`[defineTestHelpers] Failed to register component for "${pageKey}":`, error)
   }
 
-  // 4. Generate FunctionEntry array with pg_* naming.
+  // 3. Generate FunctionEntry array with pg_* naming.
   const underscoredKey = pageKey.replace(/-/g, '_')
   const functionEntries: FunctionEntry[] = Object.values(helpers).map((def) => ({
     info: {
@@ -87,16 +66,10 @@ export function defineTestHelpers(
     },
   }))
 
-  // 5. Register page functions (lifecycle managed by useRegisterFunctions).
+  // 4. Register page functions (lifecycle managed by useRegisterFunctions).
   try {
     useRegisterFunctions(functionEntries)
   } catch (error) {
     console.warn(`[defineTestHelpers] Failed to register functions for "${pageKey}":`, error)
-  }
-}
-
-declare global {
-  interface Window {
-    XyncraTestHelpers?: Record<string, Record<string, (args: Record<string, unknown>) => any>>
   }
 }

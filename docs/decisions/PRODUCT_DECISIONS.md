@@ -62,9 +62,10 @@
 | D-131 | 客户端 deviceInfo 自动填充 | Web 自动 `{platform:'web',userAgent}`，CLI 自动 `{platform:'cli',os}`，符合 D-001 开箱即用 |
 | D-132 | 客户端错误消息分层 | error:rpc 事件暴露 `{method,message,code}` 公共通道，UI 映射友好提示，不泄露内部堆栈 |
 | D-133 | Web Agent 超时复用 hitl:question 事件 | 维持 `hitl:question` 映射，不拆独立 `agent:timeout`，与 075 HITL 恢复链路一致 |
-| D-134 | 双层函数注册策略：页面级 + 通用级 fallback | 页面函数按需注册/注销，通用函数常驻注册 |
+| D-134 | ~~双层函数注册策略：页面级 + 通用级 fallback~~ | **废弃**（D-142：通用 DOM 函数不可靠、不安全、不 Vue，改为页面主动注册 + Vue 原生 API） |
 | D-135 | 每设备最大函数数上调至 500 | 全量适配预期 230+ 函数，上调提供安全边际 |
-| D-136 | 测试辅助函数统一接口（Agent 和 Playwright 共用） | 测试辅助函数既是 Agent 可调用的页面函数，也是 Playwright 可直接调用的测试工具。已采用声明式注册模式 `defineTestHelpers(pageKey, helpers)` 一行代码完成组件注册、函数暴露、window 挂载、页面函数生成 |
+| D-136 | ~~测试辅助函数统一接口（Agent 和 Playwright 共用）~~ | **废弃**（D-142：删除 window.XyncraTestHelpers 全局挂载，E2E 测试改用 FunctionRegistry 直接调用） |
+| D-142 | DOM 操作移除：页面主动注册 + Vue 原生 API | 删除通用 DOM 函数（get_form_data/get_table_data/click_element/type_text/highlight_element/scroll_to/get_page_structure/get_page_description/get_current_page/wait_for_element），show_notification 改用 ElNotification，confirm_action 改用 ElMessageBox.confirm，navigate_to 改用 plugin injection。页面通过 defineTestHelpers 主动注册能力，不再依赖 Agent 扫描 DOM。原因：DOM 操作不可靠（CSS 选择器依赖页面结构）、不安全（Agent 可任意操作页面元素）、不 Vue（违背响应式设计） |
 | D-137 | RemoteCalling 统一模型 | Question 表废弃，所有需要等待外部结果的操作统一使用 RemoteCalling |
 | D-138 | RemoteCalling 并发执行策略 | 客户端本地队列串行执行，按 checkpoint 粒度检查：同一 checkpoint 下所有 RemoteCalling 都 resolve 后才触发 Agent 恢复 |
 | D-139 | RemoteCalling 设备路由与过滤 | DeviceID 非空时仅指定设备可处理，为空时任意设备可处理（first-response-wins） |
