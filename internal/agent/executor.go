@@ -245,6 +245,11 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 	// LoggingMiddleware can emit function_call updates to clients.
 	ctx = WithBroadcastInfo(ctx, e.broadcaster, payload.SenderID, payload.AgentID, payload.ConversationID)
 
+	// 2c. Enrich context with StoreAPI so that the LoggingMiddleware can
+	// persist tool_calling messages (D-141). When the store is nil, the
+	// middleware falls back to ephemeral-only broadcasting (D-063 nil-safe).
+	ctx = WithStore(ctx, e.store)
+
 	// 3. Look up agent config by exact match in the registry (D-054 revised).
 	config, ok := e.registry.Get(payload.AgentID)
 	if !ok {
@@ -438,15 +443,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 
 			// 2. Persist RemoteCalling to DB (D-063: nil-safe).
 			if e.remoteCallingStore != nil {
-				timeoutMs := interruptInfo.TimeoutMs
-				if timeoutMs <= 0 {
-					timeoutMs = DefaultClientFunctionCallTimeoutMs
-				}
-				// Enforce minimum timeout to prevent RemoteCallings from expiring
-				// before the client has a reasonable chance to process them.
-				if timeoutMs < MinClientFunctionCallTimeoutMs {
-					timeoutMs = MinClientFunctionCallTimeoutMs
-				}
+				timeoutMs := NormalizeClientFunctionTimeout(int(interruptInfo.TimeoutMs), 0)
 				expiresAt := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 				rc := &model.RemoteCalling{
 					ID:             uuid.New().String(),

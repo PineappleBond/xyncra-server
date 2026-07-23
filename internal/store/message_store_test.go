@@ -9,6 +9,7 @@ import (
 	"github.com/PineappleBond/xyncra-server/internal/store/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // ---------------------------------------------------------------------------
@@ -903,5 +904,80 @@ func TestMessageStore_ListRecentByConversation_ExcludesSoftDeleted(t *testing.T)
 		for _, msg := range msgs {
 			assert.NotEqual(t, "msg-3", msg.ID, "soft-deleted message should not be present")
 		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// UpdateMessageContentTx
+// ---------------------------------------------------------------------------
+
+// TestMessageStore_UpdateMessageContentTx_HappyPath verifies that
+// UpdateMessageContentTx updates content, type, and status fields.
+func TestMessageStore_UpdateMessageContentTx_HappyPath(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		require.NoError(t, s.Conversations.Create(ctx, newTestConv("conv-umc", "alice", "bob", "1-on-1", "Test")))
+		createTestMessages(t, s, ctx, "conv-umc", "msg", 3)
+
+		// Update message 2 within a transaction.
+		err := s.Transaction(ctx, func(tx *gorm.DB) error {
+			return s.Messages.UpdateMessageContentTx(ctx, tx, "conv-umc", 2,
+				`{"name":"test_tool","args":"{}","status":"completed","result":"ok"}`,
+				"tool_calling", "completed")
+		})
+		require.NoError(t, err, "UpdateMessageContentTx should succeed")
+
+		// Verify the update.
+		msg, err := s.Messages.Get(ctx, "msg-2")
+		require.NoError(t, err)
+		assert.Equal(t, "tool_calling", msg.Type, "type should be updated")
+		assert.Equal(t, "completed", msg.Status, "status should be updated")
+		assert.Contains(t, msg.Content, "test_tool", "content should be updated")
+	})
+}
+
+// TestMessageStore_UpdateMessageContentTx_NotFound verifies that
+// UpdateMessageContentTx returns ErrNotFound when the message does not exist.
+func TestMessageStore_UpdateMessageContentTx_NotFound(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		require.NoError(t, s.Conversations.Create(ctx, newTestConv("conv-umc2", "alice", "bob", "1-on-1", "Test")))
+
+		// Try to update non-existent message.
+		err := s.Transaction(ctx, func(tx *gorm.DB) error {
+			return s.Messages.UpdateMessageContentTx(ctx, tx, "conv-umc2", 999,
+				"content", "text", "sent")
+		})
+		assert.ErrorIs(t, err, ErrNotFound, "should return ErrNotFound for non-existent message")
+	})
+}
+
+// TestMessageStore_UpdateMessageContentTx_SpecialChars verifies that
+// UpdateMessageContentTx handles special characters correctly.
+func TestMessageStore_UpdateMessageContentTx_SpecialChars(t *testing.T) {
+	runOnAllDatabases(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		cleanAll(t, s, ctx)
+
+		require.NoError(t, s.Conversations.Create(ctx, newTestConv("conv-umc3", "alice", "bob", "1-on-1", "Test")))
+		createTestMessages(t, s, ctx, "conv-umc3", "msg", 1)
+
+		// Content with special characters: Unicode, newlines, quotes.
+		specialContent := `{"name":"test","args":"{\"key\":\"值\\n换行\"}","status":"completed"}`
+
+		err := s.Transaction(ctx, func(tx *gorm.DB) error {
+			return s.Messages.UpdateMessageContentTx(ctx, tx, "conv-umc3", 1,
+				specialContent, "tool_calling", "completed")
+		})
+		require.NoError(t, err, "UpdateMessageContentTx with special chars should succeed")
+
+		// Verify the content is stored correctly.
+		msg, err := s.Messages.Get(ctx, "msg-1")
+		require.NoError(t, err)
+		assert.Equal(t, specialContent, msg.Content, "special characters should be preserved")
 	})
 }

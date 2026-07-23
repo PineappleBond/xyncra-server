@@ -482,16 +482,10 @@ export class SyncManager {
     );
     const msgTable = tx.table('messages') as Dexie.Table<DBMessage, string>;
 
-    // Persist the message. Ignore duplicate key errors (idempotent).
-    try {
-      await msgTable.add(msg);
-    } catch (error) {
-      if (error === ErrDuplicateKey || this.isConstraintError(error)) {
-        // Duplicate — idempotent, skip.
-      } else {
-        throw error;
-      }
-    }
+    // Persist the message with upsert semantics (D-141).
+    // Dexie put() creates if not exists, updates if exists — perfect for
+    // tool_calling message lifecycle (executing→completed/failed).
+    await msgTable.put(msg);
 
     // Update conversation last-message pointer.
     const convTable = tx.table('conversations') as Dexie.Table<
@@ -766,9 +760,11 @@ export class SyncManager {
     >;
     await convTable.put(conv);
 
-    // Sync remote callings outside transaction (RPC call is slow)
+    // Sync remote callings outside transaction (RPC call is slow).
+    // queueMicrotask runs after the current task (transaction commit) but before
+    // the next macrotask, which is more predictable than setTimeout(fn, 0).
     const convID = conv.id;
-    setTimeout(async () => {
+    queueMicrotask(async () => {
       try {
         await this.syncRemoteCallingsForConversation(convID);
       } catch (error) {
@@ -777,7 +773,7 @@ export class SyncManager {
           error,
         });
       }
-    }, 0);
+    });
   }
 
   /**
@@ -842,9 +838,11 @@ export class SyncManager {
     >;
     await convTable.put(conv);
 
-    // Sync remote callings outside transaction (RPC call is slow)
+    // Sync remote callings outside transaction (RPC call is slow).
+    // queueMicrotask runs after the current task (transaction commit) but before
+    // the next macrotask, which is more predictable than setTimeout(fn, 0).
     const convID = conv.id;
-    setTimeout(async () => {
+    queueMicrotask(async () => {
       try {
         await this.syncRemoteCallingsForConversation(convID);
       } catch (error) {
@@ -853,7 +851,7 @@ export class SyncManager {
           error,
         });
       }
-    }, 0);
+    });
   }
 
   /**

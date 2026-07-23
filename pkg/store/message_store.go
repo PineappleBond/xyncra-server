@@ -293,3 +293,49 @@ func (ms *MessageStore) SoftDeleteTx(ctx context.Context, tx *gorm.DB, id string
 	}
 	return nil
 }
+
+// CreateOrUpdateTx implements upsert semantics within the given transaction.
+// If a message with the same id exists, it updates content, type, and status.
+// Otherwise, it creates a new record. This is used by the client SDK to handle
+// tool_calling message updates (D-141).
+func (ms *MessageStore) CreateOrUpdateTx(ctx context.Context, tx *gorm.DB, msg *model.Message) error {
+	// Try to find existing message by id.
+	var existing model.Message
+	err := tx.WithContext(ctx).
+		Where("id = ?", msg.ID).
+		First(&existing).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Not found — create new record.
+			if createErr := tx.WithContext(ctx).Create(msg).Error; createErr != nil {
+				// If duplicate key error (e.g. same id inserted concurrently),
+				// retry as update.
+				if errors.Is(classifyError(createErr), ErrDuplicateKey) {
+					return ms.updateByID(ctx, tx, msg)
+				}
+				return classifyError(fmt.Errorf("store: create or update message create: %w", createErr))
+			}
+			return nil
+		}
+		return classifyError(fmt.Errorf("store: create or update message lookup: %w", err))
+	}
+
+	// Found — update mutable fields.
+	return ms.updateByID(ctx, tx, msg)
+}
+
+// updateByID updates a message identified by primary key (id).
+func (ms *MessageStore) updateByID(ctx context.Context, tx *gorm.DB, msg *model.Message) error {
+	result := tx.WithContext(ctx).
+		Model(&model.Message{}).
+		Where("id = ?", msg.ID).
+		Updates(map[string]interface{}{
+			"content": msg.Content,
+			"type":    msg.Type,
+			"status":  msg.Status,
+		})
+	if result.Error != nil {
+		return classifyError(fmt.Errorf("store: create or update message update: %w", result.Error))
+	}
+	return nil
+}

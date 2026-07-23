@@ -23,9 +23,9 @@
 | D-032 | CLI IPC Fallback 策略 | IPC 优先，失败 fallback 到 WebSocket 短连接 |
 | D-036 | 部分 CLI 命令为 IPC-only | sync-updates/agent-resume/reload-agents 等依赖 daemon 状态 |
 | D-044 | listen daemon 连接韧性策略 | 无限重试 WS 连接（4001 设备替换除外），IPC 始终可用 |
-| D-050 | Ephemeral Push 模式 (Seq=0) | typing/presence 等瞬时业务零持久化 |
+| D-050 | Ephemeral Push 模式 (Seq=0) | typing/presence 等瞬时业务零持久化（D-141 修订：tool_calling 执行结果具有独立记录价值，属于 persistent 范畴） |
 | D-054 | Agent 身份判定：Registry 精确匹配 | 检查 userID 是否存在于 AgentRegistry，`agent/{id}` 为示例约定而非强制 |
-| D-055 | Agent 消息格式复用 | 不新增 Message 类型，复用现有协议 |
+| D-055 | Agent 消息格式复用 | 不新增 Message 类型，复用现有协议（D-141 修订：tool_calling 生命周期与 text 有本质差异，允许新增 Message 类型） |
 | D-060 | Agent 上下文管理策略 | DB 存储 + 内存缓存，Token 裁剪 |
 | D-062 | Agent 消息路由触发模型 | 消息先持久化再异步入队 MQ，fire-and-forget |
 | D-063 | AgentRegistry 可选注入（nil-safe） | Agent 功能为可选模块 |
@@ -69,6 +69,7 @@
 | D-138 | RemoteCalling 并发执行策略 | 客户端本地队列串行执行，按 checkpoint 粒度检查：同一 checkpoint 下所有 RemoteCalling 都 resolve 后才触发 Agent 恢复 |
 | D-139 | RemoteCalling 设备路由与过滤 | DeviceID 非空时仅指定设备可处理，为空时任意设备可处理（first-response-wins） |
 | D-140 | ReverseRPC 废弃，客户端函数调用统一为 RemoteCalling | 废弃 D-092/D-103/D-108。客户端函数从同步 RPC 改为 RemoteCalling 异步中断-恢复模式 |
+| D-141 | Tool Calling 消息持久化策略 | tool_calling 执行结果持久化到 messages 表，前端可回溯 |
 
 ---
 

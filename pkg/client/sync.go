@@ -329,18 +329,19 @@ func (sm *syncManager) dispatchUpdateTx(ctx context.Context, tx *gorm.DB, update
 }
 
 // handleMessageTx persists the message and updates the conversation's
-// last-message pointer within the given transaction.
+// last-message pointer within the given transaction. Uses upsert semantics
+// to support tool_calling message updates (D-141).
 func (sm *syncManager) handleMessageTx(ctx context.Context, tx *gorm.DB, payload json.RawMessage) error {
 	var msg model.Message
 	if err := json.Unmarshal(payload, &msg); err != nil {
 		return fmt.Errorf("unmarshal message payload: %w", err)
 	}
 
-	// Persist the message. Ignore duplicate key errors (idempotent).
-	if err := sm.db.Messages.CreateTx(ctx, tx, &msg); err != nil {
-		if !errors.Is(err, store.ErrDuplicateKey) {
-			return fmt.Errorf("create message: %w", err)
-		}
+	// Persist the message with upsert semantics (D-141).
+	// CreateOrUpdateTx handles both new messages and updates to existing
+	// tool_calling messages.
+	if err := sm.db.Messages.CreateOrUpdateTx(ctx, tx, &msg); err != nil {
+		return fmt.Errorf("create or update message: %w", err)
 	}
 
 	// Update conversation last-message pointer.

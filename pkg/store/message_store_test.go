@@ -6,8 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PineappleBond/xyncra-server/pkg/store/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestMessageStore_Create_Success(t *testing.T) {
@@ -649,4 +651,85 @@ func TestMessageStore_Upsert_CompositeKey(t *testing.T) {
 	got2, err := db.Messages.GetByClientMessageID(ctx, clientMsgID, "senderB")
 	require.NoError(t, err)
 	assert.Equal(t, "From B", got2.Content)
+}
+
+// ---------------------------------------------------------------------------
+// CreateOrUpdateTx
+// ---------------------------------------------------------------------------
+
+func TestMessageStore_CreateOrUpdateTx_NewRecord(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	convID := uid()
+	require.NoError(t, db.Conversations.Create(ctx, newTestConv(convID, uid(), uid(), "direct", "Test")))
+
+	msgID := uid()
+	msg := &model.Message{
+		ID:             msgID,
+		ConversationID: convID,
+		MessageID:      1,
+		SenderID:       "agent-1",
+		Content:        `{"name":"test_tool","args":"{}","status":"executing"}`,
+		Type:           "tool_calling",
+		Status:         "executing",
+		CreatedAt:      time.Now(),
+	}
+
+	// Create new record within transaction.
+	err := db.Transaction(ctx, func(tx *gorm.DB) error {
+		return db.Messages.CreateOrUpdateTx(ctx, tx, msg)
+	})
+	require.NoError(t, err, "CreateOrUpdateTx should succeed for new record")
+
+	// Verify the record was created.
+	got, err := db.Messages.Get(ctx, msgID)
+	require.NoError(t, err)
+	assert.Equal(t, "tool_calling", got.Type)
+	assert.Equal(t, "executing", got.Status)
+	assert.Contains(t, got.Content, "test_tool")
+}
+
+func TestMessageStore_CreateOrUpdateTx_UpdateExisting(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	cleanAll(t, db, ctx)
+
+	convID := uid()
+	require.NoError(t, db.Conversations.Create(ctx, newTestConv(convID, uid(), uid(), "direct", "Test")))
+
+	msgID := uid()
+	msg := &model.Message{
+		ID:             msgID,
+		ConversationID: convID,
+		MessageID:      1,
+		SenderID:       "agent-1",
+		Content:        `{"name":"test_tool","args":"{}","status":"executing"}`,
+		Type:           "tool_calling",
+		Status:         "executing",
+		CreatedAt:      time.Now(),
+	}
+
+	// First create the record.
+	err := db.Transaction(ctx, func(tx *gorm.DB) error {
+		return db.Messages.CreateOrUpdateTx(ctx, tx, msg)
+	})
+	require.NoError(t, err)
+
+	// Update the same record.
+	msg.Content = `{"name":"test_tool","args":"{}","status":"completed","result":"ok"}`
+	msg.Status = "completed"
+
+	err = db.Transaction(ctx, func(tx *gorm.DB) error {
+		return db.Messages.CreateOrUpdateTx(ctx, tx, msg)
+	})
+	require.NoError(t, err, "CreateOrUpdateTx should succeed for update")
+
+	// Verify the record was updated (not duplicated).
+	got, err := db.Messages.Get(ctx, msgID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", got.Status)
+	assert.Contains(t, got.Content, "completed")
+	assert.Contains(t, got.Content, "ok")
 }

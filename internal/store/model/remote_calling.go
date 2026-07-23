@@ -17,6 +17,7 @@ type RemoteCalling struct {
 	ConversationID string         `gorm:"size:36;index;not null;index:idx_rc_conversation_status,priority:1" json:"conversation_id"`
 	CheckpointID   string         `gorm:"size:36;not null;index:idx_rc_checkpoint_status" json:"checkpoint_id"`
 	AgentID        string         `gorm:"size:64" json:"agent_id"`
+	MessageID      uint32         `gorm:"index" json:"message_id"`          // D-141: optional, links to tool_calling message
 	Method         string         `gorm:"size:128;not null" json:"method"`  // e.g. ask_user, pg_chatai_sendMessage
 	Params         string         `gorm:"type:text" json:"params"`          // JSON parameters
 	InterruptID    string         `gorm:"size:64" json:"interrupt_id"`      // Eino interrupt ID (ask_user only)

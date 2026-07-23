@@ -474,6 +474,63 @@
 
 ---
 
+## D-141: Tool Calling 消息持久化策略
+
+**决策**：Agent 调用工具时，将 tool calling 的输入参数和输出结果持久化到 messages 表，前端可查看完整的 tool 执行历史。
+
+**设计背景**：
+- 原有实现：tool calling 信息仅通过 ephemeral 广播（Seq=0）实时推送给在线用户，不进入 sync_updates 通道
+- 问题：前端刷新页面后看不到 tool calling 执行历史，离线用户上线后无法获取记录
+- 修订 D-050：tool_calling 执行结果具有独立记录价值，属于 persistent 范畴
+- 修订 D-055：tool_calling 生命周期与 text 有本质差异，允许新增 Message 类型
+
+**实现细节**：
+
+1. **消息模型**：
+   - Message.Type = "tool_calling"（新增类型）
+   - Message.Content = JSON 序列化的 ToolCallingPayload
+   - ToolCallingPayload 字段：name, args, status (executing|completed|failed), result, error, duration_ms
+
+2. **生命周期**：
+   - 执行前：创建 Message (status=executing)，调用 store.SendMessage 持久化
+   - 执行后：事务内更新 Message (status=completed/failed)，创建 UserUpdate fan-out
+   - 消耗 MessageID，推进 conversation 序列（与 text 消息一致）
+
+3. **截断策略**：
+   - args: 2048 字符
+   - result: 4096 字符
+   - error: 2048 字符
+   - 与现有 truncate 行为一致，防止大 payload
+
+4. **降级策略（D-063 nil-safe）**：
+   - context 未注入 StoreAPI 时，降级为原有 ephemeral broadcast
+   - SendMessage 失败时记录错误日志，工具仍正常执行（fire-and-forget, D-007）
+   - UpdateMessageContentTx 失败时工具结果不丢失（已返回给 Agent）
+
+5. **客户端同步**：
+   - 客户端使用 put 语义（upsert）替代 add（insert-only）
+   - Go 客户端：CreateOrUpdateTx 方法
+   - 前端：Dexie put() 替代 add()
+
+6. **RemoteCalling 关联**：
+   - RemoteCalling 新增 MessageID 可选字段（D-141）
+   - 初始不自动回填历史数据，后续迭代
+
+**约束条件**：
+
+- UserUpdate.Type 使用 "message"（复用现有 sync_updates 通道）
+- UserUpdate.Payload 是 marshal 后的完整 Message 对象
+- 所有 DB 操作在同一事务内（UpdateMessageContentTx + UserUpdate fan-out）
+- 同一会话的多个 tool call 由 Eino 串行执行，无需并发控制
+
+**影响范围**：
+
+- 后端：internal/store/message.go, internal/agent/llm_logger.go, internal/agent/executor.go
+- 客户端 SDK：pkg/store/message_store.go, pkg/client/sync.go
+- 前端：sync-manager.ts (add→put), ToolCallingMessage.vue (新增组件)
+
+---
+
 ## 版本历史
 
 | 日期       | 版本  | 变更                                                                                           |
