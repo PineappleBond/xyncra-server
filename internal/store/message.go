@@ -193,6 +193,29 @@ func (ms *MessageStore) ListByTimeRange(ctx context.Context, convID string, star
 	return msgs, nil
 }
 
+// GetLatestToolCallingMessage returns the most recent tool_calling message for a conversation
+// that is in "executing" status. This is used to associate with RemoteCalling without
+// relying on in-memory tracker (which would be lost on server restart).
+// Returns nil, ErrNotFound if no executing tool_calling message exists.
+func (ms *MessageStore) GetLatestToolCallingMessage(ctx context.Context, convID string) (result *model.Message, err error) {
+	ctx, finish := startSpan(ctx, "store.MessageStore.GetLatestToolCallingMessage",
+		attribute.String(tracing.AttrConversationID, convID))
+	defer func() { finish(err) }()
+
+	var msg model.Message
+	err = ms.db.WithContext(ctx).
+		Where("conversation_id = ? AND type = ? AND status = ?", convID, "tool_calling", "executing").
+		Order("message_id DESC").
+		First(&msg).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, classifyError(fmt.Errorf("store: get latest tool_calling message: %w", err))
+	}
+	return &msg, nil
+}
+
 // Restore undeletes a soft-deleted message identified by id.
 func (ms *MessageStore) Restore(ctx context.Context, id string) (err error) {
 	ctx, finish := startSpan(ctx, tracing.SpanDBMessageRestore)

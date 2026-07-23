@@ -237,6 +237,7 @@ func NewAgentResumeHandler(
 		}
 
 		targets := make(map[string]any)
+		toolCallingMsgIDs := make(map[string]uint32) // method -> message_id
 		for _, rc := range rcList {
 			if rc.Status == model.RemoteCallingStatusResolved {
 				if rc.InterruptID == "" {
@@ -248,8 +249,19 @@ func NewAgentResumeHandler(
 						"conversation_id", payload.ConversationID)
 				} else {
 					targets[rc.InterruptID] = rc.Result
+					if rc.MessageID > 0 {
+						toolCallingMsgIDs[rc.Method] = rc.MessageID
+					}
 				}
 			}
+		}
+		// Store tool calling message IDs in RunLocalValue so WrapInvokableToolCall
+		// can update existing messages instead of creating new ones during resume.
+		if len(toolCallingMsgIDs) > 0 {
+			adk.SetRunLocalValue(ctx, "tool_calling_msg_ids", toolCallingMsgIDs)
+			logger.Info("agent resume: stored tool_calling_msg_ids in RunLocalValue",
+				"count", len(toolCallingMsgIDs),
+				"msg_ids", fmt.Sprintf("%v", toolCallingMsgIDs))
 		}
 		if len(targets) == 0 {
 			// Defensive log: empty rcList indicates data inconsistency.
@@ -404,6 +416,14 @@ func NewAgentResumeHandler(
 				}
 
 				if executor.remoteCallingStore != nil {
+					// Query the latest executing tool_calling message from DB.
+					var toolCallingMsgID uint32
+					if msgStore := executor.store.MessageStore(); msgStore != nil {
+						if latestMsg, err := msgStore.GetLatestToolCallingMessage(ctx, payload.ConversationID); err == nil && latestMsg != nil {
+							toolCallingMsgID = latestMsg.MessageID
+						}
+					}
+
 					timeoutMs := NormalizeClientFunctionTimeout(int(interruptInfo.TimeoutMs), 0)
 					expiresAt := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 					rc := &model.RemoteCalling{
@@ -415,7 +435,7 @@ func NewAgentResumeHandler(
 						Params:         interruptInfo.Params,
 						InterruptID:    info.InterruptID,
 						DeviceID:       interruptInfo.DeviceID,
-						MessageID:      popToolCallingMsgID(payload.ConversationID),
+						MessageID:      toolCallingMsgID,
 						Status:         model.RemoteCallingStatusPending,
 						CreatedAt:      time.Now(),
 						ExpiresAt:      &expiresAt,

@@ -200,6 +200,25 @@ func (ms *MessageStore) ListRecentByConversation(ctx context.Context, convID str
 	return msgs, nil
 }
 
+// GetLatestToolCallingMessage returns the most recent tool_calling message for a conversation
+// that is in "executing" status. This is used to associate with RemoteCalling without
+// relying on in-memory tracker (which would be lost on server restart).
+// Returns nil, ErrNotFound if no executing tool_calling message exists.
+func (ms *MessageStore) GetLatestToolCallingMessage(ctx context.Context, convID string) (*model.Message, error) {
+	var msg model.Message
+	err := ms.db.WithContext(ctx).
+		Where("conversation_id = ? AND type = ? AND status = ?", convID, "tool_calling", "executing").
+		Order("message_id DESC").
+		First(&msg).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, classifyError(fmt.Errorf("store: get latest tool_calling message: %w", err))
+	}
+	return &msg, nil
+}
+
 // CountUnread returns the number of messages in the given conversation with
 // MessageID greater than afterMessageID. Soft-deleted messages are excluded
 // automatically by GORM's soft-delete plugin.

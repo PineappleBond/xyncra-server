@@ -151,6 +151,7 @@ function toMessageEvent(msg: Message): MessageEvent {
     conversationId: msg.conversationId,
     senderId: msg.senderId,
     content: msg.content,
+    type: msg.type ?? 'text',
     clientMessageId: msg.clientMessageId,
     replyToId: msg.replyToId,
     createdAt: msg.createdAt,

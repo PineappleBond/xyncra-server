@@ -1392,6 +1392,7 @@ function messageToHandler(msg: DBMessage): Message {
     conversationId: msg.conversation_id,
     senderId: msg.sender_id,
     content: msg.content,
+    type: msg.type ?? 'text',
     clientMessageId: msg.client_message_id,
     replyToId: msg.reply_to ? String(msg.reply_to) : undefined,
     createdAt:

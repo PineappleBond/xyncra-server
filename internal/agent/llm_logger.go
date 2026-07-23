@@ -25,21 +25,6 @@ import (
 // Tool-calling message ID tracker (execution-time bridge)
 // ---------------------------------------------------------------------------
 
-// toolCallingMsgTracker maps conversationID -> toolMsgID so that the executor
-// can associate a RemoteCalling record with the persisted tool_calling message.
-// The map is ephemeral (in-memory); the ID is persisted to the remote_callings
-// table before the entry is deleted, so server restarts do not lose data.
-var toolCallingMsgTracker sync.Map
-
-// popToolCallingMsgID retrieves and deletes the pending tool-calling message ID
-// for the given conversation. Returns 0 if no pending ID exists.
-func popToolCallingMsgID(conversationID string) uint32 {
-	if v, ok := toolCallingMsgTracker.LoadAndDelete(conversationID); ok {
-		return v.(uint32)
-	}
-	return 0
-}
-
 // ---------------------------------------------------------------------------
 // Context keys for function call broadcasting
 // ---------------------------------------------------------------------------
@@ -400,56 +385,60 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 					memberIDs = append(memberIDs, agentUserID)
 				}
 
-				// During resume, the RemoteCalling for this tool has already been
-				// resolved (client returned result). It still holds the message_id
-				// of the tool_calling message created during the initial execution.
-				// Reuse that message instead of creating a duplicate.
-				// Query the DB (not memory) so it survives restarts.
-				var existingMsgUUID string
+				// Check if this is a resume scenario with an existing executing tool_calling message.
+				// Query the DB directly for an executing tool_calling message for this tool.
+				// If found, update it instead of creating a new one.
 				var existingMsgID uint32
-				if rcStore := s.RemoteCallingStore(); rcStore != nil {
-					// Query by checkpoint_id from conversation, which is more reliable
-					// than status-based filtering.
-					if conv, _ := s.ConversationStore().Get(ctx, conversationID); conv != nil && conv.CheckpointID != "" {
-						if rcs, _ := rcStore.GetByCheckpoint(ctx, conv.CheckpointID); len(rcs) > 0 {
-							for _, rc := range rcs {
-								if rc.Method == tCtx.Name && rc.MessageID > 0 {
-									existingMsgID = rc.MessageID
-									break
-								}
-							}
-						}
+				if msgStore := s.MessageStore(); msgStore != nil {
+					latestMsg, queryErr := msgStore.GetLatestToolCallingMessage(ctx, conversationID)
+					m.logger.write(LogRecord{
+						Timestamp: time.Now(),
+						AgentID:   m.agentID,
+						Model:     m.model,
+						Iteration: iter,
+						Phase:     "tool_calling_resume_diag",
+						ToolName:  tCtx.Name,
+						Error:     fmt.Sprintf("Query GetLatestToolCallingMessage: result=%v, err=%v", latestMsg != nil, queryErr),
+					})
+					if queryErr == nil && latestMsg != nil {
+						existingMsgID = latestMsg.MessageID
+						m.logger.write(LogRecord{
+							Timestamp: time.Now(),
+							AgentID:   m.agentID,
+							Model:     m.model,
+							Iteration: iter,
+							Phase:     "tool_calling_resume",
+							ToolName:  tCtx.Name,
+							Error:     fmt.Sprintf("Found existing executing tool_calling message: message_id=%d, will update instead of create", existingMsgID),
+						})
 					}
 				}
+
 				if existingMsgID > 0 {
-					// Found existing message via RemoteCalling. Look up UUID and reuse.
-					_ = s.Transaction(ctx, func(tx *gorm.DB) error {
-						if existingMsg, _ := s.MessageStore().GetByConversationAndMessageIDTx(ctx, tx, conversationID, existingMsgID); existingMsg != nil {
-							existingMsgUUID = existingMsg.ID
-						}
-						return nil
-					})
-				}
-				if existingMsgUUID != "" {
-					// Reuse: update the existing message content (args may differ).
+					// Resume scenario: update existing message instead of creating new one.
 					toolMsgID = existingMsgID
-					toolMsgUUID = existingMsgUUID
 					_ = s.Transaction(ctx, func(tx *gorm.DB) error {
 						return s.MessageStore().UpdateMessageContentTx(ctx, tx, conversationID, existingMsgID, string(payloadJSON), "tool_calling", "executing")
 					})
-					// Store in tracker for this execution.
-					toolCallingMsgTracker.Store(conversationID, toolMsgID)
+					// Get the message UUID for ephemeral broadcast.
+					_ = s.Transaction(ctx, func(tx *gorm.DB) error {
+						if existingMsg, _ := s.MessageStore().GetByConversationAndMessageIDTx(ctx, tx, conversationID, existingMsgID); existingMsg != nil {
+							toolMsgUUID = existingMsg.ID
+						}
+						return nil
+					})
 				} else {
-					// Create new message for persistence.
+					// New invocation: create a new tool_calling message.
 					msgUUID := uuid.New().String()
 					msg := &model.Message{
-						ID:             msgUUID,
-						ConversationID: conversationID,
-						SenderID:       agentUserID,
-						Content:        string(payloadJSON),
-						Type:           "tool_calling",
-						Status:         "executing",
-						CreatedAt:      time.Now(),
+						ID:              msgUUID,
+						ClientMessageID: msgUUID, // Use UUID as client_message_id to avoid unique constraint violation
+						ConversationID:  conversationID,
+						SenderID:        agentUserID,
+						Content:         string(payloadJSON),
+						Type:            "tool_calling",
+						Status:          "executing",
+						CreatedAt:       time.Now(),
 					}
 
 					// Persist via SendMessage (atomic: allocates MessageID + creates UserUpdates).
@@ -468,10 +457,6 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 						toolMsgUUID = msgUUID
 						// Broadcast the persisted message update.
 						bh.BroadcastMessageUpdate(ctx, result.Updates)
-						// Store in tracker so executor can associate with RemoteCalling.
-						if conversationID != "" {
-							toolCallingMsgTracker.Store(conversationID, toolMsgID)
-						}
 					}
 				}
 			}

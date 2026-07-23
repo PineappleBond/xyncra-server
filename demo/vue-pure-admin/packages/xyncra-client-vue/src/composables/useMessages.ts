@@ -30,6 +30,7 @@ function toMessageEvent(raw: any): MessageEvent {
     conversationId: raw.conversation_id ?? raw.conversationId,
     senderId: raw.sender_id ?? raw.senderId,
     content: raw.content,
+    type: raw.type ?? 'text',
     clientMessageId: raw.client_message_id ?? raw.clientMessageId,
     replyToId: raw.reply_to_id ?? raw.replyToId,
     createdAt: raw.created_at?.toISOString?.() ?? raw.created_at ?? raw.createdAt,
@@ -98,9 +99,16 @@ export function useMessages({ conversationId }: UseMessagesParams): UseMessagesR
     unsubMsgAdded = eventEmitter.on('message:added', ({ message }) => {
       if (message.conversationId === convId) {
         const list = messages.value
-        // Avoid duplicates (by id)
-        if (list.some(m => m.id === message.id)) return
-        messages.value = [...list, message]
+        const existingIndex = list.findIndex(m => m.id === message.id)
+        if (existingIndex >= 0) {
+          // Update existing message (e.g., tool_calling status change)
+          const updated = [...list]
+          updated[existingIndex] = message
+          messages.value = updated
+        } else {
+          // Add new message
+          messages.value = [...list, message]
+        }
       }
     })
 

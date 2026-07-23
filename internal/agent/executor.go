@@ -479,6 +479,15 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 
 			// 2. Persist RemoteCalling to DB (D-063: nil-safe).
 			if e.remoteCallingStore != nil {
+				// Query the latest executing tool_calling message from DB instead of using in-memory tracker.
+				// This is more reliable and survives server restarts.
+				var toolCallingMsgID uint32
+				if msgStore := e.store.MessageStore(); msgStore != nil {
+					if latestMsg, err := msgStore.GetLatestToolCallingMessage(ctx, payload.ConversationID); err == nil && latestMsg != nil {
+						toolCallingMsgID = latestMsg.MessageID
+					}
+				}
+
 				timeoutMs := NormalizeClientFunctionTimeout(int(interruptInfo.TimeoutMs), 0)
 				expiresAt := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 				rc := &model.RemoteCalling{
@@ -490,7 +499,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 					Params:         interruptInfo.Params,
 					InterruptID:    info.InterruptID,
 					DeviceID:       interruptInfo.DeviceID,
-					MessageID:      popToolCallingMsgID(payload.ConversationID),
+					MessageID:      toolCallingMsgID,
 					Status:         model.RemoteCallingStatusPending,
 					CreatedAt:      time.Now(),
 					ExpiresAt:      &expiresAt,
