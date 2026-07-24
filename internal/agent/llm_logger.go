@@ -499,6 +499,7 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 						toolMsgID = result.Message.MessageID
 						toolMsgUUID = msgUUID
 						ctx = WithMessage(ctx, result.Message)
+						message = result.Message
 						// DIAG: log the number of UserUpdates created and their details
 						updateDetails := make([]string, 0, len(result.Updates))
 						for _, u := range result.Updates {
@@ -524,6 +525,7 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 
 		start := time.Now()
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
+		message.MessageID = 0
 		dur := time.Since(start).Milliseconds()
 
 		resultRec := LogRecord{
