@@ -459,7 +459,8 @@ func (b *AgentBuilder) Build(ctx context.Context, config *AgentConfig) (built *B
 	if len(einoTools) > 0 {
 		agentCfg.ToolsConfig = adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: einoTools,
+				Tools:               einoTools,
+				ExecuteSequentially: true,
 			},
 		}
 	}

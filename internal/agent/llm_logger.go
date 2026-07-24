@@ -33,11 +33,12 @@ import (
 type ctxKey int
 
 const (
-	ctxKeyBroadcastHelper         ctxKey = iota
+	ctxKeyBroadcastHelper ctxKey = iota
 	ctxKeyBroadcastHumanUserID
 	ctxKeyBroadcastAgentUserID
 	ctxKeyBroadcastConversationID
 	ctxKeyStore
+	ctxKeyToolCallingMessage // Stores the tool_calling message ID for executor to use
 )
 
 // WithBroadcastInfo returns a context enriched with broadcast metadata so
@@ -47,6 +48,11 @@ func WithBroadcastInfo(ctx context.Context, bh *BroadcastHelper, humanUserID, ag
 	ctx = context.WithValue(ctx, ctxKeyBroadcastHumanUserID, humanUserID)
 	ctx = context.WithValue(ctx, ctxKeyBroadcastAgentUserID, agentUserID)
 	ctx = context.WithValue(ctx, ctxKeyBroadcastConversationID, conversationID)
+	return ctx
+}
+
+func WithMessage(ctx context.Context, message *model.Message) context.Context {
+	ctx = context.WithValue(ctx, ctxKeyToolCallingMessage, message)
 	return ctx
 }
 
@@ -71,9 +77,9 @@ type ToolCallingPayload struct {
 	Name       string `json:"name"`
 	Args       string `json:"args"`
 	Status     string `json:"status"`                // "executing" | "completed" | "failed"
-	Result     string `json:"result,omitempty"`       // non-empty on completed
-	Error      string `json:"error,omitempty"`        // non-empty on failed
-	DurationMs int64  `json:"duration_ms,omitempty"`  // non-zero on completed/failed
+	Result     string `json:"result,omitempty"`      // non-empty on completed
+	Error      string `json:"error,omitempty"`       // non-empty on failed
+	DurationMs int64  `json:"duration_ms,omitempty"` // non-zero on completed/failed
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +366,20 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 		humanUserID, _ := ctx.Value(ctxKeyBroadcastHumanUserID).(string)
 		agentUserID, _ := ctx.Value(ctxKeyBroadcastAgentUserID).(string)
 		conversationID, _ := ctx.Value(ctxKeyBroadcastConversationID).(string)
+		message, _ := ctx.Value(ctxKeyToolCallingMessage).(*model.Message)
+		messageID := uint32(0)
+		if message != nil {
+			messageID = message.MessageID
+		}
+		m.logger.write(LogRecord{
+			Timestamp: time.Now(),
+			AgentID:   m.agentID,
+			Model:     m.model,
+			Iteration: iter,
+			Phase:     "wrap_invokable_entry",
+			ToolName:  tCtx.Name,
+			Error:     fmt.Sprintf("ENTER WrapInvokableToolCall: tool=%s, convID=%s, store=%v, bh=%v", tCtx.Name, conversationID, s != nil, bh != nil),
+		})
 
 		if s != nil && bh != nil && humanUserID != "" && conversationID != "" {
 			// Build executing payload.
@@ -385,54 +405,79 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 					memberIDs = append(memberIDs, agentUserID)
 				}
 
-				// Check if this is a resume scenario with an existing executing tool_calling message.
-				// Query the DB directly for an executing tool_calling message for this tool.
-				// If found, update it instead of creating a new one.
-				var existingMsgID uint32
-				if msgStore := s.MessageStore(); msgStore != nil {
-					latestMsg, queryErr := msgStore.GetLatestToolCallingMessage(ctx, conversationID)
-					m.logger.write(LogRecord{
-						Timestamp: time.Now(),
-						AgentID:   m.agentID,
-						Model:     m.model,
-						Iteration: iter,
-						Phase:     "tool_calling_resume_diag",
-						ToolName:  tCtx.Name,
-						Error:     fmt.Sprintf("Query GetLatestToolCallingMessage: result=%v, err=%v", latestMsg != nil, queryErr),
-					})
-					if queryErr == nil && latestMsg != nil {
-						existingMsgID = latestMsg.MessageID
-						m.logger.write(LogRecord{
-							Timestamp: time.Now(),
-							AgentID:   m.agentID,
-							Model:     m.model,
-							Iteration: iter,
-							Phase:     "tool_calling_resume",
-							ToolName:  tCtx.Name,
-							Error:     fmt.Sprintf("Found existing executing tool_calling message: message_id=%d, will update instead of create", existingMsgID),
-						})
-					}
-				}
+				// Check if we're in a Resume path: look for a resolved RemoteCalling
+				// with this method + conversationID. If found, update the existing
+				// tool_calling message instead of creating a duplicate.
+				// This handles the case where Run() created a message, interrupt happened,
+				// and Resume() calls the same tool again.
+				var existingMsgID uint32 = messageID
+				var existingMsgUUID string
 
 				if existingMsgID > 0 {
-					// Resume scenario: update existing message instead of creating new one.
-					toolMsgID = existingMsgID
-					_ = s.Transaction(ctx, func(tx *gorm.DB) error {
-						return s.MessageStore().UpdateMessageContentTx(ctx, tx, conversationID, existingMsgID, string(payloadJSON), "tool_calling", "executing")
-					})
-					// Get the message UUID for ephemeral broadcast.
-					_ = s.Transaction(ctx, func(tx *gorm.DB) error {
-						if existingMsg, _ := s.MessageStore().GetByConversationAndMessageIDTx(ctx, tx, conversationID, existingMsgID); existingMsg != nil {
-							toolMsgUUID = existingMsg.ID
+					if message != nil {
+						message.MessageID = 0
+					}
+					// Resume path: update the existing tool_calling message.
+					tx := s.MessageStore().Begin()
+					if tx != nil {
+						if updateErr := s.MessageStore().UpdateMessageContentTx(ctx, tx, conversationID, existingMsgID, string(payloadJSON), "tool_calling", "executing"); updateErr != nil {
+							tx.Rollback()
+							m.logger.write(LogRecord{
+								Timestamp: time.Now(),
+								AgentID:   m.agentID,
+								Model:     m.model,
+								Iteration: iter,
+								Phase:     "error",
+								Error:     fmt.Sprintf("update existing tool_calling message: %v", updateErr),
+							})
+						} else {
+							// Query full message for UserUpdate payload.
+							var broadcastUpdates []model.UserUpdate
+							if updatedMsg, getErr := s.MessageStore().GetByConversationAndMessageIDTx(ctx, tx, conversationID, existingMsgID); getErr == nil {
+								// Use the actual message's UUID (not rc.ID) for ephemeral broadcast.
+								existingMsgUUID = updatedMsg.ID
+								payload, _ := json.Marshal(updatedMsg)
+								now := time.Now()
+								for _, memberID := range memberIDs {
+									var latestSeq uint32
+									if seqErr := tx.Model(&model.UserUpdate{}).Where("user_id = ?", memberID).Select("COALESCE(MAX(seq), 0)").Scan(&latestSeq).Error; seqErr == nil {
+										broadcastUpdates = append(broadcastUpdates, model.UserUpdate{
+											ID:        uuid.New().String(),
+											UserID:    memberID,
+											Seq:       latestSeq + 1,
+											Type:      "message",
+											Payload:   payload,
+											CreatedAt: now,
+										})
+									}
+								}
+								if len(broadcastUpdates) > 0 {
+									tx.CreateInBatches(broadcastUpdates, 100)
+								}
+							}
+							tx.Commit()
+							toolMsgID = existingMsgID
+							toolMsgUUID = existingMsgUUID
+							m.logger.write(LogRecord{
+								Timestamp: time.Now(),
+								AgentID:   m.agentID,
+								Model:     m.model,
+								Iteration: iter,
+								Phase:     "resumed_existing_tool_calling_message",
+								ToolName:  tCtx.Name,
+								Error:     fmt.Sprintf("updated existing message: tool=%s, msgID=%d", tCtx.Name, toolMsgID),
+							})
+							if len(broadcastUpdates) > 0 {
+								bh.BroadcastMessageUpdate(ctx, broadcastUpdates)
+							}
 						}
-						return nil
-					})
+					}
 				} else {
-					// New invocation: create a new tool_calling message.
+					// Normal path: create a new tool_calling message.
 					msgUUID := uuid.New().String()
 					msg := &model.Message{
 						ID:              msgUUID,
-						ClientMessageID: msgUUID, // Use UUID as client_message_id to avoid unique constraint violation
+						ClientMessageID: msgUUID,
 						ConversationID:  conversationID,
 						SenderID:        agentUserID,
 						Content:         string(payloadJSON),
@@ -440,8 +485,6 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 						Status:          "executing",
 						CreatedAt:       time.Now(),
 					}
-
-					// Persist via SendMessage (atomic: allocates MessageID + creates UserUpdates).
 					result, err := s.SendMessage(ctx, msg, memberIDs)
 					if err != nil {
 						m.logger.write(LogRecord{
@@ -455,7 +498,21 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 					} else {
 						toolMsgID = result.Message.MessageID
 						toolMsgUUID = msgUUID
-						// Broadcast the persisted message update.
+						ctx = WithMessage(ctx, result.Message)
+						// DIAG: log the number of UserUpdates created and their details
+						updateDetails := make([]string, 0, len(result.Updates))
+						for _, u := range result.Updates {
+							updateDetails = append(updateDetails, fmt.Sprintf("user=%s seq=%d", u.UserID, u.Seq))
+						}
+						m.logger.write(LogRecord{
+							Timestamp: time.Now(),
+							AgentID:   m.agentID,
+							Model:     m.model,
+							Iteration: iter,
+							Phase:     "created_tool_calling_message",
+							ToolName:  tCtx.Name,
+							Error:     fmt.Sprintf("CREATED message: tool=%s, msgID=%d, msgUUID=%s, memberIDs=%v, userUpdates=%d, details=%v", tCtx.Name, toolMsgID, msgUUID, memberIDs, len(result.Updates), updateDetails),
+						})
 						bh.BroadcastMessageUpdate(ctx, result.Updates)
 					}
 				}
@@ -745,11 +802,15 @@ func (m *LoggingMiddleware) updateToolCallingMessage(ctx context.Context, s stor
 	}
 
 	// DIAG: commit done, about to broadcast
+	updateDetails := make([]string, 0, len(updates))
+	for _, u := range updates {
+		updateDetails = append(updateDetails, fmt.Sprintf("user=%s seq=%d", u.UserID, u.Seq))
+	}
 	m.logger.write(LogRecord{
 		Timestamp: time.Now(),
 		AgentID:   m.agentID,
 		Phase:     "tool_calling_update_diag",
-		Error:     fmt.Sprintf("STEP4 OK: tx committed, broadcasting %d updates", len(updates)),
+		Error:     fmt.Sprintf("STEP4 OK: tx committed, broadcasting %d updates, memberIDs=%v, details=%v", len(updates), memberIDs, updateDetails),
 	})
 
 	// Broadcast the update.

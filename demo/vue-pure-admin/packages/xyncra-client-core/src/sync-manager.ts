@@ -216,6 +216,10 @@ export class SyncManager {
   async applyUpdate(update: PackageDataUpdate): Promise<void> {
     // C7: Ephemeral updates (seq=0) bypass seq continuity, dedup, and persistence.
     if (update.seq === 0) {
+      this.options.logger.info(
+        `[SyncManager] applyUpdate ephemeral`,
+        { type: update.type, payloadType: (update.payload as Record<string, unknown>)?.type },
+      );
       // Conversation "update" action uses pull-on-notification (D-118/D-124).
       if (update.type === 'conversation') {
         await this.handleEphemeralConversationUpdate(update);
@@ -247,6 +251,10 @@ export class SyncManager {
     }
 
     // seq === localMaxSeq + 1 → normal processing.
+    this.options.logger.info(
+      `[SyncManager] applyUpdate normal`,
+      { seq: update.seq, type: update.type, payloadType: (update.payload as Record<string, unknown>)?.type },
+    );
     await this.applyUpdateTx(update);
   }
 
@@ -1153,6 +1161,10 @@ export class SyncManager {
     switch (update.type) {
       case 'message': {
         const msg = update.payload as DBMessage;
+        this.options.logger.info(
+          `[SyncManager] notifyHandler message`,
+          { id: msg.id, type: msg.type, content: msg.content?.substring(0, 100) },
+        );
         await handler.onMessage(messageToHandler(msg));
         break;
       }

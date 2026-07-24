@@ -59,6 +59,10 @@ func (ms *MessageStore) GetByConversationAndMessageIDTx(ctx context.Context, tx 
 	ctx, finish := startSpan(ctx, "db.message.get_by_conv_msg_id_tx")
 	defer func() { finish(err) }()
 
+	if tx == nil {
+		tx = ms.db
+	}
+
 	var msg model.Message
 	err = tx.WithContext(ctx).
 		Where("conversation_id = ? AND message_id = ?", conversationID, messageID).

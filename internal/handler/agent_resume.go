@@ -60,9 +60,10 @@ type agentResumeTaskPayload struct {
 	ConversationID string `json:"conversation_id"`
 	CheckpointID   string `json:"checkpoint_id"`
 	AgentID        string `json:"agent_id"`
-	SenderID       string `json:"sender_id"`               // human user who triggered the resume
-	DeviceID       string `json:"device_id,omitempty"`      // device that initiated the resume (D-102)
-	CancelledBy    string `json:"cancelled_by,omitempty"`   // non-empty when resuming after cancellation
+	SenderID       string `json:"sender_id"`              // human user who triggered the resume
+	DeviceID       string `json:"device_id,omitempty"`    // device that initiated the resume (D-102)
+	CancelledBy    string `json:"cancelled_by,omitempty"` // non-empty when resuming after cancellation
+	MessageID      uint32 `json:"message_id,omitempty"`
 }
 
 // --------------------------------------------------------------------------
@@ -90,8 +91,8 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 
 	// BUG-FIX: Validate Result/ErrorMessage length to prevent oversized payloads.
 	// Result max 1MB, ErrorMessage max 10KB.
-	const maxResultSize = 1 * 1024 * 1024       // 1MB
-	const maxErrorMessageSize = 10 * 1024       // 10KB
+	const maxResultSize = 1 * 1024 * 1024 // 1MB
+	const maxErrorMessageSize = 10 * 1024 // 10KB
 	if len(params.Result) > maxResultSize {
 		return nil, protocol.NewValidationError("result exceeds maximum size (1MB)")
 	}
@@ -201,6 +202,7 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 		AgentID:        rc.AgentID,
 		SenderID:       senderID,
 		DeviceID:       deviceID,
+		MessageID:      rc.MessageID,
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -250,4 +252,3 @@ func (h *agentResumeHandler) HandleRequest(ctx context.Context, client *server.C
 		"status": "queued",
 	})
 }
-

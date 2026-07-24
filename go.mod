@@ -15,6 +15,7 @@ require (
 	github.com/gofrs/flock v0.13.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/grafana/pyroscope-go v1.4.1
 	github.com/hibiken/asynq v0.26.0
 	github.com/mark3labs/mcp-go v0.56.0
 	github.com/prometheus/client_golang v1.23.2
@@ -79,7 +80,6 @@ require (
 	github.com/google/s2a-go v0.1.7 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.2 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
-	github.com/grafana/pyroscope-go v1.4.1 // indirect
 	github.com/grafana/pyroscope-go/godeltaprof v0.1.11 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

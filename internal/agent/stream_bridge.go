@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PineappleBond/xyncra-server/internal/store/model"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 )
@@ -31,6 +32,9 @@ type InterruptInfo struct {
 	// InterruptID is the Eino interrupt address ID that should be used as the
 	// key in ResumeParams.Targets when resuming this interrupt.
 	InterruptID string
+
+	// ToolCallingMsgID
+	ToolCallingMsgID uint32
 }
 
 // StreamBridge converts Eino's streaming output into Xyncra StreamChunks,
@@ -224,6 +228,10 @@ func (sb *StreamBridge) BridgeWithInterrupt(
 				// Check for HITL interrupt (D-084).
 				if r.event.Action != nil && r.event.Action.Interrupted != nil {
 					info := &InterruptInfo{}
+					message, _ := ctx.Value(ctxKeyToolCallingMessage).(*model.Message)
+					if message != nil {
+						info.ToolCallingMsgID = message.MessageID
+					}
 					ii := r.event.Action.Interrupted
 					if ii.Data != nil {
 						if s, ok := ii.Data.(string); ok {

@@ -23,6 +23,7 @@ go.work.sum
 *.db
 *.sqlite
 *.sqlite3
+/data
 
 # === IDE ===
 .idea/

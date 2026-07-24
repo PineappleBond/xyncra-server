@@ -1087,6 +1087,183 @@ flowchart TD
 
 ---
 
+## Tool Calling 消息 ID 传播链路分析
+
+### 问题背景
+
+当 Agent 调用 client function tool 时，`WrapInvokableToolCall` 创建一条 `tool_calling` 消息（分配 MessageID）。工具执行后触发 interrupt，Agent 暂停。客户端上报结果后，Agent 通过 `Resume` 恢复。**问题：`Resume` 路径中 `WrapInvokableToolCall` 被再次调用，创建了第二条 `tool_calling` 消息。**
+
+根因：`MessageID` 只存在于 `WrapInvokableToolCall` 闭包的局部变量中，没有传递到 `Resume` 路径。
+
+### messageID 与 checkpoint 的关联
+
+`RemoteCalling` 表已经持久化了 `checkpoint_id` 与 `message_id` 的关联关系，且存储在 DB 中，**服务器重启后不丢失**。
+
+```mermaid
+erDiagram
+    messages {
+        string id PK "UUID"
+        uint32 message_id PK "自增，SendMessage 分配"
+        string conversation_id
+        string type "tool_calling"
+        string status "executing | completed | failed"
+        string content "JSON payload"
+    }
+
+    remote_callings {
+        string id PK "UUID"
+        string conversation_id
+        string checkpoint_id "关联 checkpoint"
+        string method "函数名"
+        uint32 message_id "关联 tool_calling 消息"
+        string status "pending | resolved | expired | cancelled"
+        string result "函数返回值"
+    }
+
+    remote_callings ||--|| messages : "message_id 关联"
+```
+
+**关键关系**：`checkpoint_id` → `remote_callings.message_id` → `messages.message_id`
+
+这意味着：只要持有 checkpoint_id，就能通过 RemoteCalling 查到关联的 tool_calling 消息 ID。不需要额外存储，不需要传 context，不需要改 eino 框架。
+
+### 当前 messageID 传播时序图（带断点）
+
+```mermaid
+sequenceDiagram
+    participant WIC as WrapInvokableToolCall<br/>(Run 闭包)
+    participant Store as Store (DB)
+    participant Exec as Executor
+    participant RC as RemoteCallingStore
+    participant RH as ResumeHandler
+    participant Eino as Eino Resume
+    participant WIC2 as WrapInvokableToolCall<br/>(Resume 闭包)
+
+    Note over WIC, WIC2: ═══ 阶段 1: Run() 创建 tool_calling 消息 ═══
+
+    WIC->>WIC: msgUUID := uuid.New()
+    WIC->>Store: SendMessage(msg) → 分配 MessageID
+    Store-->>WIC: result.Message.MessageID
+    WIC->>WIC: toolMsgID = MessageID (局部变量)
+    Note right of WIC: ⚠️ 断点①: toolMsgID 是闭包局部变量<br/>无法从外部访问，ID 在此丢失
+    WIC->>WIC: endpoint(ctx, args) → 执行工具
+    WIC->>WIC: tool.Interrupt() → 触发中断
+
+    Note over WIC, WIC2: ═══ 阶段 2: Executor 保存 RemoteCalling ═══
+
+    WIC-->>Exec: interruptData 返回
+    Note right of Exec: ⚠️ 断点②: executor 不知道 messageID<br/>只能反向查询 DB
+    Exec->>Store: GetLatestToolCallingMessage(convID)<br/>WHERE type='tool_calling' AND status='executing'<br/>ORDER BY message_id DESC LIMIT 1
+    Store-->>Exec: latestMsg.MessageID
+    Exec->>RC: Create(RemoteCalling{MessageID: toolCallingMsgID, CheckpointID: checkpointID})
+    RC-->>Exec: OK
+    Note right of RC: ✅ 此时 RemoteCalling 已持久化<br/>checkpoint_id + message_id 关联已建立
+
+    Note over WIC, WIC2: ═══ 阶段 3: Resume Handler 处理 ═══
+
+    RH->>RC: GetByCheckpoint(checkpointID)
+    RC-->>RH: rcList (含 MessageID)
+    RH->>Eino: ResumeWithParams(ctx, checkpointID, params)
+
+    Note over WIC, WIC2: ═══ 阶段 4: Resume() 重复创建消息 ═══
+
+    Eino->>WIC2: WrapInvokableToolCall(ctx, endpoint, tCtx)
+    Note right of WIC2: ⚠️ 断点④: 不知道要更新哪条消息<br/>没有查询 RemoteCalling
+    WIC2->>Store: SendMessage(新消息) → 创建了第二条！
+    Store-->>WIC2: 新 MessageID = 原 MessageID + 1
+```
+
+### 断点汇总
+
+| # | 位置 | 问题 | 影响 |
+| --- | --- | --- | --- |
+| ① | WrapInvokableToolCall 闭包 | `toolMsgID` 是局部变量，无法从外部访问 | 消息创建后 ID 丢失 |
+| ② | executor.Execute() | 不知道消息 ID，只能反向查询 | 脆弱：按 status 过滤，多 executing 消息时可能错配 |
+| ③ | resume_handler | 从 RemoteCalling 读到了 ID，但没传给 ResumeWithParams | ID 已拿到但被丢弃 |
+| ④ | WrapInvokableToolCall (Resume) | 不知道要更新哪条消息，没有查询 RemoteCalling | 重复创建消息 |
+
+### 期望传播路径（修复后）
+
+核心思路：**不传 ID，查 ID**。RemoteCalling 表已经持久化了 `checkpoint_id + message_id` 的关联。WrapInvokableToolCall 在创建消息前，先查 RemoteCalling 是否已有该方法的关联消息。有则更新，无则新建。
+
+```mermaid
+sequenceDiagram
+    participant WIC as WrapInvokableToolCall<br/>(Run 闭包)
+    participant RC as RemoteCallingStore
+    participant Store as Store (DB)
+    participant Exec as Executor
+    participant RH as ResumeHandler
+    participant Eino as Eino Resume
+    participant WIC2 as WrapInvokableToolCall<br/>(Resume 闭包)
+
+    Note over WIC, WIC2: ═══ 阶段 1: Run() — 无 RemoteCalling，新建消息 ═══
+
+    WIC->>RC: 查询: method=? AND conversationID=? AND status=resolved?
+    RC-->>WIC: 无记录 (Run 阶段 RC 尚未创建)
+    WIC->>Store: SendMessage(msg) → 新建 tool_calling 消息
+    Store-->>WIC: MessageID
+    WIC->>WIC: endpoint(ctx, args) → Interrupt
+
+    Note over WIC, WIC2: ═══ 阶段 2: Executor 保存 RemoteCalling ═══
+
+    WIC-->>Exec: interruptData 返回
+    Exec->>Exec: ⚠️ 仍需反向查询 messageID（断点②暂不修复）
+    Exec->>RC: Create(RemoteCalling{CheckpointID, MessageID})
+
+    Note over WIC, WIC2: ═══ 阶段 3: Resume Handler 处理 ═══
+
+    RH->>RC: GetByCheckpoint(checkpointID)
+    RC-->>RH: rcList (含 MessageID)
+    RH->>Eino: ResumeWithParams(ctx, checkpointID, params)
+
+    Note over WIC, WIC2: ═══ 阶段 4: Resume() — 查到已有消息，更新 ═══
+
+    Eino->>WIC2: WrapInvokableToolCall(ctx, endpoint, tCtx)
+    WIC2->>RC: 查询: method=? AND conversationID=? AND status=resolved?
+    RC-->>WIC2: 找到记录, rc.MessageID = 原 MessageID
+    Note right of WIC2: ✅ 从 RemoteCalling 取回了 messageID
+    WIC2->>Store: UpdateMessageContentTx(messageID, content)
+    Note right of WIC2: ✅ 更新已有消息，不创建新消息
+```
+
+### 为什么这个方案能抗重启
+
+```mermaid
+flowchart TD
+    subgraph 服务器运行中
+        A[Run 创建 tool_calling 消息] --> B[Executor 创建 RemoteCalling]
+        B --> C["RemoteCalling 持久化到 DB<br/>(checkpoint_id + message_id)"]
+    end
+
+    subgraph 服务器崩溃重启
+        D[服务器重启] --> E[内存状态丢失]
+        E --> F["RemoteCalling 仍在 DB 中"]
+    end
+
+    subgraph Resume 恢复
+        G[Resume Handler] --> H["从 DB 读取 RemoteCalling<br/>(checkpoint_id → message_id)"]
+        H --> I[ResumeWithParams]
+        I --> J["WrapInvokableToolCall 查询 RC<br/>找到已有 messageID"]
+        J --> K[更新消息，不新建]
+    end
+
+    C -.-> F
+    F -.-> H
+```
+
+### 涉及的代码文件
+
+| 文件 | 位置 | 作用 |
+| ---- | ---- | ---- |
+| llm_logger.go | L342 `WrapInvokableToolCall` | 创建/应更新 tool_calling 消息 |
+| llm_logger.go | L359 `storeFromContext(ctx)` | 获取 StoreAPI（含 RemoteCallingStore） |
+| executor.go | L482-489 `GetLatestToolCallingMessage` | 脆弱的反向查询（断点②，暂不修复） |
+| executor.go | L502 `rc.MessageID = toolCallingMsgID` | 存入 RemoteCalling |
+| resume_handler.go | L240-256 `toolCallingMsgIDs` map | 从 RC 读取 messageID（已有逻辑） |
+| store/store.go | L43 `RemoteCallingStore()` | StoreAPI 提供的 RC 访问 |
+
+---
+
 ## 待讨论
 
 | 问题 | 状态 |

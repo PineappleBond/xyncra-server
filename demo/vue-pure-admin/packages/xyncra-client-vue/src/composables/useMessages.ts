@@ -100,13 +100,29 @@ export function useMessages({ conversationId }: UseMessagesParams): UseMessagesR
       if (message.conversationId === convId) {
         const list = messages.value
         const existingIndex = list.findIndex(m => m.id === message.id)
+        const existingIds = list.map(m => m.id)
         if (existingIndex >= 0) {
           // Update existing message (e.g., tool_calling status change)
+          console.log('[useMessages] message:added UPDATE existing', {
+            id: message.id,
+            type: message.type,
+            content: message.content?.substring(0, 80),
+            existingIndex,
+            listLength: list.length,
+            existingIds: existingIds.slice(-5), // last 5 ids
+          })
           const updated = [...list]
           updated[existingIndex] = message
           messages.value = updated
         } else {
           // Add new message
+          console.log('[useMessages] message:added NEW', {
+            id: message.id,
+            type: message.type,
+            content: message.content?.substring(0, 80),
+            listLength: list.length,
+            existingIds: existingIds.slice(-5), // last 5 ids
+          })
           messages.value = [...list, message]
         }
       }

@@ -479,12 +479,14 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 
 			// 2. Persist RemoteCalling to DB (D-063: nil-safe).
 			if e.remoteCallingStore != nil {
-				// Query the latest executing tool_calling message from DB instead of using in-memory tracker.
-				// This is more reliable and survives server restarts.
-				var toolCallingMsgID uint32
-				if msgStore := e.store.MessageStore(); msgStore != nil {
-					if latestMsg, err := msgStore.GetLatestToolCallingMessage(ctx, payload.ConversationID); err == nil && latestMsg != nil {
-						toolCallingMsgID = latestMsg.MessageID
+				// Query the latest executing tool_calling message from DB.
+				// This is the message just created by WrapInvokableToolCall.
+				var toolCallingMsgID uint32 = info.ToolCallingMsgID
+				if toolCallingMsgID == 0 {
+					if msgStore := e.store.MessageStore(); msgStore != nil {
+						if latestMsg, err := msgStore.GetLatestToolCallingMessage(ctx, payload.ConversationID); err == nil && latestMsg != nil {
+							toolCallingMsgID = latestMsg.MessageID
+						}
 					}
 				}
 

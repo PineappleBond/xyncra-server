@@ -238,6 +238,30 @@ func (rs *RemoteCallingStore) CancelByCheckpoint(ctx context.Context, checkpoint
 	return count, conversationID, agentID, nil
 }
 
+// GetResolvedByMethodAndConversation returns the most recent resolved RemoteCalling
+// for a given method and conversation that has a valid message_id (message_id > 0).
+// This is used by WrapInvokableToolCall during Resume to find the existing
+// tool_calling message instead of creating a duplicate.
+// Returns nil, ErrNotFound if no matching record exists.
+func (rs *RemoteCallingStore) GetResolvedByMethodAndConversation(ctx context.Context, method, conversationID string) (result *model.RemoteCalling, err error) {
+	ctx, finish := startSpan(ctx, "store.RemoteCallingStore.GetResolvedByMethodAndConversation")
+	defer func() { finish(err) }()
+
+	var rc model.RemoteCalling
+	err = rs.db.WithContext(ctx).
+		Where("method = ? AND conversation_id = ? AND status = ? AND message_id > 0",
+			method, conversationID, model.RemoteCallingStatusResolved).
+		Order("created_at DESC").
+		First(&rc).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, classifyError(fmt.Errorf("store: get resolved remote calling by method and conversation: %w", err))
+	}
+	return &rc, nil
+}
+
 // DeleteByConversation soft-deletes all RemoteCallings for a conversation.
 func (rs *RemoteCallingStore) DeleteByConversation(ctx context.Context, conversationID string) (err error) {
 	ctx, finish := startSpan(ctx, tracing.SpanDBRemoteCallingDeleteByConversation,

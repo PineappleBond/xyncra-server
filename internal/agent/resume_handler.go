@@ -28,6 +28,7 @@ type AgentResumePayload struct {
 	AgentID        string `json:"agent_id"`
 	SenderID       string `json:"sender_id"` // human user who sent the answer
 	DeviceID       string `json:"device_id"` // Phase 6 (D-102)
+	MessageID      uint32 `json:"message_id"`
 }
 
 // NewAgentResumeHandler returns an mq.TaskHandler-compatible function that
@@ -202,7 +203,10 @@ func NewAgentResumeHandler(
 		// the resumed execution (same as executor.Execute lines 282-287).
 		ctx = WithBroadcastInfo(ctx, executor.broadcaster, payload.SenderID, payload.AgentID, payload.ConversationID)
 		ctx = WithStore(ctx, executor.store)
-
+		message, getMessageErr := executor.store.MessageStore().GetByConversationAndMessageIDTx(ctx, nil, payload.ConversationID, payload.MessageID)
+		if getMessageErr == nil {
+			ctx = WithMessage(ctx, message)
+		}
 		// Send typing indicator.
 		executor.broadcaster.SendTyping(ctx, payload.AgentID, payload.SenderID, payload.ConversationID, true)
 		var typingOnce sync.Once
@@ -254,14 +258,6 @@ func NewAgentResumeHandler(
 					}
 				}
 			}
-		}
-		// Store tool calling message IDs in RunLocalValue so WrapInvokableToolCall
-		// can update existing messages instead of creating new ones during resume.
-		if len(toolCallingMsgIDs) > 0 {
-			adk.SetRunLocalValue(ctx, "tool_calling_msg_ids", toolCallingMsgIDs)
-			logger.Info("agent resume: stored tool_calling_msg_ids in RunLocalValue",
-				"count", len(toolCallingMsgIDs),
-				"msg_ids", fmt.Sprintf("%v", toolCallingMsgIDs))
 		}
 		if len(targets) == 0 {
 			// Defensive log: empty rcList indicates data inconsistency.
@@ -417,10 +413,12 @@ func NewAgentResumeHandler(
 
 				if executor.remoteCallingStore != nil {
 					// Query the latest executing tool_calling message from DB.
-					var toolCallingMsgID uint32
-					if msgStore := executor.store.MessageStore(); msgStore != nil {
-						if latestMsg, err := msgStore.GetLatestToolCallingMessage(ctx, payload.ConversationID); err == nil && latestMsg != nil {
-							toolCallingMsgID = latestMsg.MessageID
+					var toolCallingMsgID uint32 = info.ToolCallingMsgID
+					if toolCallingMsgID == 0 {
+						if msgStore := executor.store.MessageStore(); msgStore != nil {
+							if latestMsg, err := msgStore.GetLatestToolCallingMessage(ctx, payload.ConversationID); err == nil && latestMsg != nil {
+								toolCallingMsgID = latestMsg.MessageID
+							}
 						}
 					}
 
