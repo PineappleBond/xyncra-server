@@ -249,6 +249,10 @@ func (s *Store) SendMessage(
 // Transaction executes fn inside a database transaction. If fn returns an error,
 // the transaction is rolled back; otherwise it is committed. Returns
 // ErrContextDeadlineExceeded if the context is already expired.
+//
+// Deadlock errors (SQLite concurrent write contention) are retried up to
+// maxRetryBackoff attempts with exponential backoff (50ms, 100ms, 200ms).
+// After exhausting retries, the last error is returned as-is.
 func (s *Store) Transaction(ctx context.Context, fn func(tx *gorm.DB) error) (err error) {
 	ctx, finish := startSpan(ctx, tracing.SpanDBStoreTransaction)
 	defer func() { finish(err) }()
@@ -256,7 +260,25 @@ func (s *Store) Transaction(ctx context.Context, fn func(tx *gorm.DB) error) (er
 	if err = ctx.Err(); err != nil {
 		return fmt.Errorf("store: %w", err)
 	}
-	return s.db.WithContext(ctx).Transaction(fn)
+
+	const maxRetries = 3
+	backoff := 50 * time.Millisecond
+	for i := 0; i < maxRetries; i++ {
+		err = s.db.WithContext(ctx).Transaction(fn)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrDatabaseDeadlock) {
+			return err
+		}
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		backoff *= 2
+	}
+	return err
 }
 
 // BeginTx starts a new database transaction and returns a Tx handle.

@@ -28,6 +28,10 @@ var (
 	// ErrConflict indicates a conflict with the current state of the resource
 	// (e.g. updating a Question that has already been answered).
 	ErrConflict = errors.New("store: conflict")
+
+	// ErrDatabaseDeadlock indicates a database deadlock (SQLite: database is
+	// deadlocked). This is a transient error; the caller should retry.
+	ErrDatabaseDeadlock = errors.New("store: database deadlock")
 )
 
 // classifyError translates GORM and driver-level errors into store-level errors.
@@ -72,6 +76,11 @@ func classifyError(err error) error {
 	if strings.Contains(msg, "context deadline exceeded") ||
 		strings.Contains(msg, "Query timed out") {
 		return ErrContextDeadlineExceeded
+	}
+
+	// Database deadlock patterns (SQLite concurrent write contention).
+	if strings.Contains(msg, "database is deadlocked") {
+		return ErrDatabaseDeadlock
 	}
 
 	return err
