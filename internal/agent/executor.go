@@ -481,7 +481,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, payload ExecutePayload) (er
 			if e.remoteCallingStore != nil {
 				// Query the latest executing tool_calling message from DB.
 				// This is the message just created by WrapInvokableToolCall.
-				var toolCallingMsgID uint32 = info.ToolCallingMsgID
+				toolCallingMsgID := info.ToolCallingMsgID
 				if toolCallingMsgID == 0 {
 					if msgStore := e.store.MessageStore(); msgStore != nil {
 						if latestMsg, err := msgStore.GetLatestToolCallingMessage(ctx, payload.ConversationID); err == nil && latestMsg != nil {

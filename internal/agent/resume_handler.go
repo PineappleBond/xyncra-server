@@ -413,7 +413,7 @@ func NewAgentResumeHandler(
 
 				if executor.remoteCallingStore != nil {
 					// Query the latest executing tool_calling message from DB.
-					var toolCallingMsgID uint32 = info.ToolCallingMsgID
+					toolCallingMsgID := info.ToolCallingMsgID
 					if toolCallingMsgID == 0 {
 						if msgStore := executor.store.MessageStore(); msgStore != nil {
 							if latestMsg, err := msgStore.GetLatestToolCallingMessage(ctx, payload.ConversationID); err == nil && latestMsg != nil {

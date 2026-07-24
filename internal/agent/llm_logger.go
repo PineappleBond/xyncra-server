@@ -410,7 +410,7 @@ func (m *LoggingMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint 
 				// tool_calling message instead of creating a duplicate.
 				// This handles the case where Run() created a message, interrupt happened,
 				// and Resume() calls the same tool again.
-				var existingMsgID uint32 = messageID
+				existingMsgID := messageID
 				var existingMsgUUID string
 
 				if existingMsgID > 0 {
